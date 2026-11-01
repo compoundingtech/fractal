@@ -18,3 +18,22 @@ record a4337946f527f131467c660d9260418242f954f9 rust-tests 0 host/spindle 2026-1
 record c5580dee19ed8843fd811f14c22057e846716ed1 rust-tests 0 fleet/ci 2026-10-29T08:28:25Z
 record ca3553cae70f0bb2e7651f107801f871a916793e rust-tests 0 host/spindle 2026-10-29T09:16:53Z
 gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a
+record 00ae41571c218abe893634bfb86b806f5c3cffd3 rust-tests 0 fleet/ci 2026-10-29T04:32:04Z
+record 03d411a4e1661792946a99e58e939acb6034ee4f rust-tests 0 fleet/ci 2026-10-29T04:58:03Z
+record 0c9f9d7412517c12650236ff518a657323bf0647 rust-tests 0 fleet/ci 2026-10-29T03:56:14Z
+record 0dc75087519a90d3db6928718efa00be26095bb3 rust-tests 0 fleet/ci 2026-10-29T07:41:46Z
+record 0ed0cfad2b68e7901ed9d07bf861963539702d78 rust-tests 0 host/forge 2026-10-29T06:17:00Z
+record 2583bd468abdfbe8664e968953518b909fe3ddab rust-tests 0 fleet/ci 2026-10-29T08:16:25Z
+record 385a7d3abef6001c60a84d6f93d3ba18583bda8f rust-tests 0 fleet/ci 2026-10-29T05:33:08Z
+record 4d98739203a24b72e231fd9e13c284fa563ea868 rust-tests 0 fleet/ci 2026-10-29T04:42:03Z
+record 4f71afa33451077f2d6af9310d0ef8162dd8db32 rust-tests 0 fleet/ci 2026-10-29T05:50:18Z
+record 59db3d69d67f4a757440346d82bc62ec3b370800 rust-tests 0 host/forge 2026-10-29T05:52:33Z
+record 5e4ab4ac0052618fcc63107e10aba3638e1c5b36 rust-tests 0 fleet/ci 2026-10-29T04:25:07Z
+record 7e1555faa0e8c4577fda54db2f2559f766545b0d rust-tests 0 host/forge 2026-10-29T06:45:10Z
+record 87bbf7cabb60b503ac96be949c6fbf12c627de68 rust-tests 0 fleet/ci 2026-10-29T03:55:27Z
+record 89bc9236f5dfdc1a7d74bab53cd8874ab2107ea4 rust-tests 0 host/spindle 2026-10-29T07:57:29Z
+record 9f28907fc0a2a7e0f9deee9e50aca0ba4f676152 rust-tests 0 fleet/ci 2026-10-29T06:10:37Z
+record a4337946f527f131467c660d9260418242f954f9 rust-tests 0 host/spindle 2026-10-29T08:20:07Z
+record b0abfd1b3675d214d6609d466a1ef0a26595d7cf rust-tests 0 fleet/ci 2026-10-29T06:34:11Z
+record c5580dee19ed8843fd811f14c22057e846716ed1 rust-tests 0 fleet/ci 2026-10-29T08:28:25Z
+record ca3553cae70f0bb2e7651f107801f871a916793e rust-tests 0 host/spindle 2026-10-29T09:16:53Z

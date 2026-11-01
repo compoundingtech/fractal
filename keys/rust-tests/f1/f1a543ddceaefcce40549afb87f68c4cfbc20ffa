@@ -18,3 +18,22 @@ record e121774f4ba412916a1c2dd1e36e9f09e9517dfd rust-tests 0 host/spindle 2026-1
 record ead18db53256f9c7f816884ec2145038c1c86123 rust-tests 0 fleet/ci 2026-10-29T02:37:48Z
 record 7b1e3d0c3eb2c7cfab1bd49a232d21bbdf5b719c rust-tests 0 host/forge 2026-10-29T02:53:07Z
 gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a
+record 151490f194e1b1f8c4b82239dd953255c415c8bd rust-tests 0 fleet/ci 2026-10-29T00:12:14Z
+record 166078f17cc4b56846d6607f2640f07c52132df3 rust-tests 0 fleet/ci 2026-10-28T22:48:50Z
+record 190450184e54b7c1182021b758f04b47f953d113 rust-tests 0 fleet/ci 2026-10-29T00:55:34Z
+record 1bbdb6a553444a7658f0c301e50fac3cdea75734 rust-tests 0 fleet/ci 2026-10-29T00:03:44Z
+record 2f0a59bdf3885d84a4b41a254358dad5e2f9f931 rust-tests 0 fleet/ci 2026-10-28T21:11:15Z
+record 595c9de55cdeeb2c59565949fa2d3a439adf4b2b rust-tests 0 fleet/ci 2026-10-28T23:19:22Z
+record 6cbf595f1ea6f3ffce6bdd4f968a84ab49a922d7 rust-tests 0 fleet/ci 2026-10-28T20:32:52Z
+record 7b1e3d0c3eb2c7cfab1bd49a232d21bbdf5b719c rust-tests 0 host/forge 2026-10-29T02:53:07Z
+record 89320d5cf83eed87f5b7ec8ad7d4bd1733b28cd5 rust-tests 0 fleet/ci 2026-10-28T22:22:06Z
+record 91eec910dd78319a5ec2682a4c0da7e05e8803f9 rust-tests 0 fleet/ci 2026-10-28T21:54:05Z
+record 9535ebb3854c723866ddcfaa92eba26f9d4b08af rust-tests 0 host/spindle 2026-10-29T00:51:51Z
+record a4e8c04bc4f5052d90233a2231295c6fe1027fab rust-tests 0 host/spindle 2026-10-29T00:26:20Z
+record a6114c672fa253e3d013831482546b8826357970 rust-tests 0 fleet/ci 2026-10-28T22:05:20Z
+record c08e1c6f6945d8e07450c4b408b74e97580cdee3 rust-tests 0 fleet/ci 2026-10-28T21:39:34Z
+record e121774f4ba412916a1c2dd1e36e9f09e9517dfd rust-tests 0 host/spindle 2026-10-29T01:29:01Z
+record e87b4cb6dcc60615fa2c4a2145c7ca1758112f42 rust-tests 0 fleet/ci 2026-10-28T22:19:52Z
+record ead18db53256f9c7f816884ec2145038c1c86123 rust-tests 0 fleet/ci 2026-10-29T02:37:48Z
+record f59388fb477e849c83680f83ee4e7555e1f46074 rust-tests 0 fleet/ci 2026-10-28T23:09:14Z
+record fa6df824f49c94ad60e943e7d694ab9d6420fd53 rust-tests 0 host/spindle 2026-10-29T01:15:28Z
