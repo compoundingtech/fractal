@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "ci-perf-slot scope-move fixtures stay in the caller's enclosing slice with explicit resource limits",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No stored data changes."},
+  "rules": {"status": "none", "detail": "Only test fixtures change. Kill and timeout scope cases use the caller's parent user-manager slice with MemoryMax=64M, MemorySwapMax=0, TasksMax=16 and RuntimeMaxSec=90. Kernel limits, PID starttime, cgroup and manager placement/properties are read back. Per-unit evidence includes memory.peak and final drain status. Failure and cancellation wait for registered wrappers to exit before stopping and confirming collection of this invocation's units. Teardown manager calls have 15-second deadlines; wrapper TERM/KILL waits have 10-second deadlines. A timeout fails with an unconfirmed drain. SIGINT/SIGTERM are blocked across fixture launch and owner registration; the child's original mask is restored before exec."},
+  "compatibility": {"status": "none", "detail": "No API, CLI or wire changes. Scope cases skip without systemd-run or a user bus, or when successfully parsed cgroup metadata shows the caller outside any user manager, since a user scope would leave that tree. Unreadable or malformed metadata and missing limit readbacks fail closed. Inside a user manager, the selected parent must be a slice strictly below that manager; the manager root itself is refused. The capped user-manager execution path is unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No operator step."},
+  "recovery": {"status": "none", "detail": "Revert to restore the previous unbounded default-slice fixture placement."}
+}
