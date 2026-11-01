@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose optional host seat admission and accepted-pending seat starts",
+  "replay": {"status": "none", "detail": "Admission observations are process-local and are never replicated as graph claims or overlaid on historical status."},
+  "schema": {"status": "none", "detail": "No persisted schema or claim changes."},
+  "rules": {"status": "changed", "detail": "Optional host admission queues new seats; authorized replacements retain their replacement admission reason and internal gate runners are excluded."},
+  "compatibility": {"status": "changed", "detail": "Current status and health expose seatAdmission. Agent detail/list expose seat_admission; accepted start JSON includes seatAdmission. Missing metadata remains compatible with older daemons."},
+  "downtime": {"status": "none", "detail": "Admission is disabled by default."},
+  "manual": {"status": "changed", "detail": "Use agents start/show/ls for pending reason and queue position. Doctor JSON exposes host mode, reason, pendingCount and oldestPendingAgeSecs under performance.seatAdmission."},
+  "recovery": {"status": "none", "detail": "Pending admission is not a failed or running provider; restarting the daemon rebuilds process-local admission state from current declarations."}
+}

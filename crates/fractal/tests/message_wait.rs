@@ -54,6 +54,7 @@ async fn counted_daemon(
 ) -> (PathBuf, Arc<Store>, Arc<Requests>, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         // A file, like the daemon's own store: an in-memory store locks a table against a reader
         // while another request writes, which the counting test below does constantly.

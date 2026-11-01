@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 pub fn state(root: &Path) -> AppState {
     AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("node").unwrap()),
         notify: Arc::new(Notify::new()),

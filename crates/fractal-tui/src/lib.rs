@@ -1422,6 +1422,7 @@ mission "release" state="ready" {
                 })
                 .unwrap();
             let state = fractal_daemon::api::AppState {
+                seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(),
                 notify: Arc::new(tokio::sync::Notify::new()),

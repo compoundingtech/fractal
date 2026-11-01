@@ -176,6 +176,7 @@ mod tests {
 
     fn state(root: &std::path::Path) -> AppState {
         AppState {
+            seat_admission: Default::default(),
             store:Arc::new(crate::store::Store::open(&root.join("graph.db"),"diagnostic-test").unwrap()),
             notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,
             node:"diagnostic-test".into(),state_dir:root.into(),pty_root:root.join("pty"),pty_binary:root.join("unused-pty"),

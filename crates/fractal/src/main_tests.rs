@@ -489,6 +489,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         }).unwrap();
     };
     let state = fractal_daemon::api::AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
@@ -2568,6 +2569,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             .unwrap();
     }
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -2664,6 +2666,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         })
         .collect::<Vec<_>>();
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
@@ -2743,6 +2746,7 @@ async fn trace_wait_starts_after_existing_events() {
             .store_index;
     }
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
@@ -5959,6 +5963,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("message-read-state").unwrap()),
         notify: Arc::new(Notify::new()),
@@ -6058,6 +6063,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
         &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
+        seat_admission: Default::default(),
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
         state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
@@ -7995,6 +8001,7 @@ async fn serve_test_store(
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
