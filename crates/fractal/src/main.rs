@@ -6784,7 +6784,7 @@ fn select_private_gateway(
     };
     config.client_gateway_socket = parent
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("st3-client.sock");
+        .join("fractal-client.sock");
     if gateway_path_for_comparison(&config.client_gateway_socket)?
         == gateway_path_for_comparison(&Config::default().client_gateway_socket)?
     {
@@ -6991,12 +6991,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
     };
     config.validate()?;
     fractal_daemon::resource::configure_github(&config)?;
-    validate_unix_socket_path(&config.socket, "--socket")?;
-    validate_unix_socket_path(&config.client_gateway_socket, "--client-gateway-socket")?;
+    validate_unix_socket_path(&fractal_daemon::config::socket_binding_path(&config.socket), "--socket")?;
+    validate_unix_socket_path(
+        &fractal_daemon::config::socket_binding_path(&config.client_gateway_socket),
+        "--client-gateway-socket",
+    )?;
     let startup = begin_admitted_startup(&config, &state_identity)?;
     startup_phases.configuration_ms = phase_elapsed_ms();
     startup.phase("bind-listeners");
-    let state_socket = config.state_dir.join("run/st3.sock");
+    let state_socket = config.state_dir.join("run/fractal.sock");
     state_identity.verify_store_directory(&config)?;
     let (local_reserved, gateway_reserved) = tokio::try_join!(
         fractal_daemon::api::reserve_unix_socket(&config.socket, Some(&state_socket)),
