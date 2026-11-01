@@ -143,25 +143,34 @@ const syntaxKinds: Readonly<Record<string, string>> = {
   '#000001': 'comment', '#000002': 'keyword', '#000003': 'string', '#000004': 'number',
   '#000005': 'function', '#000006': 'deleted', '#000007': 'boolean', '#000008': 'constant',
 }
-let highlightsRequest: Promise<typeof Highlights> | undefined
-const loadHighlights = () => highlightsRequest ??= new Promise<typeof Highlights>((resolve, reject) => {
-  // Importing the published entry compiles embedded WASM synchronously. Defer that
-  // work until after the pane's plain-text first paint, never during render.
-  requestAnimationFrame(() => setTimeout(() => {
-    import('@pierre/highlights').then(resolve, reject)
-  }, 0))
-})
+let highlightsModule: typeof Highlights | undefined
+let highlightsRequest: Promise<void> | undefined
+const highlightsListeners = new Set<() => void>()
+const highlightsSnapshot = () => highlightsModule
+const plainSourceSnapshot = () => undefined
+const unsubscribePlainSource = () => {}
+const subscribePlainSource = () => unsubscribePlainSource
+const subscribeHighlights = (notify: () => void) => {
+  highlightsListeners.add(notify)
+  highlightsRequest ??= new Promise<typeof Highlights>((resolve, reject) => {
+    // The published entry compiles embedded WASM at import. Defer that work
+    // until after the pane's plain-text first paint, never during render.
+    requestAnimationFrame(() => setTimeout(() => {
+      import('@pierre/highlights').then(resolve, reject)
+    }, 0))
+  }).then(module => {
+    highlightsModule = module
+    for (const listener of highlightsListeners) listener()
+  }, error => console.error('Code highlighting failed to load', error))
+  return () => { highlightsListeners.delete(notify) }
+}
 
 export function HighlightedSource({ code, language }: { code: string; language: string }) {
-  const [highlights, setHighlights] = React.useState<typeof Highlights>()
   const normalized = language.toLowerCase()
   const canonical = Object.hasOwn(languageAliases, normalized) ? languageAliases[normalized]! : normalized
-  React.useEffect(() => {
-    if (!canonical) return
-    let active = true
-    loadHighlights().then(module => { if (active) setHighlights(module) }, error => console.error('Code highlighting failed to load', error))
-    return () => { active = false }
-  }, [canonical])
+  const highlights = React.useSyncExternalStore(
+    canonical ? subscribeHighlights : subscribePlainSource, highlightsSnapshot, plainSourceSnapshot,
+  )
   const lines = React.useMemo(() => highlights?.isSupportedLanguage(canonical)
     ? highlights.codeToTokens(code, { lang: canonical, theme: syntaxTheme }).tokens
     : undefined, [code, canonical, highlights])
