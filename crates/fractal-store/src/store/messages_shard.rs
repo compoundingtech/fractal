@@ -22,6 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
+pub mod mailbox_reads;
+
 /// The shard's ID, its directory under the store root and its name on the replication wire.
 pub const SHARD_ID: &str = "messages";
 
@@ -30,11 +32,12 @@ pub const SHARD_ID: &str = "messages";
 /// pages past every graph message continues into the stream.
 pub const STREAM_INDEX_BASE: u64 = 1 << 48;
 
-/// The shard's own tables. `stream_messages` indexes each message by recipient as it is
-/// admitted; on open it catches up only on claims newer than its newest row, such as those a
-/// rolled-back build admitted without the trigger. `stream_lifecycle` is this member's record of a stream item's delivery: it is
+/// The shard's own tables. `stream_messages` indexes each message by recipient, by sender and
+/// in shard order as it is admitted; on open it catches up only on claims newer than its newest
+/// row, such as those a rolled-back build admitted without the trigger, and an existing shard
+/// gains an index it lacks. `stream_lifecycle` is this member's record of a stream item's delivery: it is
 /// local, never replicated and outside every digest, as a lifecycle claim would not be.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha5ce4a3a3ab1 owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3a9e73d4f2c3 owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS stream_messages (
     subject TEXT PRIMARY KEY,
     recipient TEXT NOT NULL,
@@ -43,6 +46,10 @@ CREATE TABLE IF NOT EXISTS stream_messages (
 );
 CREATE INDEX IF NOT EXISTS stream_messages_recipient
     ON stream_messages(recipient, store_index);
+CREATE INDEX IF NOT EXISTS stream_messages_sender
+    ON stream_messages(sender, store_index);
+CREATE INDEX IF NOT EXISTS stream_messages_order
+    ON stream_messages(store_index);
 CREATE TRIGGER IF NOT EXISTS stream_messages_admitted AFTER INSERT ON claims
 WHEN NEW.kind='message.sent' BEGIN
     INSERT OR IGNORE INTO stream_messages(subject, recipient, sender, store_index)
@@ -128,11 +135,13 @@ pub fn message_view(graph: &super::Store, subject: &str) -> anyhow::Result<Optio
     super::message_view_from(&connection, subject, STREAM_INDEX_BASE + index, actual, None).map(Some)
 }
 
-/// The stream items addressed to any of `names`, after shard index `after`, oldest first, at
-/// most `limit` of them, with their shard indexes.
-pub fn recipient_page(
+/// The stream items after shard index `after`, oldest first, at most `limit` of them, with their
+/// shard indexes: those addressed to any of `recipients` and sent by any of `senders`, where a
+/// party left out matches every item.
+pub fn page(
     graph: &super::Store,
-    names: &[String],
+    recipients: Option<&[String]>,
+    senders: Option<&[String]>,
     after: u64,
     limit: usize,
 ) -> anyhow::Result<Vec<(String, u64)>> {
@@ -140,17 +149,41 @@ pub fn recipient_page(
         return Ok(Vec::new());
     };
     let connection = shard.readers.get();
-    let mut statement = connection.prepare_cached(
-        "SELECT subject, store_index FROM stream_messages
-         WHERE recipient IN (SELECT value FROM json_each(?1)) AND store_index>?2
-         ORDER BY store_index LIMIT ?3",
-    )?;
-    let rows = statement
-        .query_map(
-            rusqlite::params![serde_json::to_string(names)?, after, limit],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+    let row = |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?));
+    let rows = match (recipients, senders) {
+        (recipients, Some(senders)) => connection
+            .prepare_cached(
+                "SELECT subject, store_index FROM stream_messages
+                 WHERE sender IN (SELECT value FROM json_each(?1)) AND store_index>?2
+                   AND (?3 IS NULL OR recipient IN (SELECT value FROM json_each(?3)))
+                 ORDER BY store_index LIMIT ?4",
+            )?
+            .query_map(
+                rusqlite::params![
+                    serde_json::to_string(senders)?,
+                    after,
+                    recipients.map(serde_json::to_string).transpose()?,
+                    limit
+                ],
+                row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?,
+        (Some(recipients), None) => connection
+            .prepare_cached(
+                "SELECT subject, store_index FROM stream_messages
+                 WHERE recipient IN (SELECT value FROM json_each(?1)) AND store_index>?2
+                 ORDER BY store_index LIMIT ?3",
+            )?
+            .query_map(rusqlite::params![serde_json::to_string(recipients)?, after, limit], row)?
+            .collect::<Result<Vec<_>, _>>()?,
+        (None, None) => connection
+            .prepare_cached(
+                "SELECT subject, store_index FROM stream_messages
+                 WHERE store_index>?1 ORDER BY store_index LIMIT ?2",
+            )?
+            .query_map(rusqlite::params![after, limit], row)?
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     Ok(rows)
 }
 
@@ -184,6 +217,8 @@ pub fn lifecycle_receipt(
 /// A delivery channel's receipt for a stream item, admitted under the fence a graph receipt
 /// is: a live incarnation, the lease, and the current owner's token. The shard is a separate
 /// database, so the fence is read just before the record rather than in its transaction.
+/// That leaves a window a graph receipt does not have: the fence is read on the graph and the
+/// record goes to the shard, so a token revoked between the two can still record one step.
 pub fn record_fenced_lifecycle(
     graph: &super::Store,
     fence: &crate::mailbox::Fence,
@@ -209,6 +244,29 @@ pub fn record_lifecycle(
     actor: Option<&str>,
     fields: &std::collections::BTreeMap<String, Value>,
 ) -> Result<bool, St3Error> {
+    record_lifecycle_checked(graph, subject, kind, actor, fields, true)
+}
+
+/// Record a step its caller has already admitted, as the graph's internal appends skip the
+/// message transitions: a handoff acknowledgement reads its note from wherever it stands.
+pub fn record_admitted_lifecycle(
+    graph: &super::Store,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    fields: &std::collections::BTreeMap<String, Value>,
+) -> Result<bool, St3Error> {
+    record_lifecycle_checked(graph, subject, kind, actor, fields, false)
+}
+
+fn record_lifecycle_checked(
+    graph: &super::Store,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    fields: &std::collections::BTreeMap<String, Value>,
+    checked: bool,
+) -> Result<bool, St3Error> {
     let internal = |error: anyhow::Error| St3Error::new("internal", error.to_string());
     let shard = shard(graph)
         .ok_or_else(|| St3Error::new("missing-message", "this member holds no messages shard"))?;
@@ -227,14 +285,20 @@ pub fn record_lifecycle(
         .filter_map(|(kind, _)| lifecycle_rank(kind))
         .max()
         .unwrap_or(0);
-    // A replayed or earlier step settles to what is recorded, as a graph receipt does.
-    if rank <= current {
+    // A successor records its own custody read of mail its predecessor already read, once.
+    let custody_reread = checked && rank == 3 && current == 3 && fields.contains_key("acting_for");
+    // A replayed or earlier step settles to what is recorded, as a graph receipt does. An
+    // admitted step is recorded wherever the item stands, as the graph appends its claim, so the
+    // receipt it names exists.
+    if checked && rank <= current && !custody_reread {
         return Ok(false);
     }
     // Forward steps follow the graph's message transitions, so a stream item moves as the same
     // mail would through the graph.
     let recipient = sent.body.pointer("/fields/to").and_then(Value::as_str);
-    let valid = matches!((current, rank), (0, 1) | (1, 2) | (0, 2) | (2, 3) | (3, 4))
+    let valid = !checked
+        || custody_reread
+        || matches!((current, rank), (0, 1) | (1, 2) | (0, 2) | (2, 3) | (3, 4))
         // A person's displayed message has no harness handoff; their read is its delivery.
         || (rank == 3 && current <= 1 && actor.is_some_and(|actor| actor.starts_with("person/")) && actor == recipient)
         || (rank == 3 && current <= 1 && fields.contains_key("acting_for"))
@@ -251,16 +315,38 @@ pub fn record_lifecycle(
             ),
         ));
     }
+    let acting_for = fields.get("acting_for").cloned();
     let fields = serde_json::to_string(fields).map_err(|error| internal(error.into()))?;
-    let connection = shard.connection.write();
-    connection
+    let inserted = shard
+        .connection
+        .write()
         .execute(
             /* sqlite-large-value: allow-for-now lv-h2314176b1be8 owner=fractal_store::store::messages_shard TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO stream_lifecycle(subject, kind, actor, fields, recorded_at_unix_ms)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![subject, kind, actor.unwrap_or(""), fields, smallclaims::store::now_ms() as i64],
         )
-        .map(|inserted| inserted > 0)
-        .map_err(|error| internal(error.into()))
+        .map_err(|error| internal(error.into()))?;
+    if inserted == 0 && custody_reread {
+        // A retried custody read for the same predecessor settles, as its graph claim would by
+        // its idempotency key; a read of this mail for another predecessor is refused.
+        let recorded: Option<String> = shard
+            .readers
+            .get()
+            .query_row(
+                "SELECT fields FROM stream_lifecycle WHERE subject=?1 AND kind='message.read' AND actor=?2",
+                rusqlite::params![subject, actor.unwrap_or("")],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| internal(error.into()))?;
+        let same = recorded
+            .and_then(|fields| serde_json::from_str::<Value>(&fields).ok())
+            .is_some_and(|recorded| recorded.get("acting_for") == acting_for.as_ref());
+        if !same {
+            return Err(St3Error::new("invalid-message-transition", "custody read is already recorded"));
+        }
+    }
+    Ok(inserted > 0)
 }
 
 /// The graph, as the shard's fleet authority. It is held weakly: the daemon owns the graph,
@@ -837,6 +923,182 @@ mod tests {
         let receipt = lifecycle_receipt("alder", subject, "message.read", Some("agent/cedar"), &status("read"));
         assert!(receipt.id.starts_with("offset-receipt/"));
         assert_eq!(receipt.id, lifecycle_receipt("alder", subject, "message.read", Some("agent/cedar"), &status("read")).id);
+    }
+
+    /// A successor's custody read of mail its predecessor read is recorded once and a retry settles; a step its
+    /// caller admitted skips the transitions, as the graph's internal appends do.
+    #[test]
+    fn a_custody_reread_settles_on_retry_and_an_admitted_read_skips_delivery() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        let shard = open(&graph, root.path()).unwrap();
+        for subject in ["message/00000000000000d1", "message/00000000000000d2"] {
+            let mut sent = input("message.sent", Some("agent/birch"), json!({
+                "from": "agent/birch", "to": "agent/cedar", "content": "hi", "status": "sent"
+            }));
+            sent.subject = subject.into();
+            shard.append_claim(&sent).unwrap();
+        }
+        let status = |status: &str| BTreeMap::from([("status".to_owned(), json!(status))]);
+        let subject = "message/00000000000000d1";
+        assert!(record_lifecycle(&graph, subject, "message.delivered", Some("agent/cedar"), &status("delivered")).unwrap());
+        assert!(record_lifecycle(&graph, subject, "message.read", Some("agent/cedar"), &status("read")).unwrap());
+        let mut custody = status("read");
+        custody.insert("acting_for".into(), json!("agent/cedar"));
+        assert!(record_lifecycle(&graph, subject, "message.read", Some("agent/cedar-next"), &custody).unwrap());
+        // A retry settles; the same successor reading for another predecessor is refused.
+        assert!(!record_lifecycle(&graph, subject, "message.read", Some("agent/cedar-next"), &custody).unwrap());
+        let mut other = custody.clone();
+        other.insert("acting_for".into(), json!("agent/cedar-other"));
+        assert_eq!(
+            record_lifecycle(&graph, subject, "message.read", Some("agent/cedar-next"), &other).unwrap_err().code,
+            "invalid-message-transition"
+        );
+
+        let note = "message/00000000000000d2";
+        assert_eq!(
+            record_lifecycle(&graph, note, "message.read", Some("agent/cedar"), &status("read")).unwrap_err().code,
+            "invalid-message-transition"
+        );
+        assert!(record_admitted_lifecycle(&graph, note, "message.read", Some("agent/cedar"), &status("read")).unwrap());
+        assert_eq!(graph.message(note).unwrap().unwrap().status, "read");
+        // An admitted read is recorded once even after the item closed, so its receipt exists;
+        // the item stays closed.
+        assert!(record_lifecycle(&graph, note, "message.closed", Some("agent/cedar"), &status("closed")).unwrap());
+        assert!(record_admitted_lifecycle(&graph, note, "message.read", Some("agent/cedar-next"), &status("read")).unwrap());
+        assert!(!record_admitted_lifecycle(&graph, note, "message.read", Some("agent/cedar-next"), &status("read")).unwrap());
+        assert_eq!(graph.message(note).unwrap().unwrap().status, "closed");
+    }
+
+    /// A page without a recipient, which a thread reads, lists every graph message and then every
+    /// stream item, one page at a time across the boundary, and leaves a closed one out unless
+    /// it is asked for. The stream is not cut at `through`; the graph is.
+    #[test]
+    fn a_page_without_a_recipient_goes_on_from_the_graph_into_the_stream() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        let shard = open(&graph, root.path()).unwrap();
+        let message = |subject: &str, to: &str| {
+            let mut sent = input("message.sent", Some("agent/birch"), json!({
+                "from": "agent/birch", "to": to, "content": subject, "status": "sent"
+            }));
+            sent.subject = subject.into();
+            sent
+        };
+        graph.append_claim(&message("message/00000000000000a1", "agent/cedar")).unwrap();
+        for (subject, to) in [
+            ("message/00000000000000b1", "agent/cedar"),
+            ("message/00000000000000b2", "agent/other"),
+            ("message/00000000000000b3", "agent/cedar"),
+        ] {
+            shard.append_claim(&message(subject, to)).unwrap();
+        }
+        let closed = BTreeMap::from([("status".to_owned(), json!("closed"))]);
+        assert!(record_lifecycle(&graph, "message/00000000000000b3", "message.closed", Some("daemon/runtime"), &closed).unwrap());
+        let through = graph.index().unwrap();
+        graph.append_claim(&message("message/00000000000000a2", "agent/cedar")).unwrap();
+        let listing = |include_closed: bool, limit: usize| {
+            let (mut after, mut listed, mut cursors) = (None, Vec::new(), Vec::new());
+            loop {
+                let (page, next) = graph
+                    .messages_page_inner(None, include_closed, after, through, limit, false)
+                    .unwrap();
+                listed.extend(page.into_iter().map(|message| message.subject));
+                match next {
+                    Some(next) => {
+                        cursors.push(next);
+                        after = Some(next);
+                    }
+                    None => return (listed, cursors),
+                }
+            }
+        };
+        let (listed, cursors) = listing(false, 1);
+        assert_eq!(listed, ["message/00000000000000a1", "message/00000000000000b1", "message/00000000000000b2"]);
+        assert!(cursors[0] <= through, "the first page ends in the graph: {cursors:?}");
+        assert!(cursors[1..].iter().all(|cursor| *cursor > STREAM_INDEX_BASE), "{cursors:?}");
+        let (listed, cursors) = listing(true, 2);
+        assert_eq!(
+            listed,
+            ["message/00000000000000a1", "message/00000000000000b1", "message/00000000000000b2", "message/00000000000000b3"]
+        );
+        assert_eq!(cursors.len(), 1);
+        assert!(cursors[0] > STREAM_INDEX_BASE);
+        // A new listing at a newer `through` sees the later graph message, still before the stream.
+        let (page, _) = graph.messages_page_inner(None, false, None, graph.index().unwrap(), 2, false).unwrap();
+        assert_eq!(
+            page.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>(),
+            ["message/00000000000000a1", "message/00000000000000a2"]
+        );
+    }
+
+    /// A mailbox stream follows the shard by its position: a new item to its recipient and a
+    /// local step on one are reported and routed, and nothing else is.
+    #[test]
+    fn a_mailbox_follows_stream_items_and_their_local_lifecycle_by_position() {
+        use mailbox_reads::*;
+        let root = tempfile::tempdir().unwrap();
+        let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        assert_eq!(position(&graph).unwrap(), StreamPosition::default());
+        assert!(changed_subjects(&graph, "agent/cedar", "cedar", &[], StreamPosition::default()).unwrap().is_empty());
+        let shard = open(&graph, root.path()).unwrap();
+        let send = |subject: &str, to: &str| {
+            let mut sent = input("message.sent", Some("agent/birch"), json!({
+                "from": "agent/birch", "to": to, "content": subject, "status": "sent"
+            }));
+            sent.subject = subject.into();
+            shard.append_claim(&sent).unwrap()
+        };
+        let start = position(&graph).unwrap();
+        let mine = send("message/00000000000000c1", "agent/cedar");
+        send("message/00000000000000c2", "agent/other");
+        let after_sends = position(&graph).unwrap();
+        assert!(after_sends.admitted > start.admitted);
+        assert_eq!(
+            changed_subjects(&graph, "agent/cedar", "cedar", &[], start).unwrap(),
+            ["message/00000000000000c1"]
+        );
+        let (next, routed, more) = wake_batch(&graph, start, 1024).unwrap();
+        assert_eq!((next, more), (after_sends, false));
+        assert_eq!(routed.len(), 2);
+        assert!(routed.contains(&("message/00000000000000c1".into(), "agent/cedar".into())));
+
+        let subject = "message/00000000000000c1";
+        let view = graph.message(subject).unwrap().unwrap();
+        assert!(is_stream_item(&view));
+        assert_eq!(sent_claim(&graph, subject).unwrap().unwrap().accepted_at_unix_ms, mine.accepted_at_unix_ms);
+        assert!(lifecycle_step(&graph, subject, "message.delivered").unwrap().is_none());
+        let status = BTreeMap::from([("status".to_owned(), json!("delivered"))]);
+        assert!(record_lifecycle(&graph, subject, "message.delivered", Some("agent/cedar"), &status).unwrap());
+        let (actor, _) = lifecycle_step(&graph, subject, "message.delivered").unwrap().unwrap();
+        assert_eq!(actor, "agent/cedar");
+        let after_receipt = position(&graph).unwrap();
+        assert_eq!(after_receipt.admitted, after_sends.admitted);
+        assert!(after_receipt.lifecycle > after_sends.lifecycle);
+        assert_eq!(
+            changed_subjects(&graph, "agent/cedar", "cedar", &[], after_sends).unwrap(),
+            [subject]
+        );
+        assert!(changed_subjects(&graph, "agent/other", "other", &[], after_sends).unwrap().is_empty());
+        let (next, routed, _) = wake_batch(&graph, after_sends, 1024).unwrap();
+        assert_eq!(next, after_receipt);
+        assert_eq!(routed, [(subject.to_owned(), "agent/cedar".to_owned())]);
+        assert!(changed_subjects(&graph, "agent/cedar", "cedar", &[], after_receipt).unwrap().is_empty());
+
+        // A delivery snapshot lists the recipient's open items, and a read one leaves it.
+        let open_items = || {
+            delivery_items(&graph, "agent/cedar")
+                .unwrap()
+                .into_iter()
+                .map(|message| (message.subject, message.status))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(open_items(), [(subject.to_owned(), "delivered".to_owned())]);
+        let read = BTreeMap::from([("status".to_owned(), json!("read"))]);
+        assert!(record_lifecycle(&graph, subject, "message.read", Some("agent/cedar"), &read).unwrap());
+        assert!(open_items().is_empty());
+
+        assert!(graph.claims_for(subject, None).unwrap().is_empty(), "lifecycle reached the graph");
     }
 
 }

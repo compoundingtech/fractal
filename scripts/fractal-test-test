@@ -2535,7 +2535,8 @@ class StTest(unittest.TestCase):
                               env=dict(os.environ, **{st_test.REEXEC: 'test'}))
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()],
-                         ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'linux-clippy', 'fractal-web', 'rust-tests'])
+                         ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'linux-clippy', 'linux-fleet-compat',
+                          'fractal-web', 'rust-tests'])
 
     def test_a_check_that_builds_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
@@ -2670,7 +2671,8 @@ class StTest(unittest.TestCase):
     def test_every_check_of_the_per_pr_suite_runs_by_default_and_all_means_the_same(self):
         # No subset for signing: with no flag fractal-test runs the whole per-PR suite; --all is an accepted alias; --check selects.
         # The VM tests and the mail redelivery canaries run daily, not here.
-        suite = ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'linux-clippy', 'fractal-web', 'rust-tests']
+        suite = ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'linux-clippy', 'linux-fleet-compat', 'fractal-web',
+                 'rust-tests']
         for args, names in (([], suite), (['--all'], suite), (['--check', 'linux-gate'], ['linux-gate'])):
             # REEXEC: the tree's own table, not the base's copy run_base_copy would run (as under a signing run, which sets it).
             done = subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--list', *args], capture_output=True, text=True,
@@ -3921,16 +3923,17 @@ class PerCrate(StTest):
         self.assertIn('to run: base, top', out)
 
     def test_rust_tests_is_in_the_default_suite_after_linux_gate(self):
-        # Only linux-fleet-compat is opt-in: linux-gate's own run still includes its stage, so a default run never runs it twice.
-        # linux-clippy runs by default, right after linux-gate, and signs from its clippy stage (KeyedClippy).
-        self.assertEqual(st_test.OPT_IN, frozenset({'linux-fleet-compat'}))
+        # Nothing is opt-in. linux-clippy and linux-fleet-compat run by default, right after linux-gate, and sign from its clippy and
+        # fleet-compat stages (KeyedClippy, KeyedFleetCompat), so neither stage runs twice.
+        self.assertEqual(st_test.OPT_IN, frozenset())
         self.assertEqual(list(LOCAL).index('linux-clippy'), list(LOCAL).index('linux-gate') + 1)
+        self.assertEqual(list(LOCAL).index('linux-fleet-compat'), list(LOCAL).index('linux-gate') + 2)
+        self.assertIn('linux-fleet-compat', [name for name in LOCAL if name not in st_test.OPT_IN])
         self.assertIn('rust-tests', st_test.BUILDS)
         for flags in ((), ('--all',)):
             code, out, err = self.run_st_test('--list', *flags)
             names = [line.split(':')[0] for line in out.splitlines()]
             self.assertIn('rust-tests', names, flags)
-            self.assertNotIn('linux-fleet-compat', names, flags)
             self.assertLess(names.index('linux-gate') if 'linux-gate' in names else -1, names.index('rust-tests'), flags)
         code, out, err = self.run_st_test('--list', '--check', 'rust-tests')
         self.assertIn('rust-tests: python3 scripts/ci-rust-test-result', out)
@@ -4158,8 +4161,138 @@ class KeyedClippy(StTest):
                 self.assertIn('clippy', rule['command'], level)
 
 
-# PerCrate and KeyedClippy reuse StTest's repository, signer and helpers, not its tests.
-for _class in (PerCrate, KeyedClippy):
+FAKE_FLEET_COMPAT = """import json, os, sys
+from pathlib import Path
+open(os.environ['FAKE_CALLS'], 'a').write(sys.argv[1] + '\\n')
+if os.environ.get('FAKE_FLEET_COMPAT_FAIL'):
+    sys.exit(1)
+report = os.environ.get('CI_FLEET_COMPAT_REPORT')
+if report:
+    # As scripts/ci-linux's fleet-compat stage: the integration-test build's cargo messages (one unit, its dep-info naming what it read),
+    # then passed.
+    target = Path(os.environ['FAKE_TARGET'])
+    deps = target / 'debug/deps'
+    deps.mkdir(parents=True, exist_ok=True)
+    (deps / 'integration-0123abcd').write_text('')
+    (deps / 'integration-0123abcd.d').write_text('%s: %s\\n' % (deps / 'integration-0123abcd', os.environ.get('FAKE_FLEET_COMPAT_READS', 'a.txt')))
+    Path(report).mkdir(parents=True, exist_ok=True)
+    message = {'reason': 'compiler-artifact', 'filenames': [str(deps / 'integration-0123abcd')]}
+    (Path(report) / 'fleet-compat-build.jsonl').write_text(json.dumps(message) + '\\n')
+    (Path(report) / 'passed').write_text('')
+"""
+
+
+class KeyedFleetCompat(StTest):
+    """linux-fleet-compat in the default suite, as linux-clippy (docs/keyed-clippy.md, section 3): signed from linux-gate's fleet-compat
+    stage when linux-gate runs here, so the stage runs once, else from the stage run alone; either way the note records
+    scripts/ci-fleet-compat-result and which run made its report."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = Path(self.tmp.name) / 'fake-calls'
+        fake = Path(self.tmp.name) / 'fake-fleet-compat.py'
+        fake.write_text(FAKE_FLEET_COMPAT)
+        st_test.LOCAL['linux-gate'] = [sys.executable, str(fake), 'gate', 'fleet-compat']  # StTest's patcher restores the table
+        st_test.LOCAL['linux-fleet-compat'] = LOCAL['linux-fleet-compat']
+        patcher = mock.patch.object(st_test, 'RUN_FLEET_COMPAT', [sys.executable, str(fake), 'fleet-compat'])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        git(self.work, 'checkout', '-q', 'main')
+        for script in ('ci-fleet-compat-result', 'dep-info-check'):
+            shutil.copy(ROOT / 'scripts' / script, self.work / 'scripts' / script)
+        # The real linux-fleet-compat entry, keyed by this repository's files, and its lane: the verifier judges every note by the real rules.
+        inputs = ['a.txt', 'flake.lock', 'scripts']
+        policy = json.loads(json.dumps(POLICY))
+        policy['checks']['linux-fleet-compat'] = dict(
+            json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['linux-fleet-compat'], inputs=inputs)
+        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
+        (self.work / '.st/required-lanes.json').write_text(json.dumps({'version': 1, 'lanes': {'linux-fleet-compat': {
+            'argv': LOCAL['linux-fleet-compat'], 'definition_paths': ['.st', 'scripts'], 'tree_inputs': inputs}}}))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'keyed fleet-compat')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        git(self.work, 'merge', '-q', '--ff-only', 'main')
+
+    def run_fleet_compat(self, *checks, **env):
+        args = [argument for name in checks for argument in ('--check', name)]
+        return self.run_st_test(*args, extra_env=dict({'FAKE_CALLS': str(self.calls), 'FAKE_TARGET': str(Path(self.tmp.name) / 'target'),
+                                                        'ST_EVIDENCE_GOVERN': 'off', 'ST_EVIDENCE_TARGET': 'off'}, **env))
+
+    def ran(self):
+        return self.calls.read_text().split() if self.calls.exists() else []
+
+    def fleet_compat_notes(self):
+        return [s['predicate']['observed'] for s in self.statements() if 'linux-fleet-compat' in s['predicate']['observed']['checks']]
+
+    def test_unsigned_linux_fleet_compat_is_signed_from_linux_gates_fleet_compat_stage_which_runs_once(self):
+        code, out, err = self.run_fleet_compat('linux-gate', 'linux-fleet-compat')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['gate'], 'fleet-compat ran once, inside linux-gate; linux-fleet-compat ran no stage of its own')
+        [note] = self.fleet_compat_notes()
+        self.assertEqual(note['checks']['linux-fleet-compat']['exit_code'], 0)
+        self.assertEqual(note['inputs']['run_command_sha256'], hashlib.sha256(json.dumps([st_test.LOCAL['linux-gate']]).encode()).hexdigest())
+        self.assertRegex(note['inputs']['source_inputs'], r'^[0-9a-f]{40}$', 'keyed: another tree with the same key finds it')
+        self.assertTrue(any('linux-gate' in s['predicate']['observed']['checks'] for s in self.statements()), 'linux-gate is signed too')
+        self.assertRegex(out, r'linux-fleet-compat\s+passed')
+        code, out, err = self.run_fleet_compat('linux-gate', 'linux-fleet-compat')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'linux-fleet-compat\s+already signed')
+
+    def test_without_linux_gate_in_the_run_linux_fleet_compat_runs_the_stage_alone(self):
+        code, out, err = self.run_fleet_compat('linux-fleet-compat')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['fleet-compat'])
+        [note] = self.fleet_compat_notes()
+        self.assertEqual(note['inputs']['run_command_sha256'], hashlib.sha256(json.dumps([st_test.RUN_FLEET_COMPAT]).encode()).hexdigest())
+
+    def test_a_tree_with_the_same_key_reuses_the_note_and_one_that_moves_it_does_not(self):
+        self.assertEqual(self.run_fleet_compat('linux-fleet-compat')[0], 0)
+        self.commit('notes.md', 'outside the key\n')
+        code, out, err = self.run_fleet_compat('linux-fleet-compat')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'linux-fleet-compat\s+already signed')
+        self.assertEqual(self.ran(), ['fleet-compat'], 'a tree that changed no input reused the note')
+        self.commit('a.txt', 'two\n')
+        self.assertEqual(self.run_fleet_compat('linux-fleet-compat')[0], 0)
+        self.assertEqual(self.ran(), ['fleet-compat', 'fleet-compat'], 'a tree that changed an input ran the stage again')
+
+    def test_a_file_read_outside_linux_fleet_compats_key_fails_its_note(self):
+        (self.work / 'b.txt').write_text('undeclared\n')
+        git(self.work, 'add', 'b.txt')
+        git(self.work, 'commit', '-q', '-m', 'b')
+        code, out, err = self.run_fleet_compat('linux-fleet-compat', FAKE_FLEET_COMPAT_READS='b.txt')
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'linux-fleet-compat\s+FAILED')
+        self.assertEqual([n['checks']['linux-fleet-compat']['exit_code'] for n in self.fleet_compat_notes()], [1],
+                         'a failing note, never a passing one')
+
+    def test_when_linux_gates_fleet_compat_stage_did_not_pass_linux_fleet_compat_is_not_signed_and_runs_nothing_more(self):
+        code, out, err = self.run_fleet_compat('linux-gate', 'linux-fleet-compat', FAKE_FLEET_COMPAT_FAIL='1')
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.ran(), ['gate'])
+        self.assertRegex(out, r"linux-fleet-compat\s+NOT SIGNED .*linux-gate's fleet-compat stage did not pass")
+        self.assertEqual([n for n in self.fleet_compat_notes() if n['checks']['linux-fleet-compat']['exit_code'] == 0], [])
+
+    def test_while_linux_fleet_compat_is_in_shadow_linux_gate_keeps_its_fleet_compat_stage(self):
+        # As for clippy: the linux-gate shrink waits for the flip, since a shadow note skips nothing.
+        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']
+        if policy['linux-fleet-compat'].get('enforce') is not True:
+            self.assertIn('fleet-compat', LOCAL['linux-gate'])
+            for level, rule in policy['linux-gate']['kinds']['wrapper']['by_level'].items():
+                self.assertIn('fleet-compat', rule['command'], level)
+
+    def test_ci_linux_writes_the_report_only_after_the_whole_stage_passed(self):
+        source = (ROOT / 'scripts/ci-linux').read_text()
+        stage = source.split('fleet_compat() {', 1)[1].split('\n}\n', 1)[0]
+        self.assertIn('CI_FLEET_COMPAT_REPORT', stage)
+        self.assertGreater(stage.index('"$CI_FLEET_COMPAT_REPORT/passed"'), stage.index('compat-compact-result.log" || return'),
+                           '`passed` is written last, after the last test of the stage')
+        self.assertNotIn('evidence-skip-policy', stage, 'the stage never names the skip policy itself: linux-gate must not depend on it')
+
+
+# PerCrate, KeyedClippy and KeyedFleetCompat reuse StTest's repository, signer and helpers, not its tests.
+for _class in (PerCrate, KeyedClippy, KeyedFleetCompat):
     for _name in [name for name in dir(StTest) if name.startswith('test_') and name not in _class.__dict__]:
         setattr(_class, _name, None)
 

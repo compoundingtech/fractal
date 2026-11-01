@@ -1622,14 +1622,24 @@ impl Store {
         let judged = self.record_judgment_failure(
             self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS)),
         )?;
-        if self.verdicts_pending()? {
-            self.verdicts_due.store(true, Ordering::Release);
-            // The paced signature job owns what a slice leaves; a faulted member waits for resume.
-            if self.signature_migration()?.fault.is_none() {
-                self.signature_job_wake.notify_one();
-            }
-        }
+        self.hand_off_pending_verdicts()?;
         Ok(judged)
+    }
+
+    /// Leave verdict work that is still pending to the next ordinary pass and to the paced
+    /// signature job, which owns it; a faulted member waits for resume. Nothing pending wakes
+    /// nothing, so a pass that finishes its work never wakes the job again.
+    pub(crate) fn hand_off_pending_verdicts(&self) -> Result<()> {
+        if !self.verdicts_pending()? {
+            return Ok(());
+        }
+        self.verdicts_due.store(true, Ordering::Release);
+        if self.signature_migration()?.fault.is_none() {
+            self.signature_job_wake.notify_one();
+            #[cfg(test)]
+            super::SIGNATURE_JOB_WAKES.with(|wakes| wakes.set(wakes.get() + 1));
+        }
+        Ok(())
     }
 
     /// One resumable judgment loan for the paced signature worker: the bootstrap's shadow
@@ -2242,6 +2252,53 @@ mod paced_verdict_tests {
             Some("roots-before-a-membership-change")
         );
         assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+    }
+
+    #[test]
+    fn a_claim_sealed_after_the_startup_pass_is_handed_to_the_paced_job_and_judged() {
+        // A single node with no fleet: nothing exchanges, so nothing else judges. Its node key
+        // signs its claims as they are sealed.
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        store.judge_claims_slice(true).unwrap();
+        let wakes = || crate::store::SIGNATURE_JOB_WAKES.with(std::cell::Cell::get);
+        let start = wakes();
+        let write = |subject: &str| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([("state".into(), Value::from("ready"))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
+        };
+        let first = write("agent/studio.first");
+        // As a checkpoint capture does: seal, and judge nothing.
+        store.seal_local_batches().unwrap();
+        assert!(store.verdicts_pending().unwrap());
+        assert!(store.verdicts_due.load(Ordering::Acquire), "the next ordinary pass judges it too");
+        assert_eq!(wakes(), start + 1);
+        // A seal with nothing new to seal hands off nothing.
+        store.seal_local_batches().unwrap();
+        assert_eq!(wakes(), start + 1);
+        // What the woken job does, without a restart: judge while anything is pending.
+        while store.verdicts_pending().unwrap() {
+            store.advance_signature_judgment().unwrap();
+        }
+        assert_eq!(store.claim_verdict(&first.id).unwrap(), Verdict::Verified);
+        // A pass that leaves nothing pending does not wake the job again, so a steady trickle
+        // of passes and empty seals cannot loop it, and leaves the tail no slice to run.
+        store.judge_claims_slice(false).unwrap();
+        store.verdicts_due.store(false, Ordering::Release);
+        store.seal_local_batches().unwrap();
+        assert_eq!(wakes(), start + 1);
+        assert!(!store.verdicts_due.load(Ordering::Acquire));
+        // The next claim sealed is handed off again.
+        write("agent/studio.second");
+        store.seal_local_batches().unwrap();
+        assert_eq!(wakes(), start + 2);
     }
 
     #[test]
