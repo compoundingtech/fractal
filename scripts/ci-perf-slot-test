@@ -34,8 +34,18 @@ def launch_fixture(unit, units, wrappers, env, *args, command):
 
 
 def fixture_listing(systemctl, pid):
-    return subprocess.check_output([systemctl, "--user", "list-units", f"ci-perf-slot-fixture-{pid}-*",
-                                    "--all", "--no-legend", "--plain"], text=True)
+    try:
+        return subprocess.check_output([systemctl, "--user", "list-units", f"ci-perf-slot-fixture-{pid}-*",
+                                        "--all", "--no-legend", "--plain"], text=True, timeout=15)
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError("fixture drain unconfirmed: systemctl list-units timed out after 15s") from error
+
+
+def stop_fixture(systemctl, unit):
+    try:
+        subprocess.run([systemctl, "--user", "stop", unit], capture_output=True, timeout=15)
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(f"fixture drain unconfirmed: systemctl stop {unit} timed out after 15s") from error
 
 
 def until(condition, what, seconds=10):
@@ -119,6 +129,18 @@ assert events == ["blocked", "launch", "pending signal delivered after registrat
 with patch.object(subprocess, "check_output", return_value="") as listing:
     fixture_listing("systemctl", 123)
     assert listing.call_args.args[0][3] == "ci-perf-slot-fixture-123-*"
+    assert listing.call_args.kwargs["timeout"] == 15
+with patch.object(subprocess, "run", return_value=None) as stopped_unit:
+    stop_fixture("systemctl", "fixture.scope")
+    assert stopped_unit.call_args.kwargs["timeout"] == 15
+for helper, call in ((fixture_listing, "check_output"), (stop_fixture, "run")):
+    with patch.object(subprocess, call, side_effect=subprocess.TimeoutExpired("systemctl", 15)):
+        try:
+            helper("systemctl", 123)
+        except AssertionError as error:
+            assert "drain unconfirmed" in str(error) and "timed out after 15s" in str(error)
+        else:
+            raise AssertionError("manager timeout must fail the drain")
 if sys.argv[1:] == ["--helpers-only"]:
     print("passed: ci-perf-slot helpers")
     sys.exit(0)
@@ -235,12 +257,14 @@ with tempfile.TemporaryDirectory() as tmp:
                         wrapper.wait(10)
                 # Stop after wrapper exit: a launch already in flight must not register a scope after our stop.
                 for unit in units:
-                    subprocess.run([systemctl, "--user", "stop", unit], capture_output=True)
+                    stop_fixture(systemctl, unit)
                 def no_fixtures():
                     listed = fixture_listing(systemctl, os.getpid())
                     return not listed.strip() and not any(alive(pid) for pid in scoped_pids)
                 until(no_fixtures, "all fixture scopes and processes are gone")
                 cleaned = True
+            except subprocess.TimeoutExpired as error:
+                raise AssertionError("fixture drain unconfirmed: wrapper did not exit after TERM/KILL deadlines") from error
             finally:
                 for record in evidence.values():
                     record["drain"] = "empty and collected" if cleaned else "not confirmed"
