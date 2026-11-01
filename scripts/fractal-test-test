@@ -308,33 +308,43 @@ class TreeOrphansTest(unittest.TestCase):
         self.process(101, cwd=self.tree, ppid=102)
         self.process(102, argv=[f'--tree={self.tree}'], ppid=1)
         self.process(1, cwd=self.tree)
-        real_users = st_test.tree_users
-        with mock.patch.object(st_test, 'tree_users', lambda tree: real_users(tree, self.proc)), \
-                mock.patch.object(st_test.os, 'pidfd_open') as opened, \
+        with mock.patch.object(st_test.os, 'pidfd_open') as opened, \
                 mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
-            st_test.clear_tree_orphans(self.tree, grace=0)
+            st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc)
+        opened.assert_not_called()
+        sent.assert_not_called()
+
+    def test_argv_only_reference_refuses_tree_without_signalling(self):
+        self.process(101, cwd='/', argv=['tail', '-f', str(self.tree / 'log')])
+        with mock.patch.object(st_test.os, 'pidfd_open') as opened, \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
+            with self.assertRaisesRegex(st_test.Failure, r'argv-only.*101.*tail.*refusing'):
+                st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc)
         opened.assert_not_called()
         sent.assert_not_called()
 
     def test_termination_escalates_only_survivors_and_refuses_dirty_tree(self):
-        for exits_on in (st_test.signal.SIGTERM, st_test.signal.SIGKILL, None):
+        for exits_on in (st_test.signal.SIGTERM, st_test.signal.SIGKILL, 'chdir', None):
             with self.subTest(exits_on=exits_on):
                 entry = self.process(101, cwd=self.tree)
-                real_users, real_close = st_test.tree_users, os.close
+                real_close = os.close
                 def send(fd, sig):
-                    if sig == exits_on:
+                    if exits_on == 'chdir' and sig == st_test.signal.SIGTERM:
+                        (entry / 'cwd').unlink()
+                        (entry / 'cwd').symlink_to('/')
+                    if sig == exits_on or (exits_on == 'chdir' and sig == st_test.signal.SIGKILL):
                         shutil.rmtree(entry)
-                with mock.patch.object(st_test, 'tree_users', lambda tree: real_users(tree, self.proc)), \
+                with mock.patch.object(st_test.select, 'select', side_effect=lambda *args: ([501] if not entry.exists() else [], [], [])), \
                         mock.patch.object(st_test.os, 'pidfd_open', return_value=501), \
                         mock.patch.object(st_test.os, 'close', side_effect=lambda fd: None if fd == 501 else real_close(fd)) as close, \
                         mock.patch.object(st_test.signal, 'pidfd_send_signal', side_effect=send) as sent, \
                         contextlib.redirect_stderr(io.StringIO()) as said:
                     if exits_on is None:
                         with self.assertRaisesRegex(st_test.Failure, 'after SIGKILL; refusing'):
-                            st_test.clear_tree_orphans(self.tree, grace=0)
+                            st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc)
                         shutil.rmtree(entry)
                     else:
-                        st_test.clear_tree_orphans(self.tree, grace=0)
+                        st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc)
                 expected = [mock.call(501, st_test.signal.SIGTERM)]
                 if exits_on != st_test.signal.SIGTERM:
                     expected.append(mock.call(501, st_test.signal.SIGKILL))
