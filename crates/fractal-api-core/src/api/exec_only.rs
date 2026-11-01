@@ -1,5 +1,6 @@
 use super::*;
 use crate::model::DesiredSubject;
+use rusqlite::OptionalExtension;
 
 pub(super) struct Card {
     pub state: &'static str,
@@ -34,6 +35,11 @@ pub(super) fn cards(
         .into_iter().map(|child| (child.subject.clone(), child)).collect::<BTreeMap<_, _>>();
     let statuses = store.agent_card_status_at(Some(&names), index, true)?.subjects
         .into_iter().map(|child| (child.subject.clone(), child)).collect::<BTreeMap<_, _>>();
+    let connection = store.readers.get();
+    let mut fresh_receipt = connection.prepare_cached(
+        "SELECT actual.store_index>=desired.store_index FROM claims actual
+         JOIN claims desired ON desired.id=?2 WHERE actual.id=?1",
+    )?;
     let mut cards = BTreeMap::new();
     for (name, (root, tasks)) in declarations {
         let mut card = Card { state: "stopped", runtime_ids: Vec::with_capacity(tasks.len()),
@@ -65,8 +71,8 @@ pub(super) fn cards(
             let fresh = if let Some((actual, desired)) = status.and_then(|status| {
                 status.actual_claim.as_deref().zip(status.desired_token.as_deref())
             }) {
-                store.claim_by_id(actual)?.zip(store.claim_by_id(desired)?)
-                    .is_some_and(|(actual, desired)| actual.store_index >= desired.store_index)
+                fresh_receipt.query_row([actual, desired], |row| row.get::<_, bool>(0))
+                    .optional()?.unwrap_or(false)
             } else { false };
             let observed = fields.filter(|fields| fresh && member.is_some_and(|member| {
                 fields["runtime_id"].as_str() == Some(member.runtime_id.as_str())
