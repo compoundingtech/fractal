@@ -279,7 +279,7 @@ trait Manager {
 
 pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Result<()> {
     ensure!(fractal_daemon::instance::current().is_none(), "host migration does not move named instances; run it for the default host");
-    ensure!(matches!(endpoint, Endpoint::Unix(_)), "host migration requires the local Unix API, not a remote endpoint");
+    ensure!(endpoint.unix_socket().is_some(), "host migration requires the local Unix API, not a remote endpoint");
     let mut layout = Layout::discover()?;
     let mut config = Config::load_unvalidated(args.config.as_deref())?;
     if let Some(state) = &args.state_dir { config.state_dir = state.clone(); }

@@ -989,10 +989,11 @@ pub fn run(mut options: Args) -> Result<()> {
         }
         None => {
             let endpoint = environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")?.map(PathBuf::from);
-            let path = fractal_client::discover_unix_endpoint(options.endpoint.or(endpoint))?;
+            let identity = fractal_client::discover_unix_identity(options.endpoint.or(endpoint))?;
+            let path = identity.resolve();
             let actor = person.as_deref().unwrap_or_default();
             (
-                vec![Client::unix_as(&path, actor)],
+                vec![Client::discovered_unix_as(identity, actor)],
                 cache::path(&path, actor),
             )
         }

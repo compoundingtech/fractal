@@ -836,7 +836,7 @@ pub fn play(
     let daemon = Daemon::start(&exe, &dir)?;
     let runner = Runner::new(exe.clone(), &demo, &dir, &work)?;
     let outcome = (|| {
-        runner.wait_for_daemon(&config.client_socket())?;
+        runner.wait_for_daemon(fractal_daemon::client::Endpoint::DiscoveredUnix(config.client_discovery()))?;
         println!("Seeding {}…", demo.title.as_deref().unwrap_or(&demo.name));
         runner.seed(&demo)?;
         println!(
@@ -1122,10 +1122,8 @@ impl Runner {
     /// Wait up to a minute for the daemon at `socket` to answer its health check. The agents
     /// roster and the other lists are published after the daemon starts listening, and a read
     /// of one says "not ready" until then, so only the health answer says the daemon is up.
-    fn wait_for_daemon(&self, socket: &Path) -> Result<()> {
-        let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(
-            socket.to_owned(),
-        ))
+    fn wait_for_daemon(&self, endpoint: fractal_daemon::client::Endpoint) -> Result<()> {
+        let client = fractal_daemon::client::Client::new(endpoint)
         .with_outage_wait(Duration::from_secs(60), false);
         let health = tokio::runtime::Builder::new_current_thread()
             .enable_all()
