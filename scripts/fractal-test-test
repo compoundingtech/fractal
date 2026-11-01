@@ -3164,11 +3164,38 @@ class PoolQueue(unittest.TestCase):
         seat.write_text(f'rules {st_test.QUEUE_RULES}\n')  # a seat's live ticket whose waiter has not taken the free tree yet
         got = []
         with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0), contextlib.redirect_stderr(io.StringIO()):
-            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=st_test.POOL_LAST_RANK)))
+            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=st_test.POOL_LAST_RANK)))
             last.start()
             time.sleep(0.5)
-            self.assertEqual(got, [])                                           # an ordinary waiter would try it now (the fallback)
+            self.assertEqual(got, [])                                           # an ordinary waiter would try one now (the fallback)
             seat.unlink()
+            last.join(5)
+        self.assertEqual(got[0][0], 0)
+        got[0][1].close()
+
+    def test_a_last_waiter_takes_a_tree_only_while_another_is_free(self):
+        """Factory, 2026-11-01: one tree is always left for a seat that comes during the seed's run."""
+        self.root.mkdir(parents=True)
+        holder = open(self.root / 'tree-1.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)                                     # tree-1 in use: tree-0 is the only free one of two
+        got = []
+        with contextlib.redirect_stderr(io.StringIO()) as told:
+            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=st_test.POOL_LAST_RANK)))
+            last.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])
+            self.assertTrue(st_test.another_tree_free(self.root, 2, 1))         # the waiter's probe let tree-0 go again
+            holder.close()                                                      # two free now
+            last.join(5)
+        self.assertIn('leaves it to a seat', told.getvalue())
+        self.assertIn(got[0][0], (0, 1))
+        got[0][1].close()
+
+    def test_a_last_waiter_takes_a_tree_at_once_with_two_free(self):
+        got = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 3, rank=st_test.POOL_LAST_RANK)))
+            last.start()
             last.join(5)
         self.assertEqual(got[0][0], 0)
         got[0][1].close()

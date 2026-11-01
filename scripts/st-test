@@ -1235,8 +1235,24 @@ PRIORITY_MAX_WAIT_SECONDS = 2 * 3600  # a pool-tree ticket that has waited this 
 # Last in the pool (2026-11-01, Factory, from the 10-31 st-test SLO report: on one build host the shadow queue signer's seed held 18% of the
 # pool's tree-hours in a day, 20 runs of main's tips queued like any seat's). ST_TEST_POOL_RANK=last takes a ticket of this rank, which never
 # ages and is never overdue, and its waiter never takes a tree another ticket waits for (no TREE_FREE_FALLBACK_SECONDS): it gets a tree only
-# while no other ticket waits. Aging and the two-hour rule would otherwise bring any rank to the front within two hours.
+# while no other ticket waits. Aging and the two-hour rule would otherwise bring any rank to the front within two hours. It also takes a tree
+# only while another is free, which it leaves to a seat that comes during its run (a seed holds its tree 35 to 58 minutes).
 POOL_LAST_RANK = 999
+
+
+def another_tree_free(root, trees, taken):
+    """Whether a pool tree other than `taken` is free now: its flock taken without waiting and let go at once."""
+    for n in range(trees):
+        if n == taken:
+            continue
+        with open(root / f'tree-{n}.lock', 'w') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            return True
+    return False
 
 
 def pool_rank():
@@ -1397,7 +1413,7 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
     last = int(ticket.name.split('.')[0]) >= POOL_LAST_RANK  # never takes a tree while another ticket waits (POOL_LAST_RANK)
     waited, handing = False, False
     began = time.monotonic() - (time.time_ns() - int(ticket.name.split('.')[1])) / 1e9  # since the ticket was taken, by this copy or the one before
-    slot_waited, slot_seen, slot_told = 0.0, None, False
+    slot_waited, slot_seen, slot_told, spare_told = 0.0, None, False, False
     free_since = {}  # tree number -> when this waiter first saw it free (not the head's, so only watched)
 
     def taken(n, lock):
@@ -1424,6 +1440,13 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                     except BlockingIOError:
                         lock.close()
                         continue
+                    if last and not another_tree_free(root, trees, n):
+                        lock.close()
+                        if not spare_told:
+                            spare_told = True
+                            print(f'fractal-test: tree-{n} is the only free tree; a run last in the pool (ST_TEST_POOL_RANK=last) leaves it '
+                                  f'to a seat and waits for two', file=sys.stderr, flush=True)
+                        break
                     try:
                         clear_tree_orphans(root / f'tree-{n}')
                     except BaseException:
