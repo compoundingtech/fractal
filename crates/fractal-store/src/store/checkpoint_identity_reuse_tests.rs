@@ -40,7 +40,7 @@ fn a_waiting_seal_pass_reuses_the_unchanged_identity_digest() {
         let scope = SqliteWorkScope::start();
         let status = store.checkpoint_status(context.now_unix_ms, &context.configured_peers).unwrap();
         let work = scope.finish();
-        assert_eq!(status.pending.unwrap().terms.sealed_digest, walked.digest);
+        assert_eq!(status.pending.unwrap().terms.unwrap().sealed_digest, walked.digest);
         assert!(work.statements <= 14 && work.vm_steps <= 3_100, "status: {work:?}");
     }
     let (reused, work) = identities(&store, cut);

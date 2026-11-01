@@ -566,11 +566,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .environment
                         .insert(rollout::RESUME_PATH_ENV.into(), path.clone());
                 }
-                operation.desired_token = self
-                    .store
-                    .selected_desired_token(agent)?
-                    .context("replacement has no desired token")?;
-                phase(&operation, "start-attempted", None, &[])?;
                 if !current()? {
                     return Ok(true);
                 }

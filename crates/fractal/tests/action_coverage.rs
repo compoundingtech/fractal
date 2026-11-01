@@ -3367,6 +3367,26 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
         daemon.store().mission_run(&run.id).unwrap().unwrap().status,
         "completed"
     );
+    // The finished run holds no fault, so there is nothing to dismiss, and nothing is written.
+    let index = daemon.store().index().unwrap();
+    let output = daemon
+        .cli(
+            PERSON,
+            &[
+                "missions",
+                "dismiss-fault",
+                &run.subject,
+                "--as",
+                PERSON,
+                "--reason",
+                "The run finished.",
+            ],
+        )
+        .await;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("missing-fault"), "{stderr}");
+    assert_eq!(daemon.store().index().unwrap(), index);
     cli_value(
         daemon
             .cli(

@@ -665,6 +665,103 @@ async fn joined_with(
     node
 }
 
+#[test]
+fn offline_rename_proof_uses_supported_environment_aliases() {
+    let root = tempfile::tempdir().unwrap();
+    let node = Node::new(root.path(), "offline-proof");
+    fs::write(node.root.join("config/st3/config.toml"), "not valid toml = [").unwrap();
+    for kind in ["agents", "missions"] {
+        for (preferred, legacy) in [(None, None), (Some("0"), None), (None, Some("0")), (Some("0"), Some("invalid"))] {
+            let mut command = node.command(&[
+                "--endpoint", "not-a-valid-endpoint", kind, "rename-id", "proof", "verify",
+                "missing.json", "--fleet-anchor", "caller-anchor",
+            ]);
+            command.env_remove("FRACTAL_DAEMON_WAIT").env_remove("ST3_DAEMON_WAIT");
+            if let Some(value) = preferred { command.env("FRACTAL_DAEMON_WAIT", value); }
+            if let Some(value) = legacy { command.env("ST3_DAEMON_WAIT", value); }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(6), "{}", String::from_utf8_lossy(&output.stderr));
+            let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(verdict["ok"], false);
+            assert_eq!(verdict["error"]["code"], "malformed-bundle");
+        }
+    }
+}
+
+#[tokio::test]
+async fn rename_proofs_export_over_cli_and_verify_without_daemon_or_config() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "proof-source").await;
+    let anchor_value = node.st_json(&["fleet", "anchor", "show"]);
+    let fleet_anchor = anchor_value["fleet_anchor"].as_str().unwrap();
+    assert_eq!(node.st_ok(&["fleet", "anchor", "show"]).trim(), fleet_anchor);
+    let declaration = node.root.join("identities.kdl");
+    fs::write(&declaration, r#"version 2
+agent "proof-original/worker" { command "true"; workspace "/tmp"; restart "never"; }
+mission "proof-original" state="ready" {
+  goal "Prove portable identity history."
+  step "work" { agentless }
+}
+"#).unwrap();
+    node.st_ok(&["apply", declaration.to_str().unwrap(), "--as", PERSON]);
+    let mut proofs = Vec::new();
+    for (kind, prefix, suffix) in [("agents", "agent", "/worker"), ("missions", "mission", "")] {
+        let original = format!("{prefix}/proof-original{suffix}");
+        let renamed = format!("{prefix}/proof-renamed{suffix}");
+        let receipt = node.st_json(&[
+            kind, "rename-id", &original, &renamed,
+            "--as", PERSON, "--reason", "Clarify responsibility",
+        ]);
+        let revision = receipt["naming_revision"].as_str().unwrap().to_owned();
+        let denied = node.st(&[kind, "rename-id", "proof", "export", &original]);
+        assert!(!denied.status.success());
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("co-batched claims and blobs"));
+        let proof = root.path().join(format!("{kind}-proof.json"));
+        node.st_ok(&[
+            kind, "rename-id", "proof", "export", &original,
+            "--revision", &revision, "--out", proof.to_str().unwrap(),
+            "--include-co-batched-claims",
+        ]);
+        let from_file: Value = serde_json::from_slice(&fs::read(&proof).unwrap()).unwrap();
+        let from_stdout = node.st_json(&[
+            kind, "rename-id", "proof", "export", &renamed,
+            "--include-co-batched-claims",
+        ]);
+        for field in ["schema", "identity_kind", "storage_id", "canonical_id", "naming_revision", "declaration", "chain"] {
+            assert_eq!(from_file[field], from_stdout[field], "{field}");
+        }
+        assert_eq!(from_file["schema"], "fractal.rename-proof.v1");
+        assert_eq!(from_file["disclosure"], "fleet-internal");
+        proofs.push((kind, proof, renamed, revision));
+    }
+    node.stop();
+    // Deliberately invalid local configuration must be irrelevant to verification.
+    fs::write(node.root.join("config/st3/config.toml"), "not valid toml = [").unwrap();
+    for (kind, proof, renamed, revision) in proofs {
+        let offline = [
+            "--instance", "unconfigured-proof-verifier",
+            "--endpoint", "not-a-valid-endpoint",
+            kind, "rename-id", "proof", "verify", proof.to_str().unwrap(),
+            "--fleet-anchor", fleet_anchor,
+        ];
+        let verdict = node.st_json(&offline);
+        assert_eq!(verdict["schema"], "fractal.rename-proof-verdict.v1");
+        assert_eq!(verdict["ok"], true);
+        assert_eq!(verdict["disclosure"], "fleet-internal");
+        assert_eq!(verdict["to"], renamed);
+        let mut stale = offline.to_vec();
+        stale.extend(["--after-revision", &revision]);
+        let rejected = node.st(&stale);
+        assert_eq!(rejected.status.code(), Some(5));
+        let verdict: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+        assert_eq!(verdict["ok"], false);
+        assert_eq!(verdict["error"]["code"], "stale-revision");
+    }
+}
+
 /// Re-publication and parent revisions must preserve the weekly occurrence, even after its
 /// child finishes. Put the next real weekly tick close enough to exercise it in this daemon.
 #[tokio::test(flavor = "multi_thread")]
@@ -5945,6 +6042,40 @@ fn gh_prs(node: &Node, actor: &str) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+/// Wait until `node` answers `st gh prs fixture/app` from its own mirror, which it fills from
+/// GitHub right after a look it recorded; until then it answers from its graph. A wait that runs
+/// out says which step it stopped at (#4470): the last answer's source and reason, what the
+/// poller's claims say its observer did, and the tail of its logs.
+async fn wait_for_mirror(node: &Node, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let answer = gh_prs(node, PERSON);
+        assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
+        if answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // Read without unwrapping, so a stopped daemon cannot hide this message.
+            let trace = node.st(&["--json", "trace", "show", "observer/github/fixture/app"]);
+            let claims = String::from_utf8_lossy(&trace.stdout).lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>();
+            let observer = |kind: &str| claims.iter()
+                .filter(|claim| claim["kind"] == kind)
+                .map(|claim| claim["body"].clone())
+                .collect::<Vec<_>>();
+            panic!(
+                "timed out waiting until {what}: the last answer came from {}; the poller recorded {} looks; its observer's last state is {}\n{}",
+                answer["source"],
+                observer("observer.observed").len(),
+                observer("observer.state").last().unwrap_or(&Value::Null),
+                node.logs(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
 /// repository.
 fn watch_fixture_app(node: &Node) {
@@ -5976,10 +6107,7 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     let mut poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
     let reader = joined(root.path(), &poller, "fixture-reader", &[]).await;
     watch_fixture_app(&poller);
-    wait_until("the poller mirrors pull request 12", 90, || {
-        let answer = gh_prs(&poller, PERSON);
-        async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
-    }).await;
+    wait_for_mirror(&poller, "the poller mirrors pull request 12").await;
 
     let pull = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
     assert_eq!(pull["pull"]["facts"]["title"], "Copper proof", "{pull}");
@@ -6002,13 +6130,7 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     }
     poller.start().await;
     poller.wait_listening().await;
-    wait_until("the poller refills its lost mirror from GitHub", 90, || {
-        let answer = gh_prs(&poller, PERSON);
-        async move {
-            assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
-            answer["source"]["kind"] == "mirror"
-        }
-    }).await;
+    wait_for_mirror(&poller, "the poller refills its lost mirror from GitHub").await;
     let refilled = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
     assert_eq!(refilled["pull"]["facts"]["title"], "Copper proof", "{refilled}");
     assert_eq!(refilled["pull"]["facts"]["head_sha"], "a".repeat(40));
@@ -6023,13 +6145,17 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     assert_eq!(relayed["pull"]["facts"]["head_sha"], "a".repeat(40), "{relayed}");
     assert_eq!(relayed["poller"], "host/fixture-poller");
 
-    // With the poller down, the reader answers from its graph and says why.
+    // With the poller down, the reader answers from its graph and says why. Relayed reads need no
+    // replication, so first wait for the pull request's claims to reach the reader.
+    wait_until("the reader's graph holds the pull request", 90, || async {
+        reader.claims().await.iter().any(|claim| claim["subject"] == "resource/github/fixture/app/pull-request/12")
+    }).await;
     poller.stop();
     let fallback = gh_prs(&reader, PERSON);
     assert_eq!(fallback["source"]["kind"], "graph", "{fallback}");
     assert_eq!(fallback["source"]["host"], "host/fixture-reader");
     assert!(fallback["source"]["reason"].as_str().unwrap().contains("did not answer"), "{fallback}");
-    assert_eq!(fallback["pulls"][0]["number"], 12);
+    assert_eq!(fallback["pulls"][0]["number"], 12, "{fallback}");
     let checks = reader.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
     assert!(checks["checks"]["heads"].is_null(), "the graph keeps no head history: {checks}");
     let human = reader.st_ok(&["gh", "prs", "fixture/app", "--as", PERSON]);
@@ -6090,4 +6216,89 @@ async fn previous_release_poller_beside_a_github_plugin_member_and_its_upgrade()
     }).await;
     let checks = member.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
     assert_eq!(checks["checks"]["head_sha"], "b".repeat(40), "{checks}");
+}
+
+/// Ask `node` to look at fixture/app again now, as a refresh does.
+fn refresh_fixture_app(node: &Node, id: &str) {
+    let file = node.root.join(format!("refresh-{id}.kdl"));
+    fs::write(&file, format!("version 2\nresource \"github/fixture/app\" {{ refresh {id:?} {{ timeout \"60s\" }} }}\n")).unwrap();
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
+}
+
+/// Whether `node` holds a claim of `kind` on pull request 12 of fixture/app whose head is `head`.
+async fn item_claim_with_head(node: &Node, kind: &str, head: &str) -> bool {
+    node.claims().await.iter().any(|claim| {
+        claim["subject"] == "resource/github/fixture/app/pull-request/12"
+            && claim["kind"] == kind
+            && (claim.pointer("/body/fields/facts/head_sha") == Some(&json!(head))
+                || claim.pointer("/body/fields/head_sha") == Some(&json!(head)))
+    })
+}
+
+/// A member of the previous release in the fleet keeps a repository's poller writing item
+/// snapshots, which its seat watching the repository reads. Once it upgrades and advertises the
+/// GitHub plugin, the poller records the next compact-only change as compact state alone.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let mut elder = Node::new(root.path(), "fixture-elder");
+    elder.binary = old;
+    elder.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api.clone())]);
+    let code = poller.invite("fixture-elder", &[]);
+    let output = elder.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    elder.start().await;
+    watch_fixture_app(&poller);
+    wait_until("the poller fills its mirror", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" }
+    }).await;
+    wait_until("the elder holds the repository's observer", 90, || async {
+        elder.claims().await.iter().any(|claim| claim["subject"] == "observer/github/fixture/app")
+    }).await;
+    // The elder depends on the repository: a seat on it watches the pull request. The poller's
+    // observer is already running, so the watch is the elder's subscription on it.
+    watch_fixture_app(&elder);
+    wait_until("the poller holds the elder's watch", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"].as_str().is_some_and(|subject| subject.starts_with("subscription/watch/fixture/app/12/"))
+                && claim["origin"] == "fixture-elder"
+        })
+    }).await;
+
+    // A new head while the elder runs the previous release: the poller still writes a snapshot,
+    // which the elder receives.
+    *head.lock().unwrap() = "c".repeat(40);
+    refresh_fixture_app(&poller, "head-c");
+    wait_until("the elder receives a snapshot of head c", 120, || async {
+        item_claim_with_head(&elder, "resource.observed", &"c".repeat(40)).await
+    }).await;
+
+    // The elder upgrades in place and advertises the plugin: the next head is compact state alone.
+    elder.stop();
+    elder.binary = PathBuf::from(st3());
+    elder.start().await;
+    elder.wait_listening().await;
+    wait_until("the poller sees the elder advertise the plugin", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"] == "daemon/fixture-elder" && claim["kind"] == "daemon.started"
+                && claim.pointer("/body/fields/features/github_plugin").is_some()
+        })
+    }).await;
+    *head.lock().unwrap() = "d".repeat(40);
+    refresh_fixture_app(&poller, "head-d");
+    wait_until("the poller records head d as compact state", 120, || async {
+        item_claim_with_head(&poller, "vcs.item.state", &"d".repeat(40)).await
+    }).await;
+    assert!(!item_claim_with_head(&poller, "resource.observed", &"d".repeat(40)).await, "no snapshot of head d");
+    let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(pull["pull"]["facts"]["head_sha"], "d".repeat(40), "{pull}");
 }

@@ -21,6 +21,9 @@ pub struct Prefs {
     /// Use the daemon after a failed direct attachment; absence means enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_fallback: Option<bool>,
+    /// Agent details beside conversations and terminals; absence means visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_details: Option<bool>,
 }
 
 /// Whether this device opens agents on their conversation: its own choice, else no. Before the
@@ -74,16 +77,19 @@ mod tests {
                 terminal_first: Some(true),
                 conversation_first: Some(true),
                 terminal_fallback: Some(false),
+                agent_details: Some(false),
             },
         )
         .unwrap();
         assert_eq!(load(&path).simple, Some(true));
         assert_eq!(load(&path).terminal_first, Some(true));
         assert_eq!(load(&path).terminal_fallback, Some(false));
+        assert_eq!(load(&path).agent_details, Some(false));
         assert_eq!(conversation_first(&load(&path)), Some(true));
         // A file from before the setting is no choice: the terminal attaches.
         std::fs::write(&path, br#"{"simple": false}"#).unwrap();
         assert_eq!(conversation_first(&load(&path)), None);
+        assert_eq!(load(&path).agent_details, None);
     }
 
     #[test]

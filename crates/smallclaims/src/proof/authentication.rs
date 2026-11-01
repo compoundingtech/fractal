@@ -202,7 +202,7 @@ fn valid_subject(subject: &str, family: &str) -> bool {
 
 /// The portable subset of the runtime's rename schema, without a dependency from
 /// generic smallclaims back into the Fractal runtime/schema crates.
-fn validate_rename_schema(claim: &ClaimRecord) -> Result<(), ProofError> {
+pub(super) fn validate_rename_schema(claim: &ClaimRecord) -> Result<(), ProofError> {
     let family = match claim.kind.as_str() {
         "agent.renamed" => "agent",
         "mission.renamed" => "mission",
