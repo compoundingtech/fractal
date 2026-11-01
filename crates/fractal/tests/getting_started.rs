@@ -216,7 +216,16 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
     );
     let audits = newcomer.try_run(&["rules", "audit"]).unwrap();
     assert!(audits.starts_with("no write"), "{audits}");
-    let check = newcomer.signatures();
+    // Doctor reads what is sealed and judged; the daemon's own verdict passes judge a claim
+    // shortly after its batch is sealed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let check = loop {
+        let check = newcomer.signatures();
+        if check["message"].as_str().unwrap().contains(" 0 unsigned") || std::time::Instant::now() > deadline {
+            break check;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
     assert_eq!(check["status"], "pass", "{check}");
     let message = check["message"].as_str().unwrap();
     let verified: u64 = message

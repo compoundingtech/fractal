@@ -14,6 +14,11 @@ pub(super) fn client_config_check(unknown: &[String]) -> Option<DoctorCheck> {
 }
 
 /// A local warning can raise a pass, but must never hide an existing failure.
+/// The checks the daemon gave up on at their deadline, which doctor names as it exits non-zero.
+pub(super) fn timed_out(checks: &[DoctorCheck]) -> Vec<&str> {
+    checks.iter().filter(|check| check.status == "timeout").map(|check| check.name.as_str()).collect()
+}
+
 pub(super) fn client_config_status(status: &str, has_unknown_keys: bool) -> &str {
     if status == "pass" && has_unknown_keys {
         "warn"
@@ -87,5 +92,15 @@ mod client_config_tests {
         assert_eq!(super::client_config_status("warn", true), "warn");
         assert_eq!(super::client_config_status("pass", true), "warn");
         assert_eq!(super::client_config_status("pass", false), "pass");
+    }
+
+    #[test]
+    fn checks_the_daemon_timed_out_are_named() {
+        let check = |name: &str, status: &str| fractal_daemon::model::DoctorCheck {
+            name: name.into(), status: status.into(), message: String::new(),
+        };
+        let checks = [check("claim-store", "pass"), check("claim-signatures", "timeout"), check("replication", "warn"), check("attention", "timeout")];
+        assert_eq!(super::timed_out(&checks), ["claim-signatures", "attention"]);
+        assert!(super::timed_out(&checks[..1]).is_empty());
     }
 }
