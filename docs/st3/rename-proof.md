@@ -23,7 +23,7 @@ fractal fleet anchor show
 
 The default output is the public key alone, suitable for the verifier's
 `--fleet-anchor` argument. `fractal --json fleet anchor show` returns JSON with
-`fleet_id` and `fleet_anchor`. This command exports no private key or invite code.
+the single field `fleet_anchor`. This command exports no private key or invite code.
 The anchor is the founding member's public trust key; other member keys are
 authorized by the signed membership history rooted in it.
 
