@@ -66,6 +66,9 @@ const terminalPrefetch = vi.fn()
 const prepareTerminal = vi.fn(async () => ({ _tag: 'Ready' as const }))
 let resolveTerminal: () => void
 let rejectTerminal: (reason: Error) => void
+const alertsRequested = vi.fn()
+let resolveAlerts: () => void
+let rejectAlerts: (reason: Error) => void
 const frames = new Map<number, FrameRequestCallback>()
 const paintTasks: (() => void)[] = []
 
@@ -73,6 +76,7 @@ beforeEach(async () => {
   vi.resetModules()
   requested.mockClear()
   terminalRequested.mockClear()
+  alertsRequested.mockClear()
   terminalPrefetch.mockClear()
   prepareTerminal.mockClear()
   gatewayObservation = { status: { _tag: 'Live', since: 0 }, observedAt: 0 }
@@ -129,6 +133,12 @@ beforeEach(async () => {
     await terminalReady
     return { prepareTerminal, TerminalDetail: () => <div data-terminal-loaded="">Output</div> }
   })
+  const alertsReady = new Promise<void>((resolve, reject) => { resolveAlerts = resolve; rejectAlerts = reject })
+  vi.doMock('./AlertsTab.tsx', async () => {
+    alertsRequested()
+    await alertsReady
+    return { AlertsTab: () => <div data-alerts-loaded="">Inline answers</div> }
+  })
   workspace = await import('./LiveAgentWorkspace.tsx')
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -140,6 +150,7 @@ afterEach(async () => {
   container.remove()
   vi.doUnmock('./ConversationPane.tsx')
   vi.doUnmock('../terminal/TerminalDetail.tsx')
+  vi.doUnmock('./AlertsTab.tsx')
   vi.unstubAllGlobals()
   window.history.replaceState(null, '', '/')
 })
@@ -159,6 +170,51 @@ const renderShell = async (ux?: UxTelemetry) => {
     <workspace.LiveAgentWorkspace ux={ux} />
   </RegistryContext.Provider>))
 }
+
+describe('Alerts tab import boundary', () => {
+  it('requests answers only on tab selection and shows loading until the code arrives', async () => {
+    await renderShell()
+    expect(alertsRequested).not.toHaveBeenCalled()
+    const tab = container.querySelector<HTMLElement>('[data-sidebar-tab="alerts"]')
+    expect(tab).not.toBeNull()
+    await act(async () => tab!.click())
+    expect(alertsRequested).toHaveBeenCalledTimes(1)
+    expect(container.textContent).toContain('Loading alerts')
+    expect(container.querySelector('[data-alerts-loaded]')).toBeNull()
+    await act(async () => resolveAlerts())
+    expect(container.querySelector('[data-alerts-loaded]')?.textContent).toBe('Inline answers')
+    expect(container.textContent).not.toContain('Loading alerts')
+  })
+
+  it('reports failed code honestly and retries with a fresh lazy identity', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await renderShell()
+      const tab = container.querySelector<HTMLElement>('[data-sidebar-tab="alerts"]')
+      expect(tab).not.toBeNull()
+      await act(async () => tab!.click())
+      await act(async () => rejectAlerts(new Error('Chunk unavailable')))
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain('Alerts could not load.')
+      expect(container.querySelector('[data-alerts-loaded]')).toBeNull()
+      // Keep the mounted workspace and its rejected lazy identity, replacing only the failed transport.
+      vi.resetModules()
+      const recovered = new Promise<void>(resolve => { resolveAlerts = resolve })
+      vi.doMock('./AlertsTab.tsx', async () => {
+        alertsRequested()
+        await recovered
+        return { AlertsTab: () => <div data-alerts-loaded="">Inline answers</div> }
+      })
+      const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Try again')
+      expect(retry).toBeDefined()
+      await act(async () => retry!.click())
+      await act(async () => { await vi.waitFor(() => expect(alertsRequested).toHaveBeenCalledTimes(2)) })
+      expect(container.textContent).toContain('Loading alerts')
+      await act(async () => resolveAlerts())
+      expect(container.querySelector('[data-alerts-loaded]')).not.toBeNull()
+      expect(container.querySelector('[role="alert"]')).toBeNull()
+    } finally { errors.mockRestore() }
+  })
+})
 
 
 describe('gateway connection banner', () => {

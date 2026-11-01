@@ -80,6 +80,8 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(web, 'ChangesInspector.tsx'))
     expect(graph.files).not.toContain(resolve(web, 'capturedChanges.ts'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
+    expect(graph.files).not.toContain(resolve(web, 'AlertsTab.tsx'))
+    expect(graph.files).not.toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
   })
 
   it('still reaches the real heavy composition through the on-demand pane', () => {
@@ -90,6 +92,17 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
     expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(true)
+  })
+
+  it('keeps inline alert answers reachable through the on-demand Alerts tab', () => {
+    const graph = eagerGraph(resolve(web, 'AlertsTab.tsx'))
+    expect(graph.files).toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
+    expect(graph.files).toContain(resolve(web, '../conversation/alerts/AnswerAlert.tsx'))
+    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Markdown.tsx'))
+    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(true)
+    const production = eagerGraph(resolve(web, 'main.tsx'), true)
+    expect(production.files).toContain(resolve(web, 'AlertsTab.tsx'))
+    expect(production.files).toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
   })
 
   it('reaches the real diff viewer only through the on-demand Changes inspector', () => {

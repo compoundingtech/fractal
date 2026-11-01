@@ -8,7 +8,7 @@ import type * as TerminalDetailModule from '../terminal/TerminalDetail.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
-import { AlertsTab } from './AlertsTab.tsx'
+import type * as AlertsTabModule from './AlertsTab.tsx'
 import { alertTabMarkers } from './alertsTab.ts'
 import { retainPane, workspaceHref, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
 import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
@@ -194,6 +194,24 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
     const Pane = this.state.Pane
     return <React.Suspense fallback={<ConversationPaneFallback agentName={this.props.agentName} visible={this.props.visible} />}>
       <Pane {...this.props} />
+    </React.Suspense>
+  }
+}
+
+// Inline alert answers import Markdown; load the tab on demand, not with the shell.
+const makeAlertsTab = () => React.lazy(() => import('./AlertsTab.tsx').then(module => ({ default: module.AlertsTab })))
+const AlertsTab = makeAlertsTab()
+class AlertsTabCodeBoundary extends React.Component<React.ComponentProps<typeof AlertsTabModule.AlertsTab>> {
+  state = { failed: false, Tab: AlertsTab }
+  static getDerivedStateFromError() { return { failed: true } }
+  render() {
+    if (this.state.failed) return <div role="alert" {...stylex.props(styles.empty)}>
+      <p>Alerts could not load.</p>
+      <button type="button" onClick={() => this.setState({ failed: false, Tab: makeAlertsTab() })}>Try again</button>
+    </div>
+    const Tab = this.state.Tab
+    return <React.Suspense fallback={<SystemNotice kind="loading" title="Loading alerts" />}>
+      <Tab {...this.props} />
     </React.Suspense>
   }
 }
@@ -587,7 +605,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
   </aside>
   const sidebarBody = <SidebarTabs selectedId={sidebarTab === 'alerts' ? 'alerts' : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' ? 'alerts' : 'agents')} tabs={[{ id: 'agents', label: 'Agents', questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', ...alertTabMarkers(attention) }]}>
-    {sidebarTab === 'alerts' ? <AlertsTab onOpen={ref => { if (ref.startsWith('agent/')) select(ref); else { agentsDrawer.current?.close(); open({ ref }) } }} /> : <>
+    {sidebarTab === 'alerts' ? <AlertsTabCodeBoundary onOpen={ref => { if (ref.startsWith('agent/')) select(ref); else { agentsDrawer.current?.close(); open({ ref }) } }} /> : <>
     <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
     {fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
       : fleet._tag !== 'Observed' ? null

@@ -41,6 +41,11 @@ const AlertsTabStory = ({ scheme, feed: state, bounded = false }: Args) => {
             ? <div {...stylex.props(styles.panel)}><AlertsList feed={feed} now={now} onOpen={setOpened} /></div>
             : <AlertsList feed={feed} now={now} onOpen={setOpened} />}
         </aside>
+        {!slice.loading && (state === 'served' || state === 'stale') && slice.state.messages.length > 0 && <section aria-label="Scenario fixture context" {...stylex.props(styles.fixtureContext)}>
+          <h2>Scenario fixture context</h2>
+          <p>The attention slice also serves these mailbox messages. They are fixture context, not Alerts rows or another inbox.</p>
+          <dl>{slice.state.messages.map((message) => <React.Fragment key={message.id}><dt>{message.title}</dt><dd>{message.content}</dd></React.Fragment>)}</dl>
+        </section>}
         <output data-testid="alerts-opened">{opened}</output>
       </main>
     </NarrowLayoutContext.Provider>
@@ -167,7 +172,7 @@ const meta = {
   parameters: {
     layout: 'fullscreen',
     scenario: { _tag: 'slices', slices: ['attention'], world: 'fleet-mid-refactor' },
-    docs: { description: { component: 'Every open alert as an SR-2 row: glyph (? harness question, ◆ needs you, ! fault), title, wait age; line 2 shows only served facts (raised by, the step it holds, a self-resolve countdown when deadline and default answer are both served). Enter expands the alert\'s own answers in place and focuses them; Escape collapses. The ⋯ menu (also right click, Shift+F10, ContextMenu) offers Answer and, only when served, Open conversation and Open mission. The list scrolls itself inside a bounded sidebar. When an answered alert leaves the feed while focus was in its row, focus moves to the next row, else the previous one, else the empty state. Waiting, refused and stale feeds say so; an empty feed says nothing needs you.' } },
+    docs: { description: { component: 'Every open alert as an SR-2 row: glyph (? harness question, ◆ needs you, ! fault), title, wait age; line 2 shows only served facts (raised by, the step it holds, a self-resolve countdown when deadline and default answer are both served). Enter expands the alert\'s own answers in place and focuses them; Escape collapses. The ⋯ menu (also right click, Shift+F10, ContextMenu) offers Answer and, only when served, Open conversation and Open mission. The list scrolls itself inside a bounded sidebar. When an answered alert leaves the feed while focus was in its row, focus moves to the next row, else the previous one, else the empty state. Waiting, refused and stale feeds say so; an empty feed says nothing needs you. Served mailbox messages from the same slice appear separately as explicitly labeled fixture context, never as Alerts rows. Waiting and Ungranted hold the source feed boundary constant regardless of the selected attention data; their slice invariants document that contract while retaining the observed slice read.' } },
   },
   args: { scheme: 'dark', feed: 'served', attention: 'sidebar-tabs' },
   argTypes: { ...scenarioArgTypes(['attention']), scheme: { options: ['dark', 'light'], control: 'radio' }, feed: { options: ['served', 'waiting', 'ungranted', 'stale'], control: 'radio' } },
@@ -184,11 +189,11 @@ export const Empty: Story = { args: { attention: 'none' }, play: async ({ canvas
   await expect(await canvas.findByText('Nothing needs you. Asks, approvals and harness questions show here.')).toBeVisible()
   await expect(canvas.queryByRole('list', { name: 'Alerts' })).toBeNull()
 } }
-export const Waiting: Story = { args: { feed: 'waiting' }, play: async ({ canvasElement }) => {
+export const Waiting: Story = { parameters: { scenario: { _tag: 'slices', slices: ['attention'], world: 'fleet-mid-refactor', invariant: { attention: 'The source has not delivered its first observation, so selected attention data cannot change the waiting feed boundary.' } } }, args: { feed: 'waiting' }, play: async ({ canvasElement }) => {
   await expect(await within(within(canvasElement).getByRole('complementary', { name: 'Alerts sidebar' })).findByRole('status')).toHaveTextContent('Loading alerts…')
   await expect(rows(canvasElement)).toHaveLength(0)
 } }
-export const Ungranted: Story = { args: { feed: 'ungranted', scheme: 'light' }, play: async ({ canvasElement }) => {
+export const Ungranted: Story = { parameters: { scenario: { _tag: 'slices', slices: ['attention'], world: 'fleet-mid-refactor', invariant: { attention: 'The source refuses read access before exposing any selected attention data, so the ungranted feed boundary is constant.' } } }, args: { feed: 'ungranted', scheme: 'light' }, play: async ({ canvasElement }) => {
   await expect(await within(canvasElement).findByRole('alert')).toHaveTextContent('Read access to alerts has not been granted.')
   await expect(rows(canvasElement)).toHaveLength(0)
 } }
@@ -201,6 +206,7 @@ export const Stale: Story = { args: { feed: 'stale' }, play: async ({ canvasElem
 const styles = stylex.create({
   canvas: { display: 'flex', alignItems: 'flex-start', gap: 16, minHeight: '100vh', boxSizing: 'border-box', padding: 12, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   sidebar: { width: g.sidebarDefault, flexShrink: 0, boxSizing: 'border-box', backgroundColor: c.sidebar, border: `1px solid ${c.border}` },
+  fixtureContext: { flex: '1 1 0', minWidth: 0, maxWidth: 360, overflowWrap: 'anywhere' },
   bounded: { display: 'flex', flexDirection: 'column', height: BOUNDED_HEIGHT },
   panel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0, overflow: 'hidden' },
 })
