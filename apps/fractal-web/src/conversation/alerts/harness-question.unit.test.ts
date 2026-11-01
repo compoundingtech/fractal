@@ -4,8 +4,8 @@ import { projectHarnessAsks } from './harness-question.ts'
 import { unavailableHarnessAnswers } from './harness-answer-port.ts'
 import { decodeConversationChunk } from '@fractal/sdk/effect'
 import { timelineItems } from '../fromTimeline.ts'
-import { harnessAskConversation, harnessAskWorld } from './HarnessAnswerAlert.scenario.ts'
-import { loadWorld } from '@fractal/scenarios'
+import { harnessAskConversation, harnessAskWorld, harnessAskNow, harnessAskAtMs } from './HarnessAnswerAlert.scenario.ts'
+import { foldSlice, loadWorld } from '@fractal/scenarios'
 
 const question = { id: 'database', question: 'Which database?', options: [
   { label: 'SQLite', description: 'Local storage', preview: 'CREATE TABLE example (id TEXT);' },
@@ -18,8 +18,9 @@ const call = (extra: Partial<ConversationCall> = {}): ConversationCall => ({
 
 describe('projectHarnessAsks', () => {
   it('projects the Storybook native pending ask through the SDK and timeline adapter', () => {
-    const world = loadWorld(harnessAskWorld, { now: '2026-10-27T12:00:00Z' })
-    const source = world.slices.conversation.state.threads[0]
+    const world = loadWorld(harnessAskWorld, { now: harnessAskNow })
+    expect(world.slices.conversation.state.threads).toHaveLength(0)
+    const source = foldSlice(world.slices.conversation, harnessAskAtMs).state.threads[0]
     expect(source).toBeDefined()
     const fixture = harnessAskConversation(source!)
     const chunk = decodeConversationChunk({ kind: 'conversation', collection: 'conversation', id: 'follow/atlas', session_id: fixture.session_id, replace: true, has_more: false, items: fixture.items })

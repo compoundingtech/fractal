@@ -4,8 +4,10 @@ import { scenarioDomainFixture } from '@fractal/scenarios/domain-fixture'
 export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture
 
 const seed = 2315
-export const harnessAskWorld = 'ci-failing-fix'
-const castWorld = loadWorld(harnessAskWorld, { now: '2026-10-27T12:00:00Z' })
+export const harnessAskWorld = 'first-run-onboarding'
+export const harnessAskNow = '2026-10-27T12:00:00Z'
+export const harnessAskAtMs = 5_000
+const castWorld = loadWorld(harnessAskWorld, { now: harnessAskNow })
 
 /** Authored synthetic omp arguments, not a recorded terminal interaction or a settled answer. */
 export const harnessAskConversation = (source: ConversationThread): ConversationThread => {

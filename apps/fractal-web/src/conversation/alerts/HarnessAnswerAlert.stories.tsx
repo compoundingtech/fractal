@@ -4,18 +4,20 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
 import { decodeConversationChunk } from '@fractal/sdk/effect'
 import { useScenarioSlice } from '@fractal/scenarios/react'
+import { manualClock } from '@fractal/scenarios'
 import { scenarioArgTypes } from '@fractal/scenarios/storybook'
 import { assistantDarkTheme, compositionLightTheme, liveAccentTheme } from '@fractal/ui/assistant-ui'
 import { colorVars as c, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { timelineItems } from '../fromTimeline.ts'
 import { HarnessAnswerAlert } from './HarnessAnswerAlert.tsx'
-import { harnessAskConversation, harnessAskWorld } from './HarnessAnswerAlert.scenario.ts'
+import { harnessAskConversation, harnessAskWorld, harnessAskNow, harnessAskAtMs } from './HarnessAnswerAlert.scenario.ts'
 import { projectHarnessAsks } from './harness-question.ts'
 
 const styles = stylex.create({
   frame: { boxSizing: 'border-box', minHeight: 900, padding: 16, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize },
   lane: { maxWidth: 880, marginInline: 'auto', display: 'flex', flexDirection: 'column', gap: 24 },
   context: { overflowWrap: 'anywhere', color: c.fgMuted },
+  transcript: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontSans },
 })
 
 type StoryArgs = { readonly scheme: 'light' | 'dark'; readonly frame: 440 | 1440; readonly allStates: boolean }
@@ -43,6 +45,14 @@ const HarnessAnswerStory = ({ scheme, frame, allStates }: StoryArgs) => {
             <section aria-label="Terminal unavailable layout"><h2>Terminal navigation unavailable</h2><HarnessAnswerAlert ask={{ ...ask, callId: `${ask.callId}/no-terminal`, questions: [ask.questions[1]!] }} /></section>
           </> : null}
         </>}
+        <section aria-label="Scenario conversation">
+          <h2>Conversation context</h2>
+          {conversation.state.threads.map(thread => <section key={thread.session_id} aria-label={thread.agent}>
+            <h3>{thread.agent}</h3>
+            {thread.items.map(item => item.type === 'content' && typeof item.body.text === 'string'
+              ? <p key={item.id} {...stylex.props(styles.transcript)}>{item.body.text}</p> : null)}
+          </section>)}
+        </section>
       </div>
     </main>
   )
@@ -52,7 +62,8 @@ const meta = {
   title: 'Fractal/App/Conversation/Harness answer',
   component: HarnessAnswerStory,
   tags: ['critical'],
-  parameters: { layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['conversation'], world: harnessAskWorld } },
+  globals: { scenarioNow: harnessAskNow },
+  parameters: { layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['conversation'], world: harnessAskWorld }, scenarioClock: manualClock(Date.parse(harnessAskNow) + harnessAskAtMs) },
   args: { scheme: 'dark', frame: 440, allStates: false },
   argTypes: { ...scenarioArgTypes(['conversation']), scheme: { control: 'radio', options: ['light', 'dark'] }, frame: { control: 'radio', options: [440, 1440] }, allStates: { table: { disable: true } } },
 } satisfies Meta<typeof HarnessAnswerStory>
