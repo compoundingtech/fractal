@@ -2501,6 +2501,14 @@ class StTest(unittest.TestCase):
             for name in ('GIT_DIR', 'GIT_AUTHOR_NAME', 'GIT_WORK_TREE', 'GIT_PUSH_OPTION_COUNT'):
                 self.assertNotIn(name, os.environ)
 
+    def test_receipt_sink_survives_scrubbing_with_resolved_disposable_roots(self):
+        with mock.patch.dict(os.environ, {'CI_PERF_SLOT_RECEIPT_DIR': '/persistent/receipts', 'ST_MISSION': 'seat'}), \
+                mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL': '/configured/pool', 'ST_TEST_TMP': '/configured/tmp'}):
+            st_test.scrub_seat_environment()
+            self.assertEqual(os.environ['CI_PERF_SLOT_RECEIPT_DIR'], '/persistent/receipts')
+            self.assertEqual(json.loads(os.environ['CI_PERF_SLOT_DISPOSABLE_ROOTS']), ['/configured/pool', '/configured/tmp'])
+            self.assertNotIn('ST_MISSION', os.environ)
+
     def test_the_checks_do_not_see_the_agent_seats_variables_but_the_hosts_ranking_name_and_the_switches_stay(self):
         self.commit('b.txt', 'two')
         seat = {'ST_MISSION': 'm', 'ST3_ENDPOINT': 'e', 'CLAUDECODE': '1', 'CLAUDE_CONFIG_DIR': '/c', 'ANTHROPIC_API_KEY': 'k',
