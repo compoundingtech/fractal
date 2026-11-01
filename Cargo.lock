@@ -2238,6 +2238,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fractal-missions-base",
+ "fractal-runtime",
  "fractal-schema",
  "fractal-secrets",
  "hex",

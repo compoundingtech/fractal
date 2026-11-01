@@ -726,6 +726,9 @@ impl Store {
         if let Err(error) = schedule_standby::validate_publication(&connection, &self.origin, intent) {
             blockers.push(format!("{}: {}", error.code, error.message));
         }
+        if let Err(error) = mission_capacity::validate_publication(&connection, &self.origin, intent) {
+            blockers.push(format!("{}: {}", error.code, error.message));
+        }
         if let Err(error) = crate::provenance::validate_publication(&connection, intent) {
             blockers.push(format!("{}: {}", error.code, error.message));
         }
