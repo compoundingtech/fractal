@@ -2247,7 +2247,8 @@ pub fn stale_pull_request_request_tx(
     discovery: &str,
 ) -> Result<Option<String>> {
     smallclaims::touched::note_read(|| resource.to_owned());
-    let Some(requested) = claim_by_id_tx(connection, discovery)?.filter(|claim| {
+    // A compact item state, as a poller in compact mode pins, reads as its observation.
+    let Some(requested) = claim_by_id_tx(connection, discovery)?.map(|mut claim| { claim.body = fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body); claim }).filter(|claim| {
         claim.subject == resource
             && claim.body.pointer("/fields/kind").and_then(Value::as_str)
                 == Some("vcs.pull-request")
@@ -3118,6 +3119,7 @@ impl Store {
                     }
                 }
                 validate_documents(transaction, &intent.document_refs)?;
+                attention_snapshot::refuse_second_fault_agent(transaction, intent)?;
                 for desired in intent
                     .subjects
                     .values()
@@ -5859,12 +5861,28 @@ impl Store {
     }
 
     /// Each dismissed fault, by subject and episode. A new episode at the same source is a new
-    /// fault, so a dismissal never hides a later failure.
+    /// fault, so a dismissal never hides a later failure. Only a dismissal by a person, or by an
+    /// agent whose declaration carried `handles-faults` when it was written, counts: one that
+    /// another member accepted from any other actor hides nothing here.
     pub fn dismissed_faults(&self) -> Result<HashSet<(String, String)>> {
         let connection = self.readers.get();
         let mut query = connection.prepare(
-            "SELECT subject, json_extract(body, '$.fields.episode') FROM claims INDEXED BY claims_kind_index
-             WHERE kind='fault.dismissed'",
+            "SELECT dismissal.subject, json_extract(dismissal.body, '$.fields.episode')
+             FROM claims AS dismissal INDEXED BY claims_kind_index
+             WHERE dismissal.kind='fault.dismissed'
+               AND (substr(dismissal.actor, 1, 7)='person/' OR (
+                 SELECT json_extract(declaration.body, '$.kind')='agent' AND EXISTS (
+                     SELECT 1 FROM json_each(declaration.body, '$.desired.children')
+                     WHERE json_extract(value, '$.name')='handles-faults'
+                   )
+                 FROM claims AS declaration INDEXED BY claims_subject_kind_accepted_index
+                 WHERE declaration.subject=dismissal.actor AND declaration.kind='intent.desired'
+                   AND (length(declaration.accepted_at_unix_ms), declaration.accepted_at_unix_ms)
+                     <= (length(dismissal.accepted_at_unix_ms), dismissal.accepted_at_unix_ms)
+                 ORDER BY length(declaration.accepted_at_unix_ms) DESC,
+                   declaration.accepted_at_unix_ms DESC, declaration.store_index DESC
+                 LIMIT 1
+               ) = 1)",
         )?;
         Ok(query
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?
@@ -7940,7 +7958,7 @@ fn resolve_mission_run_inputs(
                 let claim_id = if let Some(claim_id) = requested_claim {
                     let exists = transaction
                         .query_row(
-                            "SELECT 1 FROM claims WHERE id=?1 AND subject=?2 AND kind='resource.observed'",
+                            "SELECT 1 FROM claims WHERE id=?1 AND subject=?2 AND kind IN ('resource.observed','vcs.item.state')",
                             params![claim_id, subject],
                             |_| Ok(()),
                         )
@@ -7965,14 +7983,23 @@ fn resolve_mission_run_inputs(
                     }
                     claim_id.to_owned()
                 } else {
-                    transaction
+                    // The item's newest record: a compact state only when it is newer than the
+                    // newest snapshot, whose facts are fuller.
+                    let observed: Option<(String, String)> = transaction
                         .query_row(
-                            /* sqlite-large-value: allow-for-now lv-h35da657ee22f owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1"),
+                            /* sqlite-large-value: allow-for-now lv-h842f1ac38047 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1"),
                             [subject],
-                            |row| row.get(0),
+                            |row| Ok((row.get(0)?, row.get(1)?)),
                         )
                         .optional()
-                        .map_err(internal)?
+                        .map_err(internal)?;
+                    let state = crate::store::resources::newest_item_state(transaction, subject).map_err(internal)?;
+                    match (observed, state) {
+                        (Some((_, observed_at)), Some((id, _, state_at)))
+                            if state_at.parse::<u128>().unwrap_or_default() > observed_at.parse::<u128>().unwrap_or_default() => Some(id),
+                        (None, Some((id, _, _))) => Some(id),
+                        (observed, _) => observed.map(|(id, _)| id),
+                    }
                         .ok_or_else(|| {
                             St3Error::new(
                                 "missing-resource-input",

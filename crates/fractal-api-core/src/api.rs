@@ -675,6 +675,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
+        .route("/v1/agents/rename-id/proof/export", post(agents::export_agent_rename_proof))
+        .route("/v1/missions/rename-id/proof/export", post(agents::export_mission_rename_proof))
+        .route("/v1/fleet/anchor", get(fleet::fleet_anchor))
         .route("/v1/agents/restart", post(agents::restart_agent))
         .route("/v1/agents/rollout", post(agents::rollout_agent))
         .route("/v1/agents/start", post(agents::start_mission_seat))
@@ -7175,7 +7178,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":1},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
     })))
 }
 
