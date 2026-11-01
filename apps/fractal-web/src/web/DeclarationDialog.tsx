@@ -22,9 +22,11 @@ export const DeclarationDialog = ({ subject, isOpen, onOpenChange }: {
   <ThemePortal>
     <Aria.ModalOverlay isDismissable {...(isOpen === undefined ? {} : { isOpen })} {...(onOpenChange === undefined ? {} : { onOpenChange })} {...stylex.props(styles.overlay)}>
       <Aria.Modal {...stylex.props(styles.modal)}>
+        <Suspense fallback={<Aria.Dialog aria-label={subject} {...stylex.props(styles.dialog)}>{({ close }) => <Aria.Button onPress={close} {...stylex.props(styles.button)}>Close declaration</Aria.Button>}</Aria.Dialog>}>
         <Aria.Dialog data-testid="declaration-dialog" {...stylex.props(styles.dialog)}>
-          {({ close }) => <Suspense fallback={<Aria.Button onPress={close}>Close declaration</Aria.Button>}><DeclarationContents subject={subject} close={<Aria.Button aria-label="Close declaration" onPress={close} {...stylex.props(styles.button)}>Close</Aria.Button>} /></Suspense>}
+          {({ close }) => <DeclarationContents subject={subject} close={<Aria.Button aria-label="Close declaration" onPress={close} {...stylex.props(styles.button)}>Close</Aria.Button>} />}
         </Aria.Dialog>
+        </Suspense>
       </Aria.Modal>
     </Aria.ModalOverlay>
   </ThemePortal>
