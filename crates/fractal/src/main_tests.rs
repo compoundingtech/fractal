@@ -9235,10 +9235,11 @@ async fn the_signature_job_drains_the_verdict_backlog_an_ordinary_pass_leaves() 
     store.judge_claims_slice(true).unwrap();
     assert!(store.verdicts_pending().unwrap(), "one ordinary pass takes only a slice");
     let deadline = Instant::now() + Duration::from_secs(60);
-    // An in-memory store shares one cache, so this read can meet the job's writer.
+    // An in-memory store shares one cache, so this read can meet the job's writer, and the job
+    // then retries its loan after a test build's one-second wait. Read seldom, so it rarely does.
     while store.verdicts_pending().unwrap_or(true) {
         assert!(Instant::now() < deadline, "the idle job drains what the pass left");
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
     assert!(!job.is_finished());
     job.abort();
