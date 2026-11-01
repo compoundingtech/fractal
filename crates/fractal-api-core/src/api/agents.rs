@@ -146,6 +146,15 @@ pub async fn restart_agent(
                 "restart needs an active seat declaration; start a stopped seat first",
             ))
         })?;
+    if let Some(run) = desired.owner_run.as_deref()
+        && let Some(view) = state.store.mission_run(run).map_err(ApiError::internal)?
+        && let Some(ended) = view.ended()
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "restart-run-ended",
+            format!("the seat's run {run} has ended ({ended}); a seat of an ended run is not started again"),
+        )));
+    }
     let member = desired
         .member
         .as_ref()

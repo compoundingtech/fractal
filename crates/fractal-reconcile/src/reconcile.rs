@@ -3095,6 +3095,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     member_errors.insert(subject.subject.clone(), error);
                     continue;
                 }
+                let cwd = Path::new(&member.cwd);
+                if cwd.is_absolute() && !cwd.is_dir() {
+                    member_errors.insert(
+                        subject.subject.clone(),
+                        anyhow::anyhow!("working directory {} does not exist", member.cwd),
+                    );
+                    continue;
+                }
                 if subject.kind == "agent" {
                     self.observe_agent_workspace(&subject.subject, member)?;
                 }
@@ -6852,11 +6860,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // A run stops its owned agents in its cleanup phase, before it becomes terminal.
         let run_ended = match subject.owner_run.as_deref() {
             None => subject.kind == "stop",
-            Some(run) => self.store.mission_run(run)?.is_some_and(|run| {
-                matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
-                    || run.phase == "terminal"
-                    || run.phase.starts_with("cleanup-")
-            }),
+            Some(run) => self.store.mission_run(run)?.is_some_and(|run| run.ended().is_some()),
         };
         let stopped = self
             .store
@@ -7541,6 +7545,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 workspace.display()
             );
         }
+        // The runtime starts in `cwd`, which can lie inside the workspace. A launcher handed a
+        // directory that does not exist exits without saying why in its status.
+        let cwd = Path::new(&member.cwd);
+        anyhow::ensure!(
+            !cwd.is_absolute() || cwd.is_dir(),
+            "working directory {} does not exist",
+            member.cwd
+        );
         // Resolve authored Fractal-only selectors before cleanup and native-session selection.
         let normalized_member = member.environment.keys().any(|name| name.starts_with("FRACTAL_"))
             .then(|| {
@@ -8555,8 +8567,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             return Ok(false);
         };
+        self.retire_restart_request(&subject.subject, &request, reason)?;
+        Ok(true)
+    }
+
+    /// Retire a restart request without starting anything: its completion says why.
+    fn retire_restart_request(&self, subject: &str, request: &crate::model::ClaimRecord, reason: &str) -> Result<()> {
         self.store.append_claim(&ClaimInput {
-            subject: subject.subject.clone(),
+            subject: subject.to_owned(),
             kind: "runtime.reconcile-decision".into(),
             actor: None,
             fields: BTreeMap::from([
@@ -8569,7 +8587,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             idempotency_key: Some(format!("restart-retired-obsolete-request:{}", request.id)),
         })?;
         self.store.append_claim(&ClaimInput {
-            subject: subject.subject.clone(),
+            subject: subject.to_owned(),
             kind: "runtime.action.succeeded".into(),
             actor: Some(RECONCILER_ACTOR.into()),
             fields: BTreeMap::from([
@@ -8577,12 +8595,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ("operation_status".into(), Value::from("retired")),
                 ("reason".into(), Value::from(reason)),
             ]),
-            evidence: vec![request.id],
+            evidence: vec![request.id.clone()],
             expected_subject: None,
-            idempotency_key: Some(completion),
+            idempotency_key: Some(format!("agent-restart-completed:{}", request.id)),
         })?;
         self.signal_changed();
-        Ok(true)
+        Ok(())
     }
 
     /// Preflight the stale producer and runtime evidence. This never releases admission;
@@ -8642,6 +8660,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         };
         if self.retire_obsolete_failed_restart(subject, now_ms())? {
+            return Ok(true);
+        }
+        // A seat of an ended run is never started again. A request made before the run ended is
+        // retired, and a failure it left is not raised again on every pass.
+        if let Some(run) = subject.owner_run.as_deref()
+            && let Some(view) = self.store.mission_run(run)?
+            && let Some(ended) = view.ended()
+        {
+            if self.store.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_none() {
+                self.retire_restart_request(
+                    &subject.subject,
+                    &request,
+                    &format!("the seat's run {run} has ended ({ended})"),
+                )?;
+            }
             return Ok(true);
         }
         if self
@@ -26496,6 +26529,66 @@ agent "import/omp/fixture" {{
         let reason = last.body.pointer("/fields/reason").and_then(Value::as_str).unwrap();
         assert!(reason.contains("absent") && reason.contains("nothing was started"), "{reason}");
         assert!(!reason.contains("recovered"), "{reason}");
+    }
+
+    #[test]
+    fn a_stop_ends_an_earlier_member_fault_on_every_host_but_not_a_later_one() {
+        // `node` recorded a fault for a seat placed on `peer`; the seat is then stopped, and the
+        // stop is `peer`'s to carry out. No host answers the fault, as on a member whose
+        // recording host never reconciles the stop, and it still ends.
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, "version 2\nagent \"seat\" { host \"peer\"; command \"sleep 100\" }", "seat");
+        let subject = "agent/peer.seat";
+        let node = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let launcher = "start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)";
+        node.record_member_reconcile_result(subject, Err(anyhow::anyhow!(launcher))).unwrap();
+        assert_eq!(store.member_reconcile_fault(subject, None).unwrap().as_deref(), Some(launcher));
+        apply_source(&store, "version 2\nstop \"agent/peer.seat\"\n", "stop-seat");
+        assert_eq!(store.member_reconcile_fault(subject, None).unwrap(), None);
+        assert_eq!(store.member_reconcile_fault_origin(subject).unwrap(), None);
+        let at = store.index().unwrap();
+        assert!(store.member_reconcile_faults_for(&[subject.to_owned()], at).unwrap().is_empty());
+        // A fault that `peer` records after the stop is `peer`'s word, and it stands.
+        let peer_store = Arc::new(Store::open_memory("peer").unwrap());
+        peer_store.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        let peer = Reconciler::new(
+            peer_store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "peer".into(),
+            Arc::new(Notify::new()),
+        );
+        peer.record_member_reconcile_result(subject, Err(anyhow::anyhow!("stop member runtime: synthetic failure")))
+            .unwrap();
+        store.import_replication("peer", &peer_store.export_replication(0).unwrap()).unwrap();
+        assert_eq!(
+            store.member_reconcile_fault(subject, None).unwrap().as_deref(),
+            Some("stop member runtime: synthetic failure")
+        );
+        assert_eq!(store.member_reconcile_fault_origin(subject).unwrap().as_deref(), Some("peer"));
+    }
+
+    #[test]
+    fn a_task_whose_working_directory_is_missing_says_so_and_is_not_launched() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let missing = workspace.path().join("gone");
+        apply_source(
+            &store,
+            &format!("version 2\nexec \"job\" {{ workspace {:?}; cwd {:?}; command \"sleep 100\" }}", workspace.path(), missing),
+            "job",
+        );
+        let subject = store.desired_subjects().unwrap().into_iter().map(|desired| desired.subject).next().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.reconcile_once().unwrap();
+        let fault = store.member_reconcile_fault(&subject, None).unwrap().unwrap_or_default();
+        assert!(fault.contains(&format!("working directory {} does not exist", missing.display())), "{fault}");
+        assert!(runtime.starts.lock().unwrap().is_empty(), "{:?}", runtime.starts.lock().unwrap());
     }
 
     #[test]
