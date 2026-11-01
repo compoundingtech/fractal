@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A guard test checks that a local cut's scoped capture stages every kind the planner reads to judge the kinds a local cut trims",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No table or claim schema change."},
+  "rules": {"status": "none", "detail": "No planner change: the status-history and limits rules name their kinds through shared constants, and each rule lists the kinds it reads beyond its own slot, which the guard test compares with the local cut's capture kinds. The rules version and digest are unchanged."},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build."}
+}

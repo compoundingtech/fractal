@@ -1,6 +1,35 @@
 //! Deterministic naming projection shared by durable stores and authenticated offline readers.
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Immutable runtime admission checks, before a naming fact can reserve or fence names.
+/// Declaration availability and predecessor conflicts belong to the projection fold.
+pub fn admits_replicated(claim: &crate::claim::ClaimRecord) -> anyhow::Result<bool> {
+    let prefix = match claim.kind.as_str() {
+        "agent.renamed" => "agent/", "mission.renamed" => "mission/", _ => return Ok(true),
+    };
+    let fields = &claim.body["fields"];
+    let request = &fields["request"];
+    let [Some(from), Some(to), Some(actor), Some(reason), Some(key)] =
+        ["from", "to", "actor", "reason", "idempotency_key"].map(|name| request[name].as_str())
+    else { return Ok(false); };
+    for name in ["expected_declaration", "expected_naming_revision"] {
+        if request.get(name).is_some_and(|value| !value.is_null() && !value.is_string()) { return Ok(false); }
+    }
+    if !claim.subject.starts_with(prefix) || !from.starts_with(prefix) || !to.starts_with(prefix)
+        || reason.trim().is_empty()
+        || fields["to"].as_str() != Some(to)
+        || fields["reason"].as_str() != Some(reason)
+        || fields["owner_host"].as_str() != Some(claim.origin.as_str())
+        || claim.actor.is_none()
+        || (!actor.starts_with("agent/") && claim.actor.as_deref() != Some(actor))
+        || request["expected_declaration"].as_str().is_some_and(|expected| fields["declaration"].as_str() != Some(expected))
+        || request["expected_naming_revision"].as_str().is_some_and(|expected| fields["previous_revision"].as_str() != Some(expected))
+    { return Ok(false); }
+    let Some((operation, digest)) = crate::store::operation_parts(&claim.body) else { return Ok(false); };
+    Ok(operation == crate::store::operation_id_for_key(key)
+        && digest == crate::hash::canonical_hash(&("st3.identity-rename-request.v1", claim.kind.as_str(), crate::hash::canonical_json_value(request)))?)
+}
+
 pub struct Fact {
     pub id: String, pub identity: String, pub from: String, pub to: String,
     pub previous: Option<String>, pub repaired: bool,

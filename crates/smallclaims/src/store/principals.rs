@@ -1047,6 +1047,24 @@ fn requeue_pending(connection: &Connection) -> Result<bool> {
         .query_row(/* sqlite-large-value: allow-for-now lv-hb771731d9c03 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [REQUEUE, REQUEUE_END], |row| row.get(0))?)
 }
 
+/// Where a claim relies on a link whose requeue cursor has not reached it yet, that link: the
+/// claim's page is not queued, so its cached verdict can predate the change and reads as held,
+/// as it did when one transaction queued every dependent.
+pub(super) fn requeue_ahead_of(connection: &Connection, claim_id: &str) -> Result<Option<String>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT l.link FROM meta m JOIN claim_verdict_links l
+               ON l.link=substr(m.key, ?3) AND l.claim_id=?4
+             WHERE m.key>=?1 AND m.key<?2 AND m.value<?4 ORDER BY m.key LIMIT 1",
+        )?
+        .query_row(
+            /* sqlite-large-value: allow-for-now lv-hd85da347d250 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */
+            params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, claim_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 /// The links a newly arrived signed claim can change: the claims waiting on it as a
 /// delegation, the claims signed by a key it revokes, and the claims sharing its nonce.
 fn queue_affected_by_tx(connection: &Connection, claim_id: &str) -> Result<()> {
@@ -1785,9 +1803,12 @@ impl Store {
                 })?
                 .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
         } else {
+            // A claim an unfinished requeue has not reached counts as held, as it reads. The
+            // per-row probe runs only while a requeue is pending.
+            let requeuing = requeue_pending(&connection)?;
             connection
-            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
-            .query_map([], |row| {
+            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
+            .query_map(params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, requeuing], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
@@ -2204,6 +2225,59 @@ mod paced_verdict_tests {
         store.judge_claims(true).unwrap();
         assert!(!store.verdicts_pending().unwrap());
         assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+    }
+
+    #[test]
+    fn a_verdict_past_any_unfinished_requeue_cursor_reads_as_held() {
+        for link in [
+            "root",
+            "key:person/ada|device-key",
+            "delegation:claim/grant",
+            "nonce:device-key|nonce-1",
+        ] {
+            let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+            {
+                let mut connection = store.connection.write();
+                let tx = connection.transaction().unwrap();
+                for claim in ["claim/00001", "claim/00002", "claim/00003", "claim/00004"] {
+                    tx.execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES (?1,'verified','host/studio')", [claim]).unwrap();
+                }
+                for claim in ["claim/00001", "claim/00002", "claim/00003"] {
+                    tx.execute(
+                        "INSERT INTO claim_verdict_links(link,claim_id) VALUES (?1,?2)",
+                        [link, claim],
+                    )
+                    .unwrap();
+                }
+                // claim/00004 relies on another link, whose requeue is not running.
+                tx.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES ('delegation:claim/other','claim/00004')", []).unwrap();
+                // The requeue of `link` has queued up to claim/00002.
+                set_meta_tx(&tx, &format!("{REQUEUE}{link}"), "claim/00002").unwrap();
+                tx.commit().unwrap();
+            }
+            let read = |claim: &str| store.claim_verdict(claim).unwrap();
+            assert_eq!(read("claim/00001"), Verdict::Verified, "{link}");
+            assert_eq!(read("claim/00002"), Verdict::Verified, "{link}");
+            assert!(
+                matches!(read("claim/00003"), Verdict::Held(reason) if reason.starts_with("signature-judgment-incomplete:") && reason.ends_with(link)),
+                "{link}"
+            );
+            assert!(store.claim_signature("claim/00003").is_err(), "{link}");
+            assert_eq!(read("claim/00004"), Verdict::Verified, "{link}");
+            let counts = store.claim_verdict_counts().unwrap();
+            assert_eq!(counts.get("verified"), Some(&3), "{link}");
+            assert_eq!(counts.get("held"), Some(&1), "{link}");
+            // A root change starts its requeue before any page: every dependent reads as held.
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            set_meta_tx(&tx, &format!("{REQUEUE}{link}"), "").unwrap();
+            tx.commit().unwrap();
+            drop(connection);
+            for claim in ["claim/00001", "claim/00002", "claim/00003"] {
+                assert!(matches!(read(claim), Verdict::Held(_)), "{link} {claim}");
+            }
+            assert_eq!(read("claim/00004"), Verdict::Verified, "{link}");
+        }
     }
 
     #[test]

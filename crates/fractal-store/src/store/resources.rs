@@ -266,12 +266,9 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         if let Some((state_id, state, state_accepted)) = &item_state
             && (kind.is_empty() || state_accepted.parse::<u128>()? >= accepted.parse::<u128>()?)
         {
-            for (name, value) in fractal_schema::github_plugin::item_state_updates(state) {
-                match value {
-                    None => facts.remove(name),
-                    Some(value) => facts.insert(name.into(), value.clone()),
-                };
-            }
+            let mut overlaid = std::mem::take(&mut facts).into_iter().collect::<serde_json::Map<_, _>>();
+            fractal_schema::github_plugin::overlay_item_state(&mut overlaid, state);
+            facts = overlaid.into_iter().collect();
             if kind.is_empty() {
                 kind = state.get("item_kind").and_then(Value::as_str).unwrap_or_default().to_owned();
                 if let Some(number) = subject.rsplit('/').next().and_then(|number| number.parse::<u64>().ok()) {
@@ -306,6 +303,45 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         [subject],
     )?;
     preparation::flush(transaction)
+}
+
+/// Whether `subject` changed in compact facts since its newest snapshot: its newest compact
+/// state differs from that snapshot's facts in compact form. What the graph holds of its facts
+/// outside the compact and delivery sets may then be behind. A state written beside a snapshot,
+/// as every look outside compact mode writes one, does not differ from it, whatever the clock;
+/// a snapshot newer than the newest state, as a poller of an older build writes, is exact.
+pub fn compact_newer(connection: &Connection, subject: &str) -> Result<bool> {
+    let Some((_, state, state_at)) = newest_item_state(connection, subject)? else {
+        return Ok(false);
+    };
+    let snapshot: Option<(Option<String>, String)> = connection
+        .query_row(
+            /* sqlite-large-value: allow-for-now lv-h8b50d51a894d owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='resource.observed'
+                 AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
+                 ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",
+            ),
+            [subject],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    // A snapshot newer than the newest state, as a poller of an older build writes, is exact.
+    if let Some((_, snapshot_at)) = &snapshot
+        && snapshot_at.parse::<u128>().unwrap_or_default() > state_at.parse::<u128>().unwrap_or_default()
+    {
+        return Ok(false);
+    }
+    let Some(snapshot) = snapshot.and_then(|(fields, _)| serde_json::from_str::<Value>(&fields?).ok()) else {
+        return Ok(true);
+    };
+    let observer = state.get("observer").and_then(Value::as_str).unwrap_or_default();
+    let compacted = snapshot.get("kind").and_then(Value::as_str)
+        .zip(snapshot.get("facts").and_then(Value::as_object))
+        .and_then(|(kind, facts)| fractal_schema::github_plugin::compact_item_state(kind, observer, facts));
+    let unattributed = |fields: &serde_json::Map<String, Value>| {
+        fields.iter().filter(|(name, _)| *name != "observer").map(|(name, value)| (name.clone(), value.clone())).collect::<BTreeMap<_, _>>()
+    };
+    Ok(compacted.is_none_or(|compacted| unattributed(&compacted) != unattributed(&state)))
 }
 
 /// A `vcs.item.state` claim: its ID, compact fields and accepted time.
@@ -1065,6 +1101,45 @@ END;
         assert_eq!(store.repository_items("resource/github/acme/garden", Some(8)).unwrap().len(), 1);
         assert_eq!(projection_digest::tables(&store.readers.get()).unwrap(),
                    projection_digest::oracle(&store.readers.get()).unwrap());
+    }
+
+    /// A compact `required_checks` summary replaces the snapshot's state and keeps the checks it
+    /// counts and their execution, in the projection every reader takes.
+    #[test]
+    fn a_compact_required_checks_summary_keeps_the_snapshots_checks_and_execution() {
+        let store = Store::open_memory("item-state-checks").unwrap();
+        let subject = "resource/github/acme/garden/pull-request/7";
+        observed(&store, subject, json!({"number": 7, "state": "open", "head_sha": "a",
+            "required_checks": {"state": "pending", "source": "rules", "checks": ["build"], "execution": {"run": 4}}}));
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        item_state(&store, subject, json!({"state": "open", "head_sha": "a",
+            "required_checks": {"state": "pass", "source": "rules"}}));
+        assert_eq!(current(&store, subject)["facts"]["required_checks"],
+            json!({"state": "pass", "source": "rules", "checks": ["build"], "execution": {"run": 4}}));
+        assert_eq!(store.latest_actual_value(subject).unwrap().unwrap()["facts"]["required_checks"]["execution"], json!({"run": 4}));
+    }
+
+    /// An item changed in compact facts since its snapshot only when its newest state differs
+    /// from that snapshot in compact form, and the snapshot is not the newer one.
+    #[test]
+    fn compact_only_changes_are_told_by_content_and_a_newer_snapshot_is_exact() {
+        let store = Store::open_memory("compact-newer").unwrap();
+        let subject = "resource/github/acme/garden/pull-request/7";
+        let newer = |store: &Store| compact_newer(&store.readers.get(), subject).unwrap();
+        let open = json!({"number": 7, "state": "open", "head_sha": "a", "title": "Garden"});
+        // A look outside compact mode: a snapshot and, beside it, the same state.
+        observed(&store, subject, open.clone());
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        item_state(&store, subject, open.clone());
+        assert!(!newer(&store), "a state beside its snapshot is not compact-only");
+        // A compact-only change.
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        item_state(&store, subject, json!({"state": "open", "head_sha": "b"}));
+        assert!(newer(&store));
+        // A poller of an older build records a snapshot and no state.
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        observed(&store, subject, json!({"number": 7, "state": "open", "head_sha": "c", "title": "Garden paths"}));
+        assert!(!newer(&store), "a newer snapshot is exact");
     }
 
     /// A full rebuild, as a replay or a checkpoint proof runs, keeps the row of an item that only

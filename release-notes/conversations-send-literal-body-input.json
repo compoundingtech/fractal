@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read conversation message bodies from --body-file PATH or --body - (also -m -) without shell interpolation.",
+  "replay": {"status": "none", "detail": "No claim replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No authority rule change."},
+  "compatibility": {"status": "changed", "detail": "conversations send requires exactly one of --body and --body-file. A body value of - now reads stdin. File and stdin bodies require valid UTF-8, preserve whitespace, and share the existing 256 KiB message limit. Help shows single-quoted text and a quoted heredoc to avoid shell expansion."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "Existing literal argv bodies remain supported; use file or stdin input for command-containing text."},
+  "recovery": {"status": "none", "detail": "No runtime recovery change."}
+}
