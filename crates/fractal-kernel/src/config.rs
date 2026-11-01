@@ -71,7 +71,11 @@ pub struct Config {
     pub pty_root: Option<PathBuf>,
     /// Owner-local catalog roots supplying declared private-notes carrier provenance.
     pub private_notes_catalogs: Vec<PathBuf>,
+    #[serde(default)]
     pub socket: PathBuf,
+    /// In-memory provenance: explicit config paths never gain discovery fallback.
+    #[serde(skip)]
+    pub socket_is_explicit: bool,
     pub client_gateway_socket: PathBuf,
     pub peer_listen: Option<String>,
     /// The one folder agents work in when nothing names another: new agents get a subfolder of
@@ -631,6 +635,7 @@ impl Default for Config {
             pty_root: None,
             private_notes_catalogs: Vec::new(),
             socket,
+            socket_is_explicit: false,
             client_gateway_socket,
             peer_listen: None,
             work_root: None,
@@ -786,6 +791,7 @@ impl Config {
         }
         .with_context(|| format!("parse st config {}", selected.display()))?;
         let defaults = Self::default();
+        config.socket_is_explicit = !config.socket.as_os_str().is_empty();
         if config.node.is_empty() {
             config.node = defaults.node;
         }
@@ -805,25 +811,22 @@ impl Config {
         Ok((config, unknown))
     }
 
-    /// Resolve the daemon's published endpoint when this client lacks its runtime directory, or
-    /// when nothing answers at the runtime default and the published link leads to a daemon that
-    /// does (one started with `--socket` elsewhere). Following the link itself would exceed the
-    /// Unix socket address limit for long state paths.
-    pub fn client_socket(&self) -> PathBuf {
+    /// Keep default discovery live through daemon restarts; configured paths remain exact.
+    pub fn client_discovery(&self) -> fractal_client::UnixSocketDiscovery {
         let published = state_socket(&self.state_dir);
-        match env::var_os("XDG_RUNTIME_DIR") {
-            None if self.socket == published => {
-                let resolved = fractal_client::default_unix_socket(&published, &published);
-                fs::read_link(&resolved)
-                    .ok()
-                    .filter(|target| target.is_absolute())
-                    .unwrap_or(resolved)
-            }
-            Some(runtime) if self.socket == Path::new(&runtime).join("fractal.sock") => {
-                fractal_client::default_unix_socket(&self.socket, &published)
-            }
-            _ => self.socket.clone(),
+        let runtime = env::var_os("XDG_RUNTIME_DIR")
+            .map(|directory| PathBuf::from(directory).join("fractal.sock"))
+            .unwrap_or_else(|| published.clone());
+        if !self.socket_is_explicit && (self.socket == runtime || self.socket == published) {
+            fractal_client::UnixSocketDiscovery::Defaults { runtime, published }
+        } else {
+            fractal_client::UnixSocketDiscovery::Explicit(self.socket.clone())
         }
+    }
+
+    /// Resolve a snapshot for path-only consumers; request clients keep `client_discovery`.
+    pub fn client_socket(&self) -> PathBuf {
+        self.client_discovery().resolve()
     }
 
     /// Merge `STATE/fleet/fleet.toml` from the effective state directory. Call it after
@@ -1686,6 +1689,26 @@ sekrets_profile = "nathan/daemon-gh"
         let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
         assert_eq!(config.trim.daily_claims, Some(5000));
         assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
+    }
+
+    #[test]
+    fn client_discovery_preserves_explicit_config_even_at_the_default_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let defaults = Config::default();
+        let socket = toml::Value::String(defaults.socket.to_string_lossy().into_owned());
+        fs::write(&path, format!("socket = {socket}\n")).unwrap();
+        let config = Config::load_unvalidated(Some(&path)).unwrap();
+        assert!(matches!(
+            config.client_discovery(),
+            fractal_client::UnixSocketDiscovery::Explicit(path) if path == defaults.socket
+        ));
+        fs::write(&path, "").unwrap();
+        let config = Config::load_unvalidated(Some(&path)).unwrap();
+        assert!(matches!(
+            config.client_discovery(),
+            fractal_client::UnixSocketDiscovery::Defaults { .. }
+        ));
     }
 
     #[test]

@@ -33,7 +33,7 @@ impl Drop for SocketAlias {
     }
 }
 
-async fn reserve_alias(socket: &Path, existing: Option<&SocketAlias>) -> Result<Option<SocketAlias>> {
+async fn reserve_alias(socket: &Path, existing: Option<&SocketAlias>, bound_socket: &Path) -> Result<Option<SocketAlias>> {
     let (primary, legacy) = match socket.file_name().and_then(|name| name.to_str()) {
         Some("fractal.sock") => ("fractal.sock", "st3.sock"),
         Some("fractal-client.sock") => ("fractal-client.sock", "st3-client.sock"),
@@ -42,7 +42,11 @@ async fn reserve_alias(socket: &Path, existing: Option<&SocketAlias>) -> Result<
     let parent = socket.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let path = fs::canonicalize(parent)?.join(legacy);
-    if existing.is_some_and(|alias| alias.path == path) {
+    let is_bound_address = bound_socket.file_name() == path.file_name()
+        && bound_socket.parent().is_some_and(|parent| {
+            fs::canonicalize(parent).is_ok_and(|parent| Some(parent.as_path()) == path.parent())
+        });
+    if is_bound_address || existing.is_some_and(|alias| alias.path == path) {
         return Ok(None);
     }
     // Do not canonicalize the alias itself: it may already point at the primary.
@@ -68,10 +72,10 @@ pub async fn reserve_unix_socket(socket: &Path, state_socket: Option<&Path>) -> 
         .or_else(|| state_socket.zip(bound_state.as_deref()).filter(|(original, bound)| original != bound));
     let socket = bound_socket.as_ref();
     let state_socket = bound_state.as_deref();
-    let primary_alias = reserve_alias(socket, None).await?;
+    let primary_alias = reserve_alias(socket, None, socket).await?;
     // Old clients discover even a custom control socket through the state/run name.
     let discovery_alias = match state_socket {
-        Some(path) => reserve_alias(path, primary_alias.as_ref()).await?,
+        Some(path) => reserve_alias(path, primary_alias.as_ref(), socket).await?,
         None => None,
     };
     let mut aliases = [primary_alias, discovery_alias];

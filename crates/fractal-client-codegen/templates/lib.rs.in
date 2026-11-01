@@ -50,13 +50,38 @@ const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 const RAW_TERMINAL_SUBPROTOCOL: &str = "fractal.client.pty.v0";
 const RAW_TERMINAL_CHUNK_BYTES: usize = 16_384;
 
-/// Resolve the local daemon socket in the same order as the `st3` CLI.
+/// A trusted local control socket's discovery identity, retained across daemon outages.
+/// Explicit and configured paths are exact; only defaults use published/legacy discovery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnixSocketDiscovery {
+    Explicit(PathBuf),
+    Defaults { runtime: PathBuf, published: PathBuf },
+}
+
+impl UnixSocketDiscovery {
+    /// Resolve the currently available daemon without freezing a default's selected path.
+    pub fn resolve(&self) -> PathBuf {
+        match self {
+            Self::Explicit(path) => path.clone(),
+            Self::Defaults { runtime, published } => default_unix_socket(runtime, published),
+        }
+    }
+}
+
+/// Resolve a snapshot of the local daemon socket in the same order as the `st3` CLI.
+/// Use [`discover_unix_identity`] with [`Client::discovered_unix`] to follow daemon restarts.
+pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, ClientError> {
+    discover_unix_identity(explicit).map(|identity| identity.resolve())
+}
+
+/// Discover the local control socket identity without probing for a running daemon.
 ///
 /// An explicit endpoint (including `ST3_ENDPOINT`, when the caller exposes it through clap) wins,
 /// followed by the normal st config file and then the XDG runtime/state defaults.
-pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, ClientError> {
+/// Configuration is read once; default candidates are resolved on every connection attempt.
+pub fn discover_unix_identity(explicit: Option<PathBuf>) -> Result<UnixSocketDiscovery, ClientError> {
     if let Some(path) = explicit {
-        return Ok(path);
+        return Ok(UnixSocketDiscovery::Explicit(path));
     }
 
     let config_base = xdg_path("XDG_CONFIG_HOME", ".config")?;
@@ -65,7 +90,7 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
     match std::fs::read_to_string(&config_path) {
         Ok(document) => {
             if let Some(socket) = configured_socket(&document)? {
-                return Ok(socket);
+                return Ok(UnixSocketDiscovery::Explicit(socket));
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -83,27 +108,34 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
             .join("fractal.sock")
     });
     match (std::env::var_os("XDG_RUNTIME_DIR"), state_socket) {
-        (Some(runtime), Ok(state_socket)) => Ok(default_unix_socket(
-            &PathBuf::from(runtime).join("fractal.sock"),
-            &state_socket,
-        )),
+        (Some(runtime), Ok(state_socket)) => Ok(UnixSocketDiscovery::Defaults {
+            runtime: PathBuf::from(runtime).join("fractal.sock"),
+            published: state_socket,
+        }),
         (Some(runtime), Err(_)) => {
             let socket = PathBuf::from(runtime).join("fractal.sock");
-            Ok(default_unix_socket(&socket, &socket))
+            Ok(UnixSocketDiscovery::Defaults { runtime: socket.clone(), published: socket })
         }
-        (None, state_socket) => state_socket.map(|socket| default_unix_socket(&socket, &socket)),
+        (None, state_socket) => state_socket.map(|socket| UnixSocketDiscovery::Defaults {
+            runtime: socket.clone(),
+            published: socket,
+        }),
     }
 }
 
 /// The runtime default, unless nothing answers there and the daemon's published discovery link
 /// leads to a socket that does. A daemon started with `--socket` elsewhere links its state
 /// directory's `run/fractal.sock` to that socket, while the runtime default can hold a dead socket
-/// left by an earlier daemon. Nothing is probed when the link leads to the default itself. The
-/// link's target is returned, not the link: a long state path can exceed the socket address limit.
+/// left by an earlier daemon. Nothing is probed when the link leads to the default itself. When
+/// no separate runtime directory exists, the published target is used directly: a long state
+/// path can exceed the socket address limit.
 pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf {
     let Ok(target) = std::fs::canonicalize(published) else {
         return runtime.to_path_buf();
     };
+    if runtime == published {
+        return target;
+    }
     if std::fs::canonicalize(runtime).ok().as_ref() == Some(&target) {
         return runtime.to_path_buf();
     }
@@ -172,6 +204,7 @@ fn xdg_path(variable: &str, home_suffix: &str) -> Result<PathBuf, ClientError> {
 #[derive(Clone, Debug)]
 pub enum Endpoint {
     Unix(PathBuf),
+    DiscoveredUnix(UnixSocketDiscovery),
     Fabric(fabric::FabricEndpoint),
     FabricLoopback(String),
 }
@@ -1339,6 +1372,11 @@ impl Client {
                     .with_messages_paging(self.messages_paging)
                     .with_outage_wait(self.outage_wait, self.announce_outage_wait)
             }
+            Endpoint::DiscoveredUnix(identity) if self.credential.is_none() => {
+                Self::discovered_unix(identity.clone())
+                    .with_messages_paging(self.messages_paging)
+                    .with_outage_wait(self.outage_wait, self.announce_outage_wait)
+            }
             _ => self.clone(),
         }
     }
@@ -1367,12 +1405,35 @@ impl Client {
     async fn transport_endpoint(&self, path: &str) -> Result<TransportEndpoint<'_>, ClientError> {
         match &self.endpoint {
             Endpoint::Unix(socket) => Ok(TransportEndpoint::Unix(std::borrow::Cow::Borrowed(socket))),
+            Endpoint::DiscoveredUnix(identity) => {
+                Ok(TransportEndpoint::Unix(std::borrow::Cow::Owned(identity.resolve())))
+            }
             Endpoint::Fabric(endpoint) => {
                 fabric::FabricEndpoint::validate_path(path)?;
                 Ok(TransportEndpoint::Unix(std::borrow::Cow::Owned(endpoint.dial().await?)))
             }
             Endpoint::FabricLoopback(base) => Ok(TransportEndpoint::FabricLoopback(base)),
         }
+    }
+
+    /// Connect to the trusted local control daemon, resolving defaults on every connection.
+    /// Paired Unix gateways must use [`Self::unix_gateway`] with their exact socket path.
+    pub fn discovered_unix(identity: UnixSocketDiscovery) -> Self {
+        match identity {
+            UnixSocketDiscovery::Explicit(path) => Self::unix(path),
+            identity @ UnixSocketDiscovery::Defaults { .. } => {
+                let mut client = Self::unix(Path::new(""));
+                client.endpoint = Endpoint::DiscoveredUnix(identity);
+                client
+            }
+        }
+    }
+
+    /// Select a local person while retaining connect-time control socket discovery.
+    pub fn discovered_unix_as(identity: UnixSocketDiscovery, person_id: impl Into<String>) -> Self {
+        let mut client = Self::discovered_unix(identity);
+        client.local_person = Some(person_id.into());
+        client
     }
 
     pub fn unix(path: impl AsRef<Path>) -> Self {
@@ -2149,7 +2210,7 @@ impl Client {
     /// Whether this client talks to a daemon on this machine over its Unix socket, as opposed to
     /// a paired device's remote gateway.
     pub fn is_local_socket(&self) -> bool {
-        matches!(self.endpoint, Endpoint::Unix(_))
+        matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_))
     }
 
     /// The fleet's membership as this host's daemon holds it, for finding a host's Fabric node.
@@ -2172,7 +2233,7 @@ impl Client {
         &self,
         subject: &str,
     ) -> Result<Option<LocalTerminalLocation>, ClientError> {
-        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+        if !self.is_local_socket() {
             return Ok(None);
         }
         // Sessions routes answer in the daemon's own envelope, with the value under `value`.
@@ -3873,6 +3934,111 @@ mod tests {
         assert_eq!(default_unix_socket(&primary, &primary), legacy);
         let _new_daemon = std::os::unix::net::UnixListener::bind(&primary).unwrap();
         assert_eq!(default_unix_socket(&primary, &primary), primary);
+    }
+
+    #[test]
+    fn discovery_without_a_runtime_directory_uses_the_short_published_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("daemon.sock");
+        let _daemon = std::os::unix::net::UnixListener::bind(&target).unwrap();
+        let mut directory = root.path().to_path_buf();
+        while unix_socket_path_fits(&directory.join("fractal.sock")) {
+            directory = directory.join("long-state-directory");
+        }
+        std::fs::create_dir_all(&directory).unwrap();
+        let published = directory.join("fractal.sock");
+        std::os::unix::fs::symlink(&target, &published).unwrap();
+        let identity = UnixSocketDiscovery::Defaults {
+            runtime: published.clone(),
+            published: published.clone(),
+        };
+        assert_eq!(identity.resolve(), std::fs::canonicalize(&target).unwrap());
+        assert_eq!(UnixSocketDiscovery::Explicit(published.clone()).resolve(), published);
+    }
+
+    #[test]
+    fn default_discovery_retries_when_a_legacy_daemon_appears_after_an_outage() {
+        runtime().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let primary = root.path().join("fractal.sock");
+            let legacy = root.path().join("st3.sock");
+            let identity = UnixSocketDiscovery::Defaults {
+                runtime: primary.clone(),
+                published: primary.clone(),
+            };
+            assert_eq!(identity.resolve(), primary);
+            let client = Client::discovered_unix_as(identity, "person/test")
+                .with_outage_wait(Duration::from_secs(5), false);
+            // Poll the real retry loop before the old daemon exists.
+            let request = client.request::<Envelope<Page>>(Method::GET, "/v1/client/agents", None);
+            tokio::pin!(request);
+            tokio::select! {
+                result = &mut request => panic!("request finished before daemon startup: {result:?}"),
+                () = tokio::time::sleep(Duration::from_millis(150)) => {}
+            }
+            let listener = tokio::net::UnixListener::bind(&legacy).unwrap();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    // Socket discovery probes connect and immediately close without HTTP.
+                    if request.is_empty() {
+                        continue;
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                        EMPTY_PAGE.len(),
+                        EMPTY_PAGE
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                    break String::from_utf8(request).unwrap();
+                }
+            });
+            request.await.unwrap();
+            let received = server.await.unwrap();
+            assert!(received.starts_with("GET /v1/client/agents HTTP/1.1\r\n"));
+            assert!(received.contains("x-st3-person: person/test\r\n"));
+            // Discovery identity survives dropping local-person authority as well.
+            assert!(matches!(
+                client.trusted_unscoped_read().endpoint,
+                Endpoint::DiscoveredUnix(_)
+            ));
+        });
+    }
+
+    #[test]
+    fn explicit_unix_control_and_gateway_paths_do_not_probe_or_fall_back() {
+        runtime().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let primary = root.path().join("fractal.sock");
+            let legacy = root.path().join("st3.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            for client in [
+                Client::unix(&primary),
+                Client::unix_as(&primary, "person/test"),
+                Client::unix_gateway(&primary, "paired-secret"),
+                Client::discovered_unix(UnixSocketDiscovery::Explicit(primary.clone())),
+            ] {
+                assert!(matches!(
+                    client.transport_endpoint("/v1/client/agents").await.unwrap(),
+                    TransportEndpoint::Unix(std::borrow::Cow::Borrowed(path)) if path == primary
+                ));
+                assert!(matches!(
+                    client.request::<Envelope<Page>>(Method::GET, "/v1/client/agents", None).await,
+                    Err(ClientError::Unreachable(_))
+                ));
+            }
+            assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        });
     }
 
     #[test]
