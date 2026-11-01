@@ -382,9 +382,19 @@ pub fn signal_changed(state: &AppState) {
     signal_visible_change(state);
 }
 
-/// The reconciler reads a message only when it is a work wake, tagged `st3-work:`.
+/// The reconciler reads a message only when it carries a work-wake tag.
 pub fn is_work_wake(tags: &[String]) -> bool {
-    tags.iter().any(|tag| tag.starts_with("st3-work:"))
+    crate::silent::message_tag_values(tags.iter().map(String::as_str), "work:")
+        .next()
+        .is_some()
+}
+
+#[test]
+fn work_wake_prefixes() {
+    for prefix in ["st3-", "fractal-"] {
+        assert!(is_work_wake(&[format!("{prefix}work:step-run/r/s@1@1@x")]));
+    }
+    assert!(!is_work_wake(&["fractal-work-handoff:r/s".into()]));
 }
 
 /// A message write wakes the reconciler only for a work wake, since the reconciler reads no other
