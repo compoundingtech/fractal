@@ -54,7 +54,7 @@ let
     ++ [ "--web-listen" (if cfg.webListen == null then "off" else cfg.webListen) ]
     ++ lib.optionals (!externallyManaged) [ "--web-dist" "${effectivePackage}/share/fractal-web" ]
     ++ lib.optionals (cfg.clientGatewaySocket == null && pkgs.stdenv.hostPlatform.isDarwin)
-      [ "--client-gateway-socket" "${cfg.stateDir}/run/st3-client.sock" ]
+      [ "--client-gateway-socket" "${cfg.stateDir}/run/fractal-client.sock" ]
     ++ (if externallyManaged then
       [ "--pty-binary" "${binDir}/pty" ]
     else
@@ -222,7 +222,7 @@ in
     };
     ptyRoot = mkOption { type = types.nullOr types.str; default = null; description = "PTY registry root; null uses the daemon default."; };
     socket = mkOption { type = types.nullOr types.str; default = null; description = "API socket; null uses the daemon default."; };
-    clientGatewaySocket = mkOption { type = types.nullOr types.str; default = null; description = "Client gateway socket; null uses the shared runtime socket (%t/st3-client.sock on Linux, stateDir/run/st3-client.sock on Darwin)."; };
+    clientGatewaySocket = mkOption { type = types.nullOr types.str; default = null; description = "Client gateway socket; null uses the shared runtime socket (%t/fractal-client.sock on Linux, stateDir/run/fractal-client.sock on Darwin)."; };
     webListen = mkOption {
       type = types.nullOr types.str;
       default = "127.0.0.1:7410";
@@ -431,7 +431,7 @@ in
           ExecStart = lib.concatStringsSep " " (map systemdArg ([ executable ] ++ upArgs))
             # Preserve systemd's runtime-directory specifier; systemdArg escapes literal percent signs.
             + lib.optionalString (cfg.clientGatewaySocket == null)
-              '' "--client-gateway-socket" "%t/st3-client.sock"'';
+              '' "--client-gateway-socket" "%t/fractal-client.sock"'';
           Environment = lib.mapAttrsToList (name: value: "${name}=${value}") (environment // { MALLOC_ARENA_MAX = "2"; });
           Restart = "on-failure";
           RestartSec = "5s";
@@ -475,7 +475,7 @@ in
           ExecCondition = toString targetGuard;
           ExecStart = lib.concatStringsSep " " (map systemdArg ([ targetExecutable ] ++ targetUpArgs))
             + lib.optionalString (cfg.clientGatewaySocket == null)
-              '' "--client-gateway-socket" "%t/st3-client.sock"'';
+              '' "--client-gateway-socket" "%t/fractal-client.sock"'';
           Environment = lib.mapAttrsToList (name: value: "${name}=${value}") (targetEnvironment // { MALLOC_ARENA_MAX = "2"; });
           Restart = "on-failure";
           RestartSec = "5s";
