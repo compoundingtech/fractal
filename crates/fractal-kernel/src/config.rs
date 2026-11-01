@@ -1019,6 +1019,23 @@ const SUN_PATH_BYTES: usize = 104;
 #[cfg(not(target_os = "macos"))]
 const SUN_PATH_BYTES: usize = 108;
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction.
+/// Preserve existing instances whose socket directory only fits the shorter legacy name.
+pub fn socket_binding_path(socket: &Path) -> std::borrow::Cow<'_, Path> {
+    if socket.as_os_str().as_bytes().len() >= SUN_PATH_BYTES {
+        let legacy = match socket.file_name().and_then(|name| name.to_str()) {
+            Some("fractal.sock") => Some("st3.sock"),
+            Some("fractal-client.sock") => Some("st3-client.sock"),
+            _ => None,
+        };
+        if let Some(name) = legacy {
+            return std::borrow::Cow::Owned(socket.with_file_name(name));
+        }
+    }
+    std::borrow::Cow::Borrowed(socket)
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+
 pub fn validate_unix_socket_path(socket: &Path, flag: &str) -> Result<()> {
     let length = socket.as_os_str().as_bytes().len();
     anyhow::ensure!(

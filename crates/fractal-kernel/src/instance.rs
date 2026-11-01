@@ -442,8 +442,14 @@ mod tests {
     fn the_socket_path_stays_within_the_unix_limit_for_the_longest_name() {
         let longest = Instance::new(Path::new("/home/example/a-very-long-directory-name-here"), &"x".repeat(LONGEST_NAME)).unwrap();
         let socket = longest.run_dir().join("fractal-client.sock");
-        // sun_path holds 104 bytes on macOS, counting the terminating NUL, even below a long HOME.
-        assert!(socket.as_os_str().len() < 104, "{}", socket.display());
+        // The legacy name preserves the original macOS budget for existing instances.
+        let legacy = socket.with_file_name("st3-client.sock");
+        assert!(legacy.as_os_str().len() < 104, "{}", legacy.display());
+        let binding = crate::config::socket_binding_path(&socket);
+        assert!(fractal_client::unix_socket_path_fits(&binding), "{}", binding.display());
+        if !fractal_client::unix_socket_path_fits(&socket) {
+            assert_eq!(binding.as_ref(), legacy);
+        }
     }
 
     #[test]
