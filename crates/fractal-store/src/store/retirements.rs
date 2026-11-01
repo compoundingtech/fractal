@@ -183,6 +183,16 @@ pub fn admit_mail_claim(connection: &Connection, input: &ClaimInput) -> Result<(
     ).map_err(internal)?;
     let Some(created) = created else { return Ok(()); };
     let message = message_view_tx(connection, &input.subject, created).map_err(internal)?;
+    admit_mail_claim_to(connection, input, &message)
+}
+
+/// `admit_mail_claim` for a lifecycle step on `message`, read by the caller. A stream item's
+/// sent claim is in the messages shard, so its step is admitted against its merged view.
+pub fn admit_mail_claim_to(
+    connection: &Connection,
+    input: &ClaimInput,
+    message: &crate::model::MessageView,
+) -> Result<(), St3Error> {
     let actor = input.actor.as_deref().unwrap_or("");
     let Some(retirement) = record(connection, &message.to, None)? else {
         if input.fields.contains_key("acting_for") {
