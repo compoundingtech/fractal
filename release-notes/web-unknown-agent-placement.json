@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The web fleet shows missing agent host placement as unknown instead of inventing a local host",
+  "replay": {"status": "none", "detail": "No persisted projection or replay change."},
+  "schema": {"status": "none", "detail": "No wire, table, or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "Nullable agent host placement stays unknown and does not contribute a fabricated host to fleet counts. Explicit local host placement remains local."},
+  "downtime": {"status": "none", "detail": "Normal web refresh on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Rolling back restores the previous web host label and count behavior."}
+}
