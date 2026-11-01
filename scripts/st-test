@@ -280,6 +280,13 @@ def check_path():
     return ':'.join(kept)
 
 
+def report_environment(scratch, environment):
+    """Expose only the already-trusted running Python, not sibling tools from its installation, to report commands."""
+    bin_dir = Path(tempfile.mkdtemp(prefix='report-python-', dir=scratch))
+    (bin_dir / 'python3').symlink_to(Path(sys.executable).resolve())
+    return dict(environment, PATH=f'{bin_dir}{os.pathsep}{environment.get("PATH", os.defpath)}')
+
+
 def scrub_seat_environment():
     """A CI runner has none of the variables an agent seat carries (identity, mission, session, daemon endpoint, hook and messaging
     settings, and the pty session it runs in), and the checks must see what CI sees: tests that read them fail or behave differently
@@ -289,6 +296,8 @@ def scrub_seat_environment():
     FRACTAL_AGENT): a check that kept them could reach the live daemon as the seat. Every check starts in `nix develop`, whose shell
     sets the dev shell's FRACTAL_* settings (flake.nix) itself, and scripts/ci-local drops the rest for its stages. ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
     starts the check); the evidence switches stay. The kept list is the only exception mechanism for a future ST_* switch."""
+    if os.environ.get('CI_PERF_SLOT_RECEIPT_DIR'):
+        os.environ['CI_PERF_SLOT_DISPOSABLE_ROOTS'] = json.dumps([str(pool_base().resolve()), str(run_tmp_root().resolve())])
     for name in [name for name in os.environ
                  if name.startswith(SEAT_PREFIXES) and name not in KEPT_SEAT and not name.startswith('ST_EVIDENCE')]:
         del os.environ[name]
@@ -701,26 +710,37 @@ def shared_target(tree_target=None):
 
 
 def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
-    """The cap this process runs under, as one string, or None. Only the two caps made for builds count: builds.slice, and a
-    seat's lane, app-lanes-<seat>.slice directly in app-lanes.slice (docs/st3/seat-lanes.md). The process must be inside one, and
-    that slice or a cgroup below it, on the way to the process, must hold a memory.max and a cpu.max quota: read from the kernel's
-    files, never from a name alone or a variable. Limits above the cap (any other cgroup's) do not count."""
+    """The cap this process runs under, as one string, or None. Builds and seat lanes (docs/st3/seat-lanes.md) require
+    memory.max and cpu.max at or below their anchor. A gate-slot scope directly in app-capped.slice or its heavy child
+    requires only memory.max at the scope or within that approved slice chain: gate-slot does not normally set a CPU quota.
+    Read kernel files, never trust names or variables alone. Limits above the approved anchor do not count."""
     try:
         text = Path(cgroup_file).read_text()
     except OSError:
         return None
     path = next((line[3:] for line in text.splitlines() if line.startswith('0::')), '').strip('/')
     parts = path.split('/') if path else []
-    cap = next((depth for depth, part in enumerate(parts) if part == 'builds.slice' or (
-        depth > 0 and parts[depth - 1] == 'app-lanes.slice' and part.startswith('app-lanes-') and part.endswith('.slice'))), None)
-    if cap is None:
-        return None
 
     def limited(cgroup, file):  # whether CGROUP's FILE holds a limit; a missing or unreadable file (no controller) is none
         try:
             return cgroup.joinpath(file).read_text().split()[0] != 'max'
         except (OSError, IndexError):
             return False
+
+    gate = next((depth for depth, part in enumerate(parts) if depth > 1
+                 and re.fullmatch(r'gate-slot-(gate|heavy|eval)-[1-9][0-9]*(?:-[0-9]+)?\.scope', part)
+                 and (parts[depth - 2:depth] == ['app.slice', 'app-capped.slice']
+                      or parts[max(0, depth - 3):depth] == ['app.slice', 'app-capped.slice', 'app-capped-heavy.slice'])), None)
+    if gate is not None:
+        anchor = gate - (2 if parts[gate - 1] == 'app-capped-heavy.slice' else 1)
+        for depth in range(gate + 1, anchor, -1):
+            if limited(Path(root, *parts[:depth]), 'memory.max'):
+                return f'{parts[gate]}: memory by {parts[depth - 1]}'
+
+    cap = next((depth for depth, part in enumerate(parts) if part == 'builds.slice' or (
+        depth > 0 and parts[depth - 1] == 'app-lanes.slice' and part.startswith('app-lanes-') and part.endswith('.slice'))), None)
+    if cap is None:
+        return None
 
     memory = cpu = None
     for depth in range(cap + 1, len(parts) + 1):
@@ -790,16 +810,19 @@ def governed(argv, name):
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
     evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
 
-    A caller whose own cgroup is already under a memory and a CPU limit runs the check in place: a seat with a lane
-    (docs/st3/seat-lanes.md) builds inside its own lane, never in builds.slice beside it. The kernel's limits decide, never a slice
-    name or an environment variable a caller could set. The check then runs with BUILDS_SLICE_ACTIVE=1, which a build host's cargo
+    A caller already under a build cap runs the check in place: builds.slice and seat lanes require memory and CPU limits;
+    gate-slot scopes require a memory limit (`own_cap`). The kernel's limits decide, never a name or an environment variable
+    a caller could set. The check then runs with BUILDS_SLICE_ACTIVE=1, which a build host's cargo
     front door reads as "already in a build cap": without it, that front door moves each cargo command into builds.slice, out of
     the lane. A seat's harness has it from its lane, but a job the seat starts as a unit of its own in the lane does not inherit
     it (2026-10-30, on a build host: such a run's cargo and tests ran in builds.slice).
 
     A seat's caller outside every cap (ST_AGENT set: st-test started as a unit of the seat's own, outside its lane) runs
     the check in a scope in the seat's capped lane (`seat_lane`), with the lane's variables, rather than in builds.slice
-    beside it. Without a capped lane, it takes builds.slice as before and says why."""
+    beside it. Without a capped lane, it takes builds.slice as before and says why.
+
+    A check's compiles that go through an account's sccache wrapper still reach the host's server, in builds.slice: ci-local leaves a
+    lane's sccache socket, since a lane's server started inside a run kept the run's removed TMPDIR (2026-11-01)."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
     cap = own_cap()
@@ -1353,7 +1376,7 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
     if ticket is None:
         ticket = queue / f'{priority_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
     write_ticket(ticket)
-    waited, told, handing = False, set(), False
+    waited, handing = False, False
     began = time.monotonic() - (time.time_ns() - int(ticket.name.split('.')[1])) / 1e9  # since the ticket was taken, by this copy or the one before
     slot_waited, slot_seen, slot_told = 0.0, None, False
     free_since = {}  # tree number -> when this waiter first saw it free (not the head's, so only watched)
@@ -1382,35 +1405,31 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                     except BlockingIOError:
                         lock.close()
                         continue
-                    # A lease ends with the run that held it, not with every process it started (2026-10-28: a seat restart killed runs
-                    # whose children went on). A free tree that still has processes at work in it is busy: never two writers in one tree.
-                    users = tree_users(root / f'tree-{n}')
-                    if not users and slot_ready is None:
-                        return taken(n, lock)
-                    if not users:
-                        ready, why = slot_ready()
-                        now = time.monotonic()
-                        if slot_seen is not None:
-                            slot_waited += now - slot_seen
-                        if ready or slot_waited >= TREE_SLOT_WAIT_LIMIT:
-                            if not ready:
-                                print(f'fractal-test: taking tree-{n} after {round(slot_waited)}s without a free build slot ({why}; '
-                                      f'TREE_SLOT_WAIT_LIMIT): its build waits for one in the tree', file=sys.stderr, flush=True)
-                            elif slot_told:
-                                print(f'fractal-test: a build slot is free ({why}): taking tree-{n} after {round(slot_waited)}s', file=sys.stderr, flush=True)
-                            return taken(n, lock)
+                    try:
+                        clear_tree_orphans(root / f'tree-{n}')
+                    except BaseException:
                         lock.close()
-                        slot_seen, free_tree = now, True
-                        if not slot_told:
-                            slot_told = True
-                            print(f'fractal-test: tree-{n} is free, but a build started now would wait for a slot ({why}); waiting for one '
-                                  f'without holding a tree (at most {TREE_SLOT_WAIT_LIMIT}s)', file=sys.stderr, flush=True)
-                        break  # every free tree would wait for the same slot
+                        raise
+                    if slot_ready is None:
+                        return taken(n, lock)
+                    ready, why = slot_ready()
+                    now = time.monotonic()
+                    if slot_seen is not None:
+                        slot_waited += now - slot_seen
+                    if ready or slot_waited >= TREE_SLOT_WAIT_LIMIT:
+                        if not ready:
+                            print(f'fractal-test: taking tree-{n} after {round(slot_waited)}s without a free build slot ({why}; '
+                                  f'TREE_SLOT_WAIT_LIMIT): its build waits for one in the tree', file=sys.stderr, flush=True)
+                        elif slot_told:
+                            print(f'fractal-test: a build slot is free ({why}): taking tree-{n} after {round(slot_waited)}s', file=sys.stderr, flush=True)
+                        return taken(n, lock)
                     lock.close()
-                    if n not in told:
-                        told.add(n)
-                        print(f'fractal-test: pool tree tree-{n} is free, but processes {", ".join(map(str, users))} still work in it (left by '
-                              'a run that lost the tree); it is skipped until they end', file=sys.stderr)
+                    slot_seen, free_tree = now, True
+                    if not slot_told:
+                        slot_told = True
+                        print(f'fractal-test: tree-{n} is free, but a build started now would wait for a slot ({why}); waiting for one '
+                              f'without holding a tree (at most {TREE_SLOT_WAIT_LIMIT}s)', file=sys.stderr, flush=True)
+                    break  # every free tree would wait for the same slot
             elif trees:
                 # Not the head of this waiter's order. Normally it leaves free trees to the head. But another waiter may run an older or newer copy of this
                 # order and defer to this one while this one defers to it (an old copy's overdue rank-50 ticket and a new copy's rank-3 one), so nobody
@@ -1424,10 +1443,11 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                         lock.close()
                         free_since.pop(n, None)
                         continue
-                    if tree_users(root / f'tree-{n}'):
+                    try:
+                        clear_tree_orphans(root / f'tree-{n}')
+                    except BaseException:
                         lock.close()
-                        free_since.pop(n, None)
-                        continue
+                        raise
                     now = time.monotonic()
                     seen = free_since.setdefault(n, now)
                     if now - seen >= TREE_FREE_FALLBACK_SECONDS and (slot_ready is None or slot_ready()[0]):
@@ -1447,22 +1467,91 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                 ticket.unlink()
 
 
-def tree_users(directory):
-    """The live processes other than this one whose working directory is in the pool tree `directory`: work a run left there when it lost
-    the tree's lease (its children, a lane's build in a scope of its own). Read from /proc; where there is none, nothing can be seen."""
+def tree_users(directory, proc='/proc', execution_only=False):
+    """Same-uid tree users, excluding this process and its ancestors. Normalize path operands before testing the tree boundary."""
     base = os.path.realpath(directory)
+    ancestors, pid = set(), os.getpid()
+    while pid > 0 and pid not in ancestors:
+        ancestors.add(pid)
+        try:
+            status = Path(proc, str(pid), 'status').read_text()
+            pid = int(next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:')))
+        except (OSError, StopIteration, ValueError, IndexError):
+            break
     found = []
-    with contextlib.suppress(OSError):
-        for entry in os.scandir('/proc'):
-            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+    with contextlib.suppress(FileNotFoundError):
+        for entry in os.scandir(proc):
+            if not entry.name.isdigit() or int(entry.name) in ancestors:
                 continue
             try:
-                cwd = os.readlink(f'/proc/{entry.name}/cwd')
-            except OSError:
-                continue  # gone, or not ours to read
-            if cwd == base or cwd.startswith(base + os.sep):
+                if entry.stat().st_uid != os.getuid():
+                    continue
+            except FileNotFoundError:
+                continue
+            paths = []
+            for name in ('cwd', 'exe'):
+                with contextlib.suppress(OSError):
+                    paths.append(os.readlink(Path(entry.path, name)).removesuffix(' (deleted)'))
+            if not execution_only:
+                with contextlib.suppress(OSError):
+                    argv = Path(entry.path, 'cmdline').read_text(errors='surrogateescape').split('\0')
+                    paths.extend(arg.split('=', 1)[1] if arg.startswith('--') and '=' in arg else arg for arg in argv)
+            normalized = (os.path.realpath(path) for path in paths if os.path.isabs(path))
+            if any(path == base or path.startswith(base + os.sep) for path in normalized):
                 found.append(int(entry.name))
     return sorted(found)
+
+
+def clear_tree_orphans(directory, grace=2.0, proc='/proc'):
+    """With the flock held, terminate only execution-backed orphans; argv-only references block reuse without authorizing a signal."""
+    users = tree_users(directory, proc, execution_only=True)
+    references = set(tree_users(directory, proc)) - set(users)
+    if references:
+        commands = {}
+        for pid in sorted(references):
+            commands[pid] = '(unavailable)'
+            with contextlib.suppress(OSError):
+                commands[pid] = Path(proc, str(pid), 'cmdline').read_text(errors='replace').replace('\0', ' ').strip()
+        raise Failure(f'pool tree {directory} has argv-only references {commands}; refusing to use it without signalling them')
+    if not users:
+        return
+    print(f'fractal-test: terminating {len(users)} orphan process(es) in pool tree {directory}', file=sys.stderr, flush=True)
+    handles = {}
+
+    def wait_live():
+        deadline = time.monotonic() + grace
+        while True:
+            exited = set(select.select(list(handles.values()), [], [], 0)[0])
+            live = {pid: fd for pid, fd in handles.items() if fd not in exited}
+            if not live or time.monotonic() >= deadline:
+                return live
+            time.sleep(0.05)
+
+    try:
+        for pid in users:
+            try:
+                fd = os.pidfd_open(pid)
+            except ProcessLookupError:
+                continue
+            handles[pid] = fd
+            # Recheck after pinning: a reused PID must still belong to this tree.
+            if pid not in tree_users(directory, proc, execution_only=True):
+                del handles[pid]
+                os.close(fd)
+                continue
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+        for fd in wait_live().values():
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+        remaining = sorted(set(wait_live()) | set(tree_users(directory, proc)))
+        if remaining:
+            raise Failure(f'pool tree {directory} still has orphan processes {remaining} after SIGKILL; refusing to use it')
+    except OSError as error:
+        raise Failure(f'cannot clear orphan processes in pool tree {directory}: {error}; refusing to use it') from error
+    finally:
+        for fd in handles.values():
+            os.close(fd)
 
 
 def clear_stale_index_lock(directory):
@@ -2124,7 +2213,8 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         started = time.monotonic()
         command = wrap + ['--'] + RUST_TESTS_COMMAND
         print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
-        signed = subprocess.run(command, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
+        environment = report_environment(scratch, dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate))
+        signed = subprocess.run(command, cwd=directory, env=environment,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if signed.returncode != 0:
             detail = (f'{len(failing)} test(s) failed every try: {name_tests(failing)}' if failing else
@@ -2773,6 +2863,7 @@ def run_main(argv, cleanup):
                                 return (name, 'timed out' if code == 124 else f'FAILED ({code})', round(time.monotonic() - started),
                                         'the clippy stage failed: nothing signed' + queue_note(limit)), True, False
                         environment['CLIPPY_REPORT'] = str(report)
+                        environment = report_environment(scratch, environment)
                         wrap += ['--input', f'run_command_sha256={run_sha}']
                     pre_start = None
                     if streams and takes_input_files(tools['evidence-wrap']):

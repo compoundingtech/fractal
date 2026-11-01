@@ -46,6 +46,9 @@ pub fn path() -> Option<PathBuf> {
 }
 
 pub fn load(path: &Path) -> Prefs {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let path = fractal_client::product_dirs::tui_read_path(path);
+    // LIVE-MIGRATION END
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -64,6 +67,43 @@ pub fn save(path: &Path, prefs: &Prefs) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    #[test]
+    fn tui_state_reads_both_names_but_writes_only_stui() {
+        use crate::ui::{drafts_store, glass_store};
+        let root = tempfile::tempdir().unwrap();
+        let new = root.path().join("tui");
+        let old = root.path().join("stui");
+        std::fs::create_dir(&new).unwrap();
+        std::fs::write(new.join("prefs.json"), br#"{"simple":true}"#).unwrap();
+        drafts_store::save(
+            &new.join("drafts.json"),
+            &Default::default(),
+            &[("key".into(), "new".into())].into(),
+        )
+        .unwrap();
+        let glasses = glass_store::Stored {
+            last: Some("new".into()),
+            ..Default::default()
+        };
+        glass_store::save(&new.join("glasses.json"), &glasses).unwrap();
+        assert_eq!(load(&old.join("prefs.json")).simple, Some(true));
+        assert_eq!(drafts_store::load(&old.join("drafts.json"))["key"], "new");
+        assert_eq!(
+            glass_store::load(&old.join("glasses.json")).last,
+            glasses.last
+        );
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("prefs.json"), b"invalid").unwrap();
+        assert_eq!(load(&old.join("prefs.json")), Prefs::default());
+        save(&old.join("prefs.json"), &Prefs::default()).unwrap();
+        assert_eq!(load(&old.join("prefs.json")), Prefs::default());
+        assert_eq!(
+            std::fs::read(new.join("prefs.json")).unwrap(),
+            br#"{"simple":true}"#
+        );
+    }
+    // LIVE-MIGRATION END
 
     #[test]
     fn a_choice_survives_a_restart_and_a_missing_file_is_no_choice() {

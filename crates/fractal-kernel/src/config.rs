@@ -524,6 +524,11 @@ pub struct OtlpConfig {
     /// config so that file can be shared.
     #[serde(default)]
     pub headers_file: Option<PathBuf>,
+    /// Where a person reads those observations, such as a Grafana or otelite address. The usage
+    /// pane links to it when set. An older daemon rejects this key, so set it after every member
+    /// runs this build.
+    #[serde(default)]
+    pub ui_url: Option<String>,
 }
 
 impl OtlpConfig {
@@ -534,6 +539,14 @@ impl OtlpConfig {
             matches!(url.scheme(), "http" | "https"),
             "observations.otlp.endpoint must use http or https"
         );
+        if let Some(ui_url) = &self.ui_url {
+            let url = reqwest::Url::parse(ui_url)
+                .with_context(|| format!("parse observations.otlp.ui_url `{ui_url}`"))?;
+            anyhow::ensure!(
+                matches!(url.scheme(), "http" | "https"),
+                "observations.otlp.ui_url must use http or https"
+            );
+        }
         Ok(())
     }
 
@@ -792,17 +805,22 @@ impl Config {
         Ok((config, unknown))
     }
 
-    /// Resolve the daemon's published endpoint when this client lacks its runtime directory.
-    /// Following the link itself would exceed the Unix socket address limit for long state paths.
+    /// Resolve the daemon's published endpoint when this client lacks its runtime directory, or
+    /// when nothing answers at the runtime default and the published link leads to a daemon that
+    /// does (one started with `--socket` elsewhere). Following the link itself would exceed the
+    /// Unix socket address limit for long state paths.
     pub fn client_socket(&self) -> PathBuf {
-        if env::var_os("XDG_RUNTIME_DIR").is_none() && self.socket == state_socket(&self.state_dir)
-        {
-            return fs::read_link(&self.socket)
+        let published = state_socket(&self.state_dir);
+        match env::var_os("XDG_RUNTIME_DIR") {
+            None if self.socket == published => fs::read_link(&self.socket)
                 .ok()
                 .filter(|target| target.is_absolute())
-                .unwrap_or_else(|| self.socket.clone());
+                .unwrap_or_else(|| self.socket.clone()),
+            Some(runtime) if self.socket == Path::new(&runtime).join("st3.sock") => {
+                fractal_client::runtime_or_published_socket(&self.socket, &published)
+            }
+            _ => self.socket.clone(),
         }
-        self.socket.clone()
     }
 
     /// Merge `STATE/fleet/fleet.toml` from the effective state directory. Call it after
@@ -1607,6 +1625,18 @@ sekrets_profile = "nathan/daemon-gh"
         let mut config = exported.clone();
         config.observations.otlp.as_mut().unwrap().endpoint = "ftp://collector".into();
         assert!(config.validate().is_err());
+        // The address people read the history at is optional, and a link has to be a web address.
+        assert!(!toml::to_string(&exported).unwrap().contains("ui_url"));
+        let linked: Config = toml::from_str(
+            "[observations.otlp]\nendpoint = \"http://127.0.0.1:4318\"\nui_url = \"https://otel.example.test/d/slo\"\n",
+        )
+        .unwrap();
+        linked.validate().unwrap();
+        for bad in ["otel.example.test", "javascript:alert(1)"] {
+            let mut config = linked.clone();
+            config.observations.otlp.as_mut().unwrap().ui_url = Some(bad.into());
+            assert!(config.validate().is_err(), "{bad}");
+        }
     }
 
     #[test]

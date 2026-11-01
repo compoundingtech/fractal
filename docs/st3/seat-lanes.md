@@ -86,7 +86,11 @@ both limits, starts the check in a scope there, with `BUILDS_SLICE_ACTIVE=1` and
 why it is not in the lane. The host's sccache server runs in `builds.slice`, so
 compiles sent to it would leave the lane: a lane sets `SCCACHE_SERVER_UDS` to a socket of its own,
 and the client starts that server inside the lane, on the same on-disk cache (the socket is named for
-the seat, so a restarted harness reuses it). A seat that names its own server keeps it. The build admission queue (slots, load and memory checks) still applies to a
+the seat, so a restarted harness reuses it). A seat that names its own server keeps it. ci-local's
+stages leave that socket (and `SCCACHE_DIR`): a server they started kept the run's `HOME` and
+`TMPDIR`, which the run removes at exit, and every later build in the lane failed through it.
+Compiles a check sends through an account's sccache wrapper reach the host's server, so they count to
+`builds.slice`, not the lane. The build admission queue (slots, load and memory checks) still applies to a
 laned seat in step 1; its slots go only after lanes have run on every Linux member for a day without
 a guard trip.
 

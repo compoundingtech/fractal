@@ -73,7 +73,7 @@ impl PresentationPatchCursor {
     }
 }
 
-mod process;
+use crate::process;
 pub(crate) use process::*;
 
 /// Resolve a task's working directory: declared `cwd` (expanded), else the agent's `workspace`

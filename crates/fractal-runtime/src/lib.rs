@@ -44,7 +44,8 @@ pub use priority::{
 };
 pub use lane::{
     CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, end as end_lane, enforced as lanes_enforced,
-    parse_memory as parse_lane_memory, seat_slice, set_enforced as set_lanes_enforced,
+    parse_memory as parse_lane_memory, sccache_socket as lane_sccache_socket, seat_slice,
+    set_enforced as set_lanes_enforced,
 };
 pub use peer_process::PeerProcessIdentity;
 pub use process::{

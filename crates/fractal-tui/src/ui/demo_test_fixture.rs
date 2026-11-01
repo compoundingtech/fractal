@@ -101,6 +101,7 @@ pub fn world() -> World {
         slo: Load::Ready(slo()),
         slo_history: slo_history(),
         slo_stale: None,
+        slo_otel_url: Some("https://otel.example.test/d/slo".into()),
         clients: Load::Ready(vec![
             Connected {
                 client: s("stui 0.1.0+1ecae71"),
@@ -156,6 +157,7 @@ fn slo() -> Vec<fractal_client::SloRow> {
         status: s(status),
         resets_at_unix_ms: None,
         measured_at_unix_ms: None,
+        tone: None,
         forecast_used_percent: None,
         forecast_basis_minutes: None,
         runs_out_at_unix_ms: None,
@@ -173,6 +175,7 @@ fn slo() -> Vec<fractal_client::SloRow> {
         status: s(if left > 0.0 { "met" } else { "missed" }),
         resets_at_unix_ms: Some(now + resets),
         measured_at_unix_ms: Some(now - 180_000),
+        tone: None,
         forecast_used_percent: None,
         forecast_basis_minutes: None,
         runs_out_at_unix_ms: None,

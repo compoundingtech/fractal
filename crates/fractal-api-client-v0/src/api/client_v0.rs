@@ -3853,6 +3853,16 @@ fn operation_checks(
     Ok(Some(checks))
 }
 
+/// A doctor check's severity and state as an operation. A check that timed out, or carries a
+/// status this build does not know, could not say the daemon is healthy: it shows as degraded.
+fn operation_severity_and_state(status: &str) -> (&'static str, &'static str) {
+    match status {
+        "pass" | "info" => ("info", "healthy"),
+        "fail" => ("critical", "failed"),
+        _ => ("warning", "degraded"),
+    }
+}
+
 fn operation_resources(state: &AppState, at: &str) -> Result<Vec<Value>, ApiError> {
     let Some(checks) = operation_checks(state)? else {
         return Ok(vec![json!({
@@ -3878,8 +3888,8 @@ fn operation_resources(state: &AppState, at: &str) -> Result<Vec<Value>, ApiErro
                 "revision": format!("{}:{}", check.name, check.status),
                 "updated_at": at,
                 "component": match check.name.as_str() { "replication" => "transport", "runtime-drift" | "runtime-ownership" | "pty-runtime" | "driver-readiness" => "runtime", _ => "daemon" },
-                "severity": match check.status.as_str() { "fail" => "critical", "warn" => "warning", _ => "info" },
-                "state": match check.status.as_str() { "fail" => "failed", "warn" => "degraded", _ => "healthy" },
+                "severity": operation_severity_and_state(&check.status).0,
+                "state": operation_severity_and_state(&check.status).1,
                 "summary": check.message,
                 "targets": [],
                 "operational": { "layer": "current", "actionable": false, "reasons": ["diagnostic"] }
@@ -14899,6 +14909,12 @@ subscription "watch/source" {
                 .any(|item| item["revision"] == "claim-store:pass"),
             "{report:?}"
         );
+
+        // A check doctor gave up on at its deadline is never shown as healthy.
+        assert_eq!(operation_severity_and_state("timeout"), ("warning", "degraded"));
+        assert_eq!(operation_severity_and_state("fail"), ("critical", "failed"));
+        assert_eq!(operation_severity_and_state("pass"), ("info", "healthy"));
+        assert_eq!(operation_severity_and_state("a-later-status"), ("warning", "degraded"));
 
         // A started report is made on its own thread, and a second start keeps it.
         let other = tempfile::tempdir().unwrap();

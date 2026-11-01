@@ -34,8 +34,10 @@ fleet_compat() {
     python3 scripts/dep-info-check --logs "$logs" --check linux-fleet-compat --policy "$policy" --jsonl 'fleet-compat-*.jsonl' --warn || return
   fi
   cargo test -p fractal --locked --test integration -- --ignored --exact \
-    fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade 2>&1 | tee "$logs/compat-result.log" || return
-  grep -q "test result: ok. 1 passed" "$logs/compat-result.log" || return
+    fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade \
+    fleet::previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place \
+    fleet::previous_release_mail_reads_beside_stream_items_across_upgrade_and_rollback 2>&1 | tee "$logs/compat-result.log" || return
+  grep -q "test result: ok. 3 passed" "$logs/compat-result.log" || return
   # The GitHub plugin store beside an older poller, and that poller upgraded in place.
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade 2>&1 | tee "$logs/compat-plugin-result.log" || return

@@ -269,6 +269,67 @@ async fn running_the_same_send_twice_sends_one_message() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_reply_references_use_read_normalization() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let original = value(&st(&socket, &[], &[
+        "--json", "conversations", "send", LEAD,
+        "--from", WORKER, "--body", "Shall I start?",
+    ]).await);
+    let parent = original["subject"].as_str().unwrap();
+    let bare = parent.strip_prefix("message/").unwrap();
+    let encoded = format!("message%2F{bare}");
+    let projected = format!("/mail/inbox/00000000000000000001-{bare}.md");
+    let mut first_subject = None;
+    for reference in [parent, bare, encoded.as_str(), projected.as_str()] {
+        let sent = value(&st(&socket, &[], &[
+            "--json", "conversations", "send", WORKER,
+            "--from", LEAD, "--body", "Acknowledged.", "--in-reply-to", reference,
+        ]).await);
+        assert_eq!(sent["in_reply_to"], parent);
+        if let Some(first) = &first_subject {
+            assert_eq!(&sent["subject"], first, "equivalent references sent twice");
+            assert_eq!(sent["already_sent"], true);
+        } else {
+            first_subject = Some(sent["subject"].clone());
+        }
+    }
+    assert_eq!(message_count(&store), 2);
+
+    let reply = value(&st(&socket, &[], &[
+        "--json", "conversations", "reply", bare,
+        "--from", LEAD, "--body", "Reply also accepts bare IDs.",
+    ]).await);
+    assert_eq!(reply["in_reply_to"], parent);
+
+    let malformed = st(&socket, &[], &[
+        "--json", "conversations", "send", WORKER,
+        "--from", LEAD, "--body", "Invalid.", "--in-reply-to", "not a message",
+    ]).await;
+    assert!(!malformed.status.success());
+    assert!(stderr(&malformed).contains("message/<id>"), "{}", stderr(&malformed));
+    assert_eq!(message_count(&store), 3, "invalid reference sent a message");
+
+    // Canonical subjects retain their exact spelling, even when read would normalize it.
+    use sha2::{Digest as _, Sha256};
+    for reference in ["message/message/x", "message/topic.md", "message/topic%2Fx"] {
+        let sent = value(&st(&socket, &[("ST3_MESSAGE_KEY_HOUR", "42")], &[
+            "--json", "conversations", "send", WORKER,
+            "--from", LEAD, "--body", "Canonical.", "--in-reply-to", reference,
+        ]).await);
+        assert_eq!(sent["in_reply_to"], reference);
+        let canonical = serde_json::json!([
+            "st3-message:v1:", LEAD, WORKER, reference, null, "Canonical.",
+            [], [], null, 42,
+        ]);
+        let digest = hex::encode(Sha256::digest(canonical.to_string().as_bytes()));
+        let expected_key = format!("st3-message:v1:{}", &digest[..32]);
+        assert_eq!(sent["idempotency_key"], expected_key);
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn running_the_same_reply_twice_sends_one_reply() {
     let root = tempfile::tempdir().unwrap();
     let (socket, store, server) = daemon(root.path()).await;

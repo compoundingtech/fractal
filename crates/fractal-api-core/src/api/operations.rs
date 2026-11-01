@@ -18,16 +18,26 @@ pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
 #[derive(Clone)]
 pub struct LocalWebStatus(pub DoctorCheck);
 
+/// Each step outside the store checks waits at most this long, so the report answers inside
+/// the client's 120 s request limit even when every step is slow.
+const DOCTOR_STEP: Duration = Duration::from_secs(10);
+
 pub async fn doctor(
     State(state): State<AppState>,
     web: Option<Extension<LocalWebStatus>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
     let reader_store = state.store.clone();
-    let environment = crate::api::read_deadline::spawn_blocking(crate::environment::snapshot)
-        .await
-        .map_err(ApiError::internal)?;
+    let environment = match tokio::time::timeout(
+        DOCTOR_STEP,
+        crate::api::read_deadline::spawn_blocking(crate::environment::snapshot),
+    )
+    .await
+    {
+        Ok(environment) => Some(environment.map_err(ApiError::internal)?),
+        Err(_) => None,
+    };
     // Linking a crate takes seconds, so it runs while the other checks do.
-    let build_tools = environment.as_ref().ok().cloned().map(|environment| {
+    let build_tools = environment.as_ref().and_then(|environment| environment.as_ref().ok()).cloned().map(|environment| {
         crate::api::read_deadline::spawn_blocking(move || crate::environment::check_build_tools(&environment))
     });
     let pty_root = state.pty_root.clone();
@@ -37,17 +47,10 @@ pub async fn doctor(
             .unwrap_or_default();
         fractal_runtime::priority_report(&observations)
     });
-    let token = crate::resource::github_auth().await;
-    let writer_wait = smallclaims::sqlite::telemetry::current_request();
-    let mut report = crate::api::read_deadline::spawn_blocking(move || {
-        // Sealing this node's batches writes through the store's writer, so the request's
-        // writer accounting must follow the job off the runtime thread.
-        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
-        // This node's claims are signed as their batches are sealed; seal and judge them so
-        // the signature counts cover everything written so far.
-        state.store.replication_snapshot().map_err(ApiError::internal)?;
-        doctor_report(&state)
-    })
+    let token = tokio::time::timeout(DOCTOR_STEP, crate::resource::github_auth()).await;
+    // Doctor reads what is sealed: claims in batches not sealed yet count as unsealed. Sealing
+    // or judging here would take the writer to answer a read-only question.
+    let mut report = crate::api::read_deadline::spawn_blocking(move || doctor_report(&state))
         .await
         .map_err(ApiError::internal)??
         .0;
@@ -55,12 +58,13 @@ pub async fn doctor(
         report.checks.push(web.0);
     }
     if let Some(build_tools) = build_tools {
-        report.checks.push(build_tools_check(
-            &build_tools.await.map_err(ApiError::internal)?,
-        ));
+        report.checks.push(match tokio::time::timeout(DOCTOR_STEP, build_tools).await {
+            Ok(build_tools) => build_tools_check(&build_tools.map_err(ApiError::internal)?),
+            Err(_) => doctor_timeout("build-tools", DOCTOR_STEP),
+        });
     }
     report.checks.push(match environment {
-        Ok(environment) => DoctorCheck {
+        Some(Ok(environment)) => DoctorCheck {
             name: "daemon-environment".into(),
             status: "pass".into(),
             message: format!(
@@ -68,25 +72,30 @@ pub async fn doctor(
                 environment.get("PATH").map(String::as_str).unwrap_or("")
             ),
         },
-        Err(error) => DoctorCheck {
+        Some(Err(error)) => DoctorCheck {
             name: "daemon-environment".into(),
             status: "fail".into(),
             message: error.to_string(),
         },
+        None => doctor_timeout("daemon-environment", DOCTOR_STEP),
     });
-    let (status, message) = priority.await.map_err(ApiError::internal)?;
-    report.checks.push(DoctorCheck {
-        name: "priority".into(),
-        status: status.into(),
-        message,
+    report.checks.push(match tokio::time::timeout(DOCTOR_STEP, priority).await {
+        Ok(priority) => {
+            let (status, message) = priority.map_err(ApiError::internal)?;
+            DoctorCheck { name: "priority".into(), status: status.into(), message }
+        }
+        Err(_) => doctor_timeout("priority", DOCTOR_STEP),
     });
-    report.checks.push(DoctorCheck {
-        name: "github-observer-auth".into(),
-        status: if token.is_ok() { "pass" } else { "warn" }.into(),
-        message: match token {
-            Ok(_) => "GitHub observers have a credential source; credential values are not displayed".into(),
-            Err(error) => error.to_string(),
+    report.checks.push(match token {
+        Ok(token) => DoctorCheck {
+            name: "github-observer-auth".into(),
+            status: if token.is_ok() { "pass" } else { "warn" }.into(),
+            message: match token {
+                Ok(_) => "GitHub observers have a credential source; credential values are not displayed".into(),
+                Err(error) => error.to_string(),
+            },
         },
+        Err(_) => doctor_timeout("github-observer-auth", DOCTOR_STEP),
     });
     // Request samples are live operational telemetry. Keep them on /v1/doctor,
     // outside the store-index-fenced operation projection built by doctor_report.
@@ -135,14 +144,7 @@ pub async fn doctor(
         smallclaims::sqlite::max_read_workers(),
         crate::memory::service_memory(),
     ));
-    report.status = if report.checks.iter().any(|check| check.status == "fail") {
-        "fail"
-    } else if report.checks.iter().any(|check| check.status == "warn") {
-        "warn"
-    } else {
-        "pass"
-    }
-    .into();
+    report.status = doctor_status(&report.checks).into();
     Ok(Json(report))
 }
 
@@ -505,10 +507,28 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     let rows = blocking_store(move || {
         let mut rows = slo_rows(&store)?;
         add_budget_forecasts(&mut rows, &dir, client_now_ms() as u64);
+        add_tones(&mut rows);
         Ok(rows)
     })
     .await?;
-    Ok(Json(json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows})))
+    let mut body = json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows});
+    if let Some(url) = crate::slo_history::ui_url() {
+        body["otel_ui_url"] = Value::String(url);
+    }
+    Ok(Json(body))
+}
+
+/// Say on each row how urgent it is, by the one rule the terminal UI colors with, so the phone
+/// and the web app need not decide what is red.
+fn add_tones(rows: &mut [Value]) {
+    for row in rows {
+        let tone = fractal_ui_model::slo::tone(
+            row["kind"].as_str().unwrap_or_default(),
+            row["status"].as_str().unwrap_or_default(),
+            row["remaining_percent"].as_f64(),
+        );
+        row["tone"] = Value::String(tone.word().into());
+    }
 }
 
 /// Say on each budget how much will be used when it resets, at the rate the local history log

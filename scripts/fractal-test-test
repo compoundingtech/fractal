@@ -258,6 +258,101 @@ class ConfigBridgeTest(unittest.TestCase):
                 self.assertFalse(marker.exists(), 'candidate producer must never execute under accepted rust-tests policy')
 
 
+class TreeOrphansTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.proc = Path(self.tmp.name, 'proc')
+        self.proc.mkdir()
+        self.tree = Path(self.tmp.name, 'tree-0')
+
+    def process(self, pid, cwd=None, exe=None, argv=(), ppid=0):
+        entry = self.proc / str(pid)
+        entry.mkdir()
+        for name, path in (('cwd', cwd), ('exe', exe)):
+            if path is not None:
+                (entry / name).symlink_to(path)
+        (entry / 'cmdline').write_text('\0'.join(map(str, argv)))
+        (entry / 'status').write_text(f'PPid:\t{ppid}\n')
+        return entry
+
+    def test_detection_uses_exe_cwd_and_argv_with_uid_and_path_boundaries(self):
+        self.process(101, cwd=self.tree / 'nested')
+        self.process(102, exe=str(self.tree / 'target/fixture') + ' (deleted)')
+        self.process(103, cwd='/', argv=['python3', f'--file={self.tree}/driver'])
+        self.process(104, cwd=str(self.tree) + '-other', argv=[f'/prefix{self.tree}/driver'])
+        self.process(105, argv=[self.tree])
+        self.process(os.getpid(), cwd=self.tree)
+        self.process(106)  # exiting process with unreadable links and empty argv
+        self.process(107, argv=[f'{self.tree}/../tree-1/driver'])
+        self.process(108, argv=[f'--file={self.tree}/../tree-1/driver'])
+        self.assertEqual(st_test.tree_users(self.tree, self.proc), [101, 102, 103, 105])
+        with mock.patch.object(st_test.os, 'getuid', return_value=os.getuid() + 1):
+            self.assertEqual(st_test.tree_users(self.tree, self.proc), [])
+        self.assertEqual(st_test.tree_users(self.tree, self.proc / 'missing'), [])
+
+    def test_argv_paths_resolve_symlinks_before_parent_segments(self):
+        self.tree.mkdir()
+        sibling = Path(self.tmp.name, 'tree-1')
+        (sibling / 'nested').mkdir(parents=True)
+        (self.tree / 'link').symlink_to(sibling / 'nested', target_is_directory=True)
+        alias = Path(self.tmp.name, 'alias')
+        alias.symlink_to(self.tree, target_is_directory=True)
+        self.process(101, argv=[str(self.tree / 'link/driver')])
+        self.process(102, argv=[f'--file={alias}/driver'])
+        self.process(103, argv=[str(self.tree / 'link/../driver')])
+        self.assertEqual(st_test.tree_users(self.tree, self.proc), [102])
+
+    def test_ancestors_referencing_the_tree_are_never_pinned_or_signalled(self):
+        self.process(os.getpid(), cwd=self.tree, ppid=101)
+        self.process(101, cwd=self.tree, ppid=102)
+        self.process(102, argv=[f'--tree={self.tree}'], ppid=1)
+        self.process(1, cwd=self.tree)
+        with mock.patch.object(st_test.os, 'pidfd_open') as opened, \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
+            st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc)
+        opened.assert_not_called()
+        sent.assert_not_called()
+
+    def test_argv_only_reference_refuses_tree_without_signalling(self):
+        self.process(101, cwd='/', argv=['tail', '-f', str(self.tree / 'log')])
+        with mock.patch.object(st_test.os, 'pidfd_open') as opened, \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
+            with self.assertRaisesRegex(st_test.Failure, r'argv-only.*101.*tail.*refusing'):
+                st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc)
+        opened.assert_not_called()
+        sent.assert_not_called()
+
+    def test_termination_escalates_only_survivors_and_refuses_dirty_tree(self):
+        for exits_on in (st_test.signal.SIGTERM, st_test.signal.SIGKILL, 'chdir', None):
+            with self.subTest(exits_on=exits_on):
+                entry = self.process(101, cwd=self.tree)
+                real_close = os.close
+                def send(fd, sig):
+                    if exits_on == 'chdir' and sig == st_test.signal.SIGTERM:
+                        (entry / 'cwd').unlink()
+                        (entry / 'cwd').symlink_to('/')
+                    if sig == exits_on or (exits_on == 'chdir' and sig == st_test.signal.SIGKILL):
+                        shutil.rmtree(entry)
+                with mock.patch.object(st_test.select, 'select', side_effect=lambda *args: ([501] if not entry.exists() else [], [], [])), \
+                        mock.patch.object(st_test.os, 'pidfd_open', return_value=501), \
+                        mock.patch.object(st_test.os, 'close', side_effect=lambda fd: None if fd == 501 else real_close(fd)) as close, \
+                        mock.patch.object(st_test.signal, 'pidfd_send_signal', side_effect=send) as sent, \
+                        contextlib.redirect_stderr(io.StringIO()) as said:
+                    if exits_on is None:
+                        with self.assertRaisesRegex(st_test.Failure, 'after SIGKILL; refusing'):
+                            st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc)
+                        shutil.rmtree(entry)
+                    else:
+                        st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc)
+                expected = [mock.call(501, st_test.signal.SIGTERM)]
+                if exits_on != st_test.signal.SIGTERM:
+                    expected.append(mock.call(501, st_test.signal.SIGKILL))
+                self.assertEqual(sent.call_args_list, expected)
+                self.assertEqual(close.call_args_list.count(mock.call(501)), 1)
+                self.assertIn('terminating 1 orphan process', said.getvalue())
+
+
 class PoolTreeTest(unittest.TestCase):
     """Pool reuse without a signer or remote: only disposable local worktrees are involved."""
 
@@ -369,12 +464,14 @@ class PoolTreeTest(unittest.TestCase):
 
 
 class GovernedTest(unittest.TestCase):
-    """A building check runs in builds.slice unless its caller's own cgroup is already under a memory and a CPU limit."""
+    """A building check stays inside a kernel-verified build, lane or gate-slot cap; otherwise it takes builds.slice."""
 
     LANE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/app-lanes-seat_1_0a1b2c3d4e5f.slice/st3-seat-1-0.scope'
     BUILDS = 'user.slice/user-1000.slice/user@1000.service/builds.slice/run-p1-i1.scope'
     SEAT = 'user.slice/user-1000.slice/user@1000.service/app.slice/st3-seat-1-0.scope'
     LANE_SLICE = 'app-lanes-seat_1_0a1b2c3d4e5f.slice'
+    GATE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-capped.slice/gate-slot-gate-123-456.scope'
+    HEAVY = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-capped.slice/app-capped-heavy.slice/gate-slot-heavy-123.scope'
 
     def tree(self, tmp, leaf, limits):
         """A cgroup v2 tree under TMP whose every level is unlimited but the ones LIMITS names ({level: (memory.max, cpu.max)})."""
@@ -428,6 +525,32 @@ class GovernedTest(unittest.TestCase):
     def test_a_capped_lane_or_build_scope_runs_in_place(self):
         self.assert_in_place(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), 'lane')
         self.assert_in_place(self.governed_in(self.BUILDS, {'builds.slice': ('34359738368', '1000000 100000')}), 'builds.slice')
+
+    def test_a_memory_capped_gate_slot_and_its_descendants_run_in_place(self):
+        limits = {'app-capped-heavy.slice': ('17179869184', 'max 100000')}
+        self.assert_in_place(self.governed_in(self.HEAVY, limits), 'shared heavy memory cap, no CPU quota')
+        self.assert_in_place(self.governed_in(self.HEAVY + '/child', limits), 'descendant of heavy scope')
+        self.assert_in_place(self.governed_in(self.GATE, {'gate-slot-gate-123-456.scope': ('10737418240', None)}),
+                             'scope memory cap, no CPU controller')
+        self.assert_in_place(self.governed_in(self.GATE, {'app-capped.slice': ('17179869184', 'max 100000')}),
+                             'approved parent memory cap')
+        self.assert_in_place(self.governed_in(self.HEAVY, {'app-capped.slice': ('17179869184', 'max 100000')}),
+                             'heavy scope inherits the approved outer slice cap')
+
+    def test_gate_slot_names_and_environment_without_the_right_memory_cap_do_not_count(self):
+        self.assert_scoped(self.governed_in(self.HEAVY, {}), 'scope name without a cap')
+        markers = {'GATE_SLOT_ADMITTED': '1', 'GATE_SLOT_SCOPE_UNIT': 'gate-slot-heavy-123.scope', 'BUILDS_SLICE_ACTIVE': '1'}
+        self.assert_scoped(self.governed_in(self.SEAT, {}, markers), 'environment alone')
+        self.assert_scoped(self.governed_in(self.HEAVY, {'app.slice': ('17179869184', 'max 100000')}),
+                           'limit above the app-capped anchor')
+        self.assert_scoped(self.governed_in(self.HEAVY, {'app-capped-heavy.slice': (None, '100000 100000')}),
+                           'CPU alone without a memory controller')
+        misplaced = self.HEAVY.replace('app-capped.slice/', '')
+        self.assert_scoped(self.governed_in(misplaced, {'app-capped-heavy.slice': ('17179869184', 'max 100000')}),
+                           'heavy slice outside app-capped.slice')
+        daemon = self.SEAT.rsplit('/', 1)[0] + '/smalltalk.service'
+        self.assert_scoped(self.governed_in(daemon, {'smalltalk.service': ('9663676416', '100000 100000')}),
+                           'daemon memory cap is not a build cap')
 
     def test_an_uncapped_caller_is_scoped_whatever_its_name_or_environment_says(self):
         self.assert_scoped(self.governed_in(self.SEAT, {}, {'BUILDS_SLICE_ACTIVE': '1'}), 'environment')
@@ -2341,6 +2464,14 @@ class StTest(unittest.TestCase):
             for name in ('GIT_DIR', 'GIT_AUTHOR_NAME', 'GIT_WORK_TREE', 'GIT_PUSH_OPTION_COUNT'):
                 self.assertNotIn(name, os.environ)
 
+    def test_receipt_sink_survives_scrubbing_with_resolved_disposable_roots(self):
+        with mock.patch.dict(os.environ, {'CI_PERF_SLOT_RECEIPT_DIR': '/persistent/receipts', 'ST_MISSION': 'seat'}), \
+                mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL': '/configured/pool', 'ST_TEST_TMP': '/configured/tmp'}):
+            st_test.scrub_seat_environment()
+            self.assertEqual(os.environ['CI_PERF_SLOT_RECEIPT_DIR'], '/persistent/receipts')
+            self.assertEqual(json.loads(os.environ['CI_PERF_SLOT_DISPOSABLE_ROOTS']), ['/configured/pool', '/configured/tmp'])
+            self.assertNotIn('ST_MISSION', os.environ)
+
     def test_the_checks_do_not_see_the_agent_seats_variables_but_the_hosts_ranking_name_and_the_switches_stay(self):
         self.commit('b.txt', 'two')
         seat = {'ST_MISSION': 'm', 'ST3_ENDPOINT': 'e', 'CLAUDECODE': '1', 'CLAUDE_CONFIG_DIR': '/c', 'ANTHROPIC_API_KEY': 'k',
@@ -3038,27 +3169,17 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(by({'ST_AGENT': '', 'CARGO_PRIORITY_CALLER': 'agent/crew/leads/lead-2'}), 4)
         self.assertEqual(st_test.priority_rank({'ST_AGENT': 'agent/x', 'CARGO_PRIORITY_FILE': str(priority) + '.missing'}), 50)
 
-    def test_a_free_tree_with_a_process_still_in_it_is_skipped_until_the_process_ends(self):
+    def test_a_free_tree_terminates_orphans_before_reuse(self):
         (self.root / 'tree-0').mkdir(parents=True)
-        left = subprocess.Popen(['sleep', '60'], cwd=self.root / 'tree-0')  # what a run that lost tree-0 left at work in it
+        left = subprocess.Popen(['sleep', '60'], cwd=self.root / 'tree-0')
         self.addCleanup(left.wait)
         self.addCleanup(left.kill)
-        said = io.StringIO()
-        with contextlib.redirect_stderr(said):
-            n, lock = st_test.acquire_tree(self.root, 2, rank=50)              # another tree is free: that one, at once
-            self.assertEqual(n, 1)
-            got = []
-            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50)))
-            waiter.start()
-            time.sleep(0.5)
-            self.assertEqual(got, [])                                           # tree-0's lease is free, but the tree is not
-            left.kill()
-            left.wait()
-            waiter.join(5)
-            lock.close()
-        self.assertEqual(got[0][0], 0)
-        got[0][1].close()
-        self.assertEqual(said.getvalue().count(f'processes {left.pid} still work in it'), 2)  # once per waiter, not on every look
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50)
+        self.addCleanup(lock.close)
+        self.assertEqual(n, 0)
+        self.assertIsNotNone(left.poll())
+        self.assertIn('terminating 1 orphan process', said.getvalue())
 
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)
@@ -3872,6 +3993,41 @@ class KeyedClippy(StTest):
 
     def clippy_notes(self):
         return [s['predicate']['observed'] for s in self.statements() if 'linux-clippy' in s['predicate']['observed']['checks']]
+
+    def test_report_python_survives_a_home_without_the_callers_profile_without_admitting_sibling_tools(self):
+        caller_bin = Path(self.tmp.name) / 'caller-bin'
+        caller_bin.mkdir()
+        # Distinct copied entry points model venv --copies; their path identities need not match.
+        for name in ('python', 'python3'):
+            shutil.copy2(sys.executable, caller_bin / name)
+        for name in ('nix', 'sibling-tool'):
+            (caller_bin / name).write_text('#!/bin/sh\nexit 99\n')
+            (caller_bin / name).chmod(0o755)
+        trusted_bin = Path(self.tmp.name) / 'canonical-bin'
+        trusted_bin.mkdir()
+        (trusted_bin / 'nix').write_text('#!/bin/sh\nexit 0\n')
+        (trusted_bin / 'nix').chmod(0o755)
+        with mock.patch.object(st_test, 'CHECK_PATH', (str(trusted_bin),)), \
+                mock.patch.object(st_test, 'resolve_nix', return_value=None), \
+                mock.patch.object(sys, 'executable', str(caller_bin / 'python')), \
+                mock.patch.dict(os.environ, HOME=str(self.home), PATH=str(caller_bin)):
+            path = st_test.check_path()
+            self.assertEqual(path, str(trusted_bin), 'canonical PATH must not include interpreter siblings')
+            environment = st_test.report_environment(self.tmp.name, dict(os.environ, PATH=path))
+        self.assertEqual(shutil.which('nix', path=environment['PATH']), str(trusted_bin / 'nix'))
+        self.assertIsNone(shutil.which('sibling-tool', path=environment['PATH']))
+        python_bin = Path(environment['PATH'].split(os.pathsep)[0])
+        self.assertEqual([entry.name for entry in python_bin.iterdir()], ['python3'])
+        for check in ('linux-clippy', 'rust-tests'):
+            self.assertEqual(LOCAL[check][0], 'python3', 'portable report argv still matches the evidence policy')
+            done = subprocess.run([LOCAL[check][0], '-I', '-c', 'print("report python works")'],
+                                  env=environment, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(done.stdout.strip(), 'report python works')
+        code, out, err = self.run_clippy('linux-clippy')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['clippy'])
+        self.assertEqual(len(self.clippy_notes()), 1)
 
     def test_unsigned_linux_clippy_is_signed_from_linux_gates_clippy_stage_which_runs_once(self):
         code, out, err = self.run_clippy('linux-gate', 'linux-clippy')

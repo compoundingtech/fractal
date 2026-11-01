@@ -894,6 +894,9 @@ pub struct MailBacklog {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SloList {
     pub as_of_unix_ms: u64,
+    /// Where a person reads the exported observation history, when the daemon is configured with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel_ui_url: Option<String>,
     pub rows: Vec<SloRow>,
 }
 /// One objective (a target with windows and an error budget) or one budget (an allowance that
@@ -910,6 +913,9 @@ pub struct SloRow {
     pub window: String,
     pub remaining_percent: Option<f64>,
     pub status: String,
+    /// How urgent the row is: `red`, `green`, `yellow` or `quiet`; a client treats any other word as `quiet`. Absent from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
     #[serde(default)]
     pub resets_at_unix_ms: Option<u64>,
     #[serde(default)]

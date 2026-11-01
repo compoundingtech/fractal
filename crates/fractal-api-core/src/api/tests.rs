@@ -1893,7 +1893,15 @@ async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
     assert_eq!(body["value"]["agent"], "agent/node.fixture");
     assert_eq!(body["value"]["runtime_id"], runtime_id.as_str());
     // The runtime's own name for the seat's slice, the one a launch caps (crate::lane::prepare).
-    assert_eq!(body["value"]["slice"], fractal_runtime::seat_slice(&runtime_id).as_str());
+    let slice = fractal_runtime::seat_slice(&runtime_id);
+    assert_eq!(body["value"]["slice"], slice.as_str());
+    // The lane's own sccache server, as the runtime names it in a laned task's environment, under the
+    // daemon's runtime directory; null without one.
+    let sccache = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| fractal_runtime::lane_sccache_socket(&dir, &slice));
+    assert_eq!(body["value"]["sccache_server_uds"], json!(sccache), "{body}");
     let (status, body) = get("/v1/agents/lane?agent=node.nobody").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
@@ -13658,3 +13666,71 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
     }
 }
 
+
+#[test]
+fn a_doctor_check_past_its_deadline_reports_timeout_and_the_next_check_still_runs() {
+    let clock = DoctorClock::new(Duration::from_secs(5), Duration::from_millis(100));
+    let pass = |name: &str| DoctorCheck { name: name.into(), status: "pass".into(), message: String::new() };
+    let slow = clock.checks("slow-check", || {
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(vec![pass("slow-check")])
+    });
+    assert_eq!(slow.len(), 1);
+    assert_eq!((slow[0].name.as_str(), slow[0].status.as_str()), ("slow-check", "timeout"));
+    assert!(slow[0].message.starts_with("did not finish in 0.") && slow[0].message.contains(" s;"), "{}", slow[0].message);
+    // A store read past the deadline is interrupted rather than left to run.
+    let interrupted = clock.checks("interrupted", || {
+        std::thread::sleep(Duration::from_millis(150));
+        smallclaims::read_budget::check().map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+        Ok(vec![pass("interrupted")])
+    });
+    assert_eq!(interrupted[0].status, "timeout");
+    let next = clock.checks("next-check", || Ok(vec![pass("next-check")]));
+    assert_eq!(next[0].status, "pass");
+    // An error fails its own check and nothing else.
+    let failed = clock.checks("failing-check", || Err(ApiError::internal(anyhow::anyhow!("no such table"))));
+    assert_eq!((failed[0].name.as_str(), failed[0].status.as_str()), ("failing-check", "fail"));
+    assert!(failed[0].message.contains("no such table"), "{}", failed[0].message);
+    let checks = [slow, next].concat();
+    assert_eq!(doctor_status(&checks), "fail", "a timed-out check fails the report");
+    assert_eq!(doctor_status(&checks[1..]), "pass");
+}
+
+#[test]
+fn doctor_checks_after_the_total_is_spent_say_they_did_not_run() {
+    let clock = DoctorClock::new(Duration::from_millis(150), Duration::from_millis(100));
+    let ran = std::cell::Cell::new(0);
+    for _ in 0..2 {
+        clock.checks("slow-check", || {
+            ran.set(ran.get() + 1);
+            std::thread::sleep(Duration::from_millis(110));
+            Ok(Vec::new())
+        });
+    }
+    assert_eq!(ran.get(), 2);
+    let skipped = clock.checks("late-check", || {
+        ran.set(ran.get() + 1);
+        Ok(Vec::new())
+    });
+    assert_eq!(ran.get(), 2, "a check after the total is spent does not run");
+    assert_eq!((skipped[0].status.as_str(), skipped[0].message.as_str()), ("timeout", "not run: doctor's checks used all their time"));
+}
+
+#[tokio::test]
+async fn doctor_reads_what_is_sealed_without_sealing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.append_claim(&ClaimInput {
+        subject: "agent/example.sealing".into(), kind: "runtime.observed".into(),
+        actor: Some("agent/example.sealing".into()),
+        fields: BTreeMap::from([("status".into(), json!("running"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let (status, doctor) = get_request(router(state.clone()), "/v1/doctor").await;
+    assert_eq!(status, StatusCode::OK, "{doctor}");
+    let checks = doctor["checks"].as_array().unwrap();
+    let signatures = checks.iter().find(|check| check["name"] == "claim-signatures").unwrap();
+    let message = signatures["message"].as_str().unwrap();
+    assert!(!message.contains(" 0 not yet sealed"), "doctor sealed this node's batches to answer: {message}");
+    assert!(checks.iter().all(|check| check["status"] != "timeout"), "{doctor}");
+}

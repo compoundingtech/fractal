@@ -746,6 +746,8 @@ gate "text omits value" { lacks "message/report" "UNVERIFIED" }
 
 `field` uses this argument order: path, full subject, operator, value. Operators are `is`, `starts-with`, and `contains`.
 
+On a `resource/...` subject, pinned to a claim (`resource/NAME@CLAIM`, as a resource input is) or not, the path reads the resource's facts first, then its whole observation. So `state` and `facts.state` both read a GitHub item's state.
+
 An `exit_code` field gate on an `exec/...` subject fails when the exec has ended and
 its selected launch cannot restart, including a missing exit code after the process was killed.
 The failure names the exec and its exit code. A running exec or an exec that can restart keeps
