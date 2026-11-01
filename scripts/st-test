@@ -1316,7 +1316,7 @@ def ticket_rules(path):
     """The QUEUE_RULES a ticket was written under: 0 for a ticket of a copy older than versioned tickets (an empty file), or one that is unreadable."""
     try:
         found = re.fullmatch(r'rules (\d+)\n?', path.read_text())
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return 0
     return int(found.group(1)) if found else 0
 
