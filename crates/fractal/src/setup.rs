@@ -1,7 +1,7 @@
 //! Establish a person's local configuration before any daemon or seat starts.
 
 use std::fs::{self, File};
-use std::io::{IsTerminal as _, Write as _};
+use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,12 @@ macro_rules! say {
 pub struct SetupArgs {
     #[arg(skip)]
     pub json_output: bool,
+    #[arg(long, hide = true, conflicts_with = "receipt_write")]
+    pub receipt_verify: Option<PathBuf>,
+    #[arg(long, hide = true, conflicts_with = "receipt_verify")]
+    pub receipt_write: Option<PathBuf>,
+    #[arg(long, hide = true, requires = "receipt_write", value_parser = ["script", "hm", "setup"])]
+    pub receipt_installer: Option<String>,
     /// Your name: lowercase letters, digits, hyphens and underscores.
     #[arg(long)]
     pub person: Option<String>,
@@ -131,6 +137,19 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
 }
 
 pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
+    if args.receipt_verify.is_some() || args.receipt_write.is_some() {
+        if let Some(bin) = &args.receipt_verify {
+            verify_install_receipt(bin)?;
+        }
+        if let Some(bin) = &args.receipt_write {
+            write_install_receipt(bin, args.receipt_installer.as_deref().unwrap_or("setup"))?;
+        }
+        return Ok(PreparedSetup {
+            config: Config::default(),
+            harness: None,
+            initial_subject: None,
+        });
+    }
     require_person_process()?;
     let program = args.program();
     let path = args.config.clone().unwrap_or_else(Config::default_path);
@@ -691,8 +710,93 @@ fn find_pty(executable: &Path) -> Result<PathBuf> {
         .context("pty is missing; unpack the complete Fractal archive (fractal and pty) before setup")
 }
 
-/// Match the installers' positive alias-layout policy without executing inspected commands.
-fn guard_canonical_install(bin: &Path, path: Option<&std::ffi::OsStr>, named_instance: bool) -> Result<()> {
+const INSTALL_RECEIPT: &str = ".fractal-install.json";
+
+fn executable_digest(executable: &Path) -> Result<String> {
+    use sha2::{Digest as _, Sha256};
+
+    let mut source = File::open(executable)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = source.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+/// A present receipt is authoritative, including when historical aliases remain.
+pub(crate) fn verify_install_receipt(bin: &Path) -> Result<bool> {
+    let path = bin.join(INSTALL_RECEIPT);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error)
+            .with_context(|| format!("inspect {}; reinstall Fractal", path.display())),
+    };
+    let verify = || -> Result<()> {
+        anyhow::ensure!(metadata.is_file() && !metadata.file_type().is_symlink(),
+            "receipt must be a regular non-symlink file");
+        let receipt: serde_json::Value = serde_json::from_reader(File::open(&path)?)?;
+        anyhow::ensure!(receipt["schema"].as_u64() == Some(1)
+            && receipt["name"].as_str() == Some("fractal"), "invalid receipt identity");
+        let executable = bin.join("fractal");
+        anyhow::ensure!(fs::metadata(&executable)?.is_file(),
+            "installed Fractal executable is not a regular file");
+        anyhow::ensure!(receipt["sha256"].as_str() == Some(executable_digest(&executable)?.as_str()),
+            "receipt does not match the installed executable");
+        Ok(())
+    };
+    verify().with_context(|| format!("invalid install receipt {}; reinstall Fractal", path.display()))?;
+    Ok(true)
+}
+
+fn install_receipt(executable: &Path, physical: &Path, installer: &str) -> Result<Vec<u8>> {
+    anyhow::ensure!(matches!(installer, "script" | "hm" | "setup"), "invalid installer");
+    let output = Command::new(executable).args(["--version", "--json"]).output()
+        .context("read incoming Fractal identity")?;
+    anyhow::ensure!(output.status.success(), "incoming Fractal --version --json failed");
+    let identity: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("decode incoming Fractal identity")?;
+    let version = identity["machine_version"].as_str().context("incoming Fractal machine_version")?;
+    let commit = identity["commit"].as_str().context("incoming Fractal commit")?;
+    Ok(serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": 1,
+        "name": "fractal",
+        "sha256": executable_digest(physical)?,
+        "installer": installer,
+        "version": version,
+        "commit": commit,
+    }))?)
+}
+
+fn persist_install_receipt(bin: &Path, receipt: &[u8]) -> Result<()> {
+    let mut pending = tempfile::NamedTempFile::new_in(bin)?;
+    pending.write_all(receipt)?;
+    pending.as_file().sync_all()?;
+    pending.persist(bin.join(INSTALL_RECEIPT))
+        .context("install Fractal ownership receipt")?;
+    Ok(())
+}
+
+/// Hidden installer entrypoint: identity always comes from this incoming image.
+pub(crate) fn write_install_receipt(bin: &Path, installer: &str) -> Result<()> {
+    let receipt = install_receipt(&std::env::current_exe()?, &bin.join("fractal"), installer)?;
+    persist_install_receipt(bin, &receipt)?;
+    File::open(bin)?.sync_all()?;
+    Ok(())
+}
+
+/// Recognize a verified receipt or the installers' historical positive alias layout.
+fn guard_canonical_install(
+    bin: &Path,
+    path: Option<&std::ffi::OsStr>,
+    named_instance: bool,
+    receipt_owned: bool,
+) -> Result<()> {
     let absolute = std::path::absolute(bin)?;
     let bin = fs::canonicalize(&absolute).unwrap_or(absolute);
     let canonical = bin.join("fractal");
@@ -702,7 +806,10 @@ fn guard_canonical_install(bin: &Path, path: Option<&std::ffi::OsStr>, named_ins
     };
     match fs::symlink_metadata(&canonical) {
         Ok(metadata) => {
-            let owned = if metadata.file_type().is_symlink() {
+            let owned = if receipt_owned {
+                fs::metadata(&canonical).is_ok_and(|metadata| metadata.is_file()
+                    && metadata.permissions().mode() & 0o111 != 0)
+            } else if metadata.file_type().is_symlink() {
                 links_to(&canonical, Path::new("st3"), &legacy)
             } else {
                 metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
@@ -748,6 +855,12 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
     // An instance always gets its own copies, below its own directory, so removing the
     // directory removes them and the default install is never the one that runs.
     let instance = fractal_daemon::instance::current();
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    let bin = match &instance {
+        Some(instance) => instance.bin_dir(),
+        None => home.join(".local/bin"),
+    };
+    let receipt_owned = verify_install_receipt(&bin)?;
     // A login shell may omit this command even when its canonical link runs this image.
     if instance.is_none()
         && std::env::var_os("HOME").is_some_and(|home| {
@@ -766,16 +879,14 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
     {
         return Ok(executable.into());
     }
-    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
-    let bin = match &instance {
-        Some(instance) => instance.bin_dir(),
-        None => home.join(".local/bin"),
-    };
     // Refuse collisions before any executable or alias can change. Signed-app
     // upgrades belong to install-macos.py; managed setup above preserves them.
-    guard_canonical_install(&bin, std::env::var_os("PATH").as_deref(), instance.is_some())?;
+    guard_canonical_install(
+        &bin, std::env::var_os("PATH").as_deref(), instance.is_some(), receipt_owned,
+    )?;
     // Locate pty before changing any installed file.
     let pty = find_pty(executable)?;
+    let receipt = install_receipt(executable, executable, "setup")?;
     fs::create_dir_all(&bin)?;
     let target = bin.join("fractal");
     let replacing = [
@@ -804,20 +915,63 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
             replacing.join(", ")
         );
     }
-    copy_executable(executable, &target)?;
-    copy_executable(&pty, &bin.join("pty"))?;
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-    for name in ["st", "st3"] {
-        let link = bin.join(name);
-        if fs::read_link(&link).ok().as_deref() != Some(Path::new("fractal")) {
-            let pending = tempfile::tempdir_in(&bin)?;
-            symlink("fractal", pending.path().join(name))?;
-            fs::rename(pending.path().join(name), &link)?;
+    // Keep every replaced entry until the complete install and manifest have committed.
+    // Hard links retain the old executable without copying it or truncating a running image.
+    let backup = tempfile::tempdir_in(&bin)?;
+    let names = ["fractal", INSTALL_RECEIPT, "pty", "st", "st3"];
+    let mut previous = Vec::new();
+    for name in names {
+        let path = bin.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    symlink(fs::read_link(&path)?, backup.path().join(name))?;
+                } else {
+                    fs::hard_link(&path, backup.path().join(name))?;
+                }
+                previous.push(name);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("back up installed Fractal entry"),
         }
     }
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
-    File::open(&bin)?.sync_all()?;
-    record_installed_binaries(&bin)?;
+    let install = || -> Result<()> {
+        copy_executable(executable, &target)?;
+        persist_install_receipt(&bin, &receipt)?;
+        copy_executable(&pty, &bin.join("pty"))?;
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        for name in ["st", "st3"] {
+            let link = bin.join(name);
+            if fs::read_link(&link).ok().as_deref() != Some(Path::new("fractal")) {
+                let pending = tempfile::tempdir_in(&bin)?;
+                symlink("fractal", pending.path().join(name))?;
+                fs::rename(pending.path().join(name), &link)?;
+            }
+        }
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
+        File::open(&bin)?.sync_all()?;
+        record_installed_binaries(&bin)?;
+        Ok(())
+    };
+    if let Err(error) = install() {
+        let rollback = || -> Result<()> {
+            for name in names {
+                if previous.contains(&name) {
+                    fs::rename(backup.path().join(name), bin.join(name))?;
+                } else {
+                    match fs::remove_file(bin.join(name)) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error).context("remove partially installed entry"),
+                    }
+                }
+            }
+            File::open(&bin)?.sync_all()?;
+            Ok(())
+        };
+        rollback().context(format!("rollback Fractal installation after: {error:#}"))?;
+        return Err(error);
+    }
     say!("Installed Fractal (fractal, pty and temporary st/st3 aliases) in {}", bin.display());
     Ok(target)
 }
@@ -835,6 +989,7 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
         "source": "setup",
         "files": [
             bin.join("fractal"), bin.join("st3"), bin.join("st"), bin.join("pty"),
+            bin.join(INSTALL_RECEIPT),
         ],
     });
     let mut pending = tempfile::NamedTempFile::new_in(&data)?;

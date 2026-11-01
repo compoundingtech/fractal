@@ -43,7 +43,7 @@ printf 'new-web\n' > "$work/package/share/fractal-web/index.html"
 printf 'new-script\n' > "$work/package/share/fractal-web/assets/main.js"
 cp "${INSTALL_RELEASE_TEST_SCRIPT:-$repo/scripts/install-release}" "$work/package/install.sh"
 for binary in fractal pty; do
-  printf '#!/bin/sh\necho new-%s\n' "$binary" > "$work/package/bin/$binary"
+  printf '#!/bin/sh\nif [ "${1:-}" = setup ]; then exec python3 "%s/scripts/fixtures/install-receipt-cli" "$@"; fi\necho new-%s\n' "$repo" "$binary" > "$work/package/bin/$binary"
   chmod +x "$work/package/bin/$binary"
   printf 'old\n' > "$work/installed/${binary/fractal/st3}"
 done
@@ -76,6 +76,26 @@ assert web.stat().st_mode & 0o200
 assert all(path.stat().st_mode & 0o200 for path in web.rglob('*'))
 PY_WEB_MODES
 chmod -R u+w "$work/package/share/fractal-web"
+# Receipt ownership survives absent aliases, but invalid receipts fail closed.
+for kind in receipt-aliases receipt-only aliases-only tampered symlink; do
+  bin="$work/receipt-$kind/bin"
+  install_fixture --bin-dir "$bin" --quiet
+  case $kind in
+    receipt-only) rm "$bin/st" "$bin/st3" ;;
+    aliases-only) rm "$bin/.fractal-install.json" ;;
+    tampered) printf '{}' > "$bin/.fractal-install.json" ;;
+    symlink) mv "$bin/.fractal-install.json" "$bin/receipt"; ln -s receipt "$bin/.fractal-install.json" ;;
+  esac
+  if [[ $kind == tampered || $kind == symlink ]]; then
+    ln "$bin/fractal" "$work/prior-$kind"
+    if install_fixture --bin-dir "$bin" --quiet > /dev/null 2> "$work/receipt.err"; then exit 1; fi
+    grep -q "$bin/.fractal-install.json.*reinstall" "$work/receipt.err"
+    test "$bin/fractal" -ef "$work/prior-$kind"
+  else
+    install_fixture --bin-dir "$bin" --quiet
+    "$work/package/bin/fractal" setup --receipt-verify "$bin"
+  fi
+done
 # Fresh installs do not claim to upgrade or restart a daemon.
 install_fixture --bin-dir "$work/fresh-notice/bin" > "$work/fresh.out" 2> "$work/fresh.err"
 grep -q 'Installed fractal' "$work/fresh.out"
@@ -176,11 +196,12 @@ mkdir -p "$work/blocked/st"
 if install_fixture --bin-dir "$work/blocked"; then exit 1; fi
 test ! -e "$work/blocked/st3"
 # Existing fractal commands are not ours, even if their target happens to be st3 elsewhere.
-for kind in file link dangling directory; do
+for kind in file identical link dangling directory; do
   bin="$work/collision-$kind"
   mkdir -p "$bin"
   case $kind in
     file) printf foreign > "$bin/fractal" ;;
+    identical) cp "$work/package/bin/fractal" "$bin/fractal" ;;
     link) ln -s "$work/package/bin/fractal" "$bin/fractal" ;;
     dangling) ln -s /missing/fractal "$bin/fractal" ;;
     directory) mkdir "$bin/fractal" ;;
@@ -193,6 +214,7 @@ for kind in file link dangling directory; do
   grep -q 'foreign fractal command' "$work/collision.err"
   case $kind in
     file) test "$(cat "$bin/fractal")" = foreign ;;
+    identical) cmp "$bin/fractal" "$work/package/bin/fractal" ;;
     link) test "$(readlink "$bin/fractal")" = "$work/package/bin/fractal" ;;
     dangling) test "$(readlink "$bin/fractal")" = /missing/fractal ;;
     directory) test -d "$bin/fractal"; test -z "$(ls -A "$bin/fractal")" ;;

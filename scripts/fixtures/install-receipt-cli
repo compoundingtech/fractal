@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Installer-test stand-in for the incoming binary's internal receipt protocol."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+_, mode, directory, *options = sys.argv[1:]
+root = Path(directory)
+receipt = root / '.fractal-install.json'
+try:
+    digest = hashlib.sha256((root / 'fractal').read_bytes()).hexdigest()
+    if mode == '--receipt-verify':
+        assert not receipt.is_symlink() and receipt.is_file()
+        value = json.loads(receipt.read_text())
+        assert value['schema'] == 1 and value['name'] == 'fractal' and value['sha256'] == digest
+    elif mode == '--receipt-write':
+        installer = options[options.index('--receipt-installer') + 1]
+        value = dict(schema=1, name='fractal', sha256=digest, installer=installer,
+                     version='0.1.0+abcdef123', commit='abcdef123')
+        fd, temporary = tempfile.mkstemp(dir=root, prefix='.receipt-')
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(value, stream)
+        os.replace(temporary, receipt)
+    else:
+        raise ValueError(mode)
+except Exception as error:
+    sys.exit(f'{receipt}: invalid install receipt; reinstall Fractal ({error})')

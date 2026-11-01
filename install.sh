@@ -215,10 +215,16 @@ write_receipt() (
     trap '[ -z "$receipt_stage" ] || rm -f "$receipt_stage"' EXIT
     release_binary="$work/$package/bin/$command_name"
     version=$("$release_binary" --version --json) || return 1
-    case "$version" in '{"machine_version":"'*'"}') ;; *) return 1 ;; esac
-    version=${version#'{"machine_version":"'}
-    version=${version%'"}'}
-    commit=${version##*+}
+    case "$version" in
+        *'"commit":"'*)
+            commit=${version#*'"commit":"'}
+            commit=${commit%%'"'*} ;;
+        '{"machine_version":"'*'"}')
+            version=${version#'{"machine_version":"'}
+            version=${version%'"}'}
+            commit=${version##*+} ;;
+        *) return 1 ;;
+    esac
     case "$commit" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "${#commit}" -ge 7 ] || return 1
     receipt="$bin_dir/RELEASE.json"

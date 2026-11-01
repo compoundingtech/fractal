@@ -5122,7 +5122,10 @@ fn cli_main() -> ExitCode {
         Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion && json_version => {
             println!(
                 "{}",
-                json!({ "machine_version": fractal_drivers::version::machine_version() })
+                json!({
+                    "machine_version": fractal_drivers::version::machine_version(),
+                    "commit": fractal_drivers::version::build_commit(),
+                })
             );
             return ExitCode::SUCCESS;
         }
