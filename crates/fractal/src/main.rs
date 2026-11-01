@@ -449,6 +449,11 @@ enum Command {
         #[command(subcommand)]
         command: SubjectCommand,
     },
+    /// Inspect native harness question metadata or answer with option positions.
+    HarnessQuestions {
+        #[command(subcommand)]
+        command: HarnessQuestionsCommand,
+    },
     /// Watch GitHub issues and pull requests: each comment, review, required-check result and
     /// close wakes this agent once.
     Gh {
@@ -574,6 +579,11 @@ struct ReplicationWorkerArgs {
 
 #[derive(Subcommand)]
 enum FleetCommand {
+    /// Show the fleet's public trust anchor for independent proof verification.
+    Anchor {
+        #[command(subcommand)]
+        command: FleetAnchorCommand,
+    },
     /// Found a new fleet with this machine as its first member (the anchor).
     Create(FleetCreateArgs),
     /// Create a single-use code that lets one new machine join.
@@ -609,6 +619,12 @@ enum FleetCommand {
         #[arg(long, default_value = "30m")]
         timeout: String,
     },
+}
+
+#[derive(Subcommand)]
+enum FleetAnchorCommand {
+    /// Print the public fleet trust anchor to distribute to offline verifiers.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -1020,7 +1036,7 @@ fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
         })
         .unwrap_or_default();
     // An instance owns its directory, but a foreign replacement of the new program name
-    // does not become ours. Plan bin entries separately so deletion rechecks its symlink.
+    // does not become ours. Plan bin entries separately so deletion rechecks ownership.
     let bin = root.join("bin");
     if fs::symlink_metadata(bin.join("fractal")).is_ok()
         && let Some(index) = removals.iter().position(|path| path == &bin)
@@ -1117,6 +1133,9 @@ struct FleetMigrateArgs {
 struct UpArgs {
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Enroll a foreground replication worker before listening; unavailable for service daemons.
+    #[arg(long)]
+    replication_worker_pid: Option<u32>,
     #[arg(long)]
     node: Option<String>,
     #[arg(long)]
@@ -1280,6 +1299,10 @@ enum MissionViewCommand {
     ReportTo(MissionReportToArgs),
     /// Set a finished run's outcome to completed, failed, or cancelled, with a reason.
     Outcome(MissionOutcomeArgs),
+    /// Dismiss a fault whose run has ended, with a reason, when nothing at its source can close it.
+    ///
+    /// A person or the fleet's fault agent may. A later failure of the same source is a new fault.
+    DismissFault(MissionDismissFaultArgs),
     /// Retire a mission so it leaves the lists and cannot start; publishing it again brings it back.
     Retire(MissionRetireArgs),
     /// Show one agent's current claim and its queued mission runs in order; same as `fractal agents queue AGENT`.
@@ -1500,6 +1523,22 @@ struct MissionOutcomeArgs {
     #[arg(long)]
     reason: String,
     /// A person, or an agent that requested the run or may revise its mission.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_parser = parse_publication_actor)]
+    actor: String,
+}
+
+#[derive(Args)]
+struct MissionDismissFaultArgs {
+    /// The fault's run (`mission-run/...`) or its exact source subject, as its fault message names it.
+    source: String,
+    /// The fault's episode, needed only when its source has more than one current fault.
+    #[arg(long)]
+    episode: Option<String>,
+    /// Why the fault can be put aside, for example that the run ended and a later run replaced it.
+    #[arg(long)]
+    reason: String,
+    /// A person, or the fleet's fault agent.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
@@ -2216,6 +2255,44 @@ struct DevicesArgs {
 }
 
 #[derive(Subcommand)]
+enum HarnessQuestionsCommand {
+    /// List native question metadata without question or option text.
+    List {
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+        /// Maximum questions on this page (the daemon defaults to 50, capped at 200).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Continue the snapshot-bound page using its next_cursor.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Read one native question's metadata.
+    Show {
+        question: String,
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+    },
+    /// Answer with a JSON file mapping question ids to {positions: [zero-based indexes]}.
+    Answer {
+        question: String,
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+        #[arg(long)]
+        answers_file: PathBuf,
+        /// Observation revision returned by `harness-questions show`.
+        #[arg(long)]
+        revision: String,
+        /// Runtime incarnation returned by `harness-questions show`.
+        #[arg(long)]
+        incarnation: String,
+        /// Reuse this key and the identical answer file when retrying.
+        #[arg(long)]
+        idempotency_key: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum SubjectCommand {
     /// Reply to a custom source under its current revision and waiting episode.
     Reply {
@@ -2717,6 +2794,9 @@ enum AgentsCommand {
     },
     /// Print one agent's declared workspace directory on its owning host, even when stopped.
     Workspace { subject: String },
+    /// Print the systemd slice of one agent's lane, as this daemon names it (docs/st3/seat-lanes.md).
+    /// It names where the lane is when the agent has one; the cgroup tree shows whether it exists.
+    Lane { subject: String },
     /// Write or read the handoff an agent leaves for the session that follows it.
     Handoff {
         #[command(subcommand)]
@@ -2776,15 +2856,20 @@ enum AgentsCommand {
 }
 
 #[derive(Args)]
+#[command(subcommand_negates_reqs = true, args_conflicts_with_subcommands = true)]
 struct IdentityRenameArgs {
+    #[command(subcommand)]
+    command: Option<IdentityRenameCommand>,
     /// Complete current or historical ID.
-    from: String,
+    #[arg(required = true)]
+    from: Option<String>,
     /// New full ID; historical names cannot be reused.
-    to: String,
-    #[arg(long = "as", value_parser = parse_publication_actor)]
-    actor: String,
-    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
-    reason: String,
+    #[arg(required = true)]
+    to: Option<String>,
+    #[arg(long = "as", required = true, value_parser = parse_publication_actor)]
+    actor: Option<String>,
+    #[arg(long, required = true, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    reason: Option<String>,
     #[arg(long = "if-naming-revision")]
     expected_naming_revision: Option<String>,
     #[arg(long = "if-declaration")]
@@ -2793,17 +2878,133 @@ struct IdentityRenameArgs {
     idempotency_key: Option<String>,
 }
 
+#[derive(Subcommand)]
+enum IdentityRenameCommand {
+    /// Export or independently verify a signed rename proof.
+    Proof {
+        #[command(subcommand)]
+        command: RenameProofCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RenameProofCommand {
+    /// Export fleet-internal evidence; contains complete co-batched claims and blobs.
+    /// Do not publish the bundle or attach it to public issues.
+    Export {
+        name: String,
+        #[arg(long)]
+        revision: Option<String>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Consent to disclosing complete co-batched claims and blobs to fleet tooling.
+        #[arg(long)]
+        include_co_batched_claims: bool,
+    },
+    /// Verify a portable proof offline, trusting only the supplied fleet anchor.
+    Verify {
+        file: PathBuf,
+        #[arg(long)]
+        fleet_anchor: String,
+        /// Require this claim-ID token to precede the proven head strictly.
+        #[arg(long)]
+        after_revision: Option<String>,
+    },
+}
+
+fn rename_proof_verdict(
+    file: &Path,
+    fleet_anchor: &str,
+    after_revision: Option<&str>,
+) -> (Value, u8) {
+    let failure = |code: &str, message: String, exit_code| {
+        (json!({
+            "schema": "fractal.rename-proof-verdict.v1",
+            "ok": false,
+            "error": { "code": code, "message": message },
+        }), exit_code)
+    };
+    let bytes = match std::fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(error) => return failure("malformed-bundle", error.to_string(), 6),
+    };
+    let bundle = match serde_json::from_slice::<smallclaims::proof::RenameProofBundle>(&bytes) {
+        Ok(bundle) => bundle,
+        Err(error) => return failure("malformed-bundle", error.to_string(), 6),
+    };
+    match smallclaims::proof::verify_rename_proof(&bundle, fleet_anchor, after_revision) {
+        Ok(verdict) => match serde_json::to_value(verdict) {
+            Ok(value) => (value, 0),
+            Err(error) => failure("malformed-bundle", error.to_string(), 6),
+        },
+        Err(error) => failure(
+            &error.code,
+            error.message.clone(),
+            u8::try_from(error.exit_code()).unwrap_or(6),
+        ),
+    }
+}
+
+fn offline_rename_proof(command: &Command) -> Option<ExitCode> {
+    let args = match command {
+        Command::Agents { command: AgentsCommand::RenameId(args) }
+        | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+        _ => return None,
+    };
+    let Some(IdentityRenameCommand::Proof {
+        command: RenameProofCommand::Verify { file, fleet_anchor, after_revision },
+    }) = &args.command else {
+        return None;
+    };
+    let (verdict, code) = rename_proof_verdict(file, fleet_anchor, after_revision.as_deref());
+    println!("{verdict}");
+    Some(ExitCode::from(code))
+}
+
+fn offline_rename_proof_arguments(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
+    // Only parse this extra time for the rename surface. Actual dispatch is based
+    // on clap's typed command, never on a filename or a free-form argument.
+    if !arguments.iter().any(|argument| argument == "rename-id") {
+        return None;
+    }
+    let matches = cli_command().try_get_matches_from_mut(arguments).ok()?;
+    let cli = Cli::from_arg_matches(&matches).ok()?;
+    offline_rename_proof(&cli.command)
+}
+
 async fn run_identity_rename(
     endpoint: &Endpoint,
     args: IdentityRenameArgs,
     agent: bool,
     json_output: bool,
 ) -> Result<()> {
+    if let Some(IdentityRenameCommand::Proof { command }) = args.command {
+        let RenameProofCommand::Export { name, revision, out, include_co_batched_claims } = command else {
+            anyhow::bail!("proof verification must be dispatched offline");
+        };
+        anyhow::ensure!(include_co_batched_claims,
+            "rename proof export requires --include-co-batched-claims: this fleet-internal bundle contains complete co-batched claims and blobs; do not publish or attach it to public issues");
+        let client = generated_client(endpoint, None)?;
+        let request = fractal_client::RenameProofExportRequest { name, revision, include_co_batched_claims };
+        let bundle = if agent {
+            client.agent_rename_proof_export(&request).await?
+        } else {
+            client.mission_rename_proof_export(&request).await?
+        };
+        let bytes = serde_json::to_vec_pretty(&bundle)?;
+        if let Some(path) = out {
+            std::fs::write(&path, &bytes)
+                .with_context(|| format!("writing rename proof {}", path.display()))?;
+        } else {
+            println!("{}", std::str::from_utf8(&bytes)?);
+        }
+        return Ok(());
+    }
     let request = fractal_client::RenameRequest {
-        from: args.from,
-        to: args.to,
-        actor: args.actor,
-        reason: args.reason,
+        from: args.from.context("rename requires a source ID")?,
+        to: args.to.context("rename requires a destination ID")?,
+        actor: args.actor.context("rename requires --as")?,
+        reason: args.reason.context("rename requires --reason")?,
         expected_naming_revision: args.expected_naming_revision,
         expected_declaration: args.expected_declaration,
         idempotency_key: args.idempotency_key.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
@@ -3369,6 +3570,12 @@ struct AgentRetireArgs {
     /// Existing eligible agent identity, bare name or agent/NAME.
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     successor: Option<String>,
+    /// Desired content revision: `revision` in agents show (not the declaration claim ID).
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    expect_revision: Option<String>,
+    /// Selected runtime's `incarnation_id` in agents show.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    expect_incarnation: Option<String>,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     idempotency_key: String,
 }
@@ -3485,6 +3692,42 @@ enum GhCommand {
     /// Record a comment or review this agent posted some other way, by its URL, as this agent's.
     /// A watch that already reported it woke the agent once.
     Own(GhOwnArgs),
+    /// List a repository's pull requests from the GitHub plugin's mirror on the member that polls
+    /// it. Another member relays the read there, or answers from its own graph and says why.
+    #[command(
+        after_help = "Examples:\n  fractal gh prs acme/garden\n  fractal gh prs acme/garden --state all --limit 100"
+    )]
+    Prs(GhPrsArgs),
+    /// Show one pull request's facts from the GitHub plugin's mirror.
+    #[command(after_help = "Examples:\n  fractal gh pr acme/garden#12\n  fractal gh pr https://github.com/acme/garden/pull/12 --json")]
+    Pr(GhReadArgs),
+    /// Show one pull request's checks: its current required checks and every head it has had.
+    #[command(after_help = "Examples:\n  fractal gh checks acme/garden#12")]
+    Checks(GhReadArgs),
+}
+
+#[derive(Args)]
+struct GhPrsArgs {
+    /// OWNER/REPO, or the repository URL.
+    repository: String,
+    /// open, closed or all.
+    #[arg(long, default_value = "open")]
+    state: String,
+    /// The most pull requests to list, newest first (at most 500).
+    #[arg(long, default_value_t = 30)]
+    limit: usize,
+    /// Read as this person or agent. Reading another member's mirror relays the read as them.
+    #[arg(long = "as", env = "ST_AGENT")]
+    actor: Option<String>,
+}
+
+#[derive(Args)]
+struct GhReadArgs {
+    /// OWNER/REPO#NUMBER, or the pull request URL.
+    thread: String,
+    /// Read as this person or agent. Reading another member's mirror relays the read as them.
+    #[arg(long = "as", env = "ST_AGENT")]
+    actor: Option<String>,
 }
 
 #[derive(Args)]
@@ -4167,6 +4410,14 @@ enum MessageCommand {
     /// `work progress` (it lands in the graph and wakes nobody), run events to report-to.
     /// People have no inbox: a send or reply to a person fails. To reach a person, print in
     /// the chat.
+    ///
+    /// Use single quotes for literal shell text, or a quoted heredoc for multiline bodies:
+    ///
+    ///   fractal conversations send agent/example --from agent/sender --body 'Run `cargo test`'
+    ///   fractal conversations send agent/example --from agent/sender --body - <<'EOF'
+    ///   Run `cargo test` and report $STATUS.
+    ///   EOF
+    #[command(verbatim_doc_comment)]
     Send(MessageSendArgs),
     /// List the current mailbox for one explicit identity.
     Ls(MessageListArgs),
@@ -4251,8 +4502,12 @@ enum MessageCommand {
 struct MessageSendArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     to: String,
-    #[arg(short = 'm', long)]
-    body: String,
+    /// Message text, or - to read UTF-8 from stdin without trimming.
+    #[arg(short = 'm', long, required_unless_present = "body_file", conflicts_with = "body_file")]
+    body: Option<String>,
+    /// Read the exact UTF-8 message text from a file.
+    #[arg(long, value_name = "PATH")]
+    body_file: Option<PathBuf>,
     #[arg(long)]
     subject: Option<String>,
     #[arg(long)]
@@ -4791,6 +5046,10 @@ fn cli_main() -> ExitCode {
         }
         None => {}
     }
+    // Verification is independent even of instance selection and config loading.
+    if let Some(code) = offline_rename_proof_arguments(&arguments) {
+        return code;
+    }
     // An instance changes where every path resolves, so it comes before anything reads one.
     let instance_name = fractal_daemon::instance::requested(&arguments);
     if let Some(name) = instance_name {
@@ -4969,6 +5228,12 @@ fn run_terminal_ui(mut options: fractal_tui::Args, endpoint: Option<&str>) -> Ex
     }
 }
 
+const DEMO_ENVIRONMENT_NAMES: &[&str] = &[
+    "ST_AGENT", "ST3_PERSON", "ST3_ENDPOINT", "ST3_INCARNATION", "ST3_DOWNLOADS",
+    "FRACTAL_AGENT", "FRACTAL_PERSON", "FRACTAL_ENDPOINT", "FRACTAL_INCARNATION",
+    "FRACTAL_DOWNLOADS",
+];
+
 /// `st demo`: like the terminal interface, it runs before the CLI runtime, because it opens one.
 fn run_demo(command: DemoCommand) -> ExitCode {
     let result = (|| -> Result<()> {
@@ -5004,7 +5269,7 @@ fn run_demo(command: DemoCommand) -> ExitCode {
                 )?;
                 let demo = demo::load(&file)?;
                 // The demo acts as its own people and agents; a seat's identity must not leak in.
-                for name in ["ST_AGENT", "ST3_PERSON", "ST3_ENDPOINT", "ST3_INCARNATION"] {
+                for name in DEMO_ENVIRONMENT_NAMES {
                     // SAFETY: no other thread exists yet; the player starts after this.
                     unsafe { std::env::remove_var(name) };
                 }
@@ -5614,7 +5879,31 @@ async fn run(cli: Cli) -> Result<()> {
             };
             change_cli::run(&client, arguments, cli.json).await
         }
-        Command::Gh { command } => run_gh(&client, command, cli.json).await,
+        Command::Gh { command } => {
+            let reader = match &command {
+                GhCommand::Prs(args) => Some(args.actor.as_deref()),
+                GhCommand::Pr(args) | GhCommand::Checks(args) => Some(args.actor.as_deref()),
+                _ => None,
+            };
+            match reader {
+                // A read relayed to the poller is made as a person or agent.
+                Some(actor) => {
+                    let actor = actor.map(str::to_owned).or_else(|| config.person.clone());
+                    let named = match (&endpoint, actor) {
+                        (Endpoint::Unix(socket), Some(actor)) if actor.starts_with("agent/") => {
+                            Client::unix_agent(socket, actor)?.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                        }
+                        (Endpoint::Unix(socket), Some(actor)) => {
+                            Client::unix_as(socket, parse_person_subject(&actor).map_err(anyhow::Error::msg)?)?
+                                .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                        }
+                        _ => client.clone(),
+                    };
+                    run_gh(&named, command, cli.json).await
+                }
+                None => run_gh(&client, command, cli.json).await,
+            }
+        }
         Command::Lanes { command } => {
             run_lanes(&client, config.person.as_deref(), command, cli.json).await
         }
@@ -5703,6 +5992,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Service { command } => run_service(command, cli.json),
         Command::ClaudeChannel { command } => run_claude_channel(command),
         Command::Subject { command } => run_subject(&client, command, cli.json).await,
+        Command::HarnessQuestions { command } => {
+            run_harness_questions(&endpoint, command, cli.json).await
+        }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
@@ -5724,9 +6016,9 @@ async fn run(cli: Cli) -> Result<()> {
                 .context("clap_complete lacks a built-in shell")?
                 .write_registration(
                     "COMPLETE",
-                    "st",
-                    "st",
-                    "st",
+                    "fractal",
+                    "fractal",
+                    "fractal",
                     &mut cli_output::stdout(),
                 )?;
             Ok(())
@@ -5811,9 +6103,10 @@ fn guard_mutating_cli_actor(
             MissionViewCommand::Publish(args) => Some(args.actor.as_str()),
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
-            MissionViewCommand::RenameId(args) => Some(args.actor.as_str()),
+            MissionViewCommand::RenameId(args) => args.actor.as_deref(),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
             MissionViewCommand::Outcome(args) => Some(args.actor.as_str()),
+            MissionViewCommand::DismissFault(args) => Some(args.actor.as_str()),
             MissionViewCommand::ReportTo(args) => Some(args.actor.as_str()),
             MissionViewCommand::Retire(args) => Some(args.actor.as_str()),
             MissionViewCommand::Release(args) | MissionViewCommand::CancelRequest(args) => {
@@ -5852,7 +6145,7 @@ fn guard_mutating_cli_actor(
             AgentsCommand::Rename(args) => Some(args.actor.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("a harness rename needs explicit --as {own}")
             })?),
-            AgentsCommand::RenameId(args) => Some(args.actor.as_str()),
+            AgentsCommand::RenameId(args) => args.actor.as_deref(),
             AgentsCommand::Queue(args) => match &args.command {
                 Some(AgentQueueCommand::Move(args)) => Some(args.actor.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("a harness queue move needs explicit --as {own}; it cannot use the configured person")
@@ -5922,7 +6215,7 @@ fn guard_mutating_cli_actor(
             GhCommand::Unwatch(args) => Some(args.actor.as_str()),
             GhCommand::Comment(args) => Some(args.actor.as_str()),
             GhCommand::Own(args) => Some(args.actor.as_str()),
-            GhCommand::Ls(_) => None,
+            GhCommand::Ls(_) | GhCommand::Prs(_) | GhCommand::Pr(_) | GhCommand::Checks(_) => None,
         },
         Command::Devices(args) => match args.command.as_ref() {
             Some(DevicesCommand::Pair { assistant: Some(_), .. })
@@ -5969,6 +6262,75 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
         String::new()
     };
     format!("{}{agent}  {state}{until}{title}", text("thread"))
+}
+
+/// `OWNER/REPO` from `OWNER/REPO` or a repository URL.
+fn gh_repository(text: &str) -> Result<String> {
+    let trimmed = text
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("github.com/")
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+    let mut parts = trimmed.split('/');
+    let (Some(owner), Some(repository), None) = (parts.next(), parts.next(), parts.next()) else {
+        anyhow::bail!("name a repository as OWNER/REPO, not {text}");
+    };
+    anyhow::ensure!(!owner.is_empty() && !repository.is_empty(), "name a repository as OWNER/REPO, not {text}");
+    Ok(format!("{owner}/{repository}"))
+}
+
+/// One pull request as one line: number, state, checks, review and queue, then its title.
+fn gh_pull_line(pull: &Value) -> String {
+    let text = |name: &str| pull.get(name).and_then(Value::as_str).unwrap_or_default();
+    let state = if pull.get("merged") == Some(&Value::Bool(true)) {
+        "merged"
+    } else if pull.get("draft") == Some(&Value::Bool(true)) && text("state") == "open" {
+        "draft"
+    } else {
+        text("state")
+    };
+    let checks = pull
+        .get("required_checks_state")
+        .or_else(|| pull.pointer("/required_checks/state"))
+        .and_then(Value::as_str)
+        .or_else(|| pull.get("checks_state").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let mut line = format!("#{:<6} {:<7} checks {:<8}", pull["number"], state, checks);
+    if !text("review_decision").is_empty() {
+        line.push_str(&format!(" {}", text("review_decision").to_ascii_lowercase()));
+    }
+    if let Some(position) = pull.pointer("/merge_queue/position").filter(|value| !value.is_null()) {
+        line.push_str(&format!(" queued #{position}"));
+    }
+    if !text("title").is_empty() {
+        line.push_str(&format!("  {}", text("title")));
+    }
+    line
+}
+
+fn gh_required_checks(required: &Value) -> String {
+    let state = required["state"].as_str().unwrap_or("unknown");
+    match required["failed"].as_array().filter(|failed| !failed.is_empty()) {
+        Some(failed) => format!(
+            "{state} ({})",
+            failed.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+        ),
+        None => state.to_owned(),
+    }
+}
+
+/// Where an answer came from: the poller's mirror, or this member's graph and why.
+fn gh_source_line(answer: &Value) -> String {
+    let source = &answer["source"];
+    let host = source["host"].as_str().unwrap_or("this member");
+    match source["kind"].as_str() {
+        Some("mirror") => format!("(from the GitHub plugin mirror on {host})"),
+        _ => format!(
+            "(from {host}'s graph: {})",
+            source["reason"].as_str().unwrap_or("the poller's mirror was not read")
+        ),
+    }
 }
 
 const GH_UNWATCH_HINT: &str = "To stop: st gh unwatch";
@@ -6072,6 +6434,100 @@ async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, jso
                 recorded["id"],
                 recorded["thread"].as_str().unwrap_or_default()
             );
+        }
+        GhCommand::Prs(args) => {
+            let locator = gh_repository(&args.repository)?;
+            let answer: Value = client
+                .get(&format!(
+                    "/v1/plugins/github/repos/{locator}/pulls?state={}&limit={}",
+                    urlencoding::encode(&args.state),
+                    args.limit
+                ))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&answer)?);
+                return Ok(());
+            }
+            let pulls = answer["pulls"].as_array().cloned().unwrap_or_default();
+            if pulls.is_empty() {
+                println!("No {} pull requests.", args.state);
+            }
+            for pull in &pulls {
+                println!("{}", gh_pull_line(pull));
+            }
+            println!("{}", gh_source_line(&answer));
+        }
+        GhCommand::Pr(args) => {
+            let thread = fractal_daemon::github_watch::ThreadRef::parse(&args.thread)?;
+            let answer: Value = client
+                .get(&format!("/v1/plugins/github/repos/{}/{}/pulls/{}", thread.owner, thread.repository, thread.number))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&answer)?);
+                return Ok(());
+            }
+            let Some(pull) = answer.get("pull").filter(|pull| !pull.is_null()) else {
+                println!("No pull request {thread} is recorded.");
+                println!("{}", gh_source_line(&answer));
+                return Ok(());
+            };
+            let facts = &pull["facts"];
+            let text = |name: &str| facts.get(name).and_then(Value::as_str).unwrap_or("");
+            println!("{thread}  {}", text("title"));
+            println!("{}", gh_pull_line(facts));
+            if !text("url").is_empty() {
+                println!("{}", text("url"));
+            }
+            if let Some(required) = facts.get("required_checks").filter(|value| !value.is_null()) {
+                println!("required checks: {}", gh_required_checks(required));
+            }
+            println!("{}", gh_source_line(&answer));
+        }
+        GhCommand::Checks(args) => {
+            let thread = fractal_daemon::github_watch::ThreadRef::parse(&args.thread)?;
+            let answer: Value = client
+                .get(&format!(
+                    "/v1/plugins/github/repos/{}/{}/pulls/{}/checks",
+                    thread.owner, thread.repository, thread.number
+                ))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&answer)?);
+                return Ok(());
+            }
+            let Some(checks) = answer.get("checks").filter(|checks| !checks.is_null()) else {
+                println!("No pull request {thread} is recorded.");
+                println!("{}", gh_source_line(&answer));
+                return Ok(());
+            };
+            println!(
+                "{thread}  head {}  checks {}",
+                checks["head_sha"].as_str().map_or("unknown", |sha| sha.get(..12).unwrap_or(sha)),
+                checks["checks_state"].as_str().unwrap_or("unknown")
+            );
+            if let Some(required) = checks.get("required_checks").filter(|value| !value.is_null()) {
+                println!("required: {}", gh_required_checks(required));
+            }
+            for check in checks["checks"].as_array().into_iter().flatten() {
+                let text = |name: &str| check.get(name).and_then(Value::as_str).unwrap_or("");
+                let outcome = if text("conclusion").is_empty() { text("status") } else { text("conclusion") };
+                println!("  {:<10} {}", outcome, text("name"));
+            }
+            match checks["heads"].as_array() {
+                Some(heads) if heads.len() > 1 => {
+                    println!("earlier heads:");
+                    for head in heads.iter().skip(1) {
+                        println!(
+                            "  {}  {}",
+                            head["head_sha"].as_str().map_or("", |sha| sha.get(..12).unwrap_or(sha)),
+                            head["required_checks"]["state"].as_str().or(head["checks_state"].as_str()).unwrap_or("unknown")
+                        );
+                    }
+                }
+                Some(_) => {}
+                None => println!("earlier heads: unknown here"),
+            }
+            println!("{}", gh_source_line(&answer));
         }
         GhCommand::Ls(args) => {
             let agent = if args.all {
@@ -6449,6 +6905,7 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
 }
 
 async fn run_up(args: UpArgs) -> Result<()> {
+    let worker_observer = fractal_daemon::api::worker_observer(args.replication_worker_pid)?;
     let started_at = Instant::now();
     let mut phase_finished_at = started_at;
     let mut phase_elapsed_ms = || {
@@ -6570,6 +7027,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
     store.trim_locally(config.trim.local)?;
+    if let Some(claims) = config.trim.daily_claims {
+        store.trim_locally_at_most(claims);
+    }
     *store
         .extension::<fractal_store::store::answers_check::TrimSettings>()
         .notify
@@ -6579,6 +7039,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     store
         .extension::<smallclaims::answers::AnswersCache>()
         .set_readers(Arc::new(fractal_store::store::answers_check::fold_reader_answers));
+    store.extension::<smallclaims::answers::AnswersCache>()
+        .set_reader_movement(Arc::new(fractal_store::store::answers_check::slot_reader_movement));
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
@@ -6592,6 +7054,24 @@ async fn run_up(args: UpArgs) -> Result<()> {
         )?))?;
     }
     store.use_key_directory(&keys)?;
+    // The messages shard sits beside the graph's database and takes its fleet from the graph.
+    // A shard that cannot open leaves messaging on graph claims: the daemon then does not
+    // advertise it, so no peer sends it stream items.
+    let messages_shard = fractal_daemon::task_cpu::blocking("startup.open_messages_shard", || {
+        let root = config
+            .store_path()
+            .parent()
+            .map(Path::to_path_buf)
+            .context("the store path has no directory")?;
+        let shard = fractal_store::store::messages_shard::open(&store, &root)?;
+        shard.validate_replication_backlog()?;
+        shard.apply_replication_repairs()?;
+        shard.project_replication_backlog()?;
+        Ok::<_, anyhow::Error>(shard)
+    });
+    if let Err(error) = &messages_shard {
+        stderr_message("st", format_args!("the messages shard did not open; messaging stays on graph claims: {error:#}"));
+    }
     startup_phases.open_store_ms = phase_elapsed_ms();
     startup.phase("judge-claims");
     startup_telemetry.phase("judge-claims");
@@ -6648,8 +7128,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,
-                    "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto)}),
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,
+                    "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
+                    "messages_stream": u8::from(messages_shard.is_ok())}),
             ),
             ("status".into(), Value::String("running".into())),
             ("pid".into(), Value::from(std::process::id())),
@@ -6710,6 +7191,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let state = AppState {
         owning_person: config.person.clone(),
         store: store.clone(),
+        seat_admission: Arc::default(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
         node: config.node.clone(),
@@ -6722,6 +7204,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .map(|relay| relay.with_links(store.clone())),
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
+        harness_question_sink: None,
         assistant_receipts: Default::default(),
         private_notes: Arc::new(fractal_daemon::private_notes::Authority {
             catalogs: config.private_notes_catalogs.clone(),
@@ -6744,7 +7227,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
-    )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+        config.unlaned_seat.clone(),
+    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
@@ -6803,6 +7287,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
     )));
+    fractal_daemon::slo_history::set_ui_url(config.observations.otlp.as_ref().and_then(|otlp| otlp.ui_url.clone()));
     if let Some(otlp) = &config.observations.otlp {
         let exporter = fractal_daemon::otlp::OtlpExporter::new(otlp, &config.node)?;
         stderr_message("st3", format_args!("exporting local observations to OpenTelemetry at {}", otlp.endpoint));
@@ -6858,6 +7343,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fractal_daemon::api::start_native_session_discovery(&state);
     // Nor does the first agents roster read fold every agent's card.
     fractal_daemon::api::start_agent_roster(&state);
+    fractal_daemon::api::seat_freshness::start_seat_freshness_push(&state);
     // Pairing-secret expiry cleanup runs even with no attention readers or publications.
     fractal_daemon::api::start_push_registration_cleanup(&state);
     // Nor does an attention window fold every person's attention.
@@ -6903,7 +7389,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
             tokio::spawn(fractal_daemon::task_cpu::account("replication.activate", async move {
                 match activation_store.connection.write_workers().spawn_blocking({
                     let store = activation_store.clone();
-                    move || fractal_daemon::task_cpu::blocking("replication.activate", || store.complete_replication_activation())
+                    move || fractal_daemon::task_cpu::blocking("replication.activate", || {
+                        let signed = store.complete_replication_activation()?;
+                        if let Some(shard) = fractal_store::store::messages_shard::shard(&store) {
+                            shard.complete_replication_activation()?;
+                        }
+                        Ok::<_, anyhow::Error>(signed)
+                    })
                 })
                 .await
                 {
@@ -6957,14 +7449,14 @@ async fn run_up(args: UpArgs) -> Result<()> {
         tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 local_reserved,
-                router(state.clone()).layer(web_status.clone()),
+                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer, config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
                 Some(state.store.clone()),
                 ready
             ),
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 gateway_reserved, fabric_router(state).layer(web_status), None, ready,
             ),
-            web.serve(web_state),
+            web.serve(web_state, config.worker_ingress_generation_check.unwrap_or_default()),
         )
     };
     let stopped = tokio::select! {
@@ -7952,7 +8444,7 @@ async fn fabric_route(
         .with_context(|| format!("this machine is in no fleet to reach `{owner}` through"))?;
     let fabric =
         fabric.with_context(|| format!("this machine has no `fabric` to reach `{owner}` with"))?;
-    let view: fractal_daemon::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
+    let view: fractal_daemon::fleet::FleetView = crate::fleet_cli::fleet_read(client, "membership").await?;
     let peer = fractal_daemon::terminal_fabric::owner_peer(&fabric, &view.members, owner)
         .await
         .with_context(|| {
@@ -10497,6 +10989,76 @@ fn unseen_timeline_entries(
     changed
 }
 
+fn parse_harness_question_person(actor: &str) -> std::result::Result<String, String> {
+    let person = parse_person_subject(actor)?;
+    if person.contains('*') || person.chars().any(char::is_whitespace) {
+        return Err("harness questions require a concrete `person/NAME` subject".into());
+    }
+    Ok(person)
+}
+
+fn harness_answer_action_id(key: &str, question: &str) -> String {
+    let mut digest = Sha256::new();
+    for value in [key, question] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("action/harness-answer-{}", hex::encode(digest.finalize()))
+}
+
+async fn run_harness_questions(
+    endpoint: &Endpoint,
+    command: HarnessQuestionsCommand,
+    json_output: bool,
+) -> Result<()> {
+    match command {
+        HarnessQuestionsCommand::List { person, cursor, limit } => {
+            let result = generated_client(endpoint, Some(&person))?
+                .harness_questions(cursor.as_deref(), limit)
+                .await?;
+            print_client_value(&result, json_output)
+        }
+        HarnessQuestionsCommand::Show { question, person } => {
+            let result = generated_client(endpoint, Some(&person))?
+                .harness_question(&question)
+                .await?;
+            print_client_value(&result, json_output)
+        }
+        HarnessQuestionsCommand::Answer {
+            question,
+            person,
+            answers_file,
+            revision,
+            incarnation,
+            idempotency_key,
+        } => {
+            let generated = generated_client(endpoint, Some(&person))?;
+            let capabilities = generated.capabilities().await?;
+            let question = if question.starts_with("harness-question/") {
+                question
+            } else {
+                format!("harness-question/{question}")
+            };
+            let answers: BTreeMap<String, fractal_client::HarnessAnswerInput> =
+                serde_json::from_slice(&fs::read(answers_file)?)?;
+            let result = generated
+                .harness_answer(
+                    harness_answer_action_id(&idempotency_key, &question),
+                    idempotency_key,
+                    ClientFence {
+                        snapshot_id: capabilities.snapshot.id,
+                        subject_revisions: BTreeMap::from([(question.clone(), revision)]),
+                        runtime_incarnation: Some(incarnation),
+                        ..ClientFence::default()
+                    },
+                    fractal_client::HarnessAnswerParameters { question, answers },
+                )
+                .await?;
+            print_client_value(&result, json_output)
+        }
+    }
+}
+
 async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool) -> Result<()> {
     match command {
         SubjectCommand::Reply {
@@ -11219,6 +11781,12 @@ async fn run_doctor(
         }
         print!("{}", render_performance(&report.performance));
     }
+    let timed_out = doctor_cli::timed_out(&report.checks);
+    anyhow::ensure!(
+        timed_out.is_empty(),
+        "fractal doctor could not finish {} in time; the checks that finished are printed",
+        timed_out.join(", ")
+    );
     anyhow::ensure!(report.status != "fail", "fractal doctor found a failed check");
     anyhow::ensure!(
         !args.strict || report.status == "pass",
@@ -11760,6 +12328,9 @@ fn render_checkpoint_status(status: &fractal_daemon::store::CheckpointStatusView
     }
     if let Some(pending) = &status.pending {
         output.push_str(&format!("pending       {}\n", pending.checkpoint));
+        if pending.local_digest_state == "unavailable" {
+            output.push_str("  local digest unavailable\n");
+        }
         for (member, build) in &pending.builds {
             output.push_str(&format!("  seal build  {member}: {build}\n"));
         }
@@ -13292,6 +13863,9 @@ fn render_client_agent(
             let _ = writeln!(output, "STATE        {}", agent.state);
         }
     }
+    if let Some(admission) = agent.extra.get("seat_admission") {
+        let _ = writeln!(output, "ADMISSION    {}", agents_cli::admission_start_message(&agent.header.id, admission));
+    }
     if agent.state != "running"
         && let Some(line) = agent_stop_line(agent)
     {
@@ -13595,6 +14169,9 @@ fn render_client_agents(
                     agent.header.id, agent.name, agent.state
                 );
             }
+            if let Some(admission) = agent.extra.get("seat_admission") {
+                let _ = writeln!(output, "  {}", agents_cli::admission_start_message(&agent.header.id, admission));
+            }
             if agent.state != "running"
                 && let Some(line) = agent_stop_line(agent)
             {
@@ -13655,6 +14232,9 @@ fn render_client_agents(
                     agent.reachability
                 );
                 let _ = writeln!(output, "{member_prefix}   {}", agent.header.id);
+                if let Some(admission) = agent.extra.get("seat_admission") {
+                    let _ = writeln!(output, "{member_prefix}   {}", agents_cli::admission_start_message(&agent.header.id, admission));
+                }
                 // The subagents its harness runs now are its children.
                 for (index, subagent) in agent.subagents.iter().enumerate() {
                     let branch = if index + 1 == agent.subagents.len() {
@@ -14316,6 +14896,24 @@ async fn send_message(
     reject_foreign_agent_actor(&args.from)?;
     let from = normalize_message_subject(&args.from);
     let mut args = args;
+    args.in_reply_to = args
+        .in_reply_to
+        .take()
+        .map(|reference| {
+            // Canonical subjects already belong to the server's validation boundary.
+            if reference.starts_with("message/") {
+                return Ok(reference);
+            }
+            let subject = format!("message/{}", normalize_message_reference(&reference));
+            fractal_schema::registry()
+                .validate_subject(&subject)
+                .with_context(|| {
+                    format!("invalid reply reference {reference:?}; expected message/<id>")
+                })?;
+            Ok::<_, anyhow::Error>(subject)
+        })
+        .transpose()?;
+    let body = args.body.take().context("message body is required")?;
     if !args.wake.silent() && args.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG) {
         anyhow::bail!("wake messages cannot carry the silent delivery tag; use --kind silent");
     }
@@ -14329,7 +14927,7 @@ async fn send_message(
         &id,
         &from,
         &to,
-        &args.body,
+        &body,
         args.subject.as_deref(),
         args.in_reply_to.as_deref(),
         &args.tags,
@@ -14342,7 +14940,7 @@ async fn send_message(
         idempotency_key: String::new(),
         from,
         to,
-        content: args.body,
+        content: body,
         title: args.subject,
         in_reply_to: args.in_reply_to,
         tags: args.tags,
@@ -17494,8 +18092,11 @@ fn admission_diagnostic(
     if failure.stage != Stage::VersionGate {
         return None;
     }
+    // Pre-admission refusals have no provider session claim. Only the diagnostic captured by
+    // this exact runtime can be rebound to its graph incarnation; legacy/unfenced files cannot.
+    let detail = failure.attempt.as_ref()?.explanation(incarnation)?;
     let reason = format!(
-        "{} {} admission failed at {}; native delivery is unavailable. {}",
+        "{} {} admission failed at {}; native delivery is unavailable. {detail}. {}",
         failure.driver.as_str(),
         failure
             .producer_version
@@ -18901,11 +19502,9 @@ async fn forward_projected_messages_reporting(
     // history, so inspect only projected files still in the native inbox before
     // deciding whether to archive them. A failed lookup keeps the file in place.
     for file in fractal_drivers::message::list_dir(inbox)? {
-        for reference in file
-            .tags
-            .iter()
-            .filter_map(|tag| tag.strip_prefix(TAG_PREFIX))
-        {
+        let prefix =
+            fractal_drivers::ding::fractal_tag_family(&file.tags, TAG_PREFIX, "fractal-message:");
+        for reference in file.tags.iter().filter_map(|tag| tag.strip_prefix(prefix)) {
             if active_subjects.contains(reference) || consumed_by_recipient.contains(reference) {
                 continue;
             }
@@ -18990,10 +19589,15 @@ fn sync_consumed_projected_messages(
 ) -> Result<()> {
     const TAG_PREFIX: &str = "st3-message:";
     for message in fractal_drivers::message::list_dir(inbox)? {
+        let prefix = fractal_drivers::ding::fractal_tag_family(
+            &message.tags,
+            TAG_PREFIX,
+            "fractal-message:",
+        );
         let is_consumed = message
             .tags
             .iter()
-            .filter_map(|tag| tag.strip_prefix(TAG_PREFIX))
+            .filter_map(|tag| tag.strip_prefix(prefix))
             .any(|subject| consumed_by_recipient.contains(subject));
         if is_consumed {
             fractal_drivers::message::archive_msg(inbox, archive, &message.filename)?;
@@ -19015,8 +19619,13 @@ fn projected_message_files(inbox: &Path, archive: &Path) -> Result<BTreeMap<Stri
         .into_iter()
         .chain(fractal_drivers::message::list_dir(archive)?)
         .flat_map(|message| {
+            let prefix = fractal_drivers::ding::fractal_tag_family(
+                &message.tags,
+                TAG_PREFIX,
+                "fractal-message:",
+            );
             message.tags.into_iter().filter_map(move |tag| {
-                tag.strip_prefix(TAG_PREFIX)
+                tag.strip_prefix(prefix)
                     .map(|subject| (subject.to_owned(), message.filename.clone()))
             })
         })

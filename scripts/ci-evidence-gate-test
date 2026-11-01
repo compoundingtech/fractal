@@ -208,10 +208,11 @@ class Decide(unittest.TestCase):
     def good(self):
         record = 'a' * 40
         now = gate.datetime.now(gate.timezone.utc).isoformat()
-        context = {'check': 'linux-gate', 'fork': 'false', 'event': 'merge_group', 'protected_changed': []}
+        context = {'check': 'linux-gate', 'fork': 'false', 'event': 'merge_group', 'protected_changed': [],
+                   'merge_group_mode': 'same-tree'}
         result = {'satisfied': True, 'policy': True, 'enforce': True, 'tier': 'full', 'kind': 'observed', 'trust_level': 'fleet',
                   'tree': 'b' * 40, 'check': 'linux-gate', 'record': record, 'signer': 'fleet/ci', 'observed_at': now,
-                  'sample_one_in': 1}
+                  'sample_one_in': 1, 'match': 'tree'}
         return context, result, 'b' * 40
 
     def test_all_conditions_together_skip(self):
@@ -585,6 +586,9 @@ class EndToEnd(unittest.TestCase):
             (repo / '.st/evidence-keys').write_text(self.f.keys.read_text())
         if policy is not False:
             (repo / '.st/evidence-skip-policy.json').write_text(policy or skip_policy())
+        signed = repo / '.st/evidence-signed-only.json'
+        if not signed.exists():
+            signed.write_text(json.dumps({'openers': [], 'merge_group': 'same-tree'}))
         self.f.git('add', '-A')
         self.f.git('commit', '-q', '--allow-empty', '-m', 'base')
         return self.f.git('rev-parse', 'HEAD')
@@ -629,6 +633,68 @@ class EndToEnd(unittest.TestCase):
         fields, outputs = self.run_gate(base, **kwargs)
         self.assertEqual((fields['decision'], outputs['skip'], outputs['record']), ('run', 'false', '-'), why)
         return fields
+
+    def test_queue_reuses_an_equal_tree_on_a_different_commit_then_runs_a_changed_tree(self):
+        base = self.commit_base()
+        commit, tree = self.head()
+        self.note(commit, tree)
+        self.f.git('commit', '-q', '--allow-empty', '-m', 'queue commit')
+        self.assertNotEqual(commit, self.f.git('rev-parse', 'HEAD'))
+        self.assertEqual(tree, self.f.git('rev-parse', 'HEAD^{tree}'))
+        fields, outputs = self.run_gate(base)
+        self.assertEqual((fields['decision'], fields['match'], outputs['refuse']), ('skip', 'tree', 'false'))
+        self.f.commit('another queued change')
+        self.assertEqual(self.assertRuns(base)['outcome'], 'no_note')
+
+    def test_queue_invalid_signature_or_principal_runs_and_never_refuses(self):
+        for kwargs in ({'key': self.stranger}, {'signer': 'fleet/not-allowed'}):
+            with self.subTest(kwargs):
+                base = self.commit_base()
+                commit, tree = self.f.commit('invalid ' + str(kwargs))
+                self.note(commit, tree, **kwargs)
+                fields, outputs = self.run_gate(base)
+                self.assertEqual((fields['decision'], fields['outcome'], outputs['refuse']),
+                                 ('run', 'rejected', 'false'))
+
+    def test_queue_mode_comes_only_from_base_and_off_or_malformed_runs(self):
+        for text in ('{"openers": [], "merge_group": "off"}', '{"openers": []}', '{bad',
+                     '{"openers": [], "merge_group": "unknown"}'):
+            with self.subTest(text):
+                path = self.f.repo / '.st/evidence-signed-only.json'
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(text)
+                base = self.commit_base()
+                path.write_text('{"openers": [], "merge_group": "same-tree"}')
+                commit, tree = self.head()
+                self.note(commit, tree)
+                fields, outputs = self.run_gate(base)
+                self.assertEqual((fields['decision'], fields['outcome'], outputs['refuse']),
+                                 ('run', 'satisfied', 'false'))
+        self.assertEqual(json.loads(root_config('evidence-signed-only.json').read_text())['merge_group'], 'off')
+
+    def test_queue_agent_note_requires_the_base_lane_digest(self):
+        agent = self.f.key('agent', 'agent/larch')
+        policy = skip_policy(trust_levels=['agent'], kinds={'wrapper': {
+            'command': ['make', 'test'], 'by_level': {'agent': {
+                'command': ['make', 'test'], 'events': ['pull_request', 'merge_group'], 'lane': True}}}})
+        repo = self.f.repo
+        (repo / '.st').mkdir(exist_ok=True)
+        (repo / '.st/required-lanes.json').write_text(json.dumps(self.LANES))
+        (repo / 'scripts').mkdir(exist_ok=True)
+        (repo / 'scripts/lane.sh').write_text('test\n')
+        (repo / 'scripts/lane.json').write_text('{}\n')
+        base = self.commit_base(policy=policy)
+        commit, tree = self.head()
+        rules = fixtures.evidence_verify.lane_rules(json.dumps(self.LANES), 'linux-gate')
+        digest = fixtures.evidence_verify.lane_definition(str(repo), base, tree, rules)['sha256']
+        record = self.note(commit, tree, key=agent, signer='agent/larch', runner='wrapper',
+                           command=('make', 'test'), inputs={'lane_definition_sha256': digest})
+        self.f.git('commit', '-q', '--allow-empty', '-m', 'queue')
+        self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
+        self.f.git('update-ref', '-d', self.f.ref_of[record])
+        self.note(commit, tree, key=agent, signer='agent/larch', runner='wrapper',
+                  command=('make', 'test'), inputs={'lane_definition_sha256': '0' * 64}, seconds=1)
+        self.assertEqual(self.assertRuns(base)['outcome'], 'rejected')
 
     # ---- the happy path and its progression -------------------------------------------------
 
@@ -1505,9 +1571,8 @@ class EndToEnd(unittest.TestCase):
         for check, entry in policy['checks'].items():
             self.assertIn(entry.get('enforce', False), (True, False), check)
 
-    def test_the_committed_policy_skips_an_enforced_check_on_pull_requests_and_never_in_the_merge_queue(self):
-        # The committed policy as it is (only sampling and inputs neutralised): an enforced check skips a pull request run on a
-        # trusted note and still runs in the merge queue, which keeps testing the combined tree; a check that is not enforced never skips.
+    def test_the_committed_policy_can_skip_exact_queue_trees_when_the_mode_is_enabled(self):
+        # Fixture opts in; the deployed mode remains off until post-merge hosted proof is deployed.
         doc = json.loads(root_config('evidence-skip-policy.json').read_text())
         for entry in doc['checks'].values():
             entry['sample_one_in'] = 1
@@ -1527,9 +1592,7 @@ class EndToEnd(unittest.TestCase):
             queue, _ = self.run_gate(base, check=check, EVENT_NAME='merge_group')
             self.assertEqual((pull['outcome'], queue['outcome']), ('satisfied', 'satisfied'), check)
             self.assertEqual(pull['decision'], 'skip' if enforced else 'run', check)
-            self.assertEqual(queue['decision'], 'run', check)
-            if enforced:
-                self.assertIn('cover_this_event', queue['reason'], check)
+            self.assertEqual(queue['decision'], 'skip' if enforced else 'run', check)
 
     def input_scenario(self, **per_check):
         """A base whose policy declares `inputs.txt` as the only input of every check; head 1 has a note."""
@@ -1551,7 +1614,9 @@ class EndToEnd(unittest.TestCase):
     def test_a_record_of_another_tree_with_the_same_input_key_skips_and_says_so(self):
         base, key, record = self.input_scenario()
         self.f.commit('an undeclared file changed')
-        fields, outputs = self.run_gate(base)
+        queue, outputs = self.run_gate(base)
+        self.assertEqual((queue['decision'], queue['outcome'], outputs['refuse']), ('run', 'satisfied', 'false'))
+        fields, outputs = self.run_gate(base, EVENT_NAME='pull_request')
         self.assertEqual((fields['decision'], fields['outcome'], fields['match'], fields['source_inputs'], outputs['record']),
                          ('skip', 'satisfied', 'inputs', key, record))
         (self.f.repo / 'inputs.txt').write_text('a declared file changed')
@@ -1562,7 +1627,7 @@ class EndToEnd(unittest.TestCase):
     def test_sampling_keeps_running_a_deterministic_share_of_matching_runs(self):
         base, key, record = self.input_scenario(sample_one_in=1)
         self.f.commit('two')
-        self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
+        self.assertEqual(self.run_gate(base, EVENT_NAME='pull_request')[0]['decision'], 'skip')
         # The sample is a function of (check, input key, head). The heads here are FIXED object ids, never the checkout's real commit
         # (whose id changes with the clock), so the outcome of every run below is the same on every machine and every day. Twelve
         # fixed heads at one in three include both outcomes for this scenario's key; the test says so before it relies on it.
@@ -1573,15 +1638,15 @@ class EndToEnd(unittest.TestCase):
                     for head in heads}
         self.assertEqual(set(expected.values()), {'skip', 'run'})
         for head in heads:
-            first = self.run_gate(base, HEAD_SHA=head)[0]
+            first = self.run_gate(base, EVENT_NAME='pull_request', HEAD_SHA=head)[0]
             self.assertEqual(first['decision'], expected[head], head)
-            self.assertEqual(first['decision'], self.run_gate(base, HEAD_SHA=head)[0]['decision'])  # a retry behaves the same
+            self.assertEqual(first['decision'], self.run_gate(base, EVENT_NAME='pull_request', HEAD_SHA=head)[0]['decision'])
             if first['decision'] == 'run':
                 self.assertEqual(first['outcome'], 'satisfied')
                 self.assertTrue(first['reason'].startswith('satisfied_but_not_skipped:_sampled:'), first['reason'])
         # Control: the real commit does not matter. The same fixed head gives the same decision after the checkout moved on.
         self.f.commit('the checkout moved')
-        again = self.run_gate(base, HEAD_SHA=heads[0])[0]
+        again = self.run_gate(base, EVENT_NAME='pull_request', HEAD_SHA=heads[0])[0]
         self.assertEqual(again['decision'], expected[heads[0]])
         self.assertTrue(gate.sampled({'check': 'c', 'head': 'h'}, {'sample_one_in': 'x'}, 't'))  # unreadable: sample
         self.assertFalse(gate.sampled({'check': 'c', 'head': 'h'}, {'sample_one_in': 1}, 't'))
@@ -1759,28 +1824,23 @@ class EndToEnd(unittest.TestCase):
             self.wrapper_note(commit, tree, lock, inputs={'toolchain_sha256': ''})
             self.assertRuns(base)
 
-    def test_one_fractal_web_shard_note_cannot_satisfy_the_check_and_the_whole_check_note_covers_pull_requests_only(self):
-        """Each fractal-web-execution shard signs its own note; the policy accepts only the whole-check note the evidence note job
-        signs from the lane's jobs. One shard's note, even shard 1 of 2 or a pull request's only shard, never satisfies the
-        check. A pull request's one-shard whole-check note covers a pull request run (it ran everything a pull request runs);
-        the policy keeps it out of the merge queue with its events (pull_request only)."""
+    def test_one_fractal_web_shard_note_cannot_satisfy_the_whole_check(self):
+        """A shard cannot substitute for the signed whole-check aggregate, on either event."""
         entry = json.loads(root_config('evidence-skip-policy.json').read_text())['checks']['fractal-web']
-        self.assertIs(entry['enforce'], True)  # turned on for pull requests only; the merge queue keeps running it
-        self.assertEqual(entry['events'], ['pull_request'])
+        self.assertIs(entry['enforce'], True)
+        self.assertEqual(entry['events'], ['pull_request', 'merge_group'])
         self.assertEqual(entry.get('require', 'off'), 'off')
         self.assertEqual(entry['trust_levels'], ['fleet'])
         self.assertEqual(sorted(entry['kinds']), ['wrapper'])  # the always-emitted fractal-web job passes without running the lane
-        # Host and agent levels admit only the local one-shard whole-check note (scripts/ci-local-web), for pull requests, bound to its
-        # lane; CI's own notes stay fleet-signed, and a single CI shard's note still never satisfies the check (below).
+        # Host and agent notes retain the exact local command and lane binding on both events.
         wrapper = entry['kinds']['wrapper']
         self.assertEqual(wrapper['trust_levels'], ['fleet', 'host', 'agent', 'queue'])
         self.assertEqual(sorted(wrapper['by_level']), ['agent', 'host', 'queue'])
         for name, level in wrapper['by_level'].items():
             self.assertEqual(level['command'], ['nix', 'develop', '.#web', '-c', 'bash', 'scripts/ci-local-web'])
-            # host and agent cover pull requests only; the (inert) queue level covers the merge queue only, like the other host checks'.
-            # A host note is held to the lane as its own tree defines it (a change may edit the lane: our hosts sign it too).
-            self.assertEqual((level['events'], level['lane']), (['merge_group' if name == 'queue' else 'pull_request'],
-                                                                'tree' if name == 'host' else True), name)
+            self.assertEqual((level['events'], level['lane']),
+                             (['merge_group'] if name == 'queue' else ['pull_request', 'merge_group'],
+                              'tree' if name == 'host' else True), name)
         self.assertRegex((ROOT / '.github/workflows/fleet.yml').read_text(), re.compile(r'^  evidence-gate-fractal-web:', re.M))
         shard_inputs = {'job': 'fractal-web', 'steps': 'run', 'step_outcomes': 'run=success'}
         for shard in ({'kit_shard': '1', 'kit_shard_count': '2', 'kit_play_set': 'all', 'app_test_set': 'all'},
@@ -2237,11 +2297,13 @@ class WorkflowStructure(unittest.TestCase):
             expression = expression[3:-2].strip()
         for gate, value in gates.items():
             expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.skip == 'true'", str(value))
+            expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.skip != 'true'", str(not value))
         for gate in ('linux-gate', 'rust-tests', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web'):
             expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.refuse == 'true'", str(gate in refused))
         expression = expression.replace("github.event_name != 'pull_request' || github.event.pull_request.draft == false", 'True')
         expression = expression.replace('!cancelled()', 'True')
         expression = expression.replace("github.event_name == 'merge_group'", str(event == 'merge_group'))
+        expression = expression.replace("github.event_name", repr(event))
         expression = expression.replace('!(', 'not (').replace('&&', ' and ').replace('||', ' or ')
         return bool(eval(expression, {'__builtins__': {}}))
 
@@ -2673,24 +2735,40 @@ class WorkflowStructure(unittest.TestCase):
         self.assertEqual(json.loads(shard_env['STEP_COMMAND'].strip().strip("'")), FRACTAL_WEB_SHARD_ARGV)
         self.assertNotEqual(FRACTAL_WEB_SHARD_ARGV, rule['command'])
 
-    def test_the_fractal_web_lane_skips_its_jobs_only_for_trusted_pull_request_evidence(self):
-        """The semantic check remains emitted; only PR execution avoids runner allocation.
-        Queue and manual execution retain their complete proof and shard coverage."""
+    def test_the_fractal_web_lane_honors_trusted_pr_and_queue_skips_but_runs_on_main_and_manual(self):
+        """Evidence suppresses both execution and receipts on PR/queue events.
+        Push and manual runs cannot receive a trusted skip and retain full hosted proof."""
         blocks = self.blocks()
         execution, verdict = blocks['fractal-web-execution'], blocks['fractal-web']
         self.assertIn('evidence-gate-fractal-web', self.needs_of(execution))
         self.assertIn('evidence-gate-fractal-web', self.needs_of(verdict))
         condition = self.job_condition(execution)
         self.assertIn("github.event_name == 'pull_request'", condition)
-        self.assertIn("needs.evidence-gate-fractal-web.outputs.skip == 'true'", condition)
+        self.assertIn("needs.evidence-gate-fractal-web.outputs.skip != 'true'", condition)
         self.assertIn("!(", condition)
         self.assertNotIn('evidence-gate', self.job_condition(verdict))
         self.assertNotIn('evidence covered by a trusted note', execution)
         self.assertIn("EVIDENCE_SKIP: ${{ needs.evidence-gate-fractal-web.outputs.skip }}", verdict)
         self.assertIn("EVENT_NAME: ${{ github.event_name }}", verdict)
+        ready = condition.replace("needs.fractal-web-changes.result == 'success'", 'True') \
+                         .replace("needs.fractal-web-changes.outputs.relevant == 'true'", 'True') \
+                         .replace("needs.genie-freshness.result == 'success'", 'True')
+        for event in ('pull_request', 'merge_group', 'push', 'workflow_dispatch'):
+            context, result, tree = Decide().good()
+            context['event'] = event
+            allowed = gate.decide(context, 'satisfied', result, tree)[0] == 'skip'
+            self.assertEqual(allowed, event in ('pull_request', 'merge_group'))
+            self.assertEqual(self.truth(ready, {'fractal-web': allowed}, event), not allowed)
+            self.assertTrue(self.truth(ready, {'fractal-web': False}, event))
         for name, condition in self.steps_of('fractal-web'):
             if name == 'Require every kit shard and exact full-index coverage':
-                self.assertNotIn('evidence-gate', condition)
+                self.assertIn("needs.evidence-gate-fractal-web.outputs.skip != 'true'", condition)
+                sharded = condition.replace("needs.fractal-web-changes.outputs.kit-inputs == 'true'", 'True') \
+                                   .replace("needs.fractal-web-changes.outputs.relevant == 'true'", 'True')
+                for event in ('merge_group', 'push', 'workflow_dispatch'):
+                    skip = event == 'merge_group'
+                    self.assertEqual(self.truth(sharded, {'fractal-web': skip}, event), not skip)
+                    self.assertTrue(self.truth(sharded, {'fractal-web': False}, event))
             elif name == 'Require detection and, for web changes, execution':
                 self.assertIsNone(condition, 'the verdict always runs')
 

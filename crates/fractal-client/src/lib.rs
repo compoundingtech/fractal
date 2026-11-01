@@ -77,15 +77,39 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
         }
     }
 
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return Ok(PathBuf::from(runtime).join("st3.sock"));
-    }
-    let state_base = xdg_path("XDG_STATE_HOME", ".local/state")?;
-    Ok(
+    let state_socket = xdg_path("XDG_STATE_HOME", ".local/state").map(|state_base| {
         product_dirs::resolve(state_base.join("st3"), state_base.join("fractal"))
             .join("run")
-            .join("st3.sock"),
-    )
+            .join("st3.sock")
+    });
+    match (std::env::var_os("XDG_RUNTIME_DIR"), state_socket) {
+        (Some(runtime), Ok(state_socket)) => Ok(runtime_or_published_socket(
+            &PathBuf::from(runtime).join("st3.sock"),
+            &state_socket,
+        )),
+        (Some(runtime), Err(_)) => Ok(PathBuf::from(runtime).join("st3.sock")),
+        (None, state_socket) => state_socket,
+    }
+}
+
+/// The runtime default, unless nothing answers there and the daemon's published discovery link
+/// leads to a socket that does. A daemon started with `--socket` elsewhere links its state
+/// directory's `run/st3.sock` to that socket, while the runtime default can hold a dead socket
+/// left by an earlier daemon. Nothing is probed when the link leads to the default itself. The
+/// link's target is returned, not the link: a long state path can exceed the socket address limit.
+pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf {
+    let Ok(target) = std::fs::canonicalize(published) else {
+        return runtime.to_path_buf();
+    };
+    if std::fs::canonicalize(runtime).ok().as_ref() == Some(&target) {
+        return runtime.to_path_buf();
+    }
+    let answers = |socket: &Path| std::os::unix::net::UnixStream::connect(socket).is_ok();
+    if !answers(runtime) && answers(&target) {
+        target
+    } else {
+        runtime.to_path_buf()
+    }
 }
 
 fn configured_socket(document: &str) -> Result<Option<PathBuf>, ClientError> {
@@ -994,6 +1018,9 @@ impl TerminalStream {
     }
 }
 
+/// The error a daemon's empty 404 decodes to: it has no such route.
+const MISSING_ROUTE: &str = "HTTP 404 with no body: the daemon has no such route";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("st client API error {0:?}: {1}")]
@@ -1007,6 +1034,13 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// Whether the daemon has no such route: it answered 404 with no error body, as a daemon
+    /// from before the route does. A typed refusal, another status, or a malformed answer to a
+    /// route that exists is not this.
+    pub fn is_missing_route(&self) -> bool {
+        matches!(self, Self::Protocol(message) if message == MISSING_ROUTE)
+    }
+
     /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
     /// a fresh request is safe) or `"unknown"` (it may still complete; send the identical request,
     /// with the same key, again). Any other answer, or none, says nothing.
@@ -1192,6 +1226,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         }
         ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
+        | ErrorCode::InvalidAnswer
+        | ErrorCode::NotAnswerable
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
         | ErrorCode::AgentsPublicationRowTooLarge
@@ -1236,6 +1272,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
+        | ErrorCode::RetireRevisionMismatch
+        | ErrorCode::RetireIncarnationMismatch
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
         | ErrorCode::MessageSelectorsNotReady
@@ -2057,6 +2095,36 @@ impl Client {
         .await
     }
 
+    pub async fn harness_questions(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/client/harness-questions{suffix}"))
+            .await
+    }
+    pub async fn harness_question(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<HarnessQuestion>, ClientError> {
+        self.get(&format!(
+            "/v1/client/harness-questions/{}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
@@ -2468,6 +2536,26 @@ impl Client {
             fields.join("&")
         ))
         .await
+    }
+    /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
+    /// query, answered from that mirror alone, so a relayed read is never relayed again.
+    pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        // No segment may be only dots, so the path cannot step out of the plugin's routes.
+        let dot_segment = path
+            .split(['/', '?'])
+            .any(|part| !part.is_empty() && part.chars().all(|c| c == '.'));
+        if !path.starts_with("/v1/plugins/github/repos/") || dot_segment || path.contains('#') {
+            return Err(ClientError::Protocol(format!(
+                "not a GitHub plugin read: {path}"
+            )));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut body: serde_json::Value = self.get(&format!("{path}{separator}local=1")).await?;
+        // The daemon wraps the answer in its API envelope; the relay carries the answer alone.
+        Ok(body
+            .get_mut("value")
+            .map(serde_json::Value::take)
+            .unwrap_or(body))
     }
     pub async fn runtimes_list(
         &self,
@@ -2887,6 +2975,17 @@ impl Client {
         parameters: CustomReplyParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::custom_reply(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn harness_answer(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HarnessAnswerParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::harness_answer(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -3709,7 +3808,14 @@ impl Client {
     /// The fleet's membership as this host's daemon holds it, for finding a host's Fabric node.
     /// A read of the local store; only a Unix socket serves it.
     pub async fn fleet_membership(&self) -> Result<serde_json::Value, ClientError> {
-        self.get("/v1/internal/fleet/membership").await
+        // Internal routes refuse seat callers; a daemon from before the public route answers
+        // only the internal one.
+        match self.get("/v1/fleet/membership").await {
+            Err(error) if error.is_missing_route() => {
+                self.get("/v1/internal/fleet/membership").await
+            }
+            result => result,
+        }
     }
 
     /// Where `subject`'s running terminal lives, read from this host's daemon without any graph
@@ -4394,6 +4500,11 @@ impl Client {
                     error.message.clone(),
                     Box::new(error),
                 ));
+            }
+            // Any other route an older daemon does not have answers Axum's empty 404: say so
+            // distinctly, so a caller can fall back without mistaking a broken answer for it.
+            if status == 404 && bytes.is_empty() {
+                return Err(ClientError::Protocol(MISSING_ROUTE.into()));
             }
             let error: ErrorEnvelope = serde_json::from_slice(&bytes)
                 .or_else(|decode| core_api_error(&bytes).ok_or(decode))
@@ -5328,6 +5439,8 @@ mod tests {
         assert!(!gone.is_transient());
         assert!(!api(ErrorCode::Forbidden, "no").is_transient());
         for code in [
+            ErrorCode::InvalidAnswer,
+            ErrorCode::NotAnswerable,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {
@@ -5585,6 +5698,39 @@ mod tests {
         );
         assert_eq!(configured_socket("node = 'local'\n").unwrap(), None);
         assert!(configured_socket("socket = 7\n").is_err());
+    }
+
+    #[test]
+    fn discovery_follows_the_published_link_past_a_dead_runtime_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("runtime/st3.sock");
+        let real = root.path().join("state/st3.sock");
+        let published = root.path().join("state/run/st3.sock");
+        for directory in ["runtime", "state/run"] {
+            std::fs::create_dir_all(root.path().join(directory)).unwrap();
+        }
+        // An earlier daemon's socket stays behind with nothing listening on it.
+        drop(std::os::unix::net::UnixListener::bind(&runtime).unwrap());
+        // No link yet: the runtime default, as before.
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+        let _daemon = std::os::unix::net::UnixListener::bind(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &published).unwrap();
+        assert_eq!(
+            runtime_or_published_socket(&runtime, &published),
+            std::fs::canonicalize(&real).unwrap()
+        );
+        // A runtime default that answers keeps precedence.
+        std::fs::remove_file(&runtime).unwrap();
+        let _other = std::os::unix::net::UnixListener::bind(&runtime).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+        // A link that leads to the default itself, and a dead link, change nothing.
+        drop(_other);
+        std::fs::remove_file(&published).unwrap();
+        std::os::unix::fs::symlink(&runtime, &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+        std::fs::remove_file(&published).unwrap();
+        std::os::unix::fs::symlink(root.path().join("state/gone.sock"), &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
     }
 
     #[test]

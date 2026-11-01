@@ -112,6 +112,9 @@ EXTRA = {
     # The recorded argv only reads one crate's result out of a JUnit report; the report is made by the tests stage that
     # scripts/fractal-test runs for the crates without a note (RUN_TESTS), so that stage is part of what a rust-tests note says.
     'rust-tests': {'argv': [['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']]},
+    # The same for linux-clippy: the recorded argv (scripts/ci-clippy-result) reads a clippy stage's report, made by the stage scripts/st-test
+    # runs alone when linux-gate does not run (RUN_CLIPPY), or by linux-gate's own run of it, already in linux-gate's closure.
+    'linux-clippy': {'argv': [['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'clippy']]},
 }
 # The tree under test: what the lanes build and test (the Rust workspace, the pnpm workspace packages), their `tree_inputs`. A script
 # that reads a file here (a lint over the crates, a test that copies a build script into a fixture) reads the subject of the check,

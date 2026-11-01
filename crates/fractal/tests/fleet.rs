@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use fractal_daemon::client::Client;
-use fractal_daemon::model::ClaimInput;
+use fractal_daemon::model::{ClaimInput, MessagePage, MessageView};
 
 fn st3() -> &'static str {
     test_env!("CARGO_BIN_EXE_fractal-fixture")
@@ -149,6 +149,24 @@ impl Node {
         let pty = root.join("bin/pty");
         fs::write(&pty, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&pty, fs::Permissions::from_mode(0o755)).unwrap();
+        // Private supervisor evidence, including replacement workers; never consult host services.
+        for (tool, script) in [
+            ("systemctl", "#!/bin/sh\ncase \"$*\" in\n*MainPID*) cat \"$HOME/../worker.pid\";;\n*'show st3-replication.service '*) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n*' show '*) printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\n';;\n*) exit 1;;\nesac\n"),
+            ("launchctl", "#!/bin/sh\ncase \"$*\" in\n*com.compoundingtech.st3.replication*) printf 'state = running\\npid = '; cat \"$HOME/../worker.pid\";;\n*) exit 1;;\nesac\n"),
+        ] {
+            let mut script = script.to_owned();
+            if tool == "systemctl"
+                && let Ok(real) = fractal_runtime::resolve_executable(tool, &std::env::vars().collect())
+            {
+                // Preserve user-scope isolation without consulting real fleet service units.
+                script = script.replace("case \"$*\" in\n", &format!(
+                    "case \"$*\" in\n*'.scope'*|*show-environment*) exec '{}' \"$@\";;\n",
+                    real.to_string_lossy().replace('\'', "'\\''")));
+            }
+            let path = root.join("bin").join(tool);
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         // A release without --pty-binary finds pty through the login shell's PATH.
         let profile = format!("export PATH=\"{}:$PATH\"\n", root.join("bin").display());
         for file in [".profile", ".bash_profile", ".zprofile", ".zshrc"] {
@@ -197,7 +215,7 @@ impl Node {
             .args(arguments)
             .current_dir(&self.root)
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("PATH", format!("{}:{}", self.root.join("bin").display(), std::env::var("PATH").unwrap_or_default()))
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))
@@ -334,6 +352,7 @@ impl Node {
                 .spawn()
                 .unwrap(),
         );
+        fs::write(self.root.join("worker.pid"), self.worker.as_ref().unwrap().id().to_string()).unwrap();
     }
 
     fn stop_worker(&mut self) {
@@ -341,6 +360,7 @@ impl Node {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let _ = fs::remove_file(self.root.join("worker.pid"));
     }
 
     fn stop(&mut self) {
@@ -352,6 +372,7 @@ impl Node {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let _ = fs::remove_file(self.root.join("worker.pid"));
         let _ = fs::remove_file(self.socket());
     }
 
@@ -642,6 +663,103 @@ async fn joined_with(
     );
     node.start().await;
     node
+}
+
+#[test]
+fn offline_rename_proof_uses_supported_environment_aliases() {
+    let root = tempfile::tempdir().unwrap();
+    let node = Node::new(root.path(), "offline-proof");
+    fs::write(node.root.join("config/st3/config.toml"), "not valid toml = [").unwrap();
+    for kind in ["agents", "missions"] {
+        for (preferred, legacy) in [(None, None), (Some("0"), None), (None, Some("0")), (Some("0"), Some("invalid"))] {
+            let mut command = node.command(&[
+                "--endpoint", "not-a-valid-endpoint", kind, "rename-id", "proof", "verify",
+                "missing.json", "--fleet-anchor", "caller-anchor",
+            ]);
+            command.env_remove("FRACTAL_DAEMON_WAIT").env_remove("ST3_DAEMON_WAIT");
+            if let Some(value) = preferred { command.env("FRACTAL_DAEMON_WAIT", value); }
+            if let Some(value) = legacy { command.env("ST3_DAEMON_WAIT", value); }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(6), "{}", String::from_utf8_lossy(&output.stderr));
+            let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(verdict["ok"], false);
+            assert_eq!(verdict["error"]["code"], "malformed-bundle");
+        }
+    }
+}
+
+#[tokio::test]
+async fn rename_proofs_export_over_cli_and_verify_without_daemon_or_config() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "proof-source").await;
+    let anchor_value = node.st_json(&["fleet", "anchor", "show"]);
+    let fleet_anchor = anchor_value["fleet_anchor"].as_str().unwrap();
+    assert_eq!(node.st_ok(&["fleet", "anchor", "show"]).trim(), fleet_anchor);
+    let declaration = node.root.join("identities.kdl");
+    fs::write(&declaration, r#"version 2
+agent "proof-original/worker" { command "true"; workspace "/tmp"; restart "never"; }
+mission "proof-original" state="ready" {
+  goal "Prove portable identity history."
+  step "work" { agentless }
+}
+"#).unwrap();
+    node.st_ok(&["apply", declaration.to_str().unwrap(), "--as", PERSON]);
+    let mut proofs = Vec::new();
+    for (kind, prefix, suffix) in [("agents", "agent", "/worker"), ("missions", "mission", "")] {
+        let original = format!("{prefix}/proof-original{suffix}");
+        let renamed = format!("{prefix}/proof-renamed{suffix}");
+        let receipt = node.st_json(&[
+            kind, "rename-id", &original, &renamed,
+            "--as", PERSON, "--reason", "Clarify responsibility",
+        ]);
+        let revision = receipt["naming_revision"].as_str().unwrap().to_owned();
+        let denied = node.st(&[kind, "rename-id", "proof", "export", &original]);
+        assert!(!denied.status.success());
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("co-batched claims and blobs"));
+        let proof = root.path().join(format!("{kind}-proof.json"));
+        node.st_ok(&[
+            kind, "rename-id", "proof", "export", &original,
+            "--revision", &revision, "--out", proof.to_str().unwrap(),
+            "--include-co-batched-claims",
+        ]);
+        let from_file: Value = serde_json::from_slice(&fs::read(&proof).unwrap()).unwrap();
+        let from_stdout = node.st_json(&[
+            kind, "rename-id", "proof", "export", &renamed,
+            "--include-co-batched-claims",
+        ]);
+        for field in ["schema", "identity_kind", "storage_id", "canonical_id", "naming_revision", "declaration", "chain"] {
+            assert_eq!(from_file[field], from_stdout[field], "{field}");
+        }
+        assert_eq!(from_file["schema"], "fractal.rename-proof.v1");
+        assert_eq!(from_file["disclosure"], "fleet-internal");
+        proofs.push((kind, proof, renamed, revision));
+    }
+    node.stop();
+    // Deliberately invalid local configuration must be irrelevant to verification.
+    fs::write(node.root.join("config/st3/config.toml"), "not valid toml = [").unwrap();
+    for (kind, proof, renamed, revision) in proofs {
+        let offline = [
+            "--instance", "unconfigured-proof-verifier",
+            "--endpoint", "not-a-valid-endpoint",
+            kind, "rename-id", "proof", "verify", proof.to_str().unwrap(),
+            "--fleet-anchor", fleet_anchor,
+        ];
+        let verdict = node.st_json(&offline);
+        assert_eq!(verdict["schema"], "fractal.rename-proof-verdict.v1");
+        assert_eq!(verdict["ok"], true);
+        assert_eq!(verdict["disclosure"], "fleet-internal");
+        assert_eq!(verdict["to"], renamed);
+        let mut stale = offline.to_vec();
+        stale.extend(["--after-revision", &revision]);
+        let rejected = node.st(&stale);
+        assert_eq!(rejected.status.code(), Some(5));
+        let verdict: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+        assert_eq!(verdict["ok"], false);
+        assert_eq!(verdict["error"]["code"], "stale-revision");
+    }
 }
 
 /// Re-publication and parent revisions must preserve the weekly occurrence, even after its
@@ -2931,8 +3049,7 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only what the test itself created remains: empty XDG roots, the stub pty, and the shell
-    // profiles (fish's config.fish among them) that put it on PATH.
+    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain.
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -2952,6 +3069,8 @@ async fn uninstall_leaves_nothing_behind() {
                 "run",
                 "bin",
                 "bin/pty",
+                "bin/systemctl",
+                "bin/launchctl",
             ]
             .iter()
             .any(|kept| relative == Path::new(kept))
@@ -4919,6 +5038,7 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
                 .spawn()
                 .unwrap(),
         );
+        fs::write(traveller.root.join("worker.pid"), traveller.worker.as_ref().unwrap().id().to_string()).unwrap();
         for node in [&a, &b, &traveller] {
             wait_for_notes(node, &expected, 10, &[&a, &b, &traveller]).await;
         }
@@ -5856,3 +5976,689 @@ mission "orchard/release" state="ready" {
 
 #[path = "fleet/schedule_standby.rs"]
 mod schedule_standby;
+
+/// An agent's message written straight into `node`'s messages shard. Nothing in this build
+/// writes the shard yet; tests reach it through a test-support route.
+async fn append_stream_item(node: &Node, subject: &str) {
+    let _: Value = node
+        .client()
+        .post(
+            "/v1/internal/test/messages-shard",
+            &ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/fleet-sender".into()),
+                fields: serde_json::from_value(json!({
+                    "from": "agent/fleet-sender", "to": "agent/fleet-reader",
+                    "content": "through the stream", "status": "sent"
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// How many claims `node`'s messages shard holds about `subject`.
+async fn stream_items(node: &Node, subject: &str) -> usize {
+    let items: Vec<Value> = node
+        .client()
+        .get(&format!("/v1/internal/test/messages-shard?subject={subject}"))
+        .await
+        .unwrap();
+    items.len()
+}
+
+/// The members `node` dials for its messages shard.
+async fn stream_peers(node: &Node) -> BTreeSet<String> {
+    let peers: Value = node
+        .client()
+        .get("/v1/internal/test/messages-shard/peers")
+        .await
+        .unwrap();
+    serde_json::from_value(peers["peers"].clone()).unwrap()
+}
+
+async fn wait_for_stream_item(node: &Node, subject: &str, seconds: u64) {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while stream_items(node, subject).await == 0 {
+        assert!(Instant::now() < deadline, "{} never received {subject}:\n{}", node.name, node.logs());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn wait_for_stream_peers(node: &Node, expected: &[&str], seconds: u64) {
+    let expected = expected.iter().map(|name| (*name).to_owned()).collect::<BTreeSet<_>>();
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        let peers = stream_peers(node).await;
+        if peers == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} dials {peers:?} for the messages shard, expected {expected:?}",
+            node.name
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Members that both hold the messages shard advertise it, dial each other for it, and
+/// replicate its items without writing them into the graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn members_that_advertise_the_messages_shard_replicate_it_beside_the_graph() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "4f1e2d3c-5b6a-4978-8e9d-0c1b2a3f4e5d";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([5_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut n1 = Node::new(root.path(), "n1");
+    let mut n2 = Node::new(root.path(), "n2");
+    n1.legacy_config(fleet_id, &secret, &[("n2", n2.port)]);
+    n2.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    for node in [&mut n1, &mut n2] {
+        node.start().await;
+        assert!(node.state_dir().join("shards/messages/claims.sqlite3").exists());
+    }
+    wait_for_stream_peers(&n1, &["n2"], 60).await;
+    wait_for_stream_peers(&n2, &["n1"], 60).await;
+    append_stream_item(&n1, "message/0000000000000a01").await;
+    wait_for_stream_item(&n2, "message/0000000000000a01", 60).await;
+    n1.note("graph-after-stream").await;
+    let expected = BTreeSet::from(["custom/fleet-test/graph-after-stream".to_owned()]);
+    wait_for_notes(&n2, &expected, 60, &[&n1, &n2]).await;
+    assert!(
+        n2.claims().await.iter().all(|claim| claim["subject"] != "message/0000000000000a01"),
+        "a stream item reached the graph"
+    );
+}
+
+/// A member's readers merge what the stream holds with the graph's mail: the recipient's page
+/// and the message read find a stream item that replicated in, and its recipient records it read
+/// on its own member with an offset receipt, writing no lifecycle claim to the graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn readers_find_stream_items_and_record_their_lifecycle_on_the_member() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "8c7b6a5d-4e3f-4210-9a8b-7c6d5e4f3a2b";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut n1 = Node::new(root.path(), "n1");
+    let mut n2 = Node::new(root.path(), "n2");
+    n1.legacy_config(fleet_id, &secret, &[("n2", n2.port)]);
+    n2.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    for node in [&mut n1, &mut n2] {
+        node.start().await;
+    }
+    wait_for_stream_peers(&n1, &["n2"], 60).await;
+    let subject = "message/0000000000000c01";
+    append_stream_item(&n1, subject).await;
+    wait_for_stream_item(&n2, subject, 60).await;
+
+    let page: MessagePage =
+        n2.client().get("/v1/messages/page?to=agent/fleet-reader").await.unwrap();
+    let listed = page.items.iter().find(|item| item.subject == subject)
+        .expect("the page lists the stream item");
+    assert_eq!(listed.content, "through the stream");
+    let read: MessageView =
+        n2.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(read.from, "agent/fleet-sender");
+
+    let _: Value = n2
+        .client()
+        .post(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "delivered", "actor": "agent/fleet-reader", "idempotency_key": "fleet-delivered"}),
+        )
+        .await
+        .unwrap();
+    let receipt: Value = n2
+        .client()
+        .post(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "read", "actor": "agent/fleet-reader", "idempotency_key": "fleet-read"}),
+        )
+        .await
+        .unwrap();
+    assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{receipt}");
+    let read: MessageView =
+        n2.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(read.status, "read");
+    let refused = n2
+        .client()
+        .post::<_, Value>(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "read", "actor": "agent/someone-else", "idempotency_key": "fleet-read-other"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("wrong-message-recipient"), "{refused}");
+    assert!(
+        n2.claims().await.iter().all(|claim| claim["subject"] != subject),
+        "a stream item's lifecycle reached the graph"
+    );
+    // The sender's member keeps its own record: the reader's receipt is not replicated.
+    let sent: MessageView =
+        n1.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(sent.status, "sent");
+}
+
+/// Mail the previous release wrote is read the same after an upgrade in place, and pages list it
+/// before the member's stream items. Rolling back to the release keeps every graph receipt either
+/// build wrote and leaves the stream's local records for the next upgrade.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    // A single-node install, as most upgrades are.
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    let send = |node: &Node, key: &str| {
+        let client = node.client();
+        let key = key.to_owned();
+        async move {
+            let receipt: Value = client
+                .post("/v1/messages", &json!({
+                    "idempotency_key": key, "from": PERSON, "to": "agent/fleet-reader",
+                    "content": format!("graph mail {key}"),
+                }))
+                .await
+                .unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    let read = |node: &Node, subject: &str, key: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+        let key = key.to_owned();
+        async move {
+            // Graph mail is read only once it was delivered.
+            let mut receipt = Value::Null;
+            for lifecycle in ["delivered", "read"] {
+                receipt = client
+                    .post(&path, &json!({
+                        "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                        "idempotency_key": format!("{key}-{lifecycle}"),
+                    }))
+                    .await
+                    .unwrap();
+            }
+            receipt
+        }
+    };
+    let listed = |node: &Node| {
+        let client = node.client();
+        async move {
+            let page: MessagePage = client
+                .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true")
+                .await
+                .unwrap();
+            page.items.into_iter().map(|item| (item.subject, item.status)).collect::<Vec<_>>()
+        }
+    };
+    // The release's own mail: one read, one not.
+    let first = send(&o, "release-first").await;
+    let second = send(&o, "release-second").await;
+    read(&o, &first, "release-read").await;
+    let before = listed(&o).await;
+    assert_eq!(
+        before,
+        [(first.clone(), "read".to_owned()), (second.clone(), "sent".to_owned())]
+    );
+
+    // Upgrade in place: the release's mail reads the same, and a stream item follows it.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+    assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
+    let stream = "message/0000000000000d01";
+    append_stream_item(&o, stream).await;
+    let mut merged = before.clone();
+    merged.push((stream.to_owned(), "sent".to_owned()));
+    assert_eq!(listed(&o).await, merged);
+    // Graph mail keeps its graph receipts; the stream item's receipt stays on the member.
+    let graph_receipt = read(&o, &second, "upgraded-read").await;
+    assert!(!graph_receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{graph_receipt}");
+    let stream_receipt = read(&o, stream, "stream-read").await;
+    assert!(stream_receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{stream_receipt}");
+    merged[1].1 = "read".into();
+    merged[2].1 = "read".into();
+    assert_eq!(listed(&o).await, merged);
+    assert!(o.claims().await.iter().all(|claim| claim["subject"] != stream));
+
+    // Roll back: the release reads every graph receipt and ignores the shard beside it.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    assert_eq!(listed(&o).await, merged[..2]);
+    let third = send(&o, "rolled-back").await;
+    assert_eq!(listed(&o).await.last(), Some(&(third.clone(), "sent".to_owned())));
+
+    // Upgrade again: the stream item kept its local receipt and follows the newer graph mail.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    merged.insert(2, (third, "sent".to_owned()));
+    assert_eq!(listed(&o).await, merged);
+}
+
+/// The previous release never holds the messages shard: it is never dialed for it, and its
+/// graph sync with new members runs as before in both directions. Upgrading it in place opens
+/// the shard and it starts receiving stream items; rolling it back to the release leaves the
+/// shard file in place, keeps graph sync working, and new members stop dialing it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "6a5b4c3d-2e1f-4a0b-9c8d-7e6f5a4b3c2d";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([6_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n1 = Node::new(root.path(), "n1");
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+    // The release's own history, written before any upgrade.
+    o.note("o-before").await;
+    n1.note("n1-before").await;
+    let mut expected = BTreeSet::from([
+        "custom/fleet-test/o-before".to_owned(),
+        "custom/fleet-test/n1-before".to_owned(),
+    ]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+    }
+    assert!(!o.state_dir().join("shards").exists(), "the release opens no shard");
+    assert!(stream_peers(&n1).await.is_empty(), "the release does not advertise the shard");
+    append_stream_item(&n1, "message/0000000000000b01").await;
+    o.note("o-mixed").await;
+    n1.note("n1-mixed").await;
+    expected.extend(["custom/fleet-test/o-mixed".to_owned(), "custom/fleet-test/n1-mixed".to_owned()]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert!(o.claims().await.iter().all(|claim| claim["subject"] != "message/0000000000000b01"));
+
+    // Upgrade the release in place: its store opens with the shard beside it.
+    let retained: BTreeSet<String> = o.notes().await;
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert!(retained.is_subset(&o.notes().await), "upgrade lost release history");
+    wait_for_stream_peers(&n1, &["o"], 90).await;
+    wait_for_stream_item(&o, "message/0000000000000b01", 90).await;
+
+    // Roll it back to the release: the shard file stays, and the release ignores it.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+    wait_for_stream_peers(&n1, &[], 90).await;
+    o.note("o-rolled-back").await;
+    n1.note("n1-after-rollback").await;
+    expected.extend([
+        "custom/fleet-test/o-rolled-back".to_owned(),
+        "custom/fleet-test/n1-after-rollback".to_owned(),
+    ]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+}
+
+/// A GitHub with one repository, `fixture/app`, and one open pull request, #12, whose head is
+/// the value of `head`. Every other read answers an empty list, as the watch fixture's does.
+async fn fake_github_with_pull_request(head: std::sync::Arc<std::sync::Mutex<String>>) -> String {
+    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", http.local_addr().unwrap());
+    let issue = json!({"number": 12, "state": "open", "title": "Copper proof", "node_id": "PR_copper",
+        "html_url": "https://github.com/fixture/app/pull/12", "updated_at": "2026-10-01T00:00:00Z",
+        "created_at": "2026-10-01T00:00:00Z", "user": {"login": "fixture-author"}, "comments": 0,
+        "pull_request": {"url": "https://api.github.com/repos/fixture/app/pulls/12"}});
+    let listed = issue.clone();
+    let graphql_head = head.clone();
+    let app = axum::Router::new()
+        .route("/graphql", axum::routing::post(move || {
+            let head = graphql_head.lock().unwrap().clone();
+            async move {
+                let pull = json!({
+                    "id": "PR_copper", "number": 12, "title": "Copper proof",
+                    "url": "https://github.com/fixture/app/pull/12", "isDraft": false,
+                    "headRefOid": head, "headRefName": "agent/copper", "baseRefName": "main",
+                    "createdAt": "2026-10-01T00:00:00Z", "author": {"login": "fixture-author"},
+                    "reviewDecision": "REVIEW_REQUIRED", "mergeQueueEntry": null,
+                    "latestReviews": {"nodes": []},
+                    "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {"nodes": [
+                        {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE"},
+                    ]}}}}]},
+                });
+                axum::Json(json!({"data": {
+                    "repository": {"pullRequests": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [pull]}},
+                    "nodes": [{"id": "PR_copper", "state": "OPEN", "number": 12, "url": "https://github.com/fixture/app/pull/12"}],
+                }}))
+            }
+        }))
+        .fallback(axum::routing::get(move |uri: axum::http::Uri| {
+            let issue = listed.clone();
+            async move {
+                let path = uri.path();
+                axum::Json(if path == "/repos/fixture/app" {
+                    json!({"id": 77, "full_name": "fixture/app"})
+                } else if path.ends_with("/issues/12") {
+                    issue
+                } else if path.ends_with("/issues") {
+                    json!([issue])
+                } else if path == "/user" {
+                    json!({"login": "fixture-bot"})
+                } else {
+                    json!([])
+                })
+            }
+        }));
+    tokio::spawn(async move {
+        axum::serve(http, app).await.unwrap();
+    });
+    api
+}
+
+/// `st gh prs` as `actor` on `node`, as JSON, or null while it fails, as it does until the
+/// repository's observer is declared.
+fn gh_prs(node: &Node, actor: &str) -> Value {
+    let output = node.st(&["--json", "gh", "prs", "fixture/app", "--state", "all", "--as", actor]);
+    if !output.status.success() {
+        return Value::Null;
+    }
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// Wait until `node` answers `st gh prs fixture/app` from its own mirror, which it fills from
+/// GitHub right after a look it recorded; until then it answers from its graph. A wait that runs
+/// out says which step it stopped at (#4470): the last answer's source and reason, what the
+/// poller's claims say its observer did, and the tail of its logs.
+async fn wait_for_mirror(node: &Node, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let answer = gh_prs(node, PERSON);
+        assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
+        if answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // Read without unwrapping, so a stopped daemon cannot hide this message.
+            let trace = node.st(&["--json", "trace", "show", "observer/github/fixture/app"]);
+            let claims = String::from_utf8_lossy(&trace.stdout).lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>();
+            let observer = |kind: &str| claims.iter()
+                .filter(|claim| claim["kind"] == kind)
+                .map(|claim| claim["body"].clone())
+                .collect::<Vec<_>>();
+            panic!(
+                "timed out waiting until {what}: the last answer came from {}; the poller recorded {} looks; its observer's last state is {}\n{}",
+                answer["source"],
+                observer("observer.observed").len(),
+                observer("observer.state").last().unwrap_or(&Value::Null),
+                node.logs(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
+/// repository.
+fn watch_fixture_app(node: &Node) {
+    let file = node.root.join("seat.kdl");
+    fs::write(&file, format!(
+        "version 2\nagent \"example/watch\" {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        node.name, node.root,
+    )).unwrap();
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
+    let output = node
+        .command(&["gh", "watch", "fixture/app#12", "--as", "agent/example/watch"])
+        .env("ST_AGENT", "agent/example/watch")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stderr), node.logs());
+}
+
+/// The member that polls a repository answers `st gh prs|pr|checks` from its plugin mirror.
+/// Another member relays the read to it and shows the poller's mirror; with the poller down, it
+/// answers from its own graph and says why.
+#[tokio::test(flavor = "multi_thread")]
+async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from_a_member() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let mut poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let reader = joined(root.path(), &poller, "fixture-reader", &[]).await;
+    watch_fixture_app(&poller);
+    wait_for_mirror(&poller, "the poller mirrors pull request 12").await;
+
+    let pull = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(pull["pull"]["facts"]["title"], "Copper proof", "{pull}");
+    assert_eq!(pull["source"]["host"], "host/fixture-poller");
+    let checks = poller.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(checks["checks"]["head_sha"], "a".repeat(40), "{checks}");
+    assert_eq!(checks["checks"]["heads"].as_array().unwrap().len(), 1);
+    let human = poller.st_ok(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert!(human.contains("from the GitHub plugin mirror on host/fixture-poller"), "{human}");
+
+    // A lost mirror refills from GitHub itself, not the graph, and serves full facts again;
+    // until then the poller answers from its graph and says so.
+    poller.stop();
+    let plugin = poller.state_dir().join("plugins/github");
+    for entry in fs::read_dir(&plugin).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().unwrap().to_string_lossy().starts_with("github.sqlite3") {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    poller.start().await;
+    poller.wait_listening().await;
+    wait_for_mirror(&poller, "the poller refills its lost mirror from GitHub").await;
+    let refilled = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(refilled["pull"]["facts"]["title"], "Copper proof", "{refilled}");
+    assert_eq!(refilled["pull"]["facts"]["head_sha"], "a".repeat(40));
+    assert!(refilled["source"]["filled_at_unix_ms"].is_i64(), "{refilled}");
+
+    // Another member relays to the poller.
+    wait_until("the reader relays to the poller's mirror", 90, || {
+        let answer = gh_prs(&reader, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["source"]["host"] == "host/fixture-poller" }
+    }).await;
+    let relayed = reader.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(relayed["pull"]["facts"]["head_sha"], "a".repeat(40), "{relayed}");
+    assert_eq!(relayed["poller"], "host/fixture-poller");
+
+    // With the poller down, the reader answers from its graph and says why. Relayed reads need no
+    // replication, so first wait for the pull request's claims to reach the reader.
+    wait_until("the reader's graph holds the pull request", 90, || async {
+        reader.claims().await.iter().any(|claim| claim["subject"] == "resource/github/fixture/app/pull-request/12")
+    }).await;
+    poller.stop();
+    let fallback = gh_prs(&reader, PERSON);
+    assert_eq!(fallback["source"]["kind"], "graph", "{fallback}");
+    assert_eq!(fallback["source"]["host"], "host/fixture-reader");
+    assert!(fallback["source"]["reason"].as_str().unwrap().contains("did not answer"), "{fallback}");
+    assert_eq!(fallback["pulls"][0]["number"], 12, "{fallback}");
+    let checks = reader.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert!(checks["checks"]["heads"].is_null(), "the graph keeps no head history: {checks}");
+    let human = reader.st_ok(&["gh", "prs", "fixture/app", "--as", PERSON]);
+    assert!(human.contains("from host/fixture-reader's graph"), "{human}");
+    poller.start().await;
+}
+
+/// An older poller beside a member of this build: the member answers from its graph and says the
+/// poller runs a build without the plugin, and both keep replicating. Upgrading the poller in
+/// place refills its mirror from GitHub while it reads on from the history the older build
+/// recorded, and the member then relays
+/// to it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_poller_beside_a_github_plugin_member_and_its_upgrade() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("b".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let member = anchor(root.path(), "fixture-member").await;
+    let mut poller = Node::new(root.path(), "fixture-old-poller");
+    poller.binary = old;
+    poller.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api)]);
+    let code = member.invite("fixture-old-poller", &[]);
+    let output = poller.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    poller.start().await;
+    watch_fixture_app(&poller);
+
+    wait_until("the member reads the old poller's pull request from its graph", 120, || {
+        let answer = gh_prs(&member, PERSON);
+        async move { answer["pulls"][0]["number"] == 12 }
+    }).await;
+    let answer = gh_prs(&member, PERSON);
+    assert_eq!(answer["source"]["kind"], "graph", "{answer}");
+    assert_eq!(answer["poller"], "host/fixture-old-poller");
+    assert!(answer["source"]["reason"].as_str().unwrap().contains("runs a build without the GitHub plugin"), "{answer}");
+    for node in [&member, &poller] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // The old poller's history, upgraded in place.
+    poller.stop();
+    poller.binary = PathBuf::from(st3());
+    poller.start().await;
+    poller.wait_listening().await;
+    wait_until("the upgraded poller refills its mirror from GitHub", 120, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
+    }).await;
+    wait_until("the member relays to the upgraded poller", 120, || {
+        let answer = gh_prs(&member, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["source"]["host"] == "host/fixture-old-poller" }
+    }).await;
+    let checks = member.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(checks["checks"]["head_sha"], "b".repeat(40), "{checks}");
+}
+
+/// Ask `node` to look at fixture/app again now, as a refresh does.
+fn refresh_fixture_app(node: &Node, id: &str) {
+    let file = node.root.join(format!("refresh-{id}.kdl"));
+    fs::write(&file, format!("version 2\nresource \"github/fixture/app\" {{ refresh {id:?} {{ timeout \"60s\" }} }}\n")).unwrap();
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
+}
+
+/// Whether `node` holds a claim of `kind` on pull request 12 of fixture/app whose head is `head`.
+async fn item_claim_with_head(node: &Node, kind: &str, head: &str) -> bool {
+    node.claims().await.iter().any(|claim| {
+        claim["subject"] == "resource/github/fixture/app/pull-request/12"
+            && claim["kind"] == kind
+            && (claim.pointer("/body/fields/facts/head_sha") == Some(&json!(head))
+                || claim.pointer("/body/fields/head_sha") == Some(&json!(head)))
+    })
+}
+
+/// A member of the previous release in the fleet keeps a repository's poller writing item
+/// snapshots, which its seat watching the repository reads. Once it upgrades and advertises the
+/// GitHub plugin, the poller records the next compact-only change as compact state alone.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let mut elder = Node::new(root.path(), "fixture-elder");
+    elder.binary = old;
+    elder.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api.clone())]);
+    let code = poller.invite("fixture-elder", &[]);
+    let output = elder.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    elder.start().await;
+    watch_fixture_app(&poller);
+    wait_until("the poller fills its mirror", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" }
+    }).await;
+    wait_until("the elder holds the repository's observer", 90, || async {
+        elder.claims().await.iter().any(|claim| claim["subject"] == "observer/github/fixture/app")
+    }).await;
+    // The elder depends on the repository: a seat on it watches the pull request. The poller's
+    // observer is already running, so the watch is the elder's subscription on it.
+    watch_fixture_app(&elder);
+    wait_until("the poller holds the elder's watch", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"].as_str().is_some_and(|subject| subject.starts_with("subscription/watch/fixture/app/12/"))
+                && claim["origin"] == "fixture-elder"
+        })
+    }).await;
+
+    // A new head while the elder runs the previous release: the poller still writes a snapshot,
+    // which the elder receives.
+    *head.lock().unwrap() = "c".repeat(40);
+    refresh_fixture_app(&poller, "head-c");
+    wait_until("the elder receives a snapshot of head c", 120, || async {
+        item_claim_with_head(&elder, "resource.observed", &"c".repeat(40)).await
+    }).await;
+
+    // The elder upgrades in place and advertises the plugin: the next head is compact state alone.
+    elder.stop();
+    elder.binary = PathBuf::from(st3());
+    elder.start().await;
+    elder.wait_listening().await;
+    wait_until("the poller sees the elder advertise the plugin", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"] == "daemon/fixture-elder" && claim["kind"] == "daemon.started"
+                && claim.pointer("/body/fields/features/github_plugin").is_some()
+        })
+    }).await;
+    *head.lock().unwrap() = "d".repeat(40);
+    refresh_fixture_app(&poller, "head-d");
+    wait_until("the poller records head d as compact state", 120, || async {
+        item_claim_with_head(&poller, "vcs.item.state", &"d".repeat(40)).await
+    }).await;
+    assert!(!item_claim_with_head(&poller, "resource.observed", &"d".repeat(40)).await, "no snapshot of head d");
+    let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(pull["pull"]["facts"]["head_sha"], "d".repeat(40), "{pull}");
+}

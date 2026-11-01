@@ -14,7 +14,7 @@ pub mod membership;
 pub mod transport;
 pub mod view;
 
-pub use keys::{MemberKey, envelope_signature_message, verify_signature};
+pub use keys::{MemberKey, envelope_signature_message, envelope_signature_message_in, verify_signature};
 pub use membership::{FleetClaim, Incarnation, MemberState, Membership, Window};
 pub use view::{Acceptance, FleetView, MemberView, Refusal, Sender, accept};
 

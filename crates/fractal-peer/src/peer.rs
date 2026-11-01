@@ -44,6 +44,8 @@ use crate::store::{
     CheckpointManifestRequest,
 };
 mod raw_lease;
+mod seat_freshness;
+pub use seat_freshness::*;
 
 /// The peer listener's shared state, with this node's daemon as the store.
 type PeerState = smallclaims::sync::PeerState<MainBackend>;
@@ -188,6 +190,24 @@ pub enum ClientReadOperation {
         sha256: String,
         message: String,
         offset: u64,
+    },
+    /// A read of the GitHub plugin's mirror on the member that polls the repository: `path` is
+    /// a `/v1/plugins/github/repos/...` path and query, answered from the owner's mirror alone.
+    GithubPlugin {
+        path: String,
+    },
+    /// The same read named by its parts, so the poller builds its path itself: `read` is
+    /// `pulls`, `pull`, `checks` or `events`. Capability `github-plugin` version 2.
+    GithubPluginRead {
+        owner: String,
+        repository: String,
+        read: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
     },
     /// The messages to and from one agent, as the host that owns the agent lists them.
     Messages {
@@ -792,6 +812,8 @@ impl ClientRelay {
                 Some(("session-detail-child-id", 1))
             }
             ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
+            ClientReadOperation::GithubPlugin { .. } => Some(("github-plugin", 1)),
+            ClientReadOperation::GithubPluginRead { .. } => Some(("github-plugin", 2)),
             _ => None,
         };
         if let Some((id, version)) = required {
@@ -954,7 +976,8 @@ impl ClientRelay {
             relay_trace::result(Phase::Decode, || -> Result<_> {
                 let envelope: ApiResponse<serde_json::Value> = serde_json::from_slice(&bytes)?;
                 anyhow::ensure!(
-                    envelope.api_version == "st3.v1",
+                    smallclaims::sync::ACCEPTED_PEER_API_VERSIONS
+                        .contains(&envelope.api_version.as_str()),
                     "the peer client read protocol differs"
                 );
                 Ok(envelope)
@@ -1270,6 +1293,17 @@ fn client_read_unsupported(operation: &ClientReadOperation) -> ClientReadRejecte
     if matches!(operation, ClientReadOperation::Messages { .. }) {
         return messages_paging_unsupported();
     }
+    if matches!(operation, ClientReadOperation::GithubPlugin { .. } | ClientReadOperation::GithubPluginRead { .. }) {
+        let mut rejected = ClientReadRejected::new(
+            "peer-too-old",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "This host runs an older Fractal version without the GitHub plugin's read API; update it to read its mirror.",
+        );
+        rejected.details.insert("capability".into(), "github-plugin".into());
+        let version = if matches!(operation, ClientReadOperation::GithubPluginRead { .. }) { 2 } else { 1 };
+        rejected.details.insert("version".into(), version.into());
+        return rejected;
+    }
     let mut rejected = ClientReadRejected::new(
         "peer-too-old",
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1302,7 +1336,9 @@ async fn client_read_capabilities(
         &state, CLIENT_READ_PATH, &FleetAuth::body_digest(&[]), 0,
         serde_json::json!({"capabilities":[
             {"id":"messages-paging","version":2,"state":"granted"},
-            {"id":"session-detail-child-id","version":1,"state":"granted"}
+            {"id":"session-detail-child-id","version":1,"state":"granted"},
+            {"id":"github-plugin","version":1,"state":"granted"},
+            {"id":"github-plugin","version":2,"state":"granted"}
         ]}),
     ).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -1533,6 +1569,14 @@ async fn receive_client_read(
                     StatusCode::CONFLICT, format!("{error:#}")
                 ).into())
             }
+            ClientReadOperation::GithubPlugin { path } => {
+                Ok(client.github_plugin_read(&path).await?)
+            }
+            ClientReadOperation::GithubPluginRead { owner, repository, read, number, state, limit } => {
+                let path = github_plugin_path(&owner, &repository, &read, number, state.as_deref(), limit)
+                    .map_err(|message| ClientReadRejected::new("validation-failed", StatusCode::UNPROCESSABLE_ENTITY, message))?;
+                Ok(client.github_plugin_read(&path).await?)
+            }
             ClientReadOperation::HarnessInventory { agent_id, query } => {
                 let value = client.harness_inventory_get(&agent_id, &query).await?.value;
                 Ok(serde_json::to_value(value)?)
@@ -1681,6 +1725,9 @@ fn signed_client_read_failure(
 pub struct MainBackend {
     socket: PathBuf,
     client: Client,
+    /// A named shard this backend reaches instead of the graph. A shard has no checkpoints,
+    /// answers or worker status of its own; it shares the graph's fleet and endpoints.
+    shard: Option<String>,
 }
 
 impl MainBackend {
@@ -1688,6 +1735,23 @@ impl MainBackend {
         Self {
             client: Client::unix(socket.clone()),
             socket,
+            shard: None,
+        }
+    }
+
+    /// The daemon's named shard `shard`, over the same socket.
+    pub fn for_shard(socket: PathBuf, shard: &str) -> Self {
+        Self {
+            shard: Some(shard.to_owned()),
+            ..Self::new(socket)
+        }
+    }
+
+    /// Where an internal replication call for this backend's store goes.
+    fn replication_path(&self, operation: &str) -> String {
+        match &self.shard {
+            Some(shard) => format!("/v1/internal/replication/shard/{shard}/{operation}"),
+            None => format!("/v1/internal/replication/{operation}"),
         }
     }
 
@@ -1775,7 +1839,7 @@ impl Backend for MainBackend {
         let started = std::time::Instant::now();
         self.client
             .post(
-                "/v1/internal/replication/export",
+                &self.replication_path("export"),
                 &ReplicationExportRequest {
                     fleet_id: fleet_id.to_owned(),
                     inventory: inventory.clone(),
@@ -1795,7 +1859,7 @@ impl Backend for MainBackend {
         // Old daemons ignore it and return the same complete summary.
         self.client
             .post(
-                "/v1/internal/replication/export",
+                &self.replication_path("export"),
                 &ReplicationExportRequest {
                     fleet_id: fleet_id.to_owned(),
                     inventory: ReplicationInventory::default(),
@@ -1814,7 +1878,7 @@ impl Backend for MainBackend {
         let response: ReplicationExportResponse = self
             .client
             .post(
-                "/v1/internal/replication/export",
+                &self.replication_path("export"),
                 &ReplicationExportRequest {
                     fleet_id: fleet_id.to_owned(),
                     inventory: ReplicationInventory::default(),
@@ -1839,7 +1903,7 @@ impl Backend for MainBackend {
         let started = std::time::Instant::now();
         self.client
             .post(
-                "/v1/internal/replication/receive",
+                &self.replication_path("receive"),
                 &ReplicationReceiveRequest {
                     peer: peer.to_owned(),
                     fleet_id: fleet_id.to_owned(),
@@ -1857,6 +1921,7 @@ impl Backend for MainBackend {
         &self,
         request: &CheckpointManifestRequest,
     ) -> Result<CheckpointManifestPage> {
+        anyhow::ensure!(self.shard.is_none(), "a shard has no checkpoints");
         self.client
             .post("/v1/internal/replication/checkpoint", request)
             .await
@@ -1866,10 +1931,16 @@ impl Backend for MainBackend {
         &self,
         request: &smallclaims::answers::AnswersRequest,
     ) -> Result<Option<smallclaims::answers::AnswersReply>> {
+        if self.shard.is_some() {
+            return Ok(None);
+        }
         self.client.post("/v1/internal/replication/answers", request).await
     }
 
     async fn record_answers_check(&self, check: &smallclaims::answers::AnswersCheck) -> Result<()> {
+        if self.shard.is_some() {
+            return Ok(());
+        }
         let _: Value = self
             .client
             .post("/v1/internal/replication/answers-check", check)
@@ -1878,6 +1949,9 @@ impl Backend for MainBackend {
     }
 
     async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
+        if self.shard.is_some() {
+            return Ok(None);
+        }
         self.client
             .post(
                 "/v1/internal/replication/checkpoint-need",
@@ -1887,6 +1961,7 @@ impl Backend for MainBackend {
     }
 
     async fn adopt_checkpoint(&self, manifest: &CheckpointManifest) -> Result<Vec<CheckpointAction>> {
+        anyhow::ensure!(self.shard.is_none(), "a shard has no checkpoints");
         self.client
             .post("/v1/internal/replication/checkpoint-adopt", manifest)
             .await
@@ -1919,6 +1994,10 @@ impl Backend for MainBackend {
         peer: &str,
         worker: smallclaims::replication::ReplicationWorkerStatus,
     ) -> Result<()> {
+        // Worker status describes each peer's graph exchanges.
+        if self.shard.is_some() {
+            return Ok(());
+        }
         let _: Value = self
             .client
             .post(
@@ -1944,7 +2023,7 @@ impl Backend for MainBackend {
         let _: serde_json::Value = self
             .client
             .post(
-                "/v1/internal/replication/peer-failure",
+                &self.replication_path("peer-failure"),
                 &ReplicationPeerFailureRequest {
                     peer: peer.to_owned(),
                     status: status.to_owned(),
@@ -1961,9 +2040,13 @@ impl Backend for MainBackend {
         if !self.socket.exists() {
             return;
         }
+        let path = match &self.shard {
+            Some(_) => self.replication_path("wake"),
+            None => "/v1/internal/replication-wake".to_owned(),
+        };
         let _ = self
             .client
-            .post::<_, serde_json::Value>("/v1/internal/replication-wake", &serde_json::json!({}))
+            .post::<_, serde_json::Value>(&path, &serde_json::json!({}))
             .await;
     }
 }
@@ -1977,6 +2060,8 @@ pub fn fractal_routes(splice: RawSplice) -> Router<PeerState> {
             post(receive_client_read).get(client_read_capabilities).layer(DefaultBodyLimit::max(16_384)),
         )
         .route(RAW_TERMINAL_PATH, get(receive_raw_terminal).layer(axum::Extension(splice)))
+        .route(SEAT_FRESHNESS_PATH,
+            post(seat_freshness::receive_seat_freshness).layer(DefaultBodyLimit::max(MAX_SEAT_FRESHNESS_BYTES)))
 }
 
 /// Serve a conversation owner's peer listener for tests, and return the client relay of a
@@ -2050,18 +2135,167 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     database_watcher.watch(&wake_file, notify::RecursiveMode::NonRecursive)?;
     started_at_unix_ms();
     tokio::spawn(MainBackend::new(config.socket.clone()).report_process_cpu());
-    smallclaims::sync::run(
-        worker,
-        MainBackend::new(config.socket.clone()),
-        wake,
-        fractal_routes(splice),
-    )
-    .await
+    let main = MainBackend::new(config.socket.clone());
+    main.ready().await;
+    let mut shards = Vec::new();
+    // Graph sync never waits on the shard. A 404 or 405 means this daemon holds none. Any other
+    // failure is taken as passing on a daemon that holds it: the shard is followed from an empty
+    // peer set, and if that guess is wrong the sync stays idle and dials nobody.
+    let held = match shard_peers(&main, MESSAGES_SHARD).await {
+        Ok(peers) => peers,
+        Err(error) => {
+            eprintln!("st replication-worker: messages shard peers unavailable, following: {error:#}");
+            Some(BTreeSet::new())
+        }
+    };
+    if let Some(peers) = held {
+        let (sender, receiver) = watch::channel(peers);
+        let shard_wake = wake.clone();
+        tokio::spawn(follow_shard_peers(main.clone(), MESSAGES_SHARD, sender, wake.subscribe()));
+        shards.push(smallclaims::sync::ShardSync {
+            id: smallclaims::shards::ShardId::parse(MESSAGES_SHARD)?,
+            backend: MainBackend::for_shard(config.socket.clone(), MESSAGES_SHARD),
+            peers: receiver,
+            wake: shard_wake,
+        });
+    }
+    smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards).await
+}
+
+/// The shard the daemon keeps messages in; see `fractal_store::store::messages_shard`.
+const MESSAGES_SHARD: &str = "messages";
+
+/// The members whose current daemon advertises holding `shard`, or `None` when this daemon
+/// holds no such shard: it opened none, or it predates shards and has no route for it.
+async fn shard_peers(backend: &MainBackend, shard: &str) -> Result<Option<BTreeSet<String>>> {
+    #[derive(serde::Deserialize)]
+    struct Peers {
+        peers: BTreeSet<String>,
+    }
+    match backend
+        .client
+        .get::<Peers>(&format!("/v1/internal/replication/shard/{shard}/peers"))
+        .await
+    {
+        Ok(peers) => Ok(Some(peers.peers)),
+        Err(error) if matches!(crate::client::http_status(&error), Some(404 | 405)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Keep a shard's peer set current: advertisements arrive as graph claims, so look again
+/// when the graph wakes the dialers, at most every 5 seconds and at least every 30.
+async fn follow_shard_peers(
+    backend: MainBackend,
+    shard: &'static str,
+    peers: watch::Sender<BTreeSet<String>>,
+    mut wake: watch::Receiver<u64>,
+) {
+    loop {
+        tokio::select! {
+            changed = wake.changed() => if changed.is_err() { return },
+            () = tokio::time::sleep(Duration::from_secs(30)) => {}
+        }
+        // Graph wakes come in bursts; one look covers every wake in the pause.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        wake.mark_unchanged();
+        if let Ok(Some(current)) = shard_peers(&backend, shard).await {
+            peers.send_if_modified(|known| {
+                let changed = *known != current;
+                *known = current;
+                changed
+            });
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn peer_envelope_versions_are_accepted_by_the_client_relay() {
+        assert_signed_peer_envelope_versions(CLIENT_READ_PATH).await;
+    }
+
+    #[tokio::test]
+    async fn peer_envelope_versions_are_accepted_by_seat_freshness() {
+        assert_signed_peer_envelope_versions(SEAT_FRESHNESS_PATH).await;
+    }
+
+    async fn assert_signed_peer_envelope_versions(path: &'static str) {
+        use std::future::IntoFuture as _;
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join("fleet-secret");
+        fs::write(&secret, [7_u8; 32]).unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        for version in ["st3.v1", "fractal.v1", "future.v9"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new().route(
+                path,
+                post(move |request: Bytes| async move {
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "api_version": version, "request_id": "test", "snapshot_host": "owner-node",
+                        "store_index": 0, "value": {"recorded": []}
+                    }))
+                    .unwrap();
+                    let headers = FleetAuth::test("fleet-test", &[7; 32])
+                        .response_headers_for(
+                            path,
+                            "owner-node",
+                            &body,
+                            &FleetAuth::body_digest(&request),
+                        )
+                        .unwrap();
+                    let mut response = (StatusCode::OK, body).into_response();
+                    response.headers_mut().extend(headers);
+                    response
+                }),
+            );
+            let server = tokio::spawn(axum::serve(listener, app).into_future());
+            let relay = ClientRelay::from_config(&Config {
+                node: "gateway-node".into(),
+                fleet_id: Some("fleet-test".into()),
+                shared_secret_file: Some(secret.clone()),
+                peers: vec![PeerConfig {
+                    name: "owner-node".into(),
+                    url: format!("http://{address}"),
+                }],
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap();
+            let request = ClientReadRequest {
+                authority_actor: "person/example".into(),
+                relay: None,
+                request: ClientReadOperation::Timeline {
+                    session_id: "session/example".into(),
+                    limit: 1,
+                    cursor: None,
+                },
+            };
+            let result = if path == SEAT_FRESHNESS_PATH {
+                relay
+                    .push_seat_freshness(
+                        "owner-node",
+                        &SeatFreshnessPush::default(),
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    .map(|ack| serde_json::to_value(ack.unwrap()).unwrap())
+            } else {
+                relay.read("host/owner-node", &request).await
+            };
+            server.abort();
+            let _ = server.await;
+            if version == "future.v9" {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), serde_json::json!({"recorded": []}));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn daemon_export_failures_preserve_machine_code_without_private_messages() {
@@ -2083,6 +2317,7 @@ mod tests {
         let backend = MainBackend {
             client: Client::new(crate::client::Endpoint::Http(format!("http://{address}"))),
             socket: PathBuf::new(),
+            shard: None,
         };
         let result = backend.export("sample", &ReplicationInventory::default(), false, &[]).await;
         server.abort();
@@ -2099,6 +2334,49 @@ mod tests {
         assert_eq!(contextual.phase, ReplicationFailurePhase::FollowUpExport);
         assert_eq!(contextual.elapsed_ms, failure.elapsed_ms);
         assert_eq!(contextual.http_status, Some(500));
+    }
+
+    /// A daemon without the shard's route holds no shard; one that answers it names its peers;
+    /// any other failure is an error the caller follows from an empty peer set.
+    #[tokio::test]
+    async fn a_daemon_without_the_shard_route_holds_no_shard() {
+        use std::future::IntoFuture as _;
+        async fn answer(app: Router) -> Result<Option<BTreeSet<String>>> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(axum::serve(listener, app).into_future());
+            let backend = MainBackend {
+                client: Client::new(crate::client::Endpoint::Http(format!("http://{address}"))),
+                socket: PathBuf::new(),
+                shard: None,
+            };
+            let result = shard_peers(&backend, "messages").await;
+            server.abort();
+            let _ = server.await;
+            result
+        }
+        let route = "/v1/internal/replication/shard/messages/peers";
+        assert_eq!(answer(Router::new()).await.unwrap(), None);
+        assert_eq!(
+            answer(Router::new().route(route, post(|| async { "" }))).await.unwrap(),
+            None,
+        );
+        let held = Router::new().route(
+            route,
+            get(|| async {
+                axum::Json(serde_json::json!({"api_version": "fractal.v1", "value": {"peers": ["host-b"]}}))
+            }),
+        );
+        assert_eq!(answer(held).await.unwrap(), Some(BTreeSet::from(["host-b".to_owned()])));
+        let failing = Router::new().route(
+            route,
+            get(|| async {
+                (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({
+                    "code": "unavailable", "message": "busy", "details": {}
+                })))
+            }),
+        );
+        assert!(answer(failing).await.is_err());
     }
 
     #[test]
@@ -2508,7 +2786,7 @@ mod tests {
         for (store, count) in [(&alder, 6), (&birch, 4)] {
             for index in 0..count {
                 store
-                    .append_claim(&ClaimInput {
+                    .append_as_older_build_for_test(&ClaimInput {
                         subject: format!("daemon/{}", store.origin()),
                         kind: "daemon.diagnostic".into(),
                         actor: None,
@@ -2704,3 +2982,73 @@ mod timeline_relay_tests;
 
 #[cfg(test)]
 mod messages_paging_relay_tests;
+
+/// The poller's own path for a typed GitHub plugin read, or why its parts name none.
+pub fn github_plugin_path(
+    owner: &str,
+    repository: &str,
+    read: &str,
+    number: Option<u64>,
+    state: Option<&str>,
+    limit: Option<usize>,
+) -> std::result::Result<String, String> {
+    let name = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 100
+            && !part.chars().all(|c| c == '.')
+            && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    };
+    if !name(owner) || !name(repository) {
+        return Err("a repository is OWNER/REPO".into());
+    }
+    if let Some(state) = state.filter(|state| !matches!(*state, "open" | "closed" | "all")) {
+        return Err(format!("state is open, closed or all, not {state}"));
+    }
+    let base = format!("/v1/plugins/github/repos/{owner}/{repository}");
+    let mut query = Vec::new();
+    if let Some(limit) = limit {
+        query.push(format!("limit={limit}"));
+    }
+    let path = match (read, number) {
+        ("pulls", None) => {
+            if let Some(state) = state {
+                query.push(format!("state={state}"));
+            }
+            format!("{base}/pulls")
+        }
+        ("pull", Some(number)) => format!("{base}/pulls/{number}"),
+        ("checks", Some(number)) => format!("{base}/pulls/{number}/checks"),
+        ("events", number) => {
+            if let Some(number) = number {
+                query.push(format!("number={number}"));
+            }
+            format!("{base}/events")
+        }
+        _ => return Err(format!("no GitHub plugin read `{read}` with that number")),
+    };
+    Ok(if query.is_empty() { path } else { format!("{path}?{}", query.join("&")) })
+}
+
+#[cfg(test)]
+mod github_plugin_path_tests {
+    use super::github_plugin_path;
+
+    #[test]
+    fn a_typed_read_names_only_the_plugins_routes() {
+        assert_eq!(
+            github_plugin_path("acme", "garden", "pulls", None, Some("all"), Some(20)).unwrap(),
+            "/v1/plugins/github/repos/acme/garden/pulls?limit=20&state=all"
+        );
+        assert_eq!(github_plugin_path("acme", "garden", "checks", Some(7), None, None).unwrap(), "/v1/plugins/github/repos/acme/garden/pulls/7/checks");
+        assert_eq!(github_plugin_path("acme", "garden", "events", Some(7), None, Some(5)).unwrap(), "/v1/plugins/github/repos/acme/garden/events?limit=5&number=7");
+        for (owner, repository, read, number, state) in [
+            ("acme", "..", "pulls", None, None),
+            ("acme/x", "garden", "pulls", None, None),
+            ("acme", "garden", "pull", None, None),
+            ("acme", "garden", "tree", None, None),
+            ("acme", "garden", "pulls", None, Some("merged")),
+        ] {
+            assert!(github_plugin_path(owner, repository, read, number, state, None).is_err(), "{owner}/{repository} {read}");
+        }
+    }
+}

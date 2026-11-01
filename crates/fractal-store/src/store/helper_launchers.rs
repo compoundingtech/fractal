@@ -30,6 +30,14 @@ fn declaration_digest(desired: &DesiredSubject) -> Result<String> {
     })))
 }
 
+fn creation_key(desired: &DesiredSubject) -> Option<&String> {
+    let tags = &desired.member.as_ref()?.tags;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    tags.get("st3.client.create-key")
+        .or_else(|| tags.get("fractal.client.create-key"))
+    // LIVE-MIGRATION END
+}
+
 pub(super) fn binding_at(connection: &Connection, subject: &str) -> Result<Option<HelperLauncherBinding>> {
     smallclaims::touched::note_read(|| subject.to_owned());
     let Some((desired, writer)) = desired_subject_with_writer_at(connection, subject)? else {
@@ -38,7 +46,7 @@ pub(super) fn binding_at(connection: &Connection, subject: &str) -> Result<Optio
     if desired.kind != "agent" {
         return Ok(None);
     }
-    let Some(key) = desired.member.as_ref().and_then(|member| member.tags.get("st3.client.create-key")) else {
+    let Some(key) = creation_key(&desired) else {
         return Ok(None);
     };
     let Some(writer) = writer.filter(|writer| writer.starts_with("agent/")) else {
@@ -104,7 +112,7 @@ fn lifetime_binding_at(connection: &Connection, subject: &str) -> Result<Option<
         if desired.kind == "stop" {
             let key: i64 = connection.query_row("SELECT store_index FROM claims WHERE id=?1", [&id], |row| row.get(0))?;
             if last_stop.as_ref().is_none_or(|previous| previous < &key) { last_stop = Some(key); }
-        } else if let Some(key) = desired.member.as_ref().and_then(|member| member.tags.get("st3.client.create-key")) {
+        } else if let Some(key) = creation_key(&desired) {
             creations.push((actor, key.clone(), declaration_digest(&desired)?));
         }
     }
@@ -374,6 +382,60 @@ mod tests {
         intent.subjects.values_mut().next().unwrap().member.as_mut().unwrap()
             .tags.insert("st3.client.create-key".into(), "create-helper".into());
         intent
+    }
+
+    #[test]
+    fn helper_creation_key_prefers_legacy_even_when_empty() {
+        fn set(desired: &mut DesiredSubject, name: &str, value: &str) {
+            let member = desired.member.as_mut().unwrap();
+            member.tags.insert(name.into(), value.into());
+        }
+        let mut intent = declaration("helper");
+        let desired = intent.subjects.values_mut().next().unwrap();
+        set(desired, "fractal.client.create-key.v2", "unknown");
+        assert_eq!(creation_key(desired), None);
+        set(desired, "fractal.client.create-key", "current");
+        assert_eq!(creation_key(desired).map(String::as_str), Some("current"));
+        set(desired, "st3.client.create-key", "legacy");
+        assert_eq!(creation_key(desired).map(String::as_str), Some("legacy"));
+        set(desired, "st3.client.create-key", "");
+        assert_eq!(creation_key(desired).map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn both_creation_tag_spellings_preserve_binding_and_historical_lifetime() {
+        for legacy in [false, true] {
+            let store = Store::open_memory("node").unwrap();
+            launcher(&store, Some("person/ada"));
+            let mut helper = helper();
+            let desired = helper.subjects.values_mut().next().unwrap();
+            if !legacy {
+                let tags = &mut desired.member.as_mut().unwrap().tags;
+                let key = tags.remove("st3.client.create-key").unwrap();
+                tags.insert("fractal.client.create-key".into(), key);
+            }
+            let desired = helper.subjects.values().next().unwrap();
+            store
+                .bind_helper_launcher(desired, "create-helper", "agent/node.launcher", "omp")
+                .unwrap();
+            publish(&store, &helper, "helper", Some("agent/node.launcher"));
+            let binding = store.helper_launcher_binding(&desired.subject).unwrap();
+            assert!(binding.is_some());
+            assert!(store.helper_launcher_alive(&desired.subject).unwrap());
+            let mut edited = helper.clone();
+            let edited_member = edited.subjects.values_mut().next().unwrap();
+            edited_member.member.as_mut().unwrap().tags.clear();
+            publish(&store, &edited, "edit-helper", Some("agent/node.launcher"));
+            let binding = store.helper_launcher_binding(&desired.subject).unwrap();
+            assert!(binding.is_none());
+            append(
+                &store,
+                "agent/node.launcher",
+                "runtime.observed",
+                json!({"status":"running", "incarnation_id":"launcher-2"}),
+            );
+            assert!(!store.helper_launcher_alive(&desired.subject).unwrap());
+        }
     }
 
     #[cfg(target_os = "linux")]

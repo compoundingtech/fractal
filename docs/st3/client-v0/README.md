@@ -164,9 +164,6 @@ Operational repairs exclude the repaired original from current-note selection,
 even when its immutable claim row remains retained. Incremental reads and full
 replay both select the latest unrepaired revision.
 The text is advisory only: no approval, gate, ask or assignment reads it as evidence.
-The daemon cost suite measures both the populated read and a real person-authenticated
-PUT replacement over Unix transport at two generated store sizes. Its fixture passes
-anchored membership and active-peer advertisements rather than measuring a refused write.
 
 The trusted local CLI writes with `PUT /v1/notes`, using a concrete person identity
 and a body containing that same `person` and `actor`, nullable `text`, and optional
@@ -177,7 +174,6 @@ requires anchored fleet membership and `person_directive_note` version 1
 advertisement from every active member. Pending unsigned local membership changes
 also block publication until the replication writer seals them. Fence legacy
 peers before enabling notes: advertisements do not discover unknown legacy peers.
-Launch delivery, change notifications, and UI authoring are outside this read-path slice.
 
 
 ### Phone observations
@@ -488,7 +484,8 @@ their existing authenticated HTTP(S) gateway transport remains available.
 
 `st up` listens on two different Unix sockets. `st3.sock` is the privileged trusted-local API;
 `st3-client.sock` is the paired-only client gateway backed by `fabric_router`. The latter rejects
-ordinary requests without a paired bearer credential, except for pairing completion. The socket
+ordinary requests without a paired bearer credential, except for public capability negotiation
+and pairing completion. The socket
 paths can be set with `socket` and `client_gateway_socket` in `config.toml`, or with `--socket` and
 `--client-gateway-socket` for a foreground daemon. They must never name the same path.
 
@@ -504,8 +501,10 @@ Default startup without either private flag is unchanged.
 For a direct tailnet connection, forward a TCP listener bound to the host's Tailscale IP to
 `st3-client.sock`. Pair the phone with `http://TAILSCALE_IP:PORT`. Tailscale encrypts the link;
 the paired gateway still authenticates each client request. Never bind this listener to a public
-or LAN interface, and never forward `st3.sock`. An unauthenticated request to
-`/v1/client/capabilities` must return a complete `403`; follow it with an authenticated read and
+or LAN interface, and never forward `st3.sock`. An unauthenticated `GET /v1/client/agents`
+must return a complete `403`. Unauthenticated `/v1/client/capabilities` exposes only public
+pairing negotiation capabilities; see [device signing](../device-signing.md). Follow the refusal
+probe with an authenticated read and
 concurrent-read check. Run the forwarder as a persistent service so daemon restarts do not strand
 the client. On iOS 17 and later, an App Transport Security exception can target Tailscale's
 `100.64.0.0/10` range without opening arbitrary HTTP destinations.
@@ -527,7 +526,7 @@ tailscale serve status
 ```
 
 On macOS, verify the HTTPS route with an unauthenticated request to
-`/v1/client/capabilities`: the gateway should return a complete `403` response.
+`/v1/client/agents`: the gateway should return a complete `403` response.
 If Tailscale Serve returns `502` when pointed at the Unix socket, run a persistent
 launchd-managed bridge from a loopback-only TCP port to `st3-client.sock`, then
 point Tailscale Serve at that port. The bridge must bind `127.0.0.1`, reconnect to
@@ -870,26 +869,24 @@ is unknown. After an upgrade, provenance covers only responses priced by the upg
 its bucket sums can therefore be smaller than the row's totals. Per-response rounding means
 recomputing a contribution from aggregate token counts can differ slightly from the recorded cost.
 
-The external per-request ledger remains canonical (#1419). These additions keep the existing
-five-minute/stop publication cadence and latest/hourly/baseline retention bounds. They do not
-change checkpoint selection or carriers, so they require no additional rules-version bump
-beyond version 10 introduced separately by #1322 for native credential evidence. Typed imports and a
-retention decision for native per-request records remain later work.
-
 The Rust method is `Client::usage_period(since_ms, until_ms)`;
 Swift has `usagePeriod(sinceMS:untilMS:)` and TypeScript `usagePeriod({ since_ms, until_ms })`.
 
 ### Objectives and budgets
 
 `GET /v1/client/slo` lists every objective and budget, the rows `st slo ls` prints. It requires
-`read.projections`. The value is `SloList { as_of_unix_ms, rows }`. An objective is a target with
+`read.projections`. The value is `SloList { as_of_unix_ms, otel_ui_url?, rows }`; `otel_ui_url` is where a person reads the exported observation history, present only when the daemon's `[observations.otlp]` sets `ui_url` (an http or https address; an older daemon rejects the key, so set it once every member runs this build), and a client shows it as a link beside the rows. An objective is a target with
 windows and an error budget (the daemon's latency, store, CPU and database targets and a paired
 phone's live-share target); a budget is an allowance that resets (each account's weekly and 5-hour
 limit, from the readings `usage.period` reports in `limits`). Every `SloRow` has `id`, `kind`
 (`objective` or `budget`), `about`, `target`, `current`, `window`, `remaining_percent` (what is
 left of the error budget or allowance; null when nothing was measured), `status` (`met`, `missed`,
 `no-data` or `stale`, the last meaning the newest reading is not recent) and `explain`, the row in
-plain words. A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`. The list is
+plain words, and `tone` (`red`, `green`, `yellow` or `quiet`, a string: a client treats a word it does not know as `quiet`; red when an objective missed or a budget has 10% or less left, the one rule the terminal UI colors by; absent from an older daemon). A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`, and, when the local history
+has enough recent readings since its last reset, a forecast: `forecast_used_percent` (its projected use
+when it resets, at the rate of its recent past, at most 100), `forecast_basis_minutes` (how much history
+the rate was fitted to) and, only when the allowance would run out first, `runs_out_at_unix_ms`;
+`explain` says the same in words. A budget with too little history has none of the three. The list is
 computed on each read from live windows and readings; it writes nothing.
 
 `GET /v1/client/slo/history?id=…&since_ms=…&until_ms=…&steps=…` reads what was left of one row
@@ -1182,7 +1179,9 @@ time can put a new tool call before an hours-old status. The gateway preserves b
 as source evidence; clients must not re-sort merged entries by sequence alone. `replace` and
 `finalize` also preserve the original append timestamp, so a revision changes content rather
 than moving the entry. A graph delivery header and its content share a timestamp and retain
-their adjacent sequence slots.
+their adjacent sequence slots. The content's body names its message in `message_id`, as the
+header's does, so a client pairs the two by identity; content from an older daemon has no
+`message_id`, and a client pairs it by its slot.
 
 HTTP opens at the newest bounded chronological window; its page cursor walks backward (a keyset
 cursor for a native transcript, a frozen projection for a stored timeline). Conversation changes
@@ -1332,15 +1331,10 @@ associated writes return HTTP 409 `idempotency-key-expired`, with the key and or
 when the saved response cannot be rebuilt. This is terminal (`retryable: false`), not a silent
 success; inspect the committed outcome before deliberately starting a new action with a fresh key.
 
-Seven days covers the phone's eight retries with backoff and normal retries within seconds to
-minutes, including a daemon restart. Exact saved-response replay is supported for seven days;
-durable recognition continues afterward. Receipts already present at the schema-17 upgrade
-are grandfathered: their older claims do not contain the caller-key association. This PR never
-expires those rows or rewrites those claims. A separate follow-up deletes the fixed legacy
-cohort **30 days after actual deployment**, outside realistic client retry horizons. Operations
-must record the deployment timestamp and due date in
-[the legacy cleanup follow-up](https://github.com/compoundingtech/fractal/issues/1741).
-That future deletion is an explicit legacy exception, not an indefinite dedupe guarantee.
+Seven days covers the phone's retries with backoff and ordinary retries across a daemon
+restart. Exact saved-response replay lasts seven days; durable recognition of the original
+effect continues afterward. Response rows that predate the caller-key association sit below
+a stored legacy watermark and are never expired by this cleanup.
 
 Cleanup adds, drops and changes **no indexes**. It seeks the first rowid above a persisted legacy
 watermark and examines at most 64 response rows in completion order. It stops at the first young
@@ -1394,28 +1388,18 @@ No stored claims are rewritten and no migration is required.
 
 Caller keys have one namespace across actors and nodes that share these claims. Use a fresh,
 globally unique key for each new request; keys are not an authorization boundary. Reusing
-another caller's key can return a terminal refusal identifying their original claim. Actor-scoped
-keys would require a compatible namespace migration and are a separate follow-up.
-Revision approval currently commits its approval before cutover and response storage; a crash
+another caller's key can return a terminal refusal identifying their original claim.
+Revision approval commits its approval before cutover and response storage; a crash
 or concurrent retry in that interval can receive the same terminal refusal before seven days.
 Inspect the proposal's current state rather than retrying its effect with a fresh key.
-Compound publication receipts use existing operation identities. Checkpoint rules version 11
-has no drop rule for `publication.operation`, so those claims remain available to rebuild the
-operation registry; this release does not change that rule.
+Compound publication receipts use existing operation identities. Checkpoint rules have no
+drop rule for `publication.operation`, so those claims remain available to rebuild the
+operation registry.
 
-Claim event positions keep their local store index through schema-17 migration. Converting an
-existing event table seeds its resume floor once at the current store frontier: older checkpoints
-did not record enough position information to prove earlier cursors continuous. Lagging followers
-receive one explicit HTTP 410 and must resync; a cursor equal to the upgrade frontier continues.
-Fresh stores keep floor zero, and ordinary excluded-claim gaps never raise it. Event payloads are
-read from claims; a local membership index records which accepted claims were eligible for the
-feed. The temporary legacy payload table drains in transactions of at most 64 rows. Schema 17
-requires the matching daemon on that node; an older binary refuses the upgraded database. Older
-peers keep their own local event cursors and continue replicating the same claim vocabulary.
-Schema 17 is a one-way database upgrade: take a supported backup before upgrade; downgrade
-requires restoring that backup. The legacy migration window ends when the 64-row worker drains
-`local_event_payloads`; its duration depends on existing rows and writer competition. No fixed
-duration or throughput is promised before copied-store measurements.
+Event positions are local store indexes. A cursor before the recorded resume floor receives
+HTTP 410 `cursor-gap` with `full_resync=true`; a cursor at the floor continues. See
+[compatibility](../compatibility.md) and the [upgrade procedure](../../site/guides/upgrading.md)
+for forward-only migration and backup requirements.
 
 Live claim bodies and positions do not change in place: local admission inserts them and replication
 uses `INSERT OR IGNORE`, with checkpoint tombstones refusing dropped claims. Live checkpoint
@@ -1460,22 +1444,31 @@ Capabilities read their event cursor and floor together and advertise that obser
 Replacing a
 projection does not pretend to replay missed durable transitions.
 
-The v0 action discriminators are:
+The `actions` object in the [operation manifest](schemas/operations.json) is the complete
+list of v0 action discriminators, required capabilities and parameter types. The
+[schema](schemas/client-v0.schema.json) defines those parameters and the `Fence` fields;
+the action-specific sections below describe the required revisions and incarnations.
+Use the generated clients to construct typed requests from the current resource snapshot.
+Pairing begin and completion are entries in the manifest's `commands` list, sent to
+`POST /v1/client/pairings` and `POST /v1/client/pairings/{id}/complete`.
+Only `pairing.revoke` is a pairing action.
 
-| Family | Actions | Required fences |
-|---|---|---|
-| Attention | `work.done`, `review.approve`, `review.reject`, `review.request-changes` | source episode or review revision |
-| Messages | `message.send`, `message.read`, `message.close` | reply/message revision when present |
-| Launches | `launch.create`, `launch.revise`, `launch.preview`, `launch.approve`, `launch.cancel` | launch revision; target generation and preview token where applicable |
-| Missions | `mission.start`, `mission.revise`, `mission.approve-revision`, `mission.cancel-revision`, `mission.cancel` | mission revision and current generation where applicable |
-| Sessions | `session.import` | exact native-session revision; an exact running-process fingerprint is revalidated server-side |
-| Work | `work.ask`, `work.cancel-ask`, `work.claim`, `work.renew`, `work.progress`, `work.complete`, `work.fail`, `work.release`, `work.retry`, `work.publish-mission` | generation, definition, attempt, readiness epoch, and claimant incarnation after claim |
-| Seat queues | `agent.queue-move` | snapshot; the run and any anchor run must be queued for the seat |
-| Lanes | `lane.join`, `lane.leave`, `lane.move`, `lane.mark`, `lane.approve` | snapshot; the lane must be open and a named entry or anchor must be in it |
-| Runtimes | `runtime.stop`, `runtime.restart`, `runtime.reset`, `runtime.context-clear`, `runtime.signal` | runtime incarnation; stop, restart, and reset also require `runtime_desired_revision` from the runtime resource |
-| Agent desired state | `agent.stop`, `agent.start` | snapshot and `runtime_desired_revision`, the agent's selected desired claim ID; no runtime incarnation required |
-| Terminals | `terminal.input`, `terminal.resize`, `terminal.attach`, `terminal.detach` | runtime incarnation; resize and a line of input (`mode` `line`) also require the screen sequence; raw and key input do not |
-| Pairing | `pairing.begin`, `pairing.complete`, `pairing.revoke` | pairing/device revision where applicable |
+Fences are tied to the resource being changed:
+
+| Resource | Required fences |
+| --- | --- |
+| Attention and reviews | Source episode or review revision. |
+| Messages | Reply/message revision when present. |
+| Launches | Launch revision; target generation and preview token where applicable. |
+| Missions | Mission revision and current generation where applicable. |
+| Native sessions | Exact native-session revision; an exact running-process fingerprint is revalidated server-side. |
+| Work | Generation, definition, attempt, readiness epoch, and claimant incarnation after claim. |
+| Seat queues | Snapshot; the run and any anchor run must be queued for the seat. |
+| Lanes | Snapshot; the lane must be open and a named entry or anchor must be in it. |
+| Runtimes | Runtime incarnation; stop, restart and reset also require the resource's `runtime_desired_revision`. |
+| Agent desired state | Selected desired revision; suspend also requires the running incarnation. See the action-specific requirements below. |
+| Terminal input and attachments | Runtime incarnation; resize and line input also require the screen sequence. Raw and key input do not. |
+| Pairing revocation | Pairing/device revision. |
 
 After authentication and snapshot admission, `message.send` waits at most three seconds
 for confirmation of dispatch and its action receipt. HTTP 503 `message-send-unconfirmed`
@@ -1776,7 +1769,7 @@ The shared `checks.st3` suite includes the adapter's Rust tests.
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
 
 ```sh
-nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal --features fractal/test-support --bin st-chatgpt --bin st3 --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
+nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal --features fractal/test-support --bin st-chatgpt --bin fractal --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
 ```
 
 The script starts the repository API harness with its own persistent store, paired gateway,
@@ -2420,15 +2413,8 @@ typed operation unions, not arbitrary JSON bodies. Regenerate all clients with
 `cargo run -p fractal-client-codegen`; verify freshness with
 `cargo run -p fractal-client-codegen -- --check`.
 
-Legacy custom-to-v1 Fractal migration is client-owned: discover capability, pause legacy writers, fold old
-`custom.fractal.sidebar` HLC history once, and durably stage the snapshot, target ID,
-exact typed operations and idempotency key. Preserve stable IDs, import order (keys are
-re-derived), tombstones and placements. Fractal sorts legacy siblings by `(key, ID)` and
-deterministically derives canonical fractional keys for each folder and placement list.
-Retry that exact staged request until acknowledged and readable, then switch
-exclusively to arrangements. Old stamps remain provenance, not live ordering. Keep staged
-state on failure, leave immutable custom history, and never dual-write. There is no
-upstream Fractal-specific importer.
+See the [Fractal web implementation](../../fractal-web.md#sidebar-migration) for requirements
+when importing its custom sidebar history into arrangements.
 
 ### Ordered memberships and new version-2 layouts
 
@@ -2804,22 +2790,21 @@ them or binding their cursors to them. Terminal cursors bind those values, so ev
 continuation must repeat them.
 Changing or dropping a filter while continuing returns `page-cursor-expired`.
 
-This is an additive client read contract change: the operations manifest documents the
-optional query fields; resource schemas, API versions, capabilities and stored claims
-are unchanged. Old clients still list new servers normally. New filtered client methods
+The operations manifest documents the optional query fields. Filtered client methods
 refuse an older server that omits the requested filter acknowledgment, with an upgrade
 message, instead of returning an unfiltered page or scanning pages on the client.
 A running projection is replicated evidence, not a successful PTY handshake: callers
 must still use the existing incarnation-fenced attachment routes to attach.
 
-The real-daemon mixed-build regression is a **manual proof**, not a CI gate: run
+The real-daemon mixed-build regression is a manual proof requiring a binary built before
+terminal owner filters:
 
 ```sh
 ST3_TERMINALS_COMPAT_BIN=/path/to/older/st3 cargo test -p fractal --test integration fleet::terminal_owner_filters_are_safe_across_mixed_builds -- --ignored --exact
 ```
 
-Choose a binary built before these terminal filters. The fake legacy-server refusal
-and escaping test, server filter/paging tests, and TypeScript client checks run in CI.
+The fake legacy-server refusal and escaping test, server filter/paging tests, and
+TypeScript client checks run in CI.
 
 ### Message author and recipients
 
@@ -2959,14 +2944,14 @@ typed view; its presence does not imply an explicit-configuration fact.
 Non-fetchable prefix notices express that fact in `reason` and omit a continuation cursor,
 without adding undeclared fields to the closed truncation body.
 
-The pre-approval parity audit adds these parsed contract fields explicitly:
+Parsed views carry these contract fields:
 `TimelineViewTask.context`, `SubagentSummary.name` (OMP name, distinct from agent
 type), `TimelineViewWrite.content` and `line_count`, search flags `case`, `hidden`,
 `gitignore`, `limit`, `skip` and output fields `call_id`, `is_error`, `match_count`,
 `file_count`, `truncated`, `file_limit_reached`, `per_file_limit_reached`, `warning`;
 ask option `description`; hub `message`; eval `code`, `timeout_s`, `reset`; and
-compaction `summary`. Existing bash `cwd` and `timeout_s` now render on both clients.
-Assistant session errors add `TimelineViewAssistantError` with `status`,
+compaction `summary`. Bash `cwd` and `timeout_s` render on both clients.
+Assistant session errors use `TimelineViewAssistantError` with `status`,
 `presentation`, `is_error`, `label`, original `message`, optional `stop_reason`,
 `error_id`, `api`, `provider`, `model`, and optional persisted `retry`
 (`kind`, `status`, `attempt`, `recovery`, `note`, ISO-string `recovered_at`,
@@ -3041,8 +3026,7 @@ HTTP 410 `conversation-content-invalidated`, `retryable: true`, and
 reachable owner with unreadable/missing bytes returns `transcript-unavailable`;
 unreachable owner reads retain `remote-unavailable` and carry
 `details.availability: owner-unavailable`. The managed transcript notice similarly
-labels `transcript-unavailable`; retiring its stored-history fallback is owned by
-the separate no-agent-history mission. This contract adds no durable content class,
+labels `transcript-unavailable`. This contract adds no durable content class,
 claim kind, retention rule, spool, or image blob copy.
 
 Native conversation `read.projections` grants full transcript, chunk and image access,

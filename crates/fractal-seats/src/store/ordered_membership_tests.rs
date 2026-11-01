@@ -994,7 +994,7 @@ fn replay_rebuild_replication_and_checkpoint_retain_raw_hidden_and_absent_author
         let mut noise = claim("daemon/membership-noise", "daemon.diagnostic",
             json!({"severity":"warning","code":"membership-checkpoint-noise","reason":format!("sample {number}")}));
         noise.actor = None;
-        store.append_claim(&noise).unwrap();
+        store.append_as_older_build_for_test(&noise).unwrap();
     }
     let retained: Vec<_> = [SEAT_A, SEAT_B, SEAT_C].iter().map(|member| head(&store, member)).collect();
     let before = rows(&store);

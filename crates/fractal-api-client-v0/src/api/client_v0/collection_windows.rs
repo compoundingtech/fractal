@@ -51,7 +51,7 @@ mod tests {
     fn diagnostic(state: &AppState) {
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/shared-window".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,

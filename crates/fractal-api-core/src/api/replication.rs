@@ -486,3 +486,155 @@ pub async fn replication_wake(State(state): State<AppState>) -> Result<Json<Valu
         "projection_attempted": projection_attempted,
     })))
 }
+
+/// The named shard a `/v1/internal/replication/shard/{shard}/…` route serves: the messages
+/// shard, when this daemon opened it.
+fn replication_shard(state: &AppState, shard: &str) -> Result<Arc<smallclaims::store::Store>, ApiError> {
+    crate::store::messages_shard::shard(&state.store)
+        .filter(|_| shard == crate::store::messages_shard::SHARD_ID)
+        .ok_or_else(|| ApiError::not_found(format!("this daemon holds no shard `{shard}`")))
+}
+
+/// The members to dial for a shard: those whose current daemon advertises holding it.
+pub async fn shard_replication_peers(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    replication_shard(&state, &shard)?;
+    let store = state.store.clone();
+    let configured = state.configured_peers.clone();
+    let peers = blocking_store(move || {
+        crate::store::messages_shard::advertising_hosts(&store, &configured)
+    })
+    .await?;
+    Ok(Json(json!({ "peers": peers })))
+}
+
+pub async fn shard_replication_export(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(request): Json<ReplicationExportRequest>,
+) -> Result<Json<ReplicationExportResponse>, ApiError> {
+    let store = replication_shard(&state, &shard)?;
+    blocking_store(move || {
+        let exchange = if request.summary_only {
+            store.export_replication_summary(&request.fleet_id)?
+        } else {
+            store.export_replication_exchange_answering(
+                &request.fleet_id,
+                &request.inventory,
+                &request.signature_requests,
+            )?
+        };
+        Ok(Json(ReplicationExportResponse {
+            exchange,
+            store_index: store.index()?,
+        }))
+    })
+    .await
+}
+
+/// Receive a peer's shard exchange, then admit and project what it brought. A shard carries
+/// no transport observations or sync notices: those describe the graph's exchanges.
+pub async fn shard_replication_receive(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(request): Json<ReplicationReceiveRequest>,
+) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let store = replication_shard(&state, &shard)?;
+    let response = blocking_action(move || {
+        let internal = |error: anyhow::Error| St3Error::new("internal", error.to_string());
+        let before_index = store.index().map_err(internal)?;
+        let receipt = store.receive_replication_exchange_via(
+            &request.peer,
+            &request.fleet_id,
+            &request.exchange,
+            request.round_trip_ms.is_some(),
+            request.carrier,
+        )?;
+        if replication_receive_has_new_data(receipt.received + receipt.signatures) {
+            store.validate_replication_backlog().map_err(internal)?;
+            store.apply_replication_repairs().map_err(internal)?;
+            store.project_replication_backlog().map_err(internal)?;
+        }
+        let store_index = store.index().map_err(internal)?;
+        Ok(ReplicationReceiveResponse {
+            receipt,
+            changed: store_index != before_index,
+            store_index,
+        })
+    })
+    .await?;
+    if response.changed {
+        state
+            .event_notify
+            .send_modify(|generation| *generation = generation.saturating_add(1));
+    }
+    Ok(Json(response))
+}
+
+pub async fn shard_replication_peer_failure(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(request): Json<ReplicationPeerFailureRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let store = replication_shard(&state, &shard)?;
+    blocking_store(move || {
+        store.record_peer_failure_via(
+            &request.peer, &request.status, &request.error, request.carrier, request.failure.as_ref(),
+        )?;
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({ "recorded": true })))
+}
+
+pub async fn shard_replication_wake(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let store = replication_shard(&state, &shard)?;
+    let changed = blocking_store(move || {
+        let admission = store.validate_replication_backlog()?;
+        let repairs = store.apply_replication_repairs()?;
+        let projected = store.project_replication_backlog()?;
+        Ok(projected && (admission.changed || repairs != 0))
+    })
+    .await?;
+    if changed {
+        state
+            .event_notify
+            .send_modify(|generation| *generation = generation.saturating_add(1));
+    }
+    Ok(Json(json!({ "changed": changed })))
+}
+
+/// Test support: append a claim to the messages shard as this daemon.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_append(
+    State(state): State<AppState>,
+    Json(input): Json<smallclaims::claim::ClaimInput>,
+) -> Result<Json<smallclaims::claim::ClaimRecord>, ApiError> {
+    let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
+    let claim = blocking_action(move || store.append_claim(&input)).await?;
+    // The dialers wake on the graph's replication file, as they do for a graph write.
+    let _ = std::fs::write(state.state_dir.join("replication.wake"), b"messages-shard\n");
+    Ok(Json(claim))
+}
+
+/// Test support: the claims the messages shard holds about one subject.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_items(
+    State(state): State<AppState>,
+    Query(query): Query<std::collections::BTreeMap<String, String>>,
+) -> Result<Json<Vec<smallclaims::claim::ClaimRecord>>, ApiError> {
+    let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
+    let subject = query.get("subject").cloned().unwrap_or_default();
+    Ok(Json(blocking_store(move || store.claims_for(&subject, None)).await?))
+}
+
+/// Test support: the members this daemon dials for the messages shard, as the worker reads them.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_peers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    shard_replication_peers(State(state), AxumPath(crate::store::messages_shard::SHARD_ID.to_owned())).await
+}

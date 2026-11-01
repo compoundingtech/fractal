@@ -97,6 +97,10 @@ pub struct RepositoryCursor {
     identities: BTreeMap<String, ItemIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail_after: Option<String>,
+    /// Where the open listing a resume reads for identities continues, when it had more pages
+    /// than one poll reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume_next: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -137,14 +141,19 @@ fn content_digest(value: &Value) -> String {
     hex::encode(digest.0.finalize())
 }
 
+/// `started` is when the look began. A watermark never moves past it: GitHub can stamp a record
+/// in the future (on 2026-11-01 some comments were stamped an hour ahead), and a watermark at
+/// that stamp would hide every change stamped before it until the time came.
 fn finish_listing(
     scan: &mut Option<ListingScan>,
     watermark: &mut Option<String>,
     listing: &GithubListing,
+    started: &str,
 ) -> bool {
     let newest = newest_updated_at(&listing.values);
     if scan.is_none() && !listing.truncated {
         *watermark = newest.into_iter().chain(watermark.take()).max()
+            .map(|at| at.min(started.to_owned()))
             .or_else(|| Some(watermark_now()));
         return false;
     }
@@ -167,7 +176,8 @@ fn finish_listing(
             .saturating_add(1).min(IMMEDIATE_RECONCILIATION_SWEEPS);
         return progress.unstable_sweeps < IMMEDIATE_RECONCILIATION_SWEEPS;
     }
-    *watermark = progress.newest.take().into_iter().chain(watermark.take()).max();
+    *watermark = progress.newest.take().into_iter().chain(watermark.take()).max()
+        .map(|at| at.min(started.to_owned()));
     *scan = None;
     false
 }
@@ -1274,9 +1284,10 @@ fn merge(items: &mut BTreeMap<u64, Item>, item: Item) {
 }
 
 fn watermark_now() -> String {
-    let at = SystemTime::now()
-        .checked_sub(WATERMARK_SKEW)
-        .unwrap_or(UNIX_EPOCH);
+    watermark_at(SystemTime::now().checked_sub(WATERMARK_SKEW).unwrap_or(UNIX_EPOCH))
+}
+
+fn watermark_at(at: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(at)
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
@@ -1371,13 +1382,22 @@ pub async fn observe_at(
         .and_then(Value::as_str)
         .and_then(|name| name.split_once('/'))
         .unwrap_or((owner, repository));
+    let started = watermark_at(SystemTime::now());
     let mut cursor = RepositoryCursor::parse(request.cursor.as_deref());
+    // A cursor an earlier build moved past its look's start reads on from now instead.
+    for since in [&mut cursor.items_since, &mut cursor.comments_since].into_iter().flatten() {
+        if *since > started {
+            since.clone_from(&started);
+        }
+    }
     // How far the observer had read before this poll. Without one, this poll reads every open
     // item once; from then on it reads only what changed.
     let watermark = cursor.items_since.clone();
     // A read position with nothing else is how far another member read, from the observer's
-    // claim: that member kept the identities. This poll learns them from the open listing once.
-    let resuming = watermark.is_some() && cursor.seen.is_empty() && cursor.identities.is_empty();
+    // claim: that member kept the identities. This poll learns them from the open listing once,
+    // and the polls after it read on until that listing ends.
+    let resuming = cursor.resume_next.is_some()
+        || (watermark.is_some() && cursor.seen.is_empty() && cursor.identities.is_empty());
     let mut items = BTreeMap::<u64, Item>::new();
     let mut more = false;
     let mut changed_open_pull = false;
@@ -1488,7 +1508,7 @@ pub async fn observe_at(
                 }
             }
         }
-        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing);
+        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing, &started);
         if cursor.items_scan.is_none() {
             retain_boundary(&mut cursor.item_versions, cursor.items_since.as_deref());
         }
@@ -1496,15 +1516,21 @@ pub async fn observe_at(
         // the detail reads would not ask about it, and a transfer would go unseen until it
         // changes again.
         if resuming && (fields.contains("pull_requests") || fields.contains("issues")) {
+            let next = cursor.resume_next.take();
             let open = github_listing(
                 &client,
-                format!("{base}/issues?state=open&per_page=100"),
+                next.clone().unwrap_or_else(|| format!("{base}/issues?state=open&per_page=100")),
                 token,
-                cache_for,
+                if next.is_some() { Duration::ZERO } else { cache_for },
                 LISTING_PAGES,
-                false,
+                true,
             )
             .await?;
+            more |= open.truncated;
+            // GitHub pages this listing by offset: an item that closes between two polls moves
+            // the rest back, so the first item past the boundary can be skipped. It is learned
+            // when it next changes, as any item was before this read existed.
+            cursor.resume_next = open.next.clone();
             for issue in &open.values {
                 if let (Some(id), Some(number)) = (
                     issue.get("node_id").and_then(Value::as_str),
@@ -1573,7 +1599,7 @@ pub async fn observe_at(
                             merge(&mut items, item);
                         }
                     }
-                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments);
+                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments, &started);
                     if cursor.comments_scan.is_none() {
                         retain_boundary(&mut cursor.comment_versions, cursor.comments_since.as_deref());
                     }
@@ -3158,6 +3184,70 @@ mod tests {
         );
     }
 
+    /// A resume whose open listing is longer than one poll reads learns the identities on the
+    /// first pages, and the polls after it read on from where it stopped until the listing ends.
+    #[tokio::test]
+    async fn resuming_reads_a_long_open_listing_across_polls() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route(
+            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+            json!([]),
+        );
+        let start = "/repos/acme/garden/issues?state=open&per_page=100";
+        for page in 1..=11 {
+            let path = if page == 1 { start.to_owned() } else { format!("{start}&page={page}") };
+            let values: Vec<_> = (0..100)
+                .map(|offset| {
+                    let number = (page - 1) * 100 + offset + 1;
+                    issue(number, "2026-09-01T00:00:00Z", json!({"node_id": format!("I_{number}")}))
+                })
+                .collect();
+            github.route(&path, json!(values));
+            if page < 11 {
+                github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+            }
+        }
+        github.open_pull_requests(json!([]));
+        github.resolved_nodes(json!([]));
+        let position = replicated_cursor(
+            &json!({"items_since": "2026-09-10T00:00:00Z", "seen": {"items": "elsewhere"}}).to_string(),
+        )
+        .unwrap();
+        let auth = GithubAuth::test("test");
+        let first = observe_at(request(&["issues"], Some(&position), None), &base, Some(&auth))
+            .await
+            .unwrap();
+        let cursor = RepositoryCursor::parse(first.cursor.as_deref());
+        assert!(cursor.identities.contains_key("I_1000"));
+        assert!(!cursor.identities.contains_key("I_1001"));
+        assert!(cursor.resume_next.as_deref().unwrap().ends_with("&page=11"));
+
+        github.take_requests();
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        let second = observe_at(request(&["issues"], first.cursor.as_deref(), Some(first.facts)), &base, Some(&auth))
+            .await
+            .unwrap();
+        let cursor = RepositoryCursor::parse(second.cursor.as_deref());
+        assert!(cursor.identities.contains_key("I_1100"));
+        assert!(cursor.resume_next.is_none());
+        let requests = github.take_requests();
+        assert_eq!(
+            requests.iter().filter(|request| request.contains("/issues?state=open&")).count(),
+            1,
+            "the second poll reads only the page the first stopped before"
+        );
+
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        observe_at(request(&["issues"], second.cursor.as_deref(), Some(second.facts)), &base, Some(&auth))
+            .await
+            .unwrap();
+        assert!(
+            !github.take_requests().iter().any(|request| request.contains("/issues?state=open&")),
+            "once the listing ends it is not read again"
+        );
+    }
+
     #[tokio::test]
     async fn open_pull_request_execution_pages_keep_all_items_and_the_total_bound() {
         let (github, base) = FakeGithub::start().await;
@@ -3449,6 +3539,61 @@ mod tests {
                 .await.unwrap();
             assert_eq!(quiet.facts, json!({"repository_id": 7}));
         }).await;
+    }
+
+    /// GitHub can stamp a record in the future: on 2026-11-01, as US Pacific clocks fell back,
+    /// some were stamped an hour ahead. A watermark stops at the look's own start, so the next
+    /// look still sees a change stamped just after that start, and the future-stamped record
+    /// is not handed out twice.
+    #[tokio::test]
+    async fn a_future_stamp_holds_no_watermark_past_the_look() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let stamp = |offset: chrono::Duration| (chrono::Utc::now() + offset).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let earlier = stamp(chrono::Duration::minutes(-10));
+        let ahead = stamp(chrono::Duration::hours(1));
+        let listings = |since: &str| (
+            format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={}&per_page=100", inclusive_since(since)),
+            format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={}&per_page=100", inclusive_since(since)),
+        );
+        let comment = |id: u64, number: u64, at: &str| json!({
+            "id": id, "issue_url": format!("https://api.github.com/repos/acme/garden/issues/{number}"),
+            "html_url": format!("https://github.com/acme/garden/issues/{number}#issuecomment-{id}"),
+            "user": {"login": "fern"}, "body": "hello", "created_at": at, "updated_at": at,
+        });
+        let (issues, comments) = listings(&earlier);
+        github.route(&issues, json!([issue(1, &ahead, json!({}))]));
+        github.route(&comments, json!([comment(91, 1, &ahead)]));
+        let token = GithubAuth::test("future-stamp-token");
+        let cursor = json!({"items_since": earlier, "comments_since": earlier}).to_string();
+        let started = stamp(chrono::Duration::zero());
+        let first = observe_at(request(&["comments"], Some(&cursor), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(item(&first.facts, "issues", 1)["recent_comments"][0]["id"], 91);
+        let held = RepositoryCursor::parse(first.cursor.as_deref());
+        for since in [&held.items_since, &held.comments_since] {
+            let since = since.as_deref().unwrap();
+            assert!(since >= started.as_str() && since < ahead.as_str(), "{since} is not the look's start");
+        }
+
+        // A change stamped just after the first look began is still read, and the record
+        // stamped ahead is not handed out again.
+        let just_after = stamp(chrono::Duration::seconds(1));
+        let (issues, comments) = listings(held.items_since.as_deref().unwrap());
+        github.route(&issues, json!([issue(1, &ahead, json!({})), issue(2, &just_after, json!({}))]));
+        github.route(&comments, json!([comment(91, 1, &ahead), comment(92, 2, &just_after)]));
+        let next = observe_at(request(&["comments"], first.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(items(&next.facts, "issues").len(), 1, "{}", next.facts);
+        assert_eq!(item(&next.facts, "issues", 2)["recent_comments"][0]["id"], 92);
+
+        // A cursor an earlier build left at the future stamp reads on from the look's start.
+        let stuck = json!({"items_since": ahead, "comments_since": ahead}).to_string();
+        let resumed = observe_at(request(&["comments"], Some(&stuck), None), &base, Some(&token))
+            .await.unwrap();
+        let resumed = RepositoryCursor::parse(resumed.cursor.as_deref());
+        assert!(resumed.items_since.as_deref().unwrap() < ahead.as_str());
+        assert!(resumed.comments_since.as_deref().unwrap() < ahead.as_str());
     }
 
     #[tokio::test]

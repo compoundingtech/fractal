@@ -277,9 +277,17 @@ async fn a_usage_commit_rereads_agents_and_leaves_missions_idle() {
     assert_eq!((changed["id"].as_str(), changed["kind"].as_str()), (Some("agents"), Some("changes")));
     fixture.quiet().await;
     assert_eq!(fixture.counts(), counts(&[("agents", 3), ("missions", 2)]));
-    // A commit no window shows reads nothing and sends nothing.
-    fixture.claim("daemon/fixture", "daemon.diagnostic",
-        json!({"code":"fixture", "severity":"error", "reason":"unrelated"}));
+    // A commit no window shows reads nothing and sends nothing: an older member's diagnostic.
+    fixture.state.store.append_as_older_build_for_test(&ClaimInput {
+        subject: "daemon/fixture".into(),
+        kind: "daemon.diagnostic".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({"code":"fixture", "severity":"error", "reason":"unrelated"})).unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    signal_changed(&fixture.state);
     fixture.quiet().await;
     assert_eq!(fixture.counts(), counts(&[("agents", 3), ("missions", 2)]));
 }
@@ -602,8 +610,15 @@ async fn clients_hold_what_full_reads_give_through_replication_rollback_checkpoi
             json!({"state":harness, "driver":"omp", "incarnation_id":"plain-1", "observed_at_ms":n}));
     }
     for n in 0..4 {
-        claim(&state.store, "daemon/alder", "daemon.diagnostic", None,
-            json!({"severity":"warning", "code":"slow-request", "reason":format!("slow {n}")}));
+        state.store.append_as_older_build_for_test(&ClaimInput {
+            subject: "daemon/alder".into(),
+            kind: "daemon.diagnostic".into(),
+            actor: None,
+            fields: serde_json::from_value(json!({"severity":"warning", "code":"slow-request", "reason":format!("slow {n}")})).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
     }
     signal_changed(&state);
     settle(&mut fixture, &mut held).await;

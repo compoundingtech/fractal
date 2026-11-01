@@ -20,6 +20,31 @@
     { "$ref": "#/$defs/ClientDiagnosticsBatch" }
   ],
   "$defs": {
+    "HarnessQuestionAnswerabilityReason": {"anyOf": [{"enum": ["adapter_missing", "adapter_unavailable", "resolved"]}, {"type": "string"}]},
+    "HarnessInvalidAnswerReason": {"enum": [
+      "unknown_option",
+      "too_many",
+      "required_missing",
+      "empty_single",
+      "too_long",
+      "unknown_question",
+      "other_not_allowed",
+      "note_not_allowed"
+    ]},
+    "HarnessQuestionItem": {"type": "object", "additionalProperties": false, "required": ["id", "options", "multi", "required"], "properties": {"id": {"type": "string", "pattern": "^(q([0-9]|1[0-5])|sha256:[0-9a-f]{64})$"}, "options": {"type": "integer", "minimum": 0, "maximum": 64}, "multi": {"type": "boolean"}, "required": {"type": "boolean"}}},
+    "HarnessAnswerInput": {"type": "object", "additionalProperties": false, "required": ["positions"], "properties": {"positions": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "integer", "minimum": 0, "maximum": 63}}}},
+    "HarnessResolvedAnswer": {"type": "object", "additionalProperties": false, "required": ["positions", "timed_out"], "properties": {"positions": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "integer", "minimum": 0, "maximum": 63}}, "timed_out": {"type": "boolean"}}},
+    "HarnessQuestionResolution": {"type": "object", "additionalProperties": false, "required": ["status", "revision", "answers", "resolved_at"], "properties": {"status": {"anyOf": [{"enum": ["answered", "answered_elsewhere", "expired", "cancelled"]}, {"type": "string"}]}, "revision": {"$ref": "#/$defs/Revision"}, "answers": {"type": "object", "maxProperties": 16, "propertyNames": {"type": "string", "pattern": "^(q([0-9]|1[0-5])|sha256:[0-9a-f]{64})$"}, "additionalProperties": {"$ref": "#/$defs/HarnessResolvedAnswer"}}, "resolved_at": {"x-st-codec": "epoch-ms", "type": "integer", "minimum": 0, "maximum": 9007199254740991}}},
+    "HarnessQuestionAnswerability": {"type": "object", "additionalProperties": false, "required": ["state"], "properties": {"state": {"anyOf": [{"enum": ["available", "unavailable"]}, {"type": "string"}]}, "reason": {"$ref": "#/$defs/HarnessQuestionAnswerabilityReason"}}, "allOf": [{"if": {"properties": {"state": {"const": "unavailable"}}}, "then": {"required": ["reason"]}}, {"if": {"properties": {"state": {"const": "available"}}}, "then": {"properties": {"reason": false}}}]},
+    "HarnessQuestion": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "agent", "session", "native_id", "runtime_incarnation", "questions", "observed_at", "resolution", "answer"], "properties": {"kind": {"const": "harness-question"}, "agent": {"$ref": "#/$defs/AgentId"}, "session": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\s\\x00-\\x1f\\x7f]+$", "description": "Opaque value of 1–128 UTF-8 bytes, without whitespace or control characters; runtime enforces byte length."}, "native_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "runtime_incarnation": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\s\\x00-\\x1f\\x7f]+$", "description": "Opaque value of 1–128 UTF-8 bytes, without whitespace or control characters; runtime enforces byte length."}, "questions": {"type": "array", "items": {"$ref": "#/$defs/HarnessQuestionItem"}, "minItems": 1, "maxItems": 16, "uniqueItems": true}, "observed_at": {"x-st-codec": "epoch-ms", "type": "integer", "minimum": 0, "maximum": 9007199254740991}, "resolution": {"oneOf": [{"$ref": "#/$defs/HarnessQuestionResolution"}, {"type": "null"}]}, "answer": {"$ref": "#/$defs/HarnessQuestionAnswerability"}, "id": {"type": "string", "pattern": "^harness-question/[0-9a-f]{32}$"}}}]},
+    "HarnessAnswerParameters": {"type": "object", "additionalProperties": false, "required": ["question", "answers"], "properties": {"question": {"type": "string", "pattern": "^harness-question/[0-9a-f]{32}$"}, "answers": {"type": "object", "maxProperties": 16, "propertyNames": {"type": "string", "pattern": "^(q([0-9]|1[0-5])|sha256:[0-9a-f]{64})$"}, "additionalProperties": {"$ref": "#/$defs/HarnessAnswerInput"}}}},
+    "HarnessAnswerResult": {"type": "object", "additionalProperties": false, "required": ["status", "resolution"], "properties": {"status": {"anyOf": [{"enum": ["accepted", "already_resolved"]}, {"type": "string"}]}, "resolution": {"$ref": "#/$defs/HarnessQuestionResolution"}}},
+    "HarnessInvalidAnswerDetails": {"type": "object", "additionalProperties": false, "required": ["reason"], "properties": {"reason": {"$ref": "#/$defs/HarnessInvalidAnswerReason"}}},
+    "HarnessNotAnswerableDetails": {"type": "object", "additionalProperties": false, "required": ["reason"], "properties": {"reason": {"enum": ["adapter_missing", "adapter_unavailable"]}}},
+    "HarnessTodoSnapshot": {"type": "object", "additionalProperties": false, "required": ["harness", "session_id", "incarnation_id", "observed_at", "source_op", "phases", "totals", "truncated"], "properties": {"harness": {"type": "string"}, "session_id": {"type": "string"}, "incarnation_id": {"type": "string"}, "observed_at": {"$ref": "#/$defs/Timestamp"}, "source_op": {"type": "string"}, "phases": {"type": "array", "items": {"$ref": "#/$defs/HarnessPhase"}}, "totals": {"$ref": "#/$defs/HarnessTodoTotals"}, "truncated": {"type": "boolean"}}},
+    "HarnessPhase": {"type": "object", "additionalProperties": false, "required": ["name", "tasks"], "properties": {"name": {"type": "string"}, "tasks": {"type": "array", "items": {"$ref": "#/$defs/HarnessTask"}}}},
+    "HarnessTask": {"type": "object", "additionalProperties": false, "required": ["content", "status"], "properties": {"content": {"type": "string"}, "status": {"enum": ["pending", "in_progress", "completed", "blocked"]}, "blocker": {"type": ["string", "null"]}}},
+    "HarnessTodoTotals": {"type": "object", "additionalProperties": false, "required": ["pending", "in_progress", "completed", "blocked"], "properties": {"pending": {"type": "integer", "minimum": 0}, "in_progress": {"type": "integer", "minimum": 0}, "completed": {"type": "integer", "minimum": 0}, "blocked": {"type": "integer", "minimum": 0}, "abandoned": {"type": "integer", "minimum": 0}}},
     "ScheduleOwner": {"type": "object", "additionalProperties": {}, "required": ["run_id", "generation_id", "step_id", "state"], "properties": {"run_id": {"type": ["string", "null"]}, "generation_id": {"type": ["string", "null"]}, "step_id": {"type": ["string", "null"]}, "state": {"anyOf": [{"enum": ["recorded", "not-recorded", "unknown"]}, {"type": "string"}]}}},
     "ScheduleKnowledge": {"type": "object", "additionalProperties": {}, "required": ["origin_host_id", "basis", "last_exchange_at", "age_ms", "completeness"], "properties": {"origin_host_id": {"type": ["string", "null"]}, "basis": {"anyOf": [{"enum": ["local-read", "last-direct-exchange", "unknown"]}, {"type": "string"}]}, "last_exchange_at": {"type": ["string", "null"]}, "age_ms": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": 9007199254740991}, {"type": "null"}]}, "completeness": {"anyOf": [{"enum": ["unknown"]}, {"type": "string"}]}}},
     "ScheduleUnheardHost": {"type": "object", "additionalProperties": {}, "required": ["host_id", "last_exchange_at", "age_ms", "reason"], "properties": {"host_id": {"type": "string"}, "last_exchange_at": {"type": ["string", "null"]}, "age_ms": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": 9007199254740991}, {"type": "null"}]}, "reason": {"anyOf": [{"enum": ["older-than-threshold", "never-recorded", "clock-unknown"]}, {"type": "string"}]}}},
@@ -319,6 +344,8 @@
       "identity-unknown",
       "lifecycle-unavailable",
       "retirement-upgrade-required",
+      "retire-revision-mismatch",
+      "retire-incarnation-mismatch",
       "invalid-custody-successor",
       "custody-pending",
       "attention-migrated",
@@ -391,6 +418,8 @@
       "private-notes-unreachable",
       "private-notes-carrier-conflict",
       "private-notes-indeterminate",
+      "invalid-answer",
+      "not-answerable",
       "internal"
     ]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads."},
     "UnknownResource": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "properties": {"kind": {"type": "string", "not": {"enum": [
@@ -418,7 +447,8 @@
       "owned-set",
       "summary",
       "connected-client",
-      "usage"
+      "usage",
+      "harness-question"
     ]}}}}]},
     "OwnedSet": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "claim", "receipt", "blockers", "members_status", "visibility"], "properties": {"kind": {"const": "owned-set"}, "claim": {"type": "string"}, "receipt": {"type": "object"}, "blockers": {"type": "array", "items": {"type": "string"}}, "members_status": {"type": "array", "items": {"type": "object"}}, "visibility": {"type": "object"}, "commit_status": {"type": ["object", "null"]}}}]},
     "GlassLayout": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["tabs"], "properties": {"tabs": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/GlassTab"}}}}, {"type": "object", "additionalProperties": false, "required": ["split", "children"], "properties": {"split": {"enum": ["right", "below"]}, "ratio": {"type": "number", "minimum": 0.1, "maximum": 0.9, "description": "First child share; absent means 0.5. Requires glasses capability version 2."}, "children": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/GlassLayout"}}}}]},
@@ -718,7 +748,8 @@
           "arrangement",
           "summary",
           "connected-client",
-          "usage"
+          "usage",
+          "harness-question"
         ]}, {"type": "string"}], "description": "Resource family."},
         "revision": { "$ref": "#/$defs/Revision" },
         "updated_at": { "$ref": "#/$defs/Timestamp" },
@@ -1210,6 +1241,7 @@
       "required": ["as_of_unix_ms", "rows"],
       "properties": {
         "as_of_unix_ms": { "type": "integer", "minimum": 0 },
+        "otel_ui_url": { "type": "string", "description": "Where a person reads the exported observation history, from the daemon's [observations.otlp] ui_url. Absent when none is configured." },
         "rows": { "type": "array", "items": { "$ref": "#/$defs/SloRow" } }
       }
     },
@@ -1229,6 +1261,10 @@
         "status": { "enum": ["met", "missed", "no-data", "stale"] },
         "resets_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
         "measured_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "tone": { "type": "string", "description": "How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule." },
+        "forecast_used_percent": { "type": "number", "minimum": 0, "maximum": 100, "description": "A budget's projected use when it resets, at the rate of its recent past (at most 100). Absent without enough recent readings." },
+        "forecast_basis_minutes": { "type": "integer", "minimum": 0, "description": "How many minutes of recent readings the forecast was fitted to." },
+        "runs_out_at_unix_ms": { "type": "integer", "minimum": 0, "description": "When the allowance runs out at that rate, present only when that is before it resets." },
         "explain": { "type": "string" }
       }
     },
@@ -2641,7 +2677,89 @@
       }
     },
     "Resource": {
-      "oneOf": [{"$ref": "#/$defs/ConnectedClient"}, {"$ref": "#/$defs/Usage"}, {"$ref": "#/$defs/Summary"}, {"$ref": "#/$defs/Attention"}, {"$ref": "#/$defs/Message"}, {"$ref": "#/$defs/Launch"}, {"$ref": "#/$defs/LaunchVariant"}, {"$ref": "#/$defs/LaunchDecision"}, {"$ref": "#/$defs/LaunchApproval"}, {"$ref": "#/$defs/Mission"}, {"$ref": "#/$defs/Work"}, {"$ref": "#/$defs/Agent"}, {"$ref": "#/$defs/Runtime"}, {"$ref": "#/$defs/Observer"}, {"$ref": "#/$defs/Subscription"}, {"$ref": "#/$defs/Lane"}, {"$ref": "#/$defs/Machine"}, {"$ref": "#/$defs/Device"}, {"$ref": "#/$defs/DeviceCommand"}, {"$ref": "#/$defs/Operation"}, {"$ref": "#/$defs/History"}, {"$ref": "#/$defs/Session"}, {"$ref": "#/$defs/Glass"}, {"$ref": "#/$defs/Arrangement"}, {"$ref": "#/$defs/OwnedSet"}, {"$ref": "#/$defs/UnknownResource"}]
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ConnectedClient"
+        },
+        {
+          "$ref": "#/$defs/Usage"
+        },
+        {
+          "$ref": "#/$defs/Summary"
+        },
+        {
+          "$ref": "#/$defs/Attention"
+        },
+        {
+          "$ref": "#/$defs/Message"
+        },
+        {
+          "$ref": "#/$defs/Launch"
+        },
+        {
+          "$ref": "#/$defs/LaunchVariant"
+        },
+        {
+          "$ref": "#/$defs/LaunchDecision"
+        },
+        {
+          "$ref": "#/$defs/LaunchApproval"
+        },
+        {
+          "$ref": "#/$defs/Mission"
+        },
+        {
+          "$ref": "#/$defs/Work"
+        },
+        {
+          "$ref": "#/$defs/Agent"
+        },
+        {
+          "$ref": "#/$defs/Runtime"
+        },
+        {
+          "$ref": "#/$defs/Observer"
+        },
+        {
+          "$ref": "#/$defs/Subscription"
+        },
+        {
+          "$ref": "#/$defs/Lane"
+        },
+        {
+          "$ref": "#/$defs/Machine"
+        },
+        {
+          "$ref": "#/$defs/Device"
+        },
+        {
+          "$ref": "#/$defs/DeviceCommand"
+        },
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/History"
+        },
+        {
+          "$ref": "#/$defs/Session"
+        },
+        {
+          "$ref": "#/$defs/Glass"
+        },
+        {
+          "$ref": "#/$defs/Arrangement"
+        },
+        {
+          "$ref": "#/$defs/OwnedSet"
+        },
+        {
+          "$ref": "#/$defs/HarnessQuestion"
+        },
+        {
+          "$ref": "#/$defs/UnknownResource"
+        }
+      ]
     },
     "GoldenResourceSet": {
       "type": "array",
@@ -2849,7 +2967,7 @@
         "device": { "type": "string", "description": "The device the key was granted to, by the label it was given when it paired, such as `example phone (secure enclave)`. Absent for a key with no label." }
       }
     },
-    "TimelineContentBody": {"type": "object", "additionalProperties": false, "required": ["media_type"], "properties": {"media_type": {"type": "string"}, "text": {"type": "string"}, "attachment_id": {"$ref": "#/$defs/Id"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}, "anyOf": [{"required": ["text"]}, {"required": ["attachment_id"]}]},
+    "TimelineContentBody": {"type": "object", "additionalProperties": false, "required": ["media_type"], "properties": {"media_type": {"type": "string"}, "message_id": {"type": "string"}, "text": {"type": "string"}, "attachment_id": {"$ref": "#/$defs/Id"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}, "anyOf": [{"required": ["text"]}, {"required": ["attachment_id"]}]},
     "TimelineToolCallBody": {"type": "object", "additionalProperties": false, "required": ["call_id", "name", "arguments"], "properties": {"call_id": {"type": "string"}, "name": {"type": "string"}, "arguments": {}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineToolResultBody": {"type": "object", "additionalProperties": false, "required": ["call_id", "status", "media_type", "content"], "properties": {"call_id": {"type": "string"}, "status": {"enum": ["success", "error"]}, "media_type": {"type": "string"}, "content": {}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineStatusBody": {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"$ref": "#/$defs/TimelineStatus"}, "detail": {"type": "string"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
@@ -2959,6 +3077,7 @@
         "id": { "$ref": "#/$defs/Id" },
         "type": {
           "enum": [
+            "harness.answer",
             "arrangement.edit",
             "arrangement.membership.edit",
             "custom.reply",
@@ -3027,7 +3146,7 @@
     "AgentRepository": {"type": "object", "additionalProperties": false, "required": ["path", "workspaces", "agent_ids"], "properties": {"path": {"type": "string"}, "workspaces": {"type": "array", "items": {"type": "string"}}, "agent_ids": {"type": "array", "items": {"type": "string"}}}},
     "HostRepositories": {"type": "object", "additionalProperties": false, "required": ["host_id", "repositories"], "properties": {"host_id": {"type": "string"}, "repositories": {"type": "array", "items": {"$ref": "#/$defs/AgentRepository"}}}},
     "AgentCreateParameters": {"type": "object", "additionalProperties": false, "required": ["name", "harness"], "properties": {"name": {"type": "string", "minLength": 1}, "harness": {"enum": ["claude", "codex", "pi", "omp", "opencode"]}, "host": {"type": "string", "minLength": 1}, "model": {"type": "string", "minLength": 1}, "effort": {"type": "string", "minLength": 1}, "workspace": {"type": "string", "minLength": 1}, "repo": {"type": "string", "minLength": 1}, "base": {"type": "string", "minLength": 1}, "branch": {"type": "string", "minLength": 1}, "remove_at_run_end": {"type": "boolean"}, "description": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}}},
-    "AgentRetireParameters": {"type": "object", "additionalProperties": false, "required": ["agent", "reason"], "properties": {"agent": {"$ref": "#/$defs/Id"}, "reason": {"type": "string", "minLength": 1}, "successor": {"$ref": "#/$defs/Id"}}},
+    "AgentRetireParameters": {"type": "object", "additionalProperties": false, "required": ["agent", "reason"], "properties": {"agent": {"$ref": "#/$defs/Id"}, "reason": {"type": "string", "minLength": 1}, "successor": {"$ref": "#/$defs/Id"}, "expect_revision": {"type": "string", "minLength": 1}}},
     "MessageSendRefusal": {"oneOf": [
       {"type":"object", "required":["variant","recipient"], "properties":{"variant":{"const":"Retired"},"recipient":{"$ref":"#/$defs/Id"},"successor":{"$ref":"#/$defs/Id"},"transfer":{"type":"string"}}},
       {"type":"object", "required":["variant","recipient","reason"], "properties":{"variant":{"const":"LifecycleUnavailable"},"recipient":{"$ref":"#/$defs/Id"},"reason":{"enum":["unavailable","conflict"]}}}
@@ -3158,6 +3277,7 @@
     "ActionRequest": {
       "allOf": [{ "$ref": "#/$defs/ActionCommon" }],
       "oneOf": [
+        {"properties": {"type": {"const": "harness.answer"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_incarnation"]}]}, "parameters": {"$ref": "#/$defs/HarnessAnswerParameters"}, "id": {"allOf": [{"$ref": "#/$defs/Id"}, {"maxLength": 256, "description": "At most 256 UTF-8 bytes; runtime enforces byte length before settlement."}]}}},
         {"properties": {"type": {"const": "arrangement.edit"}, "parameters": {"$ref": "#/$defs/ArrangementEditParameters"}}},
         {"properties": {"type": {"const": "arrangement.membership.edit"}, "parameters": {"$ref": "#/$defs/ArrangementMembershipEditParameters"}}},
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
@@ -3414,6 +3534,7 @@
         "private_notes": { "$ref": "#/$defs/PrivateNotesFence" },
         "terminal_attachment": { "oneOf": [{ "$ref": "#/$defs/TerminalAttachment" }, { "type": "null" }] },
         "arrangement_revision": { "$ref": "#/$defs/Revision" },
+        "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
         "membership_revision": { "$ref": "#/$defs/Revision" }
       }
     },
@@ -4039,6 +4160,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["api_version", "error_version", "request_id", "code", "message", "retryable", "details"],
+      "allOf": [{"if": {"properties": {"code": {"const": "invalid-answer"}}}, "then": {"properties": {"details": {"$ref": "#/$defs/HarnessInvalidAnswerDetails"}}}}, {"if": {"properties": {"code": {"const": "not-answerable"}}}, "then": {"properties": {"details": {"$ref": "#/$defs/HarnessNotAnswerableDetails"}}}}],
       "properties": {
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "error_version": { "enum": ["st3.client.error.v0", "fractal.client.error.v0"] },

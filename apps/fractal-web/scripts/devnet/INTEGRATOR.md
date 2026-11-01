@@ -79,6 +79,20 @@ when adopting the script to reuse the existing member key. The production build
 helper and generated launchers remain deployment-owned inputs, not replacements
 for the separate launcher scripts.
 
+Deployment overlays can import `edgeOrTailnetAdmission` from `server/host.mts` and
+pass their existing edge admission as `edge`. With `origin: undefined`, it returns
+that exact policy. With a published HTTPS origin and a nonempty login allowlist,
+the canonical Host uses `tailnetAdmission`; other requests retain the edge policy
+only if they have neither Tailscale identity headers nor equal Host and
+X-Forwarded-Host. The latter rejects anonymous/tagged Serve traffic too: the HTTP
+proxy overwrites X-Forwarded-Host with its incoming Host, whereas Devnet sends a
+loopback Host and a distinct external forwarded host. See
+[Tailscale v1.102.3 proxy implementation](https://github.com/tailscale/tailscale/blob/v1.102.3/ipn/ipnlocal/serve.go#L978-L987)
+and [forwarded/identity headers](https://github.com/tailscale/tailscale/blob/v1.102.3/ipn/ipnlocal/serve.go#L1074-L1112).
+Keep the listener loopback-only and preserve these headers between Serve and
+the app. Local processes can forge proxy headers, the same trust assumption as
+the Hub. The old edge URL retains its existing access policy.
+
 ## Trust boundary
 
 Only same-repository PR heads are eligible: `isCrossRepository` must be false

@@ -3,7 +3,7 @@
 # byte for byte (CRLF line ends and ANSI colours included). run.sh adds --endpoint, which the "$" lines omit.
 #
 #   nix develop --command cargo test -p fractal --features test-support --test website_cli_capture --no-run
-#   nix develop --command cargo build -p fractal --bin st3
+#   nix develop --command cargo build -p fractal --bin fractal
 #   CAPTURE_DIR=/tmp/cli-capture <website_cli_capture test binary> --ignored --nocapture &   # until CAPTURE READY
 #   CAPTURE_DIR=/tmp/cli-capture scripts/website-cli-capture/capture.sh > cli.ansi
 #   touch /tmp/cli-capture/stop
@@ -11,7 +11,7 @@ set -euo pipefail
 : "${CAPTURE_DIR:?set CAPTURE_DIR to the directory the capture test serves from}"
 here=$(dirname "$(realpath "$0")")
 # The invoice-index run: the one with a person waiting on it. `sed -n 1p` reads all input, so no SIGPIPE.
-run=$(env -i HOME="$CAPTURE_DIR/cli-home" PATH=/usr/bin:/bin "$(realpath "${FRACTAL:-target/debug/st3}")" \
+run=$(env -i HOME="$CAPTURE_DIR/cli-home" PATH=/usr/bin:/bin "$(realpath "${FRACTAL:-target/debug/fractal}")" \
   --endpoint "$CAPTURE_DIR/st3.sock" --daemon-wait 0 --json missions ls |
   sed -n '/"mission\/marrowpine\/invoice-index"/,/mission-run\//p' | grep -o 'mission-run/[0-9a-f]*' | sed -n 1p)
 # Run in a pseudo-terminal so the CLI colours its output. util-linux script takes a shell command string,

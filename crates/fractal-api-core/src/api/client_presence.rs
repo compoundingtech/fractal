@@ -341,6 +341,12 @@ mod tests {
             client_name(&headers(Some("  stui 0.1.0+abc  "))).as_deref(),
             Some("stui 0.1.0+abc")
         );
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        assert_eq!(
+            client_name(&headers(Some("  fractal-tui 0.1.0+abc  "))).as_deref(),
+            Some("fractal-tui 0.1.0+abc")
+        );
+        // LIVE-MIGRATION END
         assert_eq!(client_name(&headers(Some("   "))), None);
         let long = "x".repeat(400);
         assert_eq!(

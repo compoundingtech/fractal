@@ -2050,6 +2050,7 @@ dependencies = [
  "chrono",
  "fractal-evidence",
  "fractal-github",
+ "fractal-schema",
  "getrandom 0.3.4",
  "hex",
  "libc",
@@ -2383,6 +2384,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "toml 0.9.12+spec-1.1.0",
+ "url",
 ]
 
 [[package]]

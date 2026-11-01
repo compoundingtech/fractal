@@ -110,17 +110,24 @@ const isTurnHeader = (entry: Entry) =>
 const MAILBOX_CONTENT_ID = /^timeline-entry\/[^/]+\/(?:[0-9a-f]{16}-content|[0-9a-f]{24})$/
 
 /**
- * Join only Fractal-minted mailbox pairs, never adjacent harness prose. Native pairs share a digest;
- * stored pairs have separate digests but share their claim's session, timestamp and sequence slot.
+ * Join only Fractal-minted mailbox pairs, never adjacent harness prose. Native pairs share a digest.
+ * Stored pairs have separate digests: their content names its message (`message_id`), and content
+ * from an older daemon, which does not, shares its claim's session, timestamp and sequence slot.
+ * A header answers to both keys; its content to the one it can make.
  */
-const mailboxPairKey = (entry: Entry): string | undefined => {
-  if (entry.type !== 'message' && entry.type !== 'content') return undefined
+const mailboxPairKeys = (entry: Entry): readonly string[] => {
+  if (entry.type !== 'message' && entry.type !== 'content') return []
   const native = /^(timeline-entry\/[^/]+\/[0-9a-f]{16})-(message|content)$/.exec(entry.id)
-  if (native !== null) return native[2] === entry.type ? native[1] : undefined
+  if (native !== null) return native[2] === entry.type ? [native[1]!] : []
   const stored = /^(timeline-entry\/[^/]+)\/[0-9a-f]{24}$/.exec(entry.id)
-  return stored === null ? undefined
-    : `${stored[1]}|${entryTimestamp(entry)}|${entry.sequence - (entry.type === 'content' ? 1 : 0)}`
+  if (stored === null) return []
+  const slot = `${stored[1]}|${entryTimestamp(entry)}|${entry.sequence - (entry.type === 'content' ? 1 : 0)}`
+  const message = entry.body.message_id
+  const named = message === undefined ? undefined : `${stored[1]}|${message}`
+  if (entry.type === 'content') return [named ?? slot]
+  return named === undefined ? [slot] : [named, slot]
 }
+const mailboxPairKey = (entry: Entry): string | undefined => mailboxPairKeys(entry)[0]
 const decodeUnknownJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
 
 /** Fractal explicitly marks unsupported omp entries; ordinary prose/JSON is never guessed at. */
@@ -761,13 +768,11 @@ export class LiveTimeline {
     const mailboxHeaders = new Map<string, MessageEntry>()
     for (const entry of this.ordered) {
       if (entry.type === 'message' && !isTurnHeader(entry)) {
-        const key = mailboxPairKey(entry)
-        if (key !== undefined) mailboxHeaders.set(key, entry)
+        for (const key of mailboxPairKeys(entry)) mailboxHeaders.set(key, entry)
       }
       if (entry.type === 'message' && entry.role === 'user' && entry.body.from?.startsWith('person/')) {
         const id = this.ownSendIds.get(entry.body.message_id)
-        const key = mailboxPairKey(entry)
-        if (id !== undefined && key !== undefined) this.ownSendContentIds.set(key, id)
+        if (id !== undefined) for (const key of mailboxPairKeys(entry)) this.ownSendContentIds.set(key, id)
       }
       if (entry.type !== 'content' || entry.role !== 'user' || entry.body.media_type !== 'text/plain') continue
       const key = mailboxPairKey(entry)
@@ -780,9 +785,8 @@ export class LiveTimeline {
       if (entry.type === 'message' && entry.role === 'user' && entry.body.from?.startsWith('person/')) {
         // Own-send prose stays in the outbox until its correlated content is visible.
         if (this.ownSendIds.has(entry.body.message_id)) continue
-        const key = mailboxPairKey(entry)
         // Keep header-only mail and separate agent mail; one person send needs only its user row.
-        if (key !== undefined && userMailContent.has(key)) continue
+        if (mailboxPairKeys(entry).some(key => userMailContent.has(key))) continue
       }
       // Only native harness turns repeat shown mail as delivery copies; a mailbox
       // message's own content is person-authored text that may quote anything.

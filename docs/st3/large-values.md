@@ -362,3 +362,18 @@ transitional exceptions do not prove byte-size or execution-cost bounds.
   rejection, not new production value producers. The test-module maintainer
   owns `bound-or-reference-values-and-reclamation`: carry those assertions to
   the bounded membership/state representation and its cleanup semantics.
+
+## Harness receipt lookup inventory review (PR #3916)
+
+`fractal_store::store` owns schema site `lv-h806ead738248`, replacing
+`lv-h82624af80f95` solely for the additive receipt actor/key index. The index
+extracts the existing receipt digest and retains existing origin/subject TEXT
+keys; it stores no new question content. Canonical first-resolution and local
+owner checks remain authoritative after the indexed candidate lookup. Existing
+declaration metadata and the producer's `chunk-or-reference-variable-columns`
+work remain; an indexed seek is not a byte-size proof for the retained keys.
+
+Fixture-only `lv-hc58fa3f9b3bb`, owned by `fractal::main_tests`, includes the
+existing client capability envelope to prove CLI answer fences come from the
+caller, not a new question read. It adds no production writer or SQL value.
+Its `trace-statement-and-value-representation` work remains with that module.

@@ -4275,7 +4275,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '{"shard":[0,1,2,3]}' || '{"shard":[0]}') }}
     needs: [fractal-web-changes, genie-freshness, evidence-gate-fractal-web]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && !(github.event_name == 'pull_request' && (needs.evidence-gate-fractal-web.outputs.skip == 'true' || needs.evidence-gate-fractal-web.outputs.refuse == 'true'))) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && needs.evidence-gate-fractal-web.outputs.skip != 'true' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.refuse == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -4476,8 +4476,8 @@ jobs:
           """The always-emitted fractal-web check: pass only for a deliberate skip or a successful run.
 
           Detection must have succeeded. A relevant change requires successful execution, except when
-          an explicit trusted evidence decision covers a pull request. Queue and manual runs always
-          require execution. Failure, timeout, cancellation and an unexpected skip fail the gate.
+          an explicit trusted evidence decision covers a pull request or merge group. Main and manual
+          runs require execution. Failure, timeout, cancellation and an unexpected skip fail the gate.
           A signed-only pull request (ours) with web changes and no valid signature is refused, not run:
           the gate fails with the refusal, which says how to sign it.
           """
@@ -4492,7 +4492,7 @@ jobs:
               if relevant == "true" and refusal and event == "pull_request":
                   return refusal
               if relevant == "true":
-                  if execution == "skipped" and evidence_skip == "true" and event == "pull_request":
+                  if execution == "skipped" and evidence_skip == "true" and event in ("pull_request", "merge_group"):
                       return None
                   return None if execution == "success" else f"web inputs changed but execution ended with {execution or 'no result'}"
               if relevant == "false":
@@ -4532,7 +4532,7 @@ jobs:
         if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true' && steps.cost-receipts.outcome == 'success'"
         run: node packages/fractal-ui/scripts/kit-play-cost.mjs "$RUNNER_TEMP/kit-play-receipts"
       - name: Require every kit shard and exact full-index coverage
-        if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
+        if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true'
         run: node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" 4
       - name: Report job cache coverage
         if: always()

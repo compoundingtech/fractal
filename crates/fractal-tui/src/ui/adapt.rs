@@ -46,6 +46,8 @@ pub struct Extras {
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
     /// Why the last refresh failed, while `slo` still holds the rows of an earlier read.
     pub slo_stale: Option<String>,
+    /// Where the exported observation history is read, from the same `slo.list` read.
+    pub slo_otel_url: Option<String>,
 }
 
 fn age(then: &str, now: &str) -> String {
@@ -290,6 +292,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         slo: extras.slo.clone(),
         slo_history: extras.slo_history.clone(),
         slo_stale: extras.slo_stale.clone(),
+        slo_otel_url: extras.slo_otel_url.clone(),
         clients: match &model.clients {
             Some(Ok(list)) => Load::Ready(
                 list.items
@@ -335,9 +338,11 @@ fn older_than_member(client: &str, member: &str) -> bool {
     let Some((name, build)) = client.split_once(' ') else {
         return false;
     };
-    if !matches!(name, "stui" | "st") {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    if !matches!(name, "stui" | "fractal-tui" | "st") {
         return false;
     }
+    // LIVE-MIGRATION END
     match (version(build), version(member)) {
         (Some(client), Some(member)) => client < member,
         _ => false,
@@ -617,6 +622,7 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                     .unwrap_or_else(|| clean_message_text(&item.title)),
                 waiting: path.map(|path| format!("step {path}")),
                 age: age(&item.requested_at, now),
+                requested_at: chrono::DateTime::parse_from_rfc3339(&item.requested_at).ok(),
                 deadline: item.deadline_at.as_deref().map(|deadline| {
                     ask_deadline(
                         deadline,
@@ -2918,6 +2924,17 @@ mod tests {
     fn only_an_older_st_build_is_called_older_than_its_member() {
         assert!(older_than_member("stui 0.0.9+77d0a13", "0.1.0+1ecae71"));
         assert!(older_than_member("st 0.1.0+local.ab12cd3", "0.2.0+1ecae71"));
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        assert!(older_than_member(
+            "fractal-tui 0.0.9+77d0a13",
+            "0.1.0+1ecae71"
+        ));
+        assert!(!older_than_member(
+            "fractal-tui 0.1.0+77d0a13",
+            "0.1.0+1ecae71"
+        ));
+        assert!(!older_than_member("fractal-tui dev", "0.1.0+1ecae71"));
+        // LIVE-MIGRATION END
         assert!(!older_than_member("stui 0.1.0+77d0a13", "0.1.0+1ecae71"));
         assert!(!older_than_member("stui 0.2.0+77d0a13", "0.1.0+1ecae71"));
         // Another client's version line is its own, and an unnamed or odd build is never older.

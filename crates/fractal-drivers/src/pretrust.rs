@@ -54,8 +54,15 @@ pub fn pretrust_claude(dirs: &[PathBuf]) -> Result<usize> {
     pretrust_at(&config_path()?, dirs)
 }
 
+/// Admit workspaces for Codex in the provider runtime's selected config, `$CODEX_HOME/config.toml`
+/// or `~/.codex/config.toml`: the file the seat's own Codex reads. A Codex seat start calls this
+/// for its work root before it starts Codex, so Codex does not ask "Do you trust this directory?".
+pub fn pretrust_codex(dirs: &[PathBuf]) -> Result<usize> {
+    pretrust_codex_at(&codex_config_path()?, dirs)
+}
+
 /// The codex config file: `$CODEX_HOME/config.toml` if set, else `~/.codex/config.toml`.
-fn codex_config_path() -> Result<PathBuf> {
+pub(crate) fn codex_config_path() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("CODEX_HOME") {
         Ok(PathBuf::from(dir).join("config.toml"))
     } else {

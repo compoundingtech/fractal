@@ -7,6 +7,7 @@ pub mod directive_notes;
 pub mod deploy;
 pub mod deploy_policy;
 pub mod full_value;
+pub mod github_plugin;
 pub mod glasses;
 pub mod lifecycle;
 pub mod ordered_membership;
@@ -17,6 +18,11 @@ pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
 pub mod review;
+pub mod task_grants;
+pub use task_grants::{
+    TaskManifestError, TaskManifestV1, canonicalize_task_manifest_v1,
+    digest_task_manifest_v1, parse_task_manifest_v1,
+};
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -1143,6 +1149,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            github_plugin::EVENT_FAMILY,
+            "github-event/RESOURCE/ITEM/NUMBER/KEY",
+            "One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller.",
+            false,
+        ),
+        (
             "resource",
             "resource/NAME",
             "An observed external or durable fact bag.",
@@ -1942,6 +1954,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("resources"),
             true,
             &["resource"],
+        ),
+        (
+            github_plugin::ITEM_STATE,
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("resources"),
+            true,
+            &[],
+        ),
+        (
+            github_plugin::EVENT,
+            &[github_plugin::EVENT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            Some("resources"),
+            true,
+            &[],
         ),
         (
             "observer.observed",
@@ -2854,6 +2884,29 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "fault.dismissed",
+            &[
+                "agent",
+                "exec",
+                "pty",
+                "observer",
+                "subscription",
+                "schedule",
+                "daemon",
+                "machine",
+                "step-run",
+                "mission-run",
+                "loop-run",
+                "resource",
+                "checkpoint",
+            ],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("operational"),
+            true,
+            &[],
+        ),
+        (
             "reconcile.fault",
             &[
                 "daemon",
@@ -2980,6 +3033,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("oldCommit", required_string()), ("newCommit", required_string()),
         ],
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
+        github_plugin::ITEM_STATE => github_plugin::item_state_fields(),
+        github_plugin::EVENT => github_plugin::event_fields(),
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
             ("launch_id", required_string()),
@@ -3488,6 +3543,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
             ("owner_host", required_string()),
             ("declaration", required_string()),
+            ("runtime_incarnation", string()),
+            ("desired_revision", string()),
             ("successor", reference_to(&["agent"])),
             ("transfer", string()),
         ],
@@ -3642,6 +3699,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("episode", string()),
             ("failure", string()),
             ("reason", string()),
+        ],
+        "fault.dismissed" => &[
+            ("episode", required_string()),
+            ("reason", required_string()),
         ],
         "reconcile.fault" => &[
             ("scope", required_string()),

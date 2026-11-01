@@ -1123,6 +1123,7 @@ fn resource_fixture_covers_every_resource_kind_with_stable_unique_ids() {
     let expected = BTreeSet::from([
         "agent",
         "attention",
+        "harness-question",
         "history",
         "launch",
         "launch-approval",
@@ -1295,7 +1296,7 @@ async fn publish_fixture_lists(state: &AppState) -> u64 {
 }
 
 fn test_state(root: &Path) -> AppState {
-    AppState { owning_person: None,
+    AppState { seat_admission: Default::default(), owning_person: None,
     // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
     store: Arc::new(
         Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
@@ -1310,7 +1311,7 @@ fn test_state(root: &Path) -> AppState {
     configured_peers: Vec::new(),
     client_relay: None,
     native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    planner_default: fractal_daemon::model::PlannerSpec::default(), harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 
 #[test]

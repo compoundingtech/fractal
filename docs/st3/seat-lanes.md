@@ -45,7 +45,13 @@ declaration change) ends the old scope with what the harness started in it, as t
 new one in the same slice. A job the seat wants to outlive a restart, such as a queued `st-test` run,
 starts as a unit of its own in the slice: the harness's environment names it in
 `FRACTAL_LANE_SLICE`, so `systemd-run --user --unit=st-test-<seat>-… --slice="$FRACTAL_LANE_SLICE" …`
-runs it inside the seat's cap and beside, not inside, the harness's scope. The slice ends, and every
+runs it inside the seat's cap and beside, not inside, the harness's scope. Such a unit starts with
+the user manager's environment, not the seat's, so it passes the lane's variables on itself
+(`--setenv=BUILDS_SLICE_ACTIVE=1 --setenv=FRACTAL_LANE_SLICE --setenv=SCCACHE_SERVER_UDS`, each
+`--setenv=NAME` copying the seat's value). Without `BUILDS_SLICE_ACTIVE`, a build host's cargo front
+door moves each cargo command into `builds.slice`, out of the lane; `st-test` sets it for its own
+checks when it finds itself in a lane, whatever started it, and puts the checks of a unit the seat
+started outside its lane back in it (below). The slice ends, and every
 job in it with it, when the seat stops for good: the reconciler ends it when a stop completes and the
 seat's declaration is an explicit stop or gone. A stop for a restart of a live declaration keeps it.
 Ending a lane also removes the slice's runtime limits (`systemctl --user revert`). A seat whose lane
@@ -70,8 +76,17 @@ The first two already run in place when `BUILDS_SLICE_ACTIVE` is set, so a lane'
 it. `governed()` signs checks, so it takes neither a variable's nor a name's word alone: it runs a check
 in place only when it runs inside one of the two caps made for builds, `builds.slice` or a seat's
 lane (an `app-lanes-<seat>.slice` directly in `app-lanes.slice`), and that slice or a cgroup below it
-holds a real `memory.max` and a real `cpu.max` quota. Limits anywhere else do not count. Otherwise
-it starts the check in `builds.slice` as before. The host's sccache server runs in `builds.slice`, so
+holds a real `memory.max` and a real `cpu.max` quota. Limits anywhere else do not count. In place,
+the check runs with `BUILDS_SLICE_ACTIVE=1`, so a cargo front door that reads only that variable keeps
+its cargo in the cap. Outside every cap, a caller that names a seat (`ST_AGENT`, as a unit the
+seat started without `--slice` does) asks the daemon for the seat's slice (`st agents lane AGENT`,
+the reconciler's own name for it) and, when the kernel shows that slice in `app-lanes.slice` with
+both limits, starts the check in a scope there, with `BUILDS_SLICE_ACTIVE=1` and
+`FRACTAL_LANE_SLICE`, and with the lane's sccache socket, which the daemon names too, unless the
+caller names one (`SCCACHE_SERVER_UDS`): an account's cargo config can send every compile through
+sccache, and a check that names no server compiles in the host's. A check in place in the seat's
+lane without that variable gets the same socket. Otherwise it starts the check in `builds.slice` as before, and a seat's run says
+why it is not in the lane. The host's sccache server runs in `builds.slice`, so
 compiles sent to it would leave the lane: a lane sets `SCCACHE_SERVER_UDS` to a socket of its own,
 and the client starts that server inside the lane, on the same on-disk cache (the socket is named for
 the seat, so a restarted harness reuses it). A seat that names its own server keeps it. The build admission queue (slots, load and memory checks) still applies to a
@@ -107,6 +122,42 @@ purpose is `#[ignore]`d.
 `capacity`. With it off, a declared lane is logged at launch as "not enforced: lanes are off on this
 host", and the seat starts as today. A seat's lane is applied when the seat starts; a change to the
 declaration or the switch takes effect at its next start.
+
+### Placement for unlaned daemon seats
+
+The optional `[unlaned_seat]` table in `~/.config/st3/config.toml` places only daemon-launched
+seats that have no active lane. Omit it to keep the existing placement. Restart the daemon
+after changing it; existing seats retain their placement. Laned seats keep their lane slice
+and limits; directly constructed runtimes and non-systemd launches do not use this policy.
+Do not combine it with a generic `st3-.scope.d` drop-in that overrides `Slice=`.
+
+For placement without resource caps:
+
+```toml
+[unlaned_seat]
+slice = "app-seats.slice"
+```
+
+To also set caps and OOM behavior:
+
+```toml
+[unlaned_seat]
+slice = "app-seats.slice"
+memoryMax = 8589934592
+memorySwapMax = 0
+oomPolicy = "kill"
+```
+
+Only `slice` is required; unknown fields are rejected. `memoryMax`, `memorySwapMax`, and
+`oomPolicy` are independently optional: an absent field emits no corresponding `-p` argument.
+When present, memory values are integer byte counts (`memoryMax` positive, `memorySwapMax`
+nonnegative). `oomPolicy` is `continue`, `stop`, or `kill`; setting it requires a systemd version
+supporting `OOMPolicy` on scopes (254+).
+`slice` is a non-root `.slice` name containing letters, digits, underscores and single internal
+hyphens. The launcher passes `--slice=`, `MemoryMax=`, `MemorySwapMax=` and `OOMPolicy=` directly
+to `systemd-run`. Older daemons reject this table. Upgrade: install/start the new daemon first,
+then add `[unlaned_seat]` and restart. Downgrade: remove the table first, then install the old daemon.
+
 
 ## macOS
 

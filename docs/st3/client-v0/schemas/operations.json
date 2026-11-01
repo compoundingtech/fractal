@@ -34,6 +34,8 @@
     { "id": "collections.stream", "method": "GET", "path": "/v1/client/collections/stream", "websocket_protocol": "fractal.client.collections.v0", "command": "CollectionCommand", "frame": "CollectionFrame", "max_subscriptions": 16 }
   ],
   "reads": [
+    {"id": "harness-questions.list", "method": "GET", "path": "/v1/client/harness-questions", "response": "Page", "scope": "read.projections"},
+    {"id": "harness-questions.get", "method": "GET", "path": "/v1/client/harness-questions/{id}", "response": "HarnessQuestion", "scope": "read.projections"},
     {"id": "notes.list", "method": "GET", "path": "/v1/client/notes", "response": "DirectiveNotes", "scope": "read.projections", "query": {"actor": "optional exact authenticated person or agent; cannot select another actor"}},
     {"id": "custom-subjects.list", "method": "GET", "path": "/v1/client/custom-subjects", "response": "Page", "scope": "read.projections"},
     {"id": "custom-subjects.get", "method": "GET", "path": "/v1/client/custom-subjects/{id}", "response": "Resource", "scope": "read.projections"},
@@ -137,6 +139,7 @@
     {"id": "glasses.delete", "method": "DELETE", "path": "/v1/client/glasses/{id}", "request": "GlassDelete", "response": "Glass", "scope": "control.glasses", "idempotency_header": "Idempotency-Key"}
   ],
   "actions": {
+    "harness.answer": {"capability": "terminal.control", "parameters": "HarnessAnswerParameters"},
     "arrangement.edit": { "capability": "control.arrangements", "parameters": "ArrangementEditParameters", "max_response_bytes": 1048576 },
     "arrangement.membership.edit": { "capability": "control.arrangements", "parameters": "ArrangementMembershipEditParameters", "max_response_bytes": 1048576 },
     "custom.reply": {"capability": "control.attention", "parameters": "CustomReplyParameters"},
@@ -307,7 +310,7 @@
         "Store::cache_idempotency_response (no production caller)"
       ]
     },
-    "legacy_receipts": "retain-all-rows-present-at-upgrade; follow-up-1741-deletes-at-deployment-plus-30-days",
+    "legacy_receipts": "rows-at-or-below-meta.idempotency_legacy_rowid-are-not-removed-by-this-cleanup",
     "indexes": "no-added-dropped-or-changed-indexes",
     "cleanup": "rowid-after-legacy-watermark; at-most-64; stop-at-first-young-row; rotate-active-pins-with-update"
   }

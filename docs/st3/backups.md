@@ -59,7 +59,9 @@ that its envelope inventory, claim sources and all graph table digests match.
 
 `store_dir = "/absolute/path"` in the daemon's TOML config, or `fractal up --store-dir
 /absolute/path`, selects the directory for exactly `claims.sqlite3`, `claims.sqlite3-wal`,
-and `claims.sqlite3-shm`. Unset configuration keeps the database in `state_dir`; there is no
+and `claims.sqlite3-shm`, and for the messages shard the daemon opens beside them at
+`shards/messages/claims.sqlite3`. A store moved without its `shards` directory opens a new,
+empty shard, which then receives the stream again from peers. Unset configuration keeps the database in `state_dir`; there is no
 automatic file move. Keep the product state directory and its identity, keys, sockets,
 message bodies, transcripts, PTYs, runtime files and caches unchanged.
 
@@ -159,6 +161,45 @@ private copy of every candidate until recovery is verified; never merge individu
 WAL or SHM files from different snapshots. A database rollback does not roll back external
 product state, so retain the unchanged state root throughout.
 
+
+## Preserve suspected unsigned history before maintenance
+
+A populated v0.3.4 store can contain sealed delegation grants without claim
+signatures. Preserve raw state and keys **before** doctor, restart, checkpoint,
+or offline export: those operations can seal pending work or migrate their input.
+A claim archive does not preserve private keys or all pending unsealed work.
+
+Keep the original database, keys, configuration and exact binary together with
+checksums and capture times. A consistent SQLite copy must include committed WAL
+state; copying only the live database file is insufficient. Use SQLite's read-only
+source connection and backup API, or a consistent filesystem snapshot that also
+accounts for keys and configuration. Retain an untouched original and inspect a copy.
+
+From a clean checkout, use Python 3 to run the bounded stored-evidence audit:
+
+```sh
+python3 scripts/audit-claim-signatures /path/to/preserved/claims.sqlite3 > audit.json
+```
+
+The path is an invented example. The script opens SQLite with `mode=ro`,
+`query_only` and one read transaction; it never opens the store through Fractal,
+seals claims or changes verdicts. A missing database fails without creating one.
+Its `--help` lists query, row and payload caps. Optional `cbor2` enables inspection
+of original sealed payload maps; without it, payload inspection is incomplete.
+Install dependencies away from the specimen or inspect a preserved copy elsewhere.
+
+Exit 0 means the bounded audit completed, including when it found unsigned grants;
+exit 2 means incomplete evidence. Read `complete` and `limitations` along with the
+stored-signature, sealed-payload and cached-invalid counts. This tool does not
+recompute cryptographic validity, and retained history on one replica does not
+establish the state of its peers. Keep raw results private.
+
+Preserved unsealed work needs an isolated upgrade rehearsal with its original keys
+and a verified build before any rollout. Already-sealed unsigned delegations remain
+affected: restoring their envelopes, signing an outer wrapper or issuing a child
+grant cannot supply the missing inner signature. Do not rewrite envelopes, insert
+signature rows, delete verdicts or reset identities to clear warnings. Preserve the
+evidence and obtain an operator's recovery decision for the affected authority chain.
 
 ## Rehearse a restore
 

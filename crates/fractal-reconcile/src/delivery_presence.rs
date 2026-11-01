@@ -121,10 +121,10 @@ pub fn bind_recovered(fence: &crate::mailbox::Fence) {
     }
 }
 
+/// The readers' clock (the system clock unless a clock snapshot or a simulation holds it), so one
+/// evaluation dates every state it reports from the same instant.
 fn unix_ms() -> u64 {
-    u64::try_from(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis())
-        .unwrap_or(u64::MAX)
+    u64::try_from(smallclaims::store::now_ms()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -1472,6 +1472,17 @@ mod tests {
     // unattached monitor is stale at any age, and an attached one is never consulted.
     #[test]
     fn title_report_age_never_changes_the_assessment() {
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        // One instant for every reading: the state goes stale and back below, so each return to
+        // current restarts `since`, and two clock reads a millisecond apart would differ.
+        const AT: u128 = 1_800_000_000_000;
+        smallclaims::store::set_thread_clock(Some(AT));
         let recipient = "agent/attachment-monitor-age";
         let mut delivery = crate::mailbox::Fence::new(recipient, "current", "delivery");
         delivery.epoch = 1;
@@ -1490,6 +1501,7 @@ mod tests {
         // The delivery beat alone is current, so only the monitor can make the seat stale below.
         assert!(!without_monitor.stale(), "{without_monitor:?}");
         assert_eq!(without_monitor.state, "current", "{without_monitor:?}");
+        assert_eq!(without_monitor.since_unix_ms, Some(AT as u64), "{without_monitor:?}");
         record_fenced(
             &title,
             &json!({"transport":"claude-channel", "ready":false,

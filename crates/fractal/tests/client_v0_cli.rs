@@ -17,19 +17,25 @@ use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
-    AppState { owning_person: None,
-    store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "client-v0-cli".into(),
-    state_dir: root.to_path_buf(),
-    pty_root: root.join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: vec!["offline-peer".into()],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    AppState {
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "client-v0-cli".into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: vec!["offline-peer".into()],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 
 #[tokio::test]
@@ -412,7 +418,7 @@ fn person_admission_exception_is_local_reversible_and_never_spawns_the_producer(
     std::fs::write(&producer, format!("#!/bin/sh\nprintf called > '{}'\nexit 1\n", marker.display())).unwrap();
     std::fs::set_permissions(&producer, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |action: &str, agent: bool| {
-        let mut command = std::process::Command::new(test_bin!("st3"));
+        let mut command = std::process::Command::new(test_bin!("fractal"));
         command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
             .arg("--json").args(["admission", action, "omp", "--binary"])
             .arg(&producer).arg("--state-dir").arg(root.path().join("state"));
@@ -438,6 +444,42 @@ fn person_admission_exception_is_local_reversible_and_never_spawns_the_producer(
     assert_eq!(value(&run("revoke", false))["overridden"], false);
     assert!(!record.exists());
     assert!(!marker.exists(), "the exception commands run neither --version nor the native probe");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_lane_cli_prints_the_slice_the_runtime_gives_the_seat() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let state = test_state(root.path());
+    let source = "version 2\nagent \"garden/builder\" { workspace \"/work/builder\"; command \"true\" }\n";
+    let intent = fractal_daemon::graph::parse_intent(source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, source).unwrap();
+    let (desired, _) = state.store.desired_subject_with_writer("agent/garden/builder").unwrap().unwrap();
+    let slice = fractal_runtime::seat_slice(&desired.member.unwrap().runtime_id);
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
+            .await
+            .unwrap();
+    });
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let human = run_cli_human(&socket, &["agents", "lane", "garden/builder"]).await;
+    assert!(human.status.success(), "{human:?}");
+    assert_eq!(String::from_utf8_lossy(&human.stdout), format!("{slice}\n"));
+    // The JSON st-test reads (scripts/st-test seat_lane): the slice at the top level.
+    let json = value(&run_cli(&socket, &["agents", "lane", "agent/garden/builder"]).await);
+    assert_eq!(json["slice"], slice.as_str(), "{json}");
+    assert_eq!(json["agent"], "agent/garden/builder");
+    // And the lane's sccache server, which st-test gives a check it puts in the lane.
+    assert!(json.get("sccache_server_uds").is_some(), "{json}");
+    let missing = run_cli_human(&socket, &["agents", "lane", "garden/nobody"]).await;
+    assert!(!missing.status.success(), "{missing:?}");
+    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

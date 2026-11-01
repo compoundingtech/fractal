@@ -399,7 +399,7 @@ mod tests {
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let exporter = OtlpExporter::new(
-            &super::super::OtlpConfig { endpoint, headers_file: None },
+            &super::super::OtlpConfig { endpoint, headers_file: None, ui_url: None },
             "node-a",
         )
         .unwrap();

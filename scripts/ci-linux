@@ -26,7 +26,7 @@ fleet_compat() {
   # Every file that compile reads must be in linux-fleet-compat's input key, or its notes could cover a tree they never measured. Only
   # linux-fleet-compat's own run names the skip policy (scripts/ci-fleet-compat-keyed, CI's linux-fleet-compat job): linux-gate runs this
   # stage too and must not depend on the policy file, so without CI_KEYED_FLEET_COMPAT_POLICY the build keeps no messages and nothing is
-  # checked. --warn while linux-fleet-compat is in shadow, as for clippy.
+  # checked. --warn while linux-fleet-compat is in shadow (clippy's check fails).
   if [ -n "${CI_KEYED_FLEET_COMPAT_POLICY:-}" ]; then
     cargo test -p fractal --locked --test integration --no-run --message-format=json > "$logs/fleet-compat-build.jsonl" || return
     local policy
@@ -34,8 +34,18 @@ fleet_compat() {
     python3 scripts/dep-info-check --logs "$logs" --check linux-fleet-compat --policy "$policy" --jsonl 'fleet-compat-*.jsonl' --warn || return
   fi
   cargo test -p fractal --locked --test integration -- --ignored --exact \
-    fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade 2>&1 | tee "$logs/compat-result.log" || return
-  grep -q "test result: ok. 1 passed" "$logs/compat-result.log"
+    fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade \
+    fleet::previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place \
+    fleet::previous_release_mail_reads_beside_stream_items_across_upgrade_and_rollback 2>&1 | tee "$logs/compat-result.log" || return
+  grep -q "test result: ok. 3 passed" "$logs/compat-result.log" || return
+  # The GitHub plugin store beside an older poller, and that poller upgraded in place.
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade 2>&1 | tee "$logs/compat-plugin-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-plugin-result.log" || return
+  # A member of the previous release that depends on a repository keeps its item snapshots.
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::previous_release_dependent_keeps_item_snapshots_until_it_upgrades 2>&1 | tee "$logs/compat-compact-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-compact-result.log"
 }
 
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — checkout missing-only bridge.
@@ -80,16 +90,22 @@ clippy_and_codegen() {
     base_args=(--base-ref "$CLIPPY_BASE_SHA")
   fi
   python3 scripts/clippy_ratchet.py --logs "$logs" "${base_args[@]}" || return
-  # Every file those compiles read must be in linux-clippy's input key, or its notes could cover a tree they never measured. Only
-  # linux-clippy's own run names the skip policy (scripts/ci-clippy-keyed, CI's linux-clippy job): linux-gate runs this stage too and
-  # must not depend on the policy file (lane-definition-closure --check), so without CI_KEYED_CLIPPY_POLICY the check is not run.
-  # --warn while linux-clippy is in shadow: no default local run checks it yet, so a failure would first show in the merge queue.
+  # Every file those compiles read must be in linux-clippy's input key, or its notes could cover a tree they never measured. CI's
+  # linux-clippy job names the skip policy (CI_KEYED_CLIPPY_POLICY) and checks it here. linux-gate runs this stage too and must not
+  # depend on the policy file (lane-definition-closure --check), so it never names it: a local run hands the stage's logs to
+  # scripts/ci-clippy-result instead (CI_CLIPPY_REPORT, below), which checks the same after the stage, outside linux-gate's command.
   if [ -n "${CI_KEYED_CLIPPY_POLICY:-}" ]; then
     local policy
     policy=$(keyed_policy "$CI_KEYED_CLIPPY_POLICY") || return
-    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$policy" --jsonl 'clippy-*.jsonl' --warn || return
+    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$policy" --jsonl 'clippy-*.jsonl' || return
   fi
-  cargo run --locked -p fractal-client-codegen -- --check
+  cargo run --locked -p fractal-client-codegen -- --check || return
+  # linux-clippy's note is signed from this stage (scripts/st-test): its cargo messages and metadata, and `passed` last, only when the
+  # whole stage passed, so a report without it says the stage did not.
+  if [ -n "${CI_CLIPPY_REPORT:-}" ]; then
+    mkdir -p "$CI_CLIPPY_REPORT" && cp "$logs"/clippy-*.jsonl "$logs/clippy-metadata.json" "$CI_CLIPPY_REPORT/" \
+      && : > "$CI_CLIPPY_REPORT/passed"
+  fi
 }
 
 conversation_model() {

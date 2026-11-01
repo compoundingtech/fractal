@@ -22,8 +22,8 @@ each upgrade. The shell stub passes the command line back to Fractal on every TA
 
 ```
 shell TAB
-  └─ stub: COMPLETE=<shell> <st path> -- <words…>
-       └─ st main(): CompleteEnv::complete()      before config, tokio, or daemon work
+  └─ stub: COMPLETE=<shell> <fractal path> -- <words…>
+       └─ fractal main(): CompleteEnv::complete() before config, tokio, or daemon work
             ├─ subcommands, flags, value sets     from the clap command tree
             └─ entity argument                    Complete(Entity) value completer
                  └─ private current-thread runtime, 300 ms deadline
@@ -183,7 +183,7 @@ st: `interactive` matches 9 subjects; name one exactly:
 
 ## Installation
 
-`st completions <shell>` writes clap_complete's registration stub for the PATH-resolved `st`.
+`fractal completions <shell>` writes clap_complete's registration stub for the PATH-resolved `fractal`.
 It never embeds the generating executable's store path, so manual installations survive package
 upgrades and garbage collection. The Nix package runs it at build time for bash, zsh, and fish
 (`flake.nix` `postInstall`) and installs the results with `installShellCompletion`.
@@ -204,7 +204,7 @@ upgrades and garbage collection. The Nix package runs it at build time for bash,
   ([#1344](https://github.com/compoundingtech/fractal/issues/1344)); other phases still run,
   and the zsh phase runs locally and on other runners.
 - `checks.st3-help` runs `scripts/check-installed-completions` against the built package with its
-  `bin` directory on PATH: fish and bash complete a subcommand through `st`, zsh registers it,
+  `bin` directory on PATH: fish and bash complete a subcommand through `fractal`, zsh registers it,
   and with no daemon no entity is offered.
 - Regression scenarios in `completion_shells.rs` cover stopping the same bare name twice without
   targeting a prefix neighbor, non-running exact targets, ambiguity status 2, the bare attach

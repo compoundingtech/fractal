@@ -176,11 +176,13 @@ impl Layout {
             .context("cannot lock configured store directory after legacy service stop; stop its owner or restore the directory before host migration")
     }
 
-    fn pairs(&self, services: &Services) -> Vec<(PathBuf, PathBuf)> {
+    fn pairs(&self, services: &Services) -> Result<Vec<(PathBuf, PathBuf)>> {
         let mut pairs = self.directories.to_vec();
         for old in &services.legacy {
             let target_name = if old.name == "smalltalk.service" {
                 "fractal.service".into()
+            } else if old.name == "smalltalk-replication.service" {
+                "fractal-replication.service".into()
             } else if old.name == "smalltalk-apply.service" {
                 "fractal-apply.service".into()
             } else if old.name == "org.nix-community.home.smalltalk" {
@@ -192,9 +194,14 @@ impl Layout {
             };
             if let Some(new) = services.target.iter().find(|new| new.name == target_name) {
                 pairs.push((dropins(&old.file), dropins(&new.file)));
+                if let (Some(old), Some(new)) = (control_dropins(&old.file), control_dropins(&new.file)) {
+                    let source = control_directory_exists(&old)?;
+                    let destination = control_directory_exists(&new)?;
+                    if source || destination { pairs.push((old, new)); }
+                }
             }
         }
-        pairs
+        Ok(pairs)
     }
 }
 
@@ -215,6 +222,27 @@ fn dropins(file: &Path) -> PathBuf {
     let mut name = file.as_os_str().to_owned();
     name.push(".d");
     PathBuf::from(name)
+}
+
+fn control_dropins(file: &Path) -> Option<PathBuf> {
+    let unit_directory = file.parent()?;
+    let systemd = unit_directory.parent()?;
+    if unit_directory.file_name()? != "user" || systemd.file_name()? != "systemd" { return None; }
+    let mut filename = file.file_name()?.to_os_string();
+    filename.push(".d");
+    Some(systemd.join("user.control").join(filename))
+}
+
+fn control_directory_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            ensure!(metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "{} must be an ordinary systemd control drop-in directory", path.display());
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect systemd control drop-ins {}", path.display())),
+    }
 }
 
 // Write-ahead undo state survives a killed CLI. Indices refer to the deterministic pairs.
@@ -398,7 +426,7 @@ fn validate_journal(layout: &Layout, journal: &Journal, current: &Services) -> R
     ensure!(journal.migration == MIGRATION_ID, "unrecognized host cutover journal");
     let base = current.target.first().and_then(|unit| unit.file.parent()).context("missing target service directory")?;
     #[cfg(target_os = "linux")]
-    let allowed = ["st3.service", "smalltalk.service", "st3-replication.service", "smalltalk-apply.service",
+    let allowed = ["st3.service", "smalltalk.service", "st3-replication.service", "smalltalk-replication.service", "smalltalk-apply.service",
         "fractal.service", "fractal-replication.service", "fractal-apply.service"];
     #[cfg(target_os = "macos")]
     let allowed = ["com.compoundingtech.st3", "org.nix-community.home.smalltalk", "com.compoundingtech.st3.replication",
@@ -409,7 +437,7 @@ fn validate_journal(layout: &Layout, journal: &Journal, current: &Services) -> R
         ensure!(allowed.contains(&unit.name.as_str()) && unit.file == base.join(filename),
             "journal service {} does not match this host", unit.name);
     }
-    ensure!(journal.pairs == layout.pairs(&journal.services), "journal paths do not match this host");
+    ensure!(journal.pairs == layout.pairs(&journal.services)?, "journal paths do not match this host");
     ensure!(journal.moves.iter().chain(journal.emptied.iter().map(|(index, _)| index)).all(|index| *index < journal.pairs.len())
         && journal.links.iter().chain(&journal.receipts).all(|index| *index < 2), "invalid host cutover journal indices");
     Ok(())
@@ -422,13 +450,13 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
         let mut journal: Journal = serde_json::from_slice(&fs::read(&layout.journal)?)?;
         validate_journal(layout, &journal, &services)?;
         if args.rollback {
-            mounts::rollback_preflight(&layout.directories)?;
+            mounts::rollback_preflight(&journal.pairs)?;
             ensure!(!journal.committed, "the local API probe succeeded; rollback to legacy state is no longer permitted");
             rollback(layout, manager, &mut journal)?;
             return Ok(receipt(manager, host, "rolled-back", "legacy restored", journal.before, 0));
         }
         ensure!(journal.committed, "an interrupted host swap exists; run `fractal migrate host --rollback` before retrying");
-        mounts::committed_preflight(&layout.directories, layout.target_store_dir().as_deref())?;
+        mounts::committed_preflight(&journal.pairs, layout.target_store_dir().as_deref())?;
         layout.check_store(true)?;
         ensure!(services.target[0].running && !services.legacy.iter().any(|unit| unit.running),
             "committed migration requires the Fractal daemon running and all legacy services stopped; refusing ambiguous API ownership");
@@ -448,8 +476,8 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
     for unit in &services.target {
         ensure!(unit.installed && unit.file.is_file() && !unit.enabled && !unit.running, "{} must be pre-staged, disabled and stopped", unit.name);
     }
-    let pairs = layout.pairs(&services);
-    mounts::preflight(&layout.directories)?;
+    let pairs = layout.pairs(&services)?;
+    mounts::preflight(&pairs)?;
     layout.check_store(false)?;
     for (index, (old, new)) in pairs.iter().enumerate() {
         if index < 2 || old.exists() { destination_free(old, new)?; }
@@ -569,7 +597,7 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
 }
 
 fn rollback(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal) -> Result<()> {
-    mounts::rollback_preflight(&layout.directories)?;
+    mounts::rollback_preflight(&journal.pairs)?;
     for unit in journal.services.target.iter().rev() {
         manager.stop(unit)?;
         manager.enable(unit, false)?;

@@ -19,6 +19,10 @@ mod peer_process;
 mod process;
 mod procfs;
 mod pty;
+mod seat_placement;
+pub mod seat_admission;
+pub mod seat_admission_status;
+pub use seat_placement::UnlanedSeatPlacement;
 mod pty_launcher;
 #[path = "../../pty-launch-environment.rs"]
 mod pty_launch_environment;
@@ -40,7 +44,8 @@ pub use priority::{
 };
 pub use lane::{
     CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, end as end_lane, enforced as lanes_enforced,
-    parse_memory as parse_lane_memory, seat_slice, set_enforced as set_lanes_enforced,
+    parse_memory as parse_lane_memory, sccache_socket as lane_sccache_socket, seat_slice,
+    set_enforced as set_lanes_enforced,
 };
 pub use peer_process::PeerProcessIdentity;
 pub use process::{

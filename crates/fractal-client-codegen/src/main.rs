@@ -227,6 +227,14 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn device_command_get(&self, id: &str, wait: bool) -> Result<Envelope<DeviceCommand>, ClientError> {{ self.get(&format!(\"/v1/client/device-commands/{{}}?wait={{wait}}\", percent_encode(id))).await }}")?;
             continue;
         }
+        if id == "harness-questions.list" {
+            writeln!(out, "    pub async fn harness_questions(&self, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<Page>, ClientError> {{ let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!(\"limit={{limit}}\")); }} let suffix = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/harness-questions{{suffix}}\")).await }}")?;
+            continue;
+        }
+        if id == "harness-questions.get" {
+            writeln!(out, "    pub async fn harness_question(&self, id: &str) -> Result<Envelope<HarnessQuestion>, ClientError> {{ self.get(&format!(\"/v1/client/harness-questions/{{}}\", percent_encode(id))).await }}")?;
+            continue;
+        }
         if let Some((projection, request, response)) = assistant_read(read)? {
             let response = if response == "Value" { "serde_json::Value" } else { response };
             writeln!(out, "    pub async fn {method}(&self, params: &{request}, proof: &ScgReadAuthorization) -> Result<Envelope<{response}>, ClientError> {{ self.assistant_read(\"{projection}\", params, proof).await }}")?;
@@ -326,6 +334,8 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "harness-inventory.get" {
             writeln!(out, "    pub async fn harness_inventory_get(&self, agent_id: &str, query: &HarnessInventoryQuery) -> Result<Envelope<HarnessInventory>, ClientError> {{ let mut fields = vec![format!(\"owner_host_id={{}}\", percent_encode(&query.owner_host_id)), format!(\"session_id={{}}\", percent_encode(&query.session_id)), format!(\"native_session_id={{}}\", percent_encode(&query.native_session_id)), format!(\"runtime_incarnation={{}}\", percent_encode(&query.runtime_incarnation)), format!(\"collection={{}}\", percent_encode(&query.collection)), format!(\"directory={{}}\", percent_encode(&query.directory)), format!(\"prefix={{}}\", percent_encode(&query.prefix))]; if let Some(limit) = query.limit {{ fields.push(format!(\"limit={{limit}}\")); }} if let Some(cursor) = &query.cursor {{ fields.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} self.get(&format!(\"/v1/client/harness-inventory/{{}}?{{}}\", percent_encode(agent_id), fields.join(\"&\"))).await }}")?;
+            // A relayed read of the GitHub plugin's mirror on its poller (docs/st3/plugins.md).
+            out.push_str(GITHUB_PLUGIN_READ);
         } else if id == "agent-queue.get" {
             writeln!(
                 out,
@@ -422,6 +432,14 @@ fn swift_operation_methods(
         }
         if id == "device-command.get" {
             writeln!(out, "    public func deviceCommandGet(_ id: String, wait: Bool = false) async throws -> Envelope<DeviceCommand> {{ let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: \"/\"))) ?? id; return try await get(\"v1/client/device-commands/\\(escaped)\", query: [.init(name: \"wait\", value: String(wait))]) }}")?;
+            continue;
+        }
+        if id == "harness-questions.list" {
+            writeln!(out, "    public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/harness-questions\", query: query) }}")?;
+            continue;
+        }
+        if id == "harness-questions.get" {
+            writeln!(out, "    public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> {{ try await get(\"v1/client/harness-questions/\\(Self.routedSessionID(id))\") }}")?;
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
@@ -754,6 +772,7 @@ fn validate_surfaces(
         bail!("KNOWN_RESOURCE_KINDS has {listed} kinds; the schema knows {}", known.len());
     }
     for definition in [
+        "Capability",
         "DirectiveNote",
         "DirectiveNotes",
         "ResourceObservation",
@@ -879,6 +898,15 @@ fn validate_surfaces(
         "PersonAnswerInput",
         "PersonAnswer",
         "PersonAnswerRecord",
+        "HarnessQuestionItem",
+        "HarnessAnswerInput",
+        "HarnessResolvedAnswer",
+        "HarnessQuestionResolution",
+        "HarnessQuestionAnswerability",
+        "HarnessAnswerParameters",
+        "HarnessAnswerResult",
+        "HarnessInvalidAnswerDetails",
+        "HarnessNotAnswerableDetails",
         "ArrangementMembershipEditParameters",
         "OrderedMembership",
         "OrderedMembershipPage",
@@ -958,6 +986,8 @@ fn validate_surfaces(
     for token in [
         "pub async fn diagnostics_submit",
         "pub async fn observations_report",
+        "pub async fn harness_questions(",
+        "pub async fn harness_question(",
         "pub async fn push_register",
         "pub async fn push_unregister",
         "pub async fn pairing_begin",
@@ -975,6 +1005,8 @@ fn validate_surfaces(
     for token in [
         "func diagnosticsSubmit(",
         "func capabilities(",
+        "func harnessQuestions(",
+        "func harnessQuestion(",
         "func agentsPublicationStream(",
         "func timeline(",
         "cursor: String?",
@@ -1009,6 +1041,8 @@ fn validate_surfaces(
             "events.list" => "events".into(),
             "terminal.screen" => "terminal_screen".into(),
             "agent-queue.get" => "agent_queue".into(),
+            "harness-questions.list" => "harness_questions".into(),
+            "harness-questions.get" => "harness_question".into(),
             id => action_method(id),
         };
         let swift_method = lower_camel(&pascal(read["id"].as_str().unwrap()));
@@ -1019,6 +1053,8 @@ fn validate_surfaces(
             "events.list" => "events".into(),
             "terminal.screen" => "terminalScreen".into(),
             "agent-queue.get" => "agentQueue".into(),
+            "harness-questions.list" => "harnessQuestions".into(),
+            "harness-questions.get" => "harnessQuestion".into(),
             _ => swift_method,
         };
         if !rust_client.contains(&format!("pub async fn {rust_method}("))
@@ -1585,6 +1621,14 @@ fn typescript_operation_methods(
             writeln!(out, "    async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`, undefined, requestOptions); }}")?;
             continue;
         }
+        if id == "harness-questions.list" {
+            writeln!(out, "    async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "harness-questions.get" {
+            writeln!(out, "    async harnessQuestion(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HarnessQuestion>> {{ return this.get(`/v1/client/harness-questions/${{encodeURIComponent(id)}}`, undefined, requestOptions); }}")?;
+            continue;
+        }
         if id == "conversation.search" {
             writeln!(
                 out,
@@ -1713,6 +1757,23 @@ fn typescript_operation_methods(
     }
     Ok(out.trim_end().into())
 }
+
+/// The owner side of a relayed GitHub plugin read: it asks this daemon's own mirror only, so a
+/// relayed read is never relayed again.
+const GITHUB_PLUGIN_READ: &str = r#"    /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
+    /// query, answered from that mirror alone, so a relayed read is never relayed again.
+    pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        // No segment may be only dots, so the path cannot step out of the plugin's routes.
+        let dot_segment = path.split(['/', '?']).any(|part| !part.is_empty() && part.chars().all(|c| c == '.'));
+        if !path.starts_with("/v1/plugins/github/repos/") || dot_segment || path.contains('#') {
+            return Err(ClientError::Protocol(format!("not a GitHub plugin read: {path}")));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut body: serde_json::Value = self.get(&format!("{path}{separator}local=1")).await?;
+        // The daemon wraps the answer in its API envelope; the relay carries the answer alone.
+        Ok(body.get_mut("value").map(serde_json::Value::take).unwrap_or(body))
+    }
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -2144,6 +2205,38 @@ public enum Next { case value } // {
             output(&path, expected, true)?;
             std::fs::remove_file(&path)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn harness_methods_have_stable_public_names_and_encoded_detail_ids() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let reads = operations["reads"].as_array().unwrap();
+        let actions = operations["actions"].as_object().unwrap();
+        let rust = rust_operation_methods(reads, actions)?;
+        assert!(rust.contains("pub async fn harness_questions(&self, cursor: Option<&str>, limit: Option<usize>)"));
+        assert!(rust.contains("cursor={}\", percent_encode(cursor)"));
+        assert!(rust.contains("/v1/client/harness-questions{suffix}"));
+        assert!(rust.contains("pub async fn harness_question(&self, id: &str)"));
+        assert!(rust.contains("pub async fn harness_answer("));
+        assert!(rust.contains("parameters: HarnessAnswerParameters"));
+        assert!(rust.contains("/v1/client/harness-questions/{}\", percent_encode(id)"));
+        assert_eq!(rust, rust_operation_methods(reads, actions)?);
+        let swift = swift_operation_methods(reads, actions)?;
+        assert!(swift.contains("func harnessQuestions(cursor: String? = nil, limit: Int? = nil)"));
+        assert!(swift.contains("get(\"v1/client/harness-questions\", query: query)"));
+        assert!(swift.contains("func harnessQuestion(id: String)"));
+        assert!(swift.contains("func harnessAnswer("));
+        assert!(swift.contains("Self.routedSessionID(id)"));
+        let typescript = typescript_operation_methods(reads, actions)?;
+        assert!(typescript.contains("async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'>"));
+        assert!(typescript.contains("'/v1/client/harness-questions' + query(options), undefined, requestOptions"));
+        assert!(typescript.contains("async harnessQuestion(id: string, requestOptions: RequestOptions = {})"));
+        assert!(typescript.contains("async harnessAnswer("));
+        assert!(typescript.contains("harness-questions/${encodeURIComponent(id)}"));
+        assert!(typescript.contains("harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions"));
         Ok(())
     }
 

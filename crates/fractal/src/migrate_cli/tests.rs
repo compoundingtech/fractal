@@ -221,7 +221,7 @@ fn snapshot(root: &Path, ignored: &Path) -> Result<Snapshot> {
 #[tokio::test]
 async fn swaps_authority_by_rename_preserving_all_dropins_and_receipting_memory() -> Result<()> {
     let mut fixture = Fixture::new()?;
-    let pairs = fixture.layout.pairs(&fixture.manager.services);
+    let pairs = fixture.layout.pairs(&fixture.manager.services)?;
     let before = pairs.iter().map(|(old, _)| fs::metadata(old).map(|metadata| metadata.ino()))
         .collect::<std::io::Result<Vec<_>>>()?;
     let receipt = fixture.run(false, false).await?;
@@ -629,7 +629,7 @@ async fn explicit_rollback_recovers_an_interrupted_uncommitted_swap() -> Result<
     let mut fixture = Fixture::new()?;
     let before = fixture.snapshot()?;
     let services = fixture.manager.services.clone();
-    let pairs = fixture.layout.pairs(&services);
+    let pairs = fixture.layout.pairs(&services)?;
     for (old, new) in &pairs { fs::rename(old, new)?; }
     for (old, new) in pairs.iter().take(2) {
         fs::write(new.join(RECEIPT_FILE), format!("{MIGRATION_ID}\n"))?;
@@ -684,7 +684,7 @@ fn home_manager_launchd_labels_map_to_target_dropin_directories() -> Result<()> 
         legacy: vec![unit("org.nix-community.home.smalltalk"), unit("org.nix-community.home.smalltalk-apply")],
         target: vec![unit("com.compoundingtech.fractal"), unit("com.compoundingtech.fractal-apply")],
     };
-    let pairs = fixture.layout.pairs(&services);
+    let pairs = fixture.layout.pairs(&services)?;
     assert_eq!(pairs.len(), 4);
     for (index, (old, new)) in pairs.iter().skip(2).enumerate() {
         assert_eq!(*old, dropins(&services.legacy[index].file));
@@ -696,7 +696,7 @@ fn home_manager_launchd_labels_map_to_target_dropin_directories() -> Result<()> 
 fn interrupted_journal(fixture: &Fixture) -> Journal {
     Journal {
         migration: MIGRATION_ID.into(), services: fixture.manager.services.clone(),
-        pairs: fixture.layout.pairs(&fixture.manager.services), moves: Vec::new(),
+        pairs: fixture.layout.pairs(&fixture.manager.services).unwrap(), moves: Vec::new(),
         emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), config_fence: false,
         committed: false, before: memory_protection(), after: None, gap_ms: 0,
     }
@@ -954,3 +954,5 @@ fn retained_generation_array_mutations_refuse_with_generation_number() -> Result
     }
     Ok(())
 }
+
+mod worker_control;
