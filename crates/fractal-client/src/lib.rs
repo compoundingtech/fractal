@@ -5689,7 +5689,10 @@ mod tests {
         assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
         let _daemon = std::os::unix::net::UnixListener::bind(&real).unwrap();
         std::os::unix::fs::symlink(&real, &published).unwrap();
-        assert_eq!(runtime_or_published_socket(&runtime, &published), std::fs::canonicalize(&real).unwrap());
+        assert_eq!(
+            runtime_or_published_socket(&runtime, &published),
+            std::fs::canonicalize(&real).unwrap()
+        );
         // A runtime default that answers keeps precedence.
         std::fs::remove_file(&runtime).unwrap();
         let _other = std::os::unix::net::UnixListener::bind(&runtime).unwrap();
