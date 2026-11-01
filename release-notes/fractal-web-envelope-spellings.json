@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "fractal-web accepts fractal envelope schema spellings alongside st3 spellings without changing writers.",
+  "replay": {"status": "none", "detail": "No runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema or registry name change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "changed", "detail": "Additive web readers accept fractal subject schema-id prefixes, fractal.client.v0 native usage envelopes, and fractal.client.v0/usage.period provenance beside their existing st3 spellings. Unknown namespaces and versions remain refused. Requests and locally projected provenance keep their existing st3 spelling; no server writer changes."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No manual migration required."},
+  "recovery": {"status": "none", "detail": "No recovery change; existing spellings remain readable."}
+}
