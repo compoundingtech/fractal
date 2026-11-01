@@ -92,7 +92,7 @@ where
                 let cursor = POLL.with(|poll| poll.borrow().encode())?;
                 Err(match cursor {
                     Some(cursor) => error.context(BudgetContinuation(Some(cursor))),
-                    None => error,
+                    None => error.context(BudgetContinuation(previous_cursor)),
                 })
             }
             Err(error) if resumed => Err(error.context(BudgetContinuation(previous_cursor))),
