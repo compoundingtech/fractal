@@ -4616,6 +4616,7 @@ struct MessageReadArgs {
 struct MessageReplyArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Message)))]
     reference: String,
+    /// Reply text, or - to read UTF-8 from stdin without trimming.
     #[arg(short = 'm', long)]
     body: String,
     #[arg(long)]
