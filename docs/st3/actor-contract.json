@@ -102,6 +102,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st agents lane": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st agents ls": {
         "actor": "none",
         "accepts_person": false,
@@ -152,6 +161,24 @@
         "accepts_person": true,
         "can_carry_person": true,
         "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st agents rename-id proof export": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st agents rename-id proof verify": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -849,6 +876,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st fleet anchor show": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st fleet create": {
         "actor": "none",
         "accepts_person": false,
@@ -1371,6 +1407,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st missions dismiss-fault": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st missions ls": {
         "actor": "none",
         "accepts_person": false,
@@ -1421,6 +1466,24 @@
         "accepts_person": true,
         "can_carry_person": true,
         "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st missions rename-id proof export": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st missions rename-id proof verify": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false

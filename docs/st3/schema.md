@@ -81,7 +81,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `agent.presence` | `agent` | `same-subject-actor` | `append` | `durable` | `presence!:string`, `reachability:string`, `reason:string` |  |
 | `agent.queue.moved` | `agent` | `authorized-requester` | `append` | `durable` | `anchor:subject-reference(mission-run)`, `placement!:string`, `reason:string`, `run!:subject-reference(mission-run)` |  |
 | `agent.renamed` | `agent` | `system-only` | `append` | `durable` | `declaration!:string`, `from!:subject-reference(agent|mission)`, `owner_host!:string`, `preserved_incarnation:string`, `previous_revision:string`, `reason!:string`, `request!:object`, `to!:subject-reference(agent|mission)` |  |
-| `agent.retired` | `agent` | `system-only` | `once` | `durable` | `declaration!:string`, `owner_host!:string`, `reason!:string`, `retired_by!:subject-reference(agent|person|daemon)`, `successor:subject-reference(agent)`, `transfer:string` |  |
+| `agent.retired` | `agent` | `system-only` | `once` | `durable` | `declaration!:string`, `desired_revision:string`, `owner_host!:string`, `reason!:string`, `retired_by!:subject-reference(agent|person|daemon)`, `runtime_incarnation:string`, `successor:subject-reference(agent)`, `transfer:string` |  |
 | `arrangement.edited` | `arrangement` | `ordinary-client` | `append` | `durable` | `action_digest:string`, `action_id:string`, `operations!:array`, `owner!:subject-reference(person)`, `version:integer` |  |
 | `attention.requested` | `attention` | `authorized-participant` | `once` | `durable` | `closed_by:string`, `reason!:string`, `reviewer!:subject-reference(person)`, `severity!:string`, `step:subject-reference(step-run)`, `step_attempt:integer`, `targets:array`, `title!:string`, `until:string` |  |
 | `attention.resolved` | `attention` | `authorized-participant` | `once` | `durable` | `outcome!:string`, `reason:string`, `request!:string` |  |
@@ -105,6 +105,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `deploy.stop-lifted` | `resource` | `system-only` | `append` | `durable` | `releaseGoId!:string`, `stopId!:string`, `version!:integer` |  |
 | `doc.bound` | `doc` | `authorized-requester` | `append` | `durable` | `executable:boolean`, `hash:string`, `name:string`, `size:integer` | `doc` |
 | `eval.verdict` | `mission-run` | `system-only` | `once` | `durable` | `reason:string`, `residue:array`, `verdict!:string` |  |
+| `fault.dismissed` | `agent`, `exec`, `pty`, `observer`, `subscription`, `schedule`, `daemon`, `machine`, `step-run`, `mission-run`, `loop-run`, `resource`, `checkpoint` | `system-only` | `append` | `durable` | `episode!:string`, `reason!:string` |  |
 | `file.observed` | `file` | `system-only` | `append` | `durable` | `blob_hash:string`, `content:string`, `content_hash:string`, `mode:integer`, `path!:string`, `reason:string`, `status!:string` | `gate` |
 | `fleet.invite-created` | `fleet-invite` | `system-only` | `append` | `durable` | `created_by:subject-reference(person)`, `expires_at_unix_ms!:integer`, `name:string`, `sponsor!:subject-reference(host)`, `transports:array` |  |
 | `fleet.invite-redeemed` | `fleet-invite` | `system-only` | `append` | `durable` | `member_key!:string`, `name!:string` |  |

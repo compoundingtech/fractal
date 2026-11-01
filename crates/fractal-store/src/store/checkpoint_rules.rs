@@ -83,6 +83,12 @@ pub const REQUEST_CLOSERS: [&str; 3] = [
     "subscription.mission-request-cancelled",
 ];
 
+/// The kinds a seat's status history is read from, as [`status_source`] reads them.
+pub const STATUS_SOURCE_KINDS: [&str; 3] = ["harness.observed", "runtime.observed", "harness.diagnostic"];
+
+/// The kind of an account's limit readings, whose rule reads every seat's readings.
+pub const LIMITS_KIND: &str = "harness.limits";
+
 /// What the rule engine does beyond the policy's rules. The rules digest hashes it after them.
 const ENGINE_DESCRIPTION: &str = "\
 sealed=every-admitted-claim-of-an-envelope-before-the-cut-but-repaired-originals
@@ -227,6 +233,19 @@ fn policy_rules() -> &'static BTreeMap<&'static str, Vec<(&'static fractal_schem
         }
         rules
     })
+}
+
+/// The kinds the planner reads to judge claims of `kind`: its own, those its rules read, and a
+/// seat's status sources when it is one. Cited claims are read through the citation cache.
+pub fn kinds_read_for(kind: &'static str) -> BTreeSet<&'static str> {
+    let mut kinds = BTreeSet::from([kind]);
+    for (_, rule) in policy_rules().get(kind).into_iter().flatten() {
+        kinds.extend(rule.reads());
+    }
+    if STATUS_SOURCE_KINDS.contains(&kind) {
+        kinds.extend(STATUS_SOURCE_KINDS);
+    }
+    kinds
 }
 
 /// Whether one `when` condition of a rule holds for a claim.
@@ -544,6 +563,18 @@ pub fn timing_answers(
 }
 
 impl Rule {
+    /// The kinds the rule reads beyond its own slot: a deferral's closers, the resolutions
+    /// a question waits a day after, every seat's limit readings. A new cross-kind read must be
+    /// listed here, or a local cut's scoped capture can miss the kind it reads.
+    pub fn reads(self) -> &'static [&'static str] {
+        match self {
+            Rule::Deferral => &REQUEST_CLOSERS,
+            Rule::QuestionLifecycle => &[fractal_schema::harness_questions::RESOLVED],
+            Rule::AccountLimits => &[LIMITS_KIND],
+            _ => &[],
+        }
+    }
+
     /// Whether the rule's keep function reads claim bodies, beyond field names and times.
     pub fn reads_bodies(self) -> bool {
         matches!(
@@ -779,8 +810,7 @@ pub fn status_keep_positions(sources: &[&ClaimRecord], cut: u128) -> BTreeSet<us
 
 /// Whether a claim is a source of its subject's status history.
 pub fn status_source(claim: &ClaimRecord) -> bool {
-    matches!(claim.kind.as_str(), "harness.observed" | "runtime.observed" | "harness.diagnostic")
-        && seat_status::history_source(claim)
+    STATUS_SOURCE_KINDS.contains(&claim.kind.as_str()) && seat_status::history_source(claim)
 }
 
 /// The claim IDs a claim cites as evidence, pins as a mission run's input, names as a mission
@@ -838,7 +868,7 @@ pub fn claim_facts(claim: &ClaimRecord) -> smallclaims::store::checkpoint_stagin
             .contains(&claim.kind.as_str())
             .then(|| field_str(claim, "request").map(str::to_owned))
             .flatten(),
-        limits: (claim.kind == "harness.limits")
+        limits: (claim.kind == LIMITS_KIND)
             .then(|| limits_reading(claim))
             .flatten()
             .map(|(group, measured)| (serde_json::to_string(&group).expect("text serializes"), measured)),
@@ -890,7 +920,7 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
     let mut limits_newest = BTreeMap::new();
     for index in first.iter().copied() {
         let claim = &claims[index].claim;
-        if claim.kind == "harness.limits"
+        if claim.kind == LIMITS_KIND
             && let Some((group, measured)) = limits_reading(claim)
         {
             let newest = limits_newest.entry(group).or_insert(measured);

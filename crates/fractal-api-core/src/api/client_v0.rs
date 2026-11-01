@@ -2022,7 +2022,9 @@ pub fn key_grant_label(body: &Value) -> Option<String> {
 
 pub fn session_message_content(session: &ClientSession, session_id: &str, claim: &ClaimRecord) -> Value {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
-    let mut body = json!({"media_type":"text/plain", "text":fields.get("content").and_then(Value::as_str).unwrap_or_default()});
+    // The message it is the content of, so a client pairs it with its header by identity.
+    let mut body = json!({"media_type":"text/plain", "message_id":claim.subject,
+        "text":fields.get("content").and_then(Value::as_str).unwrap_or_default()});
     if session.assistant_content_handles {
         body["blocks"] = json!([{"kind":"raw_text", "source_type":"content", "payload":{"body_ref":true},
             "continuation":{"ref":conversation_blocks::message_reference(session_id, &claim.id)}}]);

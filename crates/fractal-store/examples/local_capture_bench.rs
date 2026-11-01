@@ -4,7 +4,7 @@
 //! `cargo run --release -p fractal-store --example local_capture_bench -- STORE SCRATCH ORIGIN [CUT_UNIX_MS [trim]]`.
 //! Run it on a copy: it opens the store as the daemon would, and `trim` deletes from it.
 use fractal_store::store::Store;
-use smallclaims::store::LOCAL_TRIM_KINDS;
+use smallclaims::store::{LOCAL_TRIM_KINDS, local_trim_capture_kinds};
 use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -60,7 +60,8 @@ fn main() {
     let started = Instant::now();
     store.catch_up_local_trim_citations().unwrap();
     println!("citation cache caught up from nothing in {:?}", started.elapsed());
-    for (label, scope) in [("scoped", Some(LOCAL_TRIM_KINDS)), ("whole", None)].into_iter().filter(|_| !trim_only) {
+    let capture = local_trim_capture_kinds();
+    for (label, scope) in [("scoped", Some(capture.as_slice())), ("whole", None)].into_iter().filter(|_| !trim_only) {
         let dir = scratch.join(label);
         let started = Instant::now();
         let staged = store.checkpoint_staged_set_scoped(cut, None, &dir, scope).unwrap();

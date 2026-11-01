@@ -28,6 +28,7 @@ Use these documents for implementation details:
 - [Install/upgrade troubleshooting and support](../when-something-is-wrong.md) provides the diagnostic entry point and sanitized issue path.
 - [Claim backups](backups.md) explains live snapshots, offline restore, and recovered writer identities.
 - [Stable node identity](node-identity.md) explains computer renames, same-state recovery and local ownership diagnostics.
+- [Portable rename proofs](rename-proof.md) explains signed agent/mission naming history, offline verification and explicit fleet-anchor trust.
 - [Fleet replication](replication.md) defines convergence, inspection, and repair.
 - [Seat state truth](seat-state-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
 - [Agent seat queues](seat-queue.md) explains how each seat orders its mission runs and how moves
@@ -99,6 +100,8 @@ Use these documents for implementation details:
 - [Client v0 contract](client-v0/README.md) defines the shared TUI and mobile JSON, event, action,
   pairing, and terminal protocols.
 - [Device signing](device-signing.md) defines paired-client keys and signed requests.
+- [ChatGPT app](chatgpt-app.md) is the design for the ChatGPT app: composition boundaries, the
+  adapter's place beside the iOS app, and how any person installs it against their own daemon.
 - [Operational-state contract](operational-state/README.md) separates immutable history, current
   projection, and actor-specific actionable views and defines screen/CLI parity.
 

@@ -417,7 +417,7 @@ fn person_admission_exception_is_local_reversible_and_never_spawns_the_producer(
     std::fs::write(&producer, format!("#!/bin/sh\nprintf called > '{}'\nexit 1\n", marker.display())).unwrap();
     std::fs::set_permissions(&producer, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |action: &str, agent: bool| {
-        let mut command = std::process::Command::new(test_bin!("st3"));
+        let mut command = std::process::Command::new(test_bin!("fractal"));
         command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
             .arg("--json").args(["admission", action, "omp", "--binary"])
             .arg(&producer).arg("--state-dir").arg(root.path().join("state"));
@@ -443,6 +443,40 @@ fn person_admission_exception_is_local_reversible_and_never_spawns_the_producer(
     assert_eq!(value(&run("revoke", false))["overridden"], false);
     assert!(!record.exists());
     assert!(!marker.exists(), "the exception commands run neither --version nor the native probe");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_lane_cli_prints_the_slice_the_runtime_gives_the_seat() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let state = test_state(root.path());
+    let source = "version 2\nagent \"garden/builder\" { workspace \"/work/builder\"; command \"true\" }\n";
+    let intent = fractal_daemon::graph::parse_intent(source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, source).unwrap();
+    let (desired, _) = state.store.desired_subject_with_writer("agent/garden/builder").unwrap().unwrap();
+    let slice = fractal_runtime::seat_slice(&desired.member.unwrap().runtime_id);
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
+            .await
+            .unwrap();
+    });
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let human = run_cli_human(&socket, &["agents", "lane", "garden/builder"]).await;
+    assert!(human.status.success(), "{human:?}");
+    assert_eq!(String::from_utf8_lossy(&human.stdout), format!("{slice}\n"));
+    // The JSON st-test reads (scripts/st-test seat_lane): the slice at the top level.
+    let json = value(&run_cli(&socket, &["agents", "lane", "agent/garden/builder"]).await);
+    assert_eq!(json["slice"], slice.as_str(), "{json}");
+    assert_eq!(json["agent"], "agent/garden/builder");
+    let missing = run_cli_human(&socket, &["agents", "lane", "garden/nobody"]).await;
+    assert!(!missing.status.success(), "{missing:?}");
+    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

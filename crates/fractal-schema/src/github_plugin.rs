@@ -50,6 +50,27 @@ pub const COMPACT_FACTS: &[&str] = &[
     "required_checks",
 ];
 
+/// The facts outside the compact set that a wake or a delivery reads. A change to any of them
+/// is still recorded as a full snapshot in compact mode, so a poller without the mirror, as after
+/// a move, compares with exact knowledge and delivers nothing twice. `required_checks` counts
+/// through its `execution` only; its state is compact.
+pub const DELIVERY_FACTS: &[&str] = &["recent_comments", "comments", "last_comment", "mentions", "reactions", "reviews"];
+
+/// Whether `facts` differ from `prior` in a fact a wake or a delivery reads: one of
+/// [`DELIVERY_FACTS`], or `required_checks.execution`. A new item, with no prior, does.
+pub fn delivery_facts_changed(
+    prior: Option<&serde_json::Map<String, Value>>,
+    facts: &serde_json::Map<String, Value>,
+) -> bool {
+    let Some(prior) = prior else {
+        return true;
+    };
+    let execution = |facts: &serde_json::Map<String, Value>| {
+        facts.get("required_checks").and_then(|checks| checks.get("execution")).cloned()
+    };
+    DELIVERY_FACTS.iter().any(|name| prior.get(*name) != facts.get(*name)) || execution(prior) != execution(facts)
+}
+
 pub(crate) fn item_state_fields() -> &'static [(&'static str, FieldSpec)] {
     static FIELDS: OnceLock<Vec<(&'static str, FieldSpec)>> = OnceLock::new();
     FIELDS.get_or_init(|| {
@@ -137,18 +158,80 @@ pub fn item_state_updates(
         .map(|name| (*name, state.get(*name).filter(|value| !value.is_null())))
 }
 
+/// The value a compact fact takes over an item's `prior` value of it. `required_checks` is a
+/// summary: its state, source and failed names replace those of the prior object, and the rest
+/// (the checks it counts, their execution) stays. That rest is the last snapshot's, and after a
+/// new head it may belong to an earlier one; the next look then sees a different execution and
+/// writes a snapshot. Every other compact fact replaces its prior.
+pub fn compact_fact_over(name: &str, prior: Option<&Value>, compact: &Value) -> Value {
+    match (name, prior.and_then(Value::as_object), compact.as_object()) {
+        ("required_checks", Some(prior), Some(summary)) => {
+            let mut merged = prior.clone();
+            for field in ["state", "source", "failed"] {
+                match summary.get(field) {
+                    Some(value) => merged.insert(field.into(), value.clone()),
+                    None => merged.remove(field),
+                };
+            }
+            Value::Object(merged)
+        }
+        _ => compact.clone(),
+    }
+}
+
 /// Lay a `vcs.item.state`'s compact fields over an item's facts: each compact fact replaces the
-/// fact of that name, and a null removes it. Facts it does not carry (title, comments) stay.
+/// fact of that name (see [`compact_fact_over`]), and a null removes it. Facts it does not carry
+/// (title, comments) stay.
 pub fn overlay_item_state(
     facts: &mut serde_json::Map<String, Value>,
     state: &serde_json::Map<String, Value>,
 ) {
     for (name, value) in item_state_updates(state) {
         match value {
-            None => facts.remove(name),
-            Some(value) => facts.insert(name.into(), value.clone()),
-        };
+            None => {
+                facts.remove(name);
+            }
+            Some(value) => {
+                let value = compact_fact_over(name, facts.get(name), value);
+                facts.insert(name.into(), value);
+            }
+        }
     }
+}
+
+/// A claim body as readers of a pinned or discovered item observation read it: a
+/// `vcs.item.state` on `subject` becomes `{"fields": {"kind", "facts"}}`, its facts the compact
+/// fields that are set and the item's number, so a reader of `fields.kind` and `fields.facts`
+/// reads it like a `resource.observed`. Any other claim's body is returned as it is.
+pub fn observed_body(kind: &str, subject: &str, body: &Value) -> Value {
+    if kind != ITEM_STATE {
+        return body.clone();
+    }
+    let fields = body.get("fields").and_then(Value::as_object);
+    let mut facts = serde_json::Map::new();
+    if let Some(fields) = fields {
+        for (name, value) in item_state_updates(fields) {
+            if let Some(value) = value {
+                facts.insert(name.into(), value.clone());
+            }
+        }
+    }
+    if let Some(number) = subject.rsplit('/').next().and_then(|number| number.parse::<u64>().ok()) {
+        facts.insert("number".into(), number.into());
+    }
+    let mut observed = serde_json::Map::new();
+    observed.insert(
+        "fields".into(),
+        serde_json::json!({
+            "kind": fields.and_then(|fields| fields.get("item_kind")).cloned().unwrap_or(Value::Null),
+            "facts": facts,
+            "observer": fields.and_then(|fields| fields.get("observer")).cloned().unwrap_or(Value::Null),
+        }),
+    );
+    if let Some(evidence) = body.get("evidence") {
+        observed.insert("evidence".into(), evidence.clone());
+    }
+    Value::Object(observed)
 }
 
 /// The subject of one keyed event on one item. `item` is the item's resource subject,
@@ -195,7 +278,28 @@ mod tests {
         assert_eq!(older["head_sha"], "abc");
         assert_eq!(older["title"], "Garden paths");
         assert!(older.get("merge_queue").is_none());
+        let mut checked = json!({"required_checks": {"state": "pending", "checks": ["build"], "execution": {"run": 4}}});
+        let mut passing = compact.clone();
+        passing.insert("required_checks".into(), json!({"state": "pass", "source": "rules"}));
+        overlay_item_state(checked.as_object_mut().unwrap(), &passing);
+        assert_eq!(checked["required_checks"], json!({"state": "pass", "source": "rules", "checks": ["build"], "execution": {"run": 4}}),
+            "the summary keeps the snapshot's checks and execution");
         assert!(compact_item_state("vcs.repository", "observer/x", &serde_json::Map::new()).is_none());
+    }
+
+    #[test]
+    fn a_compact_state_reads_as_an_observation_of_its_item() {
+        let state = compact_item_state(
+            "vcs.pull-request", "observer/github/acme/garden",
+            json!({"state": "open", "head_sha": "a", "draft": true}).as_object().unwrap(),
+        ).unwrap();
+        let body = json!({"fields": state, "evidence": ["claim-1"]});
+        let observed = observed_body(ITEM_STATE, "resource/github/acme/garden/pull-request/7", &body);
+        assert_eq!(observed["fields"]["kind"], "vcs.pull-request");
+        assert_eq!(observed["fields"]["facts"], json!({"state": "open", "head_sha": "a", "draft": true, "number": 7}));
+        assert_eq!(observed["evidence"], json!(["claim-1"]));
+        let snapshot = json!({"fields": {"kind": "vcs.issue", "facts": {"state": "open"}}});
+        assert_eq!(observed_body("resource.observed", "resource/x/issue/1", &snapshot), snapshot);
     }
 
     #[test]

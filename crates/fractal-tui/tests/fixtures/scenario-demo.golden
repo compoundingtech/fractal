@@ -237,37 +237,37 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Agent details ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  ~Atlas Builder   +
- ▾ Everything else 7                    │  i back to the conversation
- ▾ Agents 4                             │ details                                                            × close
-   Atlas Builder                        │ now ──────────────────────────────────────────────────────────────────────
-   Atlas Docs                           │ example/atlas · Rename fetchUser to loadUser › step-3
-   Atlas Migrator                       │ held since 38m ago
-   Atlas Reviewer                       │
- ▾ Missions 1                           │ next 0 ───────────────────────────────────────────────────────────────────
-   example/atlas · Rename fetchUser to l│ Nothing queued.
- ▾ Machines 2                           │
-   foundry                              │ runs as ──────────────────────────────────────────────────────────────────
-   meadow                               │ ? running · older Fractal
-                                        │ harness  codex
-                                        │ model    Fractal has not said
-                                        │ state    blocked
-                                        │ runtime  Fractal has not said
-                                        │ host     meadow
-                                        │ worktree worktree · branch builder/load-user-rename · ~/src/atlas
-                                        │
-                                        │ agent/example/atlas/builder
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
+ ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                                                                 ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / Filter:                              +New│  ~Atlas Builder   +
+ ▾ Everything else 7                        │  ? Atlas Builder  running · older Fractal                 codex · meadow   │ details                    × close
+ ▾ Agents 4                                 │    agent/example/atlas/builder  ·  worktree · branch builder/load-user-re  │ now ──────────────────────────────
+   Atlas Builder                            │    mission example/atlas · Rename fetchUser to loadUser › step-3           │ example/atlas · Rename fetchUser to
+   Atlas Docs                               │ ────────────────────────────────────────────────── ctrl+d hide details ▸ ─ │ held since 38m ago
+   Atlas Migrator                           │  Can you check why the worker typecheck fails after the rename?            │
+   Atlas Reviewer                           │                                                                            │ next 0 ───────────────────────────
+ ▾ Missions 1                               │                                                                            │ Nothing queued.
+   example/atlas · Rename fetchUser to loadU│  The typecheck still fails in packages/worker: syncAvatars calls           │
+ ▾ Machines 2                               │  loadUser with one argument. I asked Robin whether to thread the session   │ runs as ──────────────────────────
+   foundry                                  │  through.                                                                  │ ? running · older Fractal
+   meadow                                   │                                                                            │ harness  codex
+                                            │  starting · transcript unavailable until the harness writes its first l…   │ model    Fractal has not said
+                                            │                                                                            │ state    blocked
+                                            │ ────── status: running · running                                           │ runtime  Fractal has not said
+                                            │                                                                            │ host     meadow
+                                            │ ────── delivery paused · channel not verified yet                        ┃ │ worktree worktree · branch builder/
+                                            │                                                                          ┃ │
+                                            │  starting · transcript unavailable until the harness writes its first l… ┃ │ agent/example/atlas/builder
+                                            │                                                                          ┃ │
+                                            │                                                                          ┃ │
+                                            │  Can you check why the worker typecheck fails after the rename?          ┃ │
+                                            │                                                                          ┃ │
+                                            │                                                                          ┃ │
+                                            │  starting · transcript unavailable until the harness writes its first l… ┃ │
+                                            │                                                                          ┃ │
+                                            │ ────────────────────────────────────────────────────────────────────────── │
+                                            │ › Message Atlas Builder · type or click                                    │
+                                            │                                                                            │
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Terminal ===

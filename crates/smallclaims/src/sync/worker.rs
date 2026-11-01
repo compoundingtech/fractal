@@ -21,8 +21,8 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use super::{
-    Backend, CHECKPOINT_PATH, DEFLATE_MIN_BYTES, EXCHANGE_ENCODING, EXCHANGE_PATH, FleetAuth,
-    HEADER_SIGNATURE, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES, PEER_API_VERSION,
+    ACCEPTED_PEER_API_VERSIONS, Backend, CHECKPOINT_PATH, DEFLATE_MIN_BYTES, EXCHANGE_ENCODING,
+    EXCHANGE_PATH, FleetAuth, HEADER_SIGNATURE, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES,
     PeerResponse, accepts_deflate, deflate, deflated, inflate,
 };
 use crate::fleet::transport::{
@@ -3124,7 +3124,7 @@ async fn fetch_checkpoint_manifest_page(
     let response: PeerResponse<CheckpointManifestPage> =
         serde_json::from_slice(&bytes).context("decode the signed checkpoint page")?;
     anyhow::ensure!(
-        response.api_version == PEER_API_VERSION,
+        ACCEPTED_PEER_API_VERSIONS.contains(&response.api_version.as_str()),
         "the peer API version differs"
     );
     fleet.note_activity(&peer.name);
@@ -4344,7 +4344,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
     let response: PeerResponse<R> =
         serde_json::from_slice(&bytes).context("decode the signed peer response")
             .map_err(|error| exchange_failure(error, ReplicationFailurePhase::Verify, started, Some(status)))?;
-    if response.api_version != PEER_API_VERSION {
+    if !ACCEPTED_PEER_API_VERSIONS.contains(&response.api_version.as_str()) {
         return Err(exchange_failure(
             anyhow::anyhow!("the peer API version differs"),
             ReplicationFailurePhase::Verify, started, Some(status),
@@ -4353,6 +4353,10 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
     fleet.note_activity(&peer.name);
     Ok((response.value, accepts_deflate(&headers)))
 }
+
+#[cfg(test)]
+#[path = "peer_envelope_version_tests.rs"]
+mod peer_envelope_version_tests;
 
 #[cfg(test)]
 #[path = "worker_tests.rs"]

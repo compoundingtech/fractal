@@ -63,7 +63,7 @@ impl Tui {
                 pixel_height: 0,
             })
             .unwrap();
-        let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_st3"));
+        let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_fractal"));
         // This proves pairing and control, read off Now, which fills a space with nothing open.
         command.args(["ui"]);
         command.env_clear();
@@ -253,7 +253,7 @@ async fn pair(root: &Path, local: &Client, url: &str) {
 }
 
 async fn complete_challenge(root: &Path, url: &str, challenge: &fractal_client::PairingChallenge) {
-    let mut child = Command::new(test_env!("CARGO_BIN_EXE_st3"))
+    let mut child = Command::new(test_env!("CARGO_BIN_EXE_fractal"))
         .args([
             "devices",
             "complete",
@@ -695,7 +695,7 @@ async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_
         .arg(repo.join("scripts/fractal-ui-test-client"))
         .args([
             "--binary",
-            test_env!("CARGO_BIN_EXE_st3"),
+            test_env!("CARGO_BIN_EXE_fractal"),
             "--seconds",
             "72",
             "--label",
@@ -857,7 +857,7 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
         .arg(repo.join("scripts/fractal-ui-test-client"))
         .args([
             "--binary",
-            test_env!("CARGO_BIN_EXE_st3"),
+            test_env!("CARGO_BIN_EXE_fractal"),
             "--seconds",
             "4",
             "--label",

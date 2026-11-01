@@ -71,6 +71,9 @@ pub struct StoredPlace {
     /// The Inbox list keeps its selected card without changing the tab's pane kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<String>,
+    /// Monotonic device-local visit order, including back/forward visits.
+    #[serde(default)]
+    pub visited: u64,
 }
 
 /// Version 1: a glass was tabs, and each tab a tree of split panes.
@@ -253,6 +256,7 @@ mod tests {
                     tab: 0,
                     pane: "mission:mission/example/audit".into(),
                     selection: None,
+                    visited: 1,
                 },
                 StoredPlace {
                     space: "0190a1b2-0000-7000-8000-000000000001".into(),
@@ -262,6 +266,7 @@ mod tests {
                     tab: 0,
                     pane: "home:inbox".into(),
                     selection: None,
+                    visited: 2,
                 },
             ],
             history_cursor: 0,

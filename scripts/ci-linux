@@ -39,7 +39,11 @@ fleet_compat() {
   # The GitHub plugin store beside an older poller, and that poller upgraded in place.
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade 2>&1 | tee "$logs/compat-plugin-result.log" || return
-  grep -q "test result: ok. 1 passed" "$logs/compat-plugin-result.log"
+  grep -q "test result: ok. 1 passed" "$logs/compat-plugin-result.log" || return
+  # A member of the previous release that depends on a repository keeps its item snapshots.
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::previous_release_dependent_keeps_item_snapshots_until_it_upgrades 2>&1 | tee "$logs/compat-compact-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-compact-result.log"
 }
 
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — checkout missing-only bridge.

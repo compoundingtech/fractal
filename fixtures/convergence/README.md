@@ -183,3 +183,15 @@ The 15 seeds are now fixed regression seeds: 27, 74, 106, 121, 130, 133, 179, 20
 used
 `CONVERGENCE_START=1 CONVERGENCE_RUNS=300 CONVERGENCE_WORKERS=4 cargo nextest run -p fractal -E 'test(=convergence::fixed_sweep)' --run-ignored only`
 (1363 s); the 14 seeds of 1–300 that did not trim are not fixed seeds.
+
+`claims-v12.json` captures the registry that adds `fault.dismissed` (a person's or the fleet
+fault agent's dismissal of a fault whose run has ended), and the current `daemon.diagnostic`
+fields. Versions 1 through 11 stay frozen. Generate v12 from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v12.json`;
+do not hand-edit or overwrite v11. The simulation selects v12 and records its filename in audit
+summaries.
+
+With v12 every fixed seed converges. The new kind shifts the draws, so seeds 2, 34 and 106 no
+longer reach a checkpoint trim; they are the exact never-trim set, and every other fixed seed
+trims. Characterization used
+`cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.

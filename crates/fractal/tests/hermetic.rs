@@ -55,7 +55,7 @@ fn fixture_commits_ignore_local_hook_and_signing_policy() {
 fn renaming_the_production_cli_does_not_bypass_mutating_actor_checks() {
     let root = tempfile::tempdir().unwrap();
     let renamed = root.path().join("fractal-fixture");
-    std::os::unix::fs::symlink(test_env!("CARGO_BIN_EXE_st3"), &renamed).unwrap();
+    std::os::unix::fs::symlink(test_env!("CARGO_BIN_EXE_fractal"), &renamed).unwrap();
     let output = Command::new(&renamed)
         .env_clear()
         .env("HOME", root.path())
@@ -84,7 +84,7 @@ fn renaming_the_production_cli_does_not_bypass_mutating_actor_checks() {
 #[test]
 fn conflicting_agent_aliases_cannot_fall_back_to_native_driver_identity() {
     let root = tempfile::tempdir().unwrap();
-    let output = Command::new(test_env!("CARGO_BIN_EXE_st3"))
+    let output = Command::new(test_env!("CARGO_BIN_EXE_fractal"))
         .env_clear()
         .env("HOME", root.path())
         .env("ST_AGENT", "agent/legacy")
@@ -110,7 +110,7 @@ fn legacy_daemon_wait_preserves_invalid_empty_and_non_utf8_values() {
         (std::ffi::OsString::new(), "--daemon-wait"),
         (std::ffi::OsString::from_vec(vec![0xff]), "invalid UTF-8"),
     ] {
-        let output = Command::new(test_env!("CARGO_BIN_EXE_st3"))
+        let output = Command::new(test_env!("CARGO_BIN_EXE_fractal"))
             .env_clear()
             .env("ST3_DAEMON_WAIT", value)
             .args(["work", "start", "task", "--as", "person/explicit"])

@@ -6,7 +6,7 @@ order: 3
 
 # Talking to agents
 
-Messages are durable conversation. Missions track work and results; alerts track decisions that need a person. Use each for its own purpose.
+Messages are durable conversation. Missions track work and results; alerts track decisions that need a person. Use each for its own purpose. The CLI examples use the `garden/worker` seat from [Your first agent](../getting-started/first-agent.md).
 
 ## In the web app
 

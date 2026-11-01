@@ -35,6 +35,25 @@ enum Read {
 const DEFAULT_LIMIT: usize = 50;
 
 impl Read {
+    /// This read for a poller that takes typed reads (capability `github-plugin` version 2): it
+    /// builds the path itself.
+    fn typed(&self, owner: &str, repository: &str) -> crate::peer::ClientReadOperation {
+        let (read, number, state, limit) = match self {
+            Self::Pulls { state, limit } => ("pulls", None, Some(state.clone().unwrap_or_else(|| "all".into())), Some(*limit)),
+            Self::Pull(number) => ("pull", Some(*number), None, None),
+            Self::Checks(number) => ("checks", Some(*number), None, None),
+            Self::Events { number, limit } => ("events", *number, None, Some(*limit)),
+        };
+        crate::peer::ClientReadOperation::GithubPluginRead {
+            owner: owner.to_owned(),
+            repository: repository.to_owned(),
+            read: read.to_owned(),
+            number,
+            state,
+            limit,
+        }
+    }
+
     /// The path and query the poller answers this read at.
     fn path(&self, owner: &str, repository: &str) -> String {
         let base = format!("/v1/plugins/github/repos/{owner}/{repository}");
@@ -261,7 +280,8 @@ async fn answer(
         let member = member.clone();
         blocking_action(move || store.advertised_feature(&member, "github_plugin").map_err(internal_error)).await?
     };
-    if advertised.as_ref().and_then(Value::as_i64).is_none_or(|version| version < 1) {
+    let advertised = advertised.as_ref().and_then(Value::as_i64);
+    if advertised.is_none_or(|version| version < 1) {
         return fallback(format!("{host} polls the repository and runs a build without the GitHub plugin"), None).await;
     }
     let Some(actor) = headers
@@ -278,7 +298,12 @@ async fn answer(
     let request = crate::peer::ClientReadRequest {
         authority_actor: actor,
         relay: None,
-        request: crate::peer::ClientReadOperation::GithubPlugin { path: read.path(&owner, &repository) },
+        // A poller of plugin version 2 builds the path from the read's parts; version 1 takes it.
+        request: if advertised.is_some_and(|version| version >= 2) {
+            read.typed(&owner, &repository)
+        } else {
+            crate::peer::ClientReadOperation::GithubPlugin { path: read.path(&owner, &repository) }
+        },
     };
     match relay.read(&host, &request).await {
         Ok(value) => Ok(Json(value)),
