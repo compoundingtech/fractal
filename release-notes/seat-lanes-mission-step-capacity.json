@@ -26,7 +26,7 @@
     "detail": "Nothing to configure."
   },
   "recovery": {
-    "status": "none",
-    "detail": "Reverting makes an older parser refuse files that declare capacity on a mission or step; remove those blocks first. Seats already materialized keep the lane they were stored with until their run's next generation."
+    "status": "changed",
+    "detail": "Once a capacity-declaring revision is published, a member rolled back below this build refuses that revision and keeps the earlier one, until it upgrades again. Reverting the change makes an older parser refuse files that declare capacity on a mission or step; remove those blocks first. Seats already materialized keep the lane they were stored with until their run's next generation."
   }
 }
