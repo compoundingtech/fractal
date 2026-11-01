@@ -8,13 +8,17 @@ import { Markdown } from '../../../../packages/fractal-ui/src/assistant-ui/compo
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const grammar = vi.hoisted(() => {
   let release!: () => void
+  let loaded!: () => void
   const ready = new Promise<void>(resolve => { release = resolve })
-  return { ready, release, requested: false }
+  const finished = new Promise<void>(resolve => { loaded = resolve })
+  return { ready, release, finished, loaded, requested: false }
 })
 vi.mock('../../../../packages/fractal-ui/src/assistant-ui/composition/SyntaxSource', async importOriginal => {
   grammar.requested = true
   await grammar.ready
-  return importOriginal()
+  const actual = await importOriginal()
+  grammar.loaded()
+  return actual
 })
 
 it('keeps readable prose, code, focus and wrap state while the real grammar module loads', async () => {
@@ -37,9 +41,8 @@ it('keeps readable prose, code, focus and wrap state while the real grammar modu
     expect(pre.getAttribute('aria-label')).toBe('Code, typescript')
     expect(code.textContent).toBe('const answer = 42\n')
     expect(code.querySelector('[data-syntax-token]')).toBeNull()
-    wrap.focus()
-    await act(async () => wrap.click())
-    await act(async () => grammar.release())
+    await act(async () => { wrap.focus(); wrap.click() })
+    await act(async () => { grammar.release(); await grammar.finished })
     expect(container.querySelector('pre')).toBe(pre)
     expect(pre.querySelector('code')).toBe(code)
     expect(code.querySelector('[data-syntax-token="keyword"]')?.textContent).toBe('const')
