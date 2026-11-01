@@ -18907,7 +18907,8 @@ mission "example/zero-run" state="ready" {
             item["sequence"].as_u64().unwrap(), item["id"].as_str().unwrap().to_owned());
         items.sort_by_key(key);
         let shown = items.iter().map(|item| (item["type"].as_str().unwrap(),
-            item["body"]["message_id"].as_str().or(item["body"]["text"].as_str()).unwrap())).collect::<Vec<_>>();
+            item["body"][if item["type"] == "message" { "message_id" } else { "text" }].as_str().unwrap()))
+            .collect::<Vec<_>>();
         assert_eq!(shown, [("message", "message/00000000000000d1"), ("content", "first"),
             ("message", "message/00000000000000d2"), ("content", "second")]);
         assert_eq!(items[0]["timestamp"], "2026-09-21T14:13:20.000Z");

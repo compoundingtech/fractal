@@ -27,6 +27,7 @@
       "final": true,
       "body": {
         "media_type": "text/plain",
+        "message_id": "message/00000000000000d1",
         "text": "first"
       }
     },
@@ -56,6 +57,7 @@
       "final": true,
       "body": {
         "media_type": "text/plain",
+        "message_id": "message/00000000000000d2",
         "text": "second"
       }
     }
