@@ -17,7 +17,7 @@ export const alertsTabRows = (items: readonly Attention[], now: number): readonl
     .map(item => {
       const tier = homeKind(item)?.tier ?? Option.getOrUndefined(item.presentation?.tier ?? Option.none())
       const glyph: '?' | '◆' | '!' = item.attention_kind === 'fault' || Option.getOrUndefined(item.presentation?.kind ?? Option.none()) === 'fault'
-        ? '!' : isWaitingForAnswer(item) ? '?' : '◆'
+        ? '!' : item.attention_kind === 'harness-prompt' || isWaitingForAnswer(item) ? '?' : '◆'
       const deadline = item.deadline_at === undefined || item.default_answer === undefined ? undefined :
         askDeadline({ deadline_at: DateTime.formatIso(item.deadline_at), default_answer: item.default_answer }, now)
       return {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep the question glyph on open harness prompts even when their reply port is unavailable",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "Match the agent row's question vocabulary without pretending that a terminal-only question can be answered in the web client."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

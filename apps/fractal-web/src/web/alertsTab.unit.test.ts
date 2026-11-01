@@ -35,13 +35,13 @@ describe('Alerts tab projection', () => {
       .toEqual({ questionCount: 0, needsYouCount: 0, status: { glyph: '!', label: 'Fault reported' } })
   })
 
-  it('uses existing answerability semantics for question and needs-you counts', () => {
+  it('marks harness questions even without a reply port, alongside answerable requests', () => {
     const question = item()
     const review = item({ attention_kind: 'human-gate', actions: ['review.approve'], presentation: presented('stopped', 'review') })
     const terminal = item({ attention_kind: 'harness-prompt', actions: [] })
     const feed = { _tag: 'Observed', freshness: 'stale', value: [question, review, terminal] } as const
-    expect(alertsTabRows(feed.value, now).map(row => row.glyph)).toEqual(['?', '◆', '◆'])
-    expect(alertTabMarkers(feed)).toEqual({ questionCount: 1, needsYouCount: 2 })
+    expect(alertsTabRows(feed.value, now).map(row => row.glyph)).toEqual(['?', '◆', '?'])
+    expect(alertTabMarkers(feed)).toEqual({ questionCount: 2, needsYouCount: 1 })
     expect(alertTabMarkers({ _tag: 'Waiting' })).toEqual({ questionCount: 0, needsYouCount: 0 })
     expect(alertTabMarkers({ _tag: 'Unavailable', reason: 'unsupported', detail: 'Unsupported' })).toEqual({ questionCount: 0, needsYouCount: 0 })
   })
