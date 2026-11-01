@@ -8928,16 +8928,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("restart blocked: {error:#}"),
             );
         }
-        if attempted.is_some() {
+        if let Some(attempt) = attempted.as_ref() {
+            let diagnostic = self.restart_admission_error(&subject.subject, attempt, previous)?;
             return self.fail_requested_restart(
                 subject,
                 member,
                 &request,
-                if channel_recovery::automatic_request(&request) {
+                diagnostic.as_deref().unwrap_or_else(|| if channel_recovery::automatic_request(&request) {
                     "the automatic Claude channel recovery launch was interrupted before its result was recorded"
                 } else {
                     "the explicit launch attempt was interrupted before its result was recorded"
-                },
+                }),
             );
         }
         if request.body["fields"]["fresh_session"] == true {
@@ -8984,6 +8985,44 @@ impl<R: RuntimeControl> Reconciler<R> {
         // that exit at startup after the physical launcher accepted the attempt.
         self.signal_changed();
         Ok(true)
+    }
+
+    /// A driver may publish its refusal and exit before the physical observation arrives.
+    /// Read only this attempt's successor report; an old same-code diagnostic is not its cause.
+    fn restart_admission_error(
+        &self,
+        subject: &str,
+        attempt: &crate::model::ClaimRecord,
+        previous: &str,
+    ) -> Result<Option<String>> {
+        let order = crate::store::claim_log_order;
+        let reports = self.store.claims_for(subject, Some("runtime.observed"))?;
+        let report = reports.iter().rev().find(|claim| {
+            claim.actor.as_deref() == Some(subject)
+                && order(claim) > order(attempt)
+                && claim.body["fields"]["incarnation_id"]
+                    .as_str()
+                    .is_some_and(|inc| !inc.is_empty() && inc != previous)
+        });
+        let Some(report) = report.filter(|claim| claim.body["fields"]["status"] == "exited") else {
+            return Ok(None);
+        };
+        let incarnation = &report.body["fields"]["incarnation_id"];
+        Ok(self
+            .store
+            .harness_diagnostics(subject)?
+            .iter()
+            .rev()
+            .find(|claim| {
+                order(claim) > order(attempt)
+                    && order(claim) < order(report)
+                    && claim.actor.as_deref() == Some(subject)
+                    && claim.body["fields"]["incarnation_id"] == *incarnation
+                    && claim.body["fields"]["code"] == "harness-admission-failed"
+                    && claim.body["fields"]["status"] == "failed"
+            })
+            .and_then(|claim| claim.body["fields"]["reason"].as_str())
+            .map(str::to_owned))
     }
 
     fn fail_requested_restart(
@@ -20467,6 +20506,7 @@ pub mod tests {
         }
     }
 
+    mod admission_attempt_tests;
     mod channel_recovery;
     mod differential;
     mod fault_dismiss_tests;
