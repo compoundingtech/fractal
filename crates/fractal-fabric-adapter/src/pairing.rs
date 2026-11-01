@@ -176,7 +176,8 @@ async fn snapshot(client: &reqwest::Client) -> Result<super::LeaveSnapshot> {
         );
         bytes.extend_from_slice(&chunk);
     }
-    let snapshot: super::LeaveSnapshot = serde_json::from_slice(&bytes)?;
+    let snapshot =
+        serde_json::from_slice::<smallclaims::sync::PeerResponse<super::LeaveSnapshot>>(&bytes)?.value;
     ensure!(
         snapshot.persistence_error.is_none() && snapshot.membership.anchor.is_some(),
         "st membership is not durable and verified"
@@ -260,7 +261,8 @@ pub async fn invite(client: &reqwest::Client, socket: &Path, state: &Path) -> Re
                 .iter()
                 .any(|endpoint| endpoint["transport"] == "fabric"
                     && endpoint["node"] == gateway
-                    && endpoint["protocol"] == format!("st3/fleet/{fleet}")),
+                    && endpoint["protocol"].as_str().is_some_and(|protocol|
+                        smallclaims::fleet::transport::is_fleet_fabric_protocol(protocol, &fleet))),
         "sponsor lacks a unique current signed endpoint for the Fabric gateway"
     );
     let deadline = code.expires_at.min((super::now_ms() / 1000) as u64 + 600);
@@ -450,8 +452,9 @@ async fn process(
             .send()
             .await?
             .error_for_status()?
-            .json::<JoinResponse>()
-            .await?;
+            .json::<smallclaims::sync::PeerResponse<JoinResponse>>()
+            .await?
+            .value;
         bound(
             &snapshot(client).await?,
             &request.name,
@@ -725,7 +728,8 @@ pub async fn join(socket: &Path, state: &Path) -> Result<()> {
             .iter()
             .any(|endpoint| endpoint["transport"] == "fabric"
                 && endpoint["node"] == pairing.gateway
-                && endpoint["protocol"] == format!("st3/fleet/{}", sealed.fleet_id)),
+                && endpoint["protocol"].as_str().is_some_and(|protocol|
+                    smallclaims::fleet::transport::is_fleet_fabric_protocol(protocol, &sealed.fleet_id))),
         "authenticated sponsor lacks signed exact Fabric endpoint"
     );
     if let Some(resume) = &start.resume {

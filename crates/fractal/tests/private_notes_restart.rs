@@ -39,6 +39,7 @@ impl Daemon {
 
     fn state(root: &Path) -> AppState {
         AppState {
+            seat_admission: Default::default(),
             owning_person: None,
             store: Arc::new(Store::open(&root.join("graph.db"), NODE).unwrap()),
             notify: Arc::new(Notify::new()),
@@ -54,6 +55,7 @@ impl Daemon {
             planner_default: Default::default(),
             assistant_receipts: Default::default(),
             private_notes: Arc::new(Authority { catalogs: vec![root.join("catalog")] }),
+            harness_question_sink: None,
         }
     }
 

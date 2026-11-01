@@ -1041,6 +1041,16 @@ mission "person-work" state="ready" {{
             .into_iter()
             .find(|item| item.subject == ask.subject)
             .unwrap();
+        // The person's home shows when the ask resolves by itself and what then applies.
+        assert_eq!(item.deadline_unix_ms, Some(deadline));
+        assert_eq!(
+            item.default_answer,
+            Some(json!({"id": "keep-open", "label": "Keep it open"}))
+        );
+        // The stored attention projection does not read the deadline policy, so a policy change
+        // cannot leave its rows stale: the published list adds the deadline at each fold.
+        let row = fractal_store::store::attention_ivm::resource(&item).unwrap();
+        assert!(row.get("deadline_at").is_none() && row.get("default_answer").is_none(), "{row}");
         assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
         assert!(
             store.attention_items(Some("person/avery")).unwrap().iter().all(|item| item.subject != ask.subject),
@@ -1089,7 +1099,7 @@ mission "person-work" state="ready" {{
         input.default_answer = Some("friday".into());
         assert_eq!(store.ask_person(&input).unwrap_err().code, "invalid-default-answer");
         input.default_answer = None;
-        store.set_default_ask_deadline_ms(2 * 3_600_000);
+        store.set_default_ask_deadline_ms(2 * 3_600_000).unwrap();
         let asked = 1_800_000_000_000u128;
         smallclaims::store::set_thread_clock(Some(asked));
         let ask = store.ask_person(&input).unwrap();
@@ -1269,8 +1279,13 @@ mission "person-work" state="ready" {{
             Ok(claim)
         }).unwrap().unwrap();
         let day = DEFAULT_ASK_DEADLINE_MS as u128;
+        // The person's home shows a deadline only while deadlines count.
+        let home = |store: &Store| store.attention_items(Some("person/avery")).unwrap().into_iter()
+            .find(|item| item.subject == subject).unwrap();
         // Opening the store starts no count, and nothing counts while deadlines are off.
         assert_eq!(ask_deadlines_since(&store.readers.get()).unwrap(), 0);
+        assert_eq!(home(&store).deadline_unix_ms, None);
+        assert_eq!(home(&store).requested_at_unix_ms, asked.accepted_at_unix_ms);
         let off = store.reconcile_person_asks_at(asked.accepted_at_unix_ms + 30 * day).unwrap();
         assert_eq!(off, PersonAskPass::default());
         assert_eq!(ask_deadlines_since(&store.readers.get()).unwrap(), 0);
@@ -1279,6 +1294,9 @@ mission "person-work" state="ready" {{
         let pass = store.reconcile_person_asks_at(on).unwrap();
         assert_eq!(pass, PersonAskPass { changed: false, next_deadline: Some(on + day) });
         assert_eq!(ask_deadlines_since(&store.readers.get()).unwrap(), on);
+        assert_eq!(home(&store).deadline_unix_ms, Some(on + day), "the home shows the deadline counted from the turn-on");
+        assert_eq!(home(&store).default_answer, None);
+        assert_eq!(home(&store).requested_at_unix_ms, asked.accepted_at_unix_ms, "the home still shows when it was asked");
         // A later pass does not move the count.
         let pass = store.reconcile_person_asks_at(asked.accepted_at_unix_ms + day).unwrap();
         assert_eq!(pass, PersonAskPass { changed: false, next_deadline: Some(on + day) });
@@ -1289,10 +1307,12 @@ mission "person-work" state="ready" {{
         store.set_ask_deadlines(false);
         assert_eq!(store.reconcile_person_asks_at(on + day).unwrap(), PersonAskPass::default());
         assert_eq!(ask_deadlines_since(&store.readers.get()).unwrap(), 0);
+        assert_eq!(home(&store).deadline_unix_ms, None);
         store.set_ask_deadlines(true);
         let again = on + 2 * day;
         assert_eq!(store.reconcile_person_asks_at(again).unwrap(), PersonAskPass { changed: false, next_deadline: Some(again + day) });
         assert_eq!(ask_deadlines_since(&store.readers.get()).unwrap(), again);
+        assert_eq!(home(&store).deadline_unix_ms, Some(again + day));
         assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "waiting-person");
         assert!(store.reconcile_person_asks_at(again + day).unwrap().changed);
         let resumed = store.step_run(&origin.subject).unwrap().unwrap();
@@ -1829,7 +1849,7 @@ mission "writer-load" state="ready" {
 
                 let start = Instant::now();
                 for n in 0..10 {
-                    target.append_claim(&ClaimInput {
+                    target.append_as_older_build_for_test(&ClaimInput {
                         subject: "daemon/birch".into(), kind: "daemon.diagnostic".into(), actor: None,
                         fields: serde_json::from_value(json!({"severity":"warning","code":"live","reason":format!("claim {n}")})).unwrap(),
                         evidence: vec![], expected_subject: None, idempotency_key: None,

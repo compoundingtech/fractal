@@ -12,7 +12,7 @@ use super::adapt::{self, Extras};
 use super::direct;
 use super::glass::GlassWrite;
 use super::resource_sidebar::ArrangementV1 as _;
-use super::view::{Load, MissionPreview};
+use super::view::Load;
 use super::{AgentControl, Effect, Guard, Ui};
 use crate::feed::{self, Command, Inventories, Inventory, Window};
 use crate::model::{self, Collection, Model};
@@ -401,7 +401,6 @@ enum Fetched {
         /// How long st took to answer, so a slow st is not asked for more than the person scrolled to.
         took: Duration,
     },
-    Preview(String, Load<MissionPreview>),
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
@@ -416,7 +415,7 @@ enum Fetched {
     Observations { generation: u64, outcome: Result<(Vec<fractal_client::ResourceObservation>, bool), String> },
     Inventory { generation: u64, result: InventoryRead },
     /// The objectives and budgets the Usage view shows, or why st could not say.
-    Slo { generation: u64, outcome: Result<Vec<fractal_client::SloRow>, String> },
+    Slo { generation: u64, outcome: Result<(Vec<fractal_client::SloRow>, Option<String>), String> },
     /// What was left of one objective or budget across the chart period.
     SloHistory { generation: u64, id: String, outcome: Result<fractal_client::SloHistory, String> },
     /// st's conversation search for the palette's query, or why st could not say.
@@ -547,7 +546,6 @@ pub fn run(context: Context) -> Result<()> {
     // The session each conversation was last subscribed again for, so it is asked once.
     let mut resubscribed: BTreeMap<String, String> = BTreeMap::new();
     let mut sessions_requested = HashSet::new();
-    let mut preview_requested: HashSet<String> = HashSet::new();
     let mut body_requested: HashSet<String> = HashSet::new();
     let mut read_receipts = ReadReceipts::default();
     // Messages sent from here, shown at once until st reports them back.
@@ -571,6 +569,7 @@ pub fn run(context: Context) -> Result<()> {
     ui.build = true;
     ui.live = true;
     ui.glasses = super::glass::Glasses::open(space, super::glass_store::path(&person));
+    ui.prune_place_history();
     // A space opens where this device left it.
     ui.show_focused();
     if std::env::args().any(|arg| arg == "--old") {
@@ -583,6 +582,7 @@ pub fn run(context: Context) -> Result<()> {
         ui.flash = Some((note, Instant::now() + Duration::from_secs(26)));
     }
     let _guard = Guard::enter(true)?;
+    ui.keyboard_enhanced = _guard.enhanced;
     // The release smoke test's probe: the terminal is restored after a panic too.
     #[cfg(debug_assertions)]
     if std::env::var_os("STUI_TEST_PANIC_AFTER_ENTER").is_some() {
@@ -731,12 +731,11 @@ pub fn run(context: Context) -> Result<()> {
                     inventory_sent = None; legacy_requested.clear(); legacy_pending.clear();
                     slo_stale = true; slo_reading = false; slo_history_asked.clear();
                     // Another member's objectives are not this one's: drop them until it answers.
-                    extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None;
+                    extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None; extras.slo_otel_url = None;
                     extras.live = false;
                     attached = None;
                     shown_tab = usize::MAX;
                     sessions_requested.clear();
-                    preview_requested.clear();
                     body_requested.clear();
                     changed = true;
                 }
@@ -1087,9 +1086,6 @@ pub fn run(context: Context) -> Result<()> {
                         waiting
                     });
                 }
-                Fetched::Preview(id, preview) => {
-                    extras.previews.insert(id, preview);
-                }
                 Fetched::Body(id, from, title, content) => {
                     extras.bodies.insert(id, (from, title, content));
                 }
@@ -1212,8 +1208,9 @@ pub fn run(context: Context) -> Result<()> {
                     slo_reading = false;
                     if generation != resources_generation { continue; }
                     match outcome {
-                        Ok(rows) => {
+                        Ok((rows, otel_url)) => {
                             extras.slo = Load::Ready(rows);
+                            extras.slo_otel_url = otel_url;
                             extras.slo_stale = None;
                             // A chart open now is read again beside the fresh rows.
                             slo_history_asked.clear();
@@ -1351,7 +1348,7 @@ pub fn run(context: Context) -> Result<()> {
             slo_stale = false; slo_reading = true;
             let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
             runtime.spawn(async move {
-                let outcome = reader.slo_list().await.map(|reply| reply.value.rows).map_err(|error| super::objectives::error(&error));
+                let outcome = reader.slo_list().await.map(|reply| (reply.value.rows, reply.value.otel_ui_url)).map_err(|error| super::objectives::error(&error));
                 let _ = tx.send(Fetched::Slo { generation, outcome });
             });
         }
@@ -1462,60 +1459,6 @@ pub fn run(context: Context) -> Result<()> {
         for target in moved_sessions(&conversing, &model, &timelines, &mut resubscribed) {
             let _ = commands.send(Command::Resubscribe { target });
         }
-        if tab == 0
-            && let Some(id) = selected.clone()
-            && !preview_requested.contains(&id)
-            && let Some(item) = model
-                .attention()
-                .find(|item| item.header.id == id && item.attention_kind == "launch-approval")
-        {
-            preview_requested.insert(id.clone());
-            let client = client.clone();
-            let tx = fetched_tx.clone();
-            let source = item.source_id.clone();
-            let name = item
-                .mission_id
-                .clone()
-                .unwrap_or_else(|| item.title.clone())
-                .trim_start_matches("mission/")
-                .to_owned();
-            runtime.spawn(async move {
-                let preview = match client.launch_variants_list(&source, None, Some(50)).await {
-                    Err(error) => Load::Failed(format!("Could not load the proposed mission: {error}")),
-                    Ok(variants) => {
-                        let latest = variants
-                            .value
-                            .items
-                            .iter()
-                            .filter_map(|item| match item {
-                                Resource::LaunchVariant(variant) => Some(variant),
-                                _ => None,
-                            })
-                            .max_by_key(|variant| variant.ordinal);
-                        match latest {
-                            None => Load::Failed("The planner has not proposed a mission yet.".into()),
-                            Some(variant)
-                                if variant.normalized_mission.as_object().is_none_or(|fields| fields.is_empty()) =>
-                            {
-                                let mut reason = format!(
-                                    "The planner's latest candidate ({}) has no preview, so there is no mission to show yet.",
-                                    variant.status
-                                );
-                                for diagnostic in variant.diagnostics.iter().take(3) {
-                                    if let Some(message) = diagnostic.get("message").and_then(|value| value.as_str()) {
-                                        reason.push_str(&format!("\n• {message}"));
-                                    }
-                                }
-                                Load::Failed(reason)
-                            }
-                            Some(variant) => Load::Ready(adapt::preview(&name, &variant.normalized_mission)),
-                        }
-                    }
-                };
-                let _ = tx.send(Fetched::Preview(id, preview));
-            });
-        }
-
         // An unread-message item names its message; load the message itself.
         if tab == 0
             && let Some(id) = selected.clone()
@@ -1957,10 +1900,6 @@ pub fn run(context: Context) -> Result<()> {
         if changed {
             ui.content.index(&timelines);
             extras.conversations = conversations(&model, &person, &timelines, &failed, &conversing);
-            extras.pending_calls = timelines
-                .iter()
-                .map(|(agent, timeline)| (agent.clone(), adapt::pending_calls(&timeline.items)))
-                .collect();
             for entry in &pending {
                 if let Some(Load::Ready(entries)) = extras.conversations.get_mut(&entry.agent) {
                     entries.push(super::view::Entry {
@@ -2968,7 +2907,7 @@ async fn perform(
         }
         Effect::OpenImage { image } => {
             // In the person's own viewer where this machine has one; saved where they keep
-            // downloads (ST3_DOWNLOADS or their download directory) where it has none.
+            // downloads (FRACTAL_DOWNLOADS, ST3_DOWNLOADS or their download directory) where it has none.
             let bytes = client.blob(&image.sha256, Some(&image.message)).await?;
             let dir = super::attach::dir()
                 .ok_or_else(|| anyhow::anyhow!("No place to keep the image (HOME is not set)"))?;
@@ -2976,11 +2915,11 @@ async fn perform(
             if super::attach::show(&kept) {
                 return Ok((format!("Opened {}", image.name.as_deref().unwrap_or("the image")), None));
             }
-            let downloads = super::attach::downloads()
+            let downloads = super::attach::downloads()?
                 .ok_or_else(|| anyhow::anyhow!("No place to save the image (HOME is not set)"))?;
             let path = super::attach::save(&downloads, &image, &bytes)?;
             Ok((
-                format!("Saved to {} · ST3_DOWNLOADS chooses where", path.display()),
+                format!("Saved to {} · FRACTAL_DOWNLOADS chooses where (ST3_DOWNLOADS also works)", path.display()),
                 None,
             ))
         }
@@ -4103,19 +4042,25 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("daemon.sock");
         let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "ui-hint").unwrap());
-        let state = fractal_daemon::api::AppState { owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(tokio::sync::Notify::new()),
-        event_notify: tokio::sync::watch::channel(0_u64).0,
-        node: "ui-hint".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = fractal_daemon::api::AppState {
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "ui-hint".into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let path = socket.clone();
         let server = tokio::spawn(async move {
             fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap();
@@ -4156,10 +4101,13 @@ mod tests {
         let socket = root.path().join("sidebar.sock");
         async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<fractal_daemon::store::Store>, tokio::task::JoinHandle<()>) {
             let store = Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
-            let state = fractal_daemon::api::AppState { owning_person: None,
-            store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
-            fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+            let state = fractal_daemon::api::AppState {
+                seat_admission: Default::default(),
+                owning_person: None,
+                store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
+                node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
+                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
+            };
             let path = socket.to_owned();
             let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap(); });
             for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
@@ -4206,19 +4154,25 @@ mod tests {
         ) -> (Arc<fractal_daemon::store::Store>, tokio::task::JoinHandle<()>) {
             let store =
                 Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "ui-actions").unwrap());
-            let state = fractal_daemon::api::AppState { owning_person: None,
-            store: store.clone(),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "ui-actions".into(),
-            state_dir: root.into(),
-            pty_root: root.join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+            let state = fractal_daemon::api::AppState {
+                seat_admission: Default::default(),
+                owning_person: None,
+                store: store.clone(),
+                notify: Arc::new(tokio::sync::Notify::new()),
+                event_notify: tokio::sync::watch::channel(0_u64).0,
+                node: "ui-actions".into(),
+                state_dir: root.into(),
+                pty_root: root.join("pty"),
+                pty_binary: "pty".into(),
+                fleet_id: None,
+                configured_peers: vec![],
+                client_relay: None,
+                native_session_home: None,
+                planner_default: Default::default(),
+                harness_question_sink: None,
+                assistant_receipts: Default::default(),
+                private_notes: Default::default(),
+            };
             let path = socket.to_owned();
             let server = tokio::spawn(async move {
                 fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state))
@@ -4628,19 +4582,25 @@ mod tests {
                 })
                 .unwrap();
         }
-        let state = fractal_daemon::api::AppState { owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(tokio::sync::Notify::new()),
-        event_notify: tokio::sync::watch::channel(0_u64).0,
-        node: "person-read".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: root.path().join("unused-pty"),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = fractal_daemon::api::AppState {
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "person-read".into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: root.path().join("unused-pty"),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let socket = root.path().join("daemon.sock");
         let server_path = socket.clone();
         let server = tokio::spawn(async move {

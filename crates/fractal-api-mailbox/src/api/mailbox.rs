@@ -329,15 +329,41 @@ pub async fn receipt(
     let ((record, appended, work_wake), _) = authority_action(move || {
         let _admission = admission;
         authority::with_claude_primary(&checked_state, &request.fence, &checked_peer, None, || {
+        // A stream item's receipt is this member's record, not a graph claim. Only its
+        // recipient's delivery component records it, under the fence a graph receipt checks.
+        let stream = store
+            .message(&input.subject)
+            .map_err(|error| St3Error::new("internal", error.to_string()))?
+            .filter(|message| message.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE);
+        if let Some(message) = &stream
+            && message.to != request.fence.subject
+        {
+            return Err(St3Error::new("wrong-message-recipient", format!(
+                "message `{}` belongs to `{}`, not `{}`", input.subject, message.to, request.fence.subject
+            )));
+        }
+        let record_stream = || -> Result<(ClaimRecord, bool), St3Error> {
+            let appended = crate::store::messages_shard::record_fenced_lifecycle(
+                &store, &request.fence, &input.subject, &input.kind, input.actor.as_deref(), &input.fields,
+            )?;
+            Ok((crate::store::messages_shard::lifecycle_receipt(
+                &store.graph.origin, &input.subject, &input.kind, input.actor.as_deref(), &input.fields,
+            ), appended))
+        };
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
             authority::with_authority(&checked_state, &request.fence, &checked_peer, || {}, |owner, validate| {
                 validate()?;
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
                     return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
                 }
+                if stream.is_some() {
+                    return record_stream();
+                }
                 store.append_native_mailbox_receipt_outcome(&input, &request.fence,
                     payload.native_receipt.as_ref())
             })?
+        } else if stream.is_some() {
+            record_stream()?
         } else { store.append_mailbox_receipt_outcome(&input, &request.fence)? };
         // A message this store cannot read is treated as a work wake.
         let work_wake = store

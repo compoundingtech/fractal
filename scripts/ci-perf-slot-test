@@ -1,20 +1,71 @@
 #!/usr/bin/env python3
 """Two runs take turns, a killed run frees the slot at once, a run past its timeout is stopped."""
+import contextlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 slot = str(Path(__file__).resolve().parent / "ci-perf-slot")
 
 
-def start(env, *args, command):
-    return subprocess.Popen([sys.executable, slot, *args, "--", *command], env=env,
+def start(env, *args, command, signal_mask=None):
+    # The test is single-threaded; restore the child's mask before exec, not the parent's protected registration window.
+    restore_mask = (lambda: signal.pthread_sigmask(signal.SIG_SETMASK, signal_mask)) if signal_mask is not None else None
+    return subprocess.Popen([sys.executable, slot, *args, "--", *command], env=env, preexec_fn=restore_mask,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def signal_on_publication(env, number):
+    # Inject cancellation at the first instant holder.json is visible, before
+    # run() can continue to fork. This makes the startup race deterministic.
+    script = '''import os, pathlib, runpy, sys
+number = int(sys.argv.pop(1))
+replace = pathlib.Path.replace
+def publish(self, target):
+    result = replace(self, target)
+    if pathlib.Path(target).name == "holder.json":
+        os.kill(os.getpid(), number)
+    return result
+pathlib.Path.replace = publish
+sys.argv = sys.argv[1:]
+sys.path.insert(0, str(pathlib.Path(sys.argv[0]).parent))
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+    return subprocess.Popen([sys.executable, "-c", script, str(number), slot, "--", "sleep", "60"],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def launch_fixture(unit, units, wrappers, env, *args, command):
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    try:
+        units.append(unit)
+        victim = start(env, *args, command=command, signal_mask=previous)
+        wrappers.append(victim)
+        return victim
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def fixture_listing(systemctl, pid):
+    try:
+        return subprocess.check_output([systemctl, "--user", "list-units", f"ci-perf-slot-fixture-{pid}-*",
+                                        "--all", "--no-legend", "--plain"], text=True, timeout=15)
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError("fixture drain unconfirmed: systemctl list-units timed out after 15s") from error
+
+
+def stop_fixture(systemctl, unit):
+    try:
+        subprocess.run([systemctl, "--user", "stop", unit], capture_output=True, timeout=15)
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(f"fixture drain unconfirmed: systemctl stop {unit} timed out after 15s") from error
 
 
 def until(condition, what, seconds=10):
@@ -36,6 +87,132 @@ def alive(pid):
     except (FileNotFoundError, ProcessLookupError):
         return False  # it exited and was reaped after the kill above: gone, so not running
     return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+def cgroup_path(text):
+    lines = text.splitlines()
+    assert lines and all(re.fullmatch(r"\d+:[^:]*:/.*", line) for line in lines), "malformed cgroup metadata"
+    paths = [line[3:] for line in lines if line.startswith("0::")]
+    assert len(paths) == 1, "missing or duplicate unified cgroup metadata"
+    path = paths[0]
+    assert path == "/" or all(part not in ("", ".", "..") for part in path[1:].split("/")), "malformed cgroup path"
+    return path
+
+
+def caller_slice(text):
+    path = cgroup_path(text)
+    parent = path.rsplit("/", 1)[0]
+    parts = path.strip("/").split("/")
+    manager_depth = next((i for i, part in enumerate(parts) if re.fullmatch(r"user@\d+\.service", part)), None)
+    if manager_depth is None:
+        return None  # A --user scope would leave this caller's cgroup tree.
+    assert manager_depth < len(parts) - 2, "caller parent is not strictly below its user manager"
+    assert parent.endswith(".slice"), f"caller cgroup parent is not a slice: {parent}"
+    return parent
+
+
+def read_caller_slice(cgroup_file="/proc/self/cgroup"):
+    return caller_slice(Path(cgroup_file).read_text())
+
+def starttime(text):
+    return int(text.rsplit(")", 1)[1].split()[19])  # /proc/PID/stat field 22
+
+
+def runtime_usec(value):
+    assert re.fullmatch(r"\d+(?:min|us|s)(?: \d+(?:min|us|s))*", value), value
+    return sum(int(n) * {"min": 60000000, "s": 1000000, "us": 1}[unit]
+               for n, unit in re.findall(r"(\d+)(min|us|s)", value))
+
+
+def kernel_limits(group):
+    limits = {name: int((group / name).read_text()) for name in ("memory.max", "memory.swap.max", "pids.max")}
+    assert limits == {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}, limits
+    return limits
+
+
+# Fake cgroup lines exercise hierarchy-preserving leaf slice selection without a user bus.
+manager = "/user.slice/user-1000.slice/user@1000.service"
+for leaf in ("app.slice", "app.slice/app-capped.slice/app-capped-heavy.slice"):
+    assert caller_slice(f"0::{manager}/{leaf}/gate-slot-heavy-1.scope\n") == f"{manager}/{leaf}"
+assert caller_slice("0::/system.slice/ci-runner.service\n") is None
+for invalid in (f"{manager}/app.slice/outer.scope/child", manager, f"{manager}/init.scope"):
+    with patch.object(subprocess, "Popen") as launched:
+        try:
+            caller_slice(f"0::{invalid}\n")
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("a parent outside the user manager or not a slice must fail")
+        launched.assert_not_called()
+for metadata in ("", "not cgroup metadata", "0::relative", "0::/a\n0::/b\n", "0::/a/../b\n"):
+    try:
+        caller_slice(metadata)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("malformed cgroup metadata must fail, not skip")
+assert starttime("1 (name with ) spaces) " + " ".join(["S"] + ["0"] * 18 + ["12345"])) == 12345
+assert runtime_usec("1min 30s") == runtime_usec("90s") == runtime_usec("90000000us") == 90000000
+with tempfile.TemporaryDirectory() as helper_tmp:
+    group = Path(helper_tmp)
+    for name, value in {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}.items():
+        (group / name).write_text(str(value))
+    assert kernel_limits(group)["pids.max"] == 16
+    try:
+        read_caller_slice(group / "unreadable")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("unreadable cgroup metadata must fail, not skip")
+    (group / "pids.max").unlink()
+    try:
+        kernel_limits(group)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("missing kernel limit readback must fail")
+test_units, test_wrappers, test_child, events = [], [], object(), []
+def fake_mask(how, mask):
+    if how == signal.SIG_BLOCK:
+        assert mask == {signal.SIGINT, signal.SIGTERM}
+        events.append("blocked")
+        return set()
+    assert test_units == ["fixture.scope"] and test_wrappers == [test_child]
+    events.append("pending signal delivered after registration")
+def fake_start(*args, **kwargs):
+    assert test_units == ["fixture.scope"] and kwargs["signal_mask"] == set()
+    events.append("launch")
+    return test_child
+with patch.object(signal, "pthread_sigmask", side_effect=fake_mask), patch.dict(globals(), start=fake_start):
+    assert launch_fixture("fixture.scope", test_units, test_wrappers, {}, command=["true"]) is test_child
+assert events == ["blocked", "launch", "pending signal delivered after registration"]
+with patch.object(subprocess, "check_output", return_value="") as listing:
+    fixture_listing("systemctl", 123)
+    assert listing.call_args.args[0][3] == "ci-perf-slot-fixture-123-*"
+    assert listing.call_args.kwargs["timeout"] == 15
+with patch.object(subprocess, "run", return_value=None) as stopped_unit:
+    stop_fixture("systemctl", "fixture.scope")
+    assert stopped_unit.call_args.kwargs["timeout"] == 15
+for helper, call in ((fixture_listing, "check_output"), (stop_fixture, "run")):
+    with patch.object(subprocess, call, side_effect=subprocess.TimeoutExpired("systemctl", 15)):
+        try:
+            helper("systemctl", 123)
+        except AssertionError as error:
+            assert "drain unconfirmed" in str(error) and "timed out after 15s" in str(error)
+        else:
+            raise AssertionError("manager timeout must fail the drain")
+# A zombie is exited, not a live load. Leave it unreaped long enough to test
+# the real /proc state rather than assuming kill(pid, 0) means running.
+zombie = subprocess.Popen([sys.executable, "-c", "pass"])
+try:
+    os.waitid(os.P_PID, zombie.pid, os.WEXITED | os.WNOWAIT)
+    assert not alive(zombie.pid)
+finally:
+    zombie.wait()
+
+if sys.argv[1:] == ["--helpers-only"]:
+    print("passed: ci-perf-slot helpers")
+    sys.exit(0)
+
 
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -112,38 +289,123 @@ with tempfile.TemporaryDirectory() as tmp:
     victim.wait()
     assert not holder.exists()
 
-    # hetz2's cargo test runner starts the test binary with `systemd-run --user --scope`. A scope
-    # moves the process into a transient unit but keeps it in this process group, so killing the
-    # group kills it. Skipped where there is no user bus.
+    # A scope move keeps the process group, so killing or timing out the group must kill it too.
+    # Keep the moved fixture in the caller's enclosing slice and give it its own small hard limits.
     runtime = os.environ.get("XDG_RUNTIME_DIR", "")
     systemd_run = next((Path(d) / "systemd-run" for d in os.environ["PATH"].split(":") + ["/run/current-system/sw/bin", "/usr/bin"]
                         if (Path(d) / "systemd-run").exists()), None)
-    if systemd_run and runtime and Path(runtime, "bus").exists():
+    scope_available = systemd_run and runtime and Path(runtime, "bus").exists()
+    slice_path = read_caller_slice() if scope_available else None
+    if scope_available and slice_path:
+        units, wrappers, scoped_pids, evidence = [], [], [], {}
+        systemctl = str(systemd_run.with_name("systemctl"))
         scoped = root / "scoped"
         script = "echo $BASHPID > %s; exec sleep 60" % scoped
-        victim = start(env, command=[str(systemd_run), "--user", "--scope", "--quiet", "--collect", "--",
-                                     "bash", "-c", script])
-        until(lambda: scoped.exists() and scoped.read_text().strip(), "scoped run started")
-        scoped_pid = int(scoped.read_text())
-        assert "scope" in Path("/proc/%d/cgroup" % scoped_pid).read_text(), "the run is in a transient scope unit"
-        victim.kill()
-        until(lambda: not alive(scoped_pid), "a killed run takes its systemd scope process with it")
-        victim.wait()
-        stopped = start(env, "--timeout", "1s", command=[str(systemd_run), "--user", "--scope", "--quiet", "--collect",
-                                                         "--", "bash", "-c", script])
-        assert stopped.wait(20) == 124
-        until(lambda: not alive(int(scoped.read_text())), "a timeout stops the scope process too")
+        cleaned = False
+        previous_signals = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+        def finish_fixtures():
+            global cleaned
+            if cleaned:
+                return
+            for sig in previous_signals:
+                signal.signal(sig, signal.SIG_IGN)
+            try:
+                for unit in units:
+                    record = evidence.setdefault(unit, {"unit": unit})
+                    group = record.get("cgroup", f"{slice_path}/{unit}")
+                    with contextlib.suppress(OSError):
+                        record["memory.peak"] = int(Path("/sys/fs/cgroup", group.lstrip("/"), "memory.peak").read_text())
+                for wrapper in wrappers:
+                    if wrapper.poll() is None:
+                        wrapper.terminate()
+                    try:
+                        wrapper.wait(10)
+                    except subprocess.TimeoutExpired:
+                        wrapper.kill()
+                        wrapper.wait(10)
+                # Stop after wrapper exit: a launch already in flight must not register a scope after our stop.
+                for unit in units:
+                    stop_fixture(systemctl, unit)
+                def no_fixtures():
+                    listed = fixture_listing(systemctl, os.getpid())
+                    return not listed.strip() and not any(alive(pid) for pid in scoped_pids)
+                until(no_fixtures, "all fixture scopes and processes are gone")
+                cleaned = True
+            except subprocess.TimeoutExpired as error:
+                raise AssertionError("fixture drain unconfirmed: wrapper did not exit after TERM/KILL deadlines") from error
+            finally:
+                for record in evidence.values():
+                    record["drain"] = "empty and collected" if cleaned else "not confirmed"
+                    print("ci-perf-slot fixture: " + json.dumps(record, sort_keys=True), flush=True)
+                for sig, handler in previous_signals.items():
+                    signal.signal(sig, handler)
+
+        def cancelled(signum, frame):
+            finish_fixtures()
+            raise SystemExit(128 + signum)
+
+        for sig in previous_signals:
+            signal.signal(sig, cancelled)
+        try:
+            for n, mode in enumerate(("kill", "timeout")):
+                unit = f"ci-perf-slot-fixture-{os.getpid()}-{n}.scope"
+                scoped.unlink(missing_ok=True)
+                command = [str(systemd_run), "--user", "--scope", "--quiet", "--collect",
+                           f"--slice={Path(slice_path).name}", f"--unit={unit}",
+                           "-p", "MemoryMax=64M", "-p", "MemorySwapMax=0", "-p", "TasksMax=16",
+                           "-p", "RuntimeMaxSec=90", "--", "bash", "-c", script]
+                victim = launch_fixture(unit, units, wrappers, env, *(("--timeout", "1s") if mode == "timeout" else ()), command=command)
+                until(lambda: scoped.exists() and scoped.read_text().strip(), "scoped run started")
+                scoped_pid = int(scoped.read_text())
+                scoped_pids.append(scoped_pid)
+                group = cgroup_path(Path(f"/proc/{scoped_pid}/cgroup").read_text())
+                record = evidence.setdefault(unit, {"unit": unit})
+                record.update(pid=scoped_pid, starttime=starttime(Path(f"/proc/{scoped_pid}/stat").read_text()), cgroup=group)
+                assert group == f"{slice_path}/{unit}", f"fixture left caller slice: {group}"
+                properties = dict(line.split("=", 1) for line in subprocess.check_output(
+                    [systemctl, "--user", "show", unit, "-p", "MemoryMax", "-p", "MemorySwapMax",
+                     "-p", "TasksMax", "-p", "RuntimeMaxUSec", "-p", "ControlGroup", "-p", "Slice"], text=True).splitlines())
+                assert properties["MemoryMax"] == "67108864", properties
+                assert properties["MemorySwapMax"] == "0" and properties["TasksMax"] == "16", properties
+                assert properties["ControlGroup"] == group and properties["Slice"] == Path(slice_path).name, properties
+                usec = runtime_usec(properties["RuntimeMaxUSec"])
+                assert usec == 90000000, properties
+                record.update(slice=properties["Slice"], limits=kernel_limits(Path("/sys/fs/cgroup", group.lstrip("/"))),
+                              RuntimeMaxUSec=usec, manager=properties)
+                with contextlib.suppress(OSError):
+                    record["memory.peak"] = int(Path("/sys/fs/cgroup", group.lstrip("/"), "memory.peak").read_text())
+                if mode == "kill":
+                    victim.kill()
+                assert victim.wait(20) == (124 if mode == "timeout" else -signal.SIGKILL)
+                until(lambda: not alive(scoped_pid), f"{mode} stops the scope process")
+        finally:
+            finish_fixtures()
+    elif scope_available:
+        print("skipped: caller is not under a user manager; a --user scope would leave the caller's cgroup tree (scope-move case)")
     else:
         print("skipped: no systemd user bus for the scope case")
 
     # Ctrl-C and SIGTERM on the wrapper stop the run and free the slot too.
     for number in (signal.SIGINT, signal.SIGTERM):
         stopped = start(env, command=["sleep", "60"])
-        until(holder.exists, "run holds the slot")
-        pid = json.loads(holder.read_text())["pid"]
+        # No pause between looks, and nothing read first: the signal comes as soon as the record shows the slot held, which is
+        # where a wrapper that installed its handlers after publishing the record exited without dropping it (2026-11-01, two
+        # merge groups). The record names the wrapper itself.
+        deadline = time.time() + 10
+        while not holder.exists():
+            assert time.time() < deadline, "timed out: run holds the slot"
         stopped.send_signal(number)
+        pid = stopped.pid
         assert stopped.wait(10) == 128 + number
         assert not alive(pid) and not holder.exists()
+
+    # The publication itself is the readiness boundary: even a signal before
+    # the watchdog forks must return only after cleanup, not leave a record.
+    for number in (signal.SIGINT, signal.SIGTERM):
+        stopped = signal_on_publication(env, number)
+        assert stopped.wait(10) == 128 + number, stopped.stderr.read()
+        assert not holder.exists() and "perf slot free" in status()
 
     # The watchdog is protected from TERM itself, but must not pass SIG_IGN
     # through exec to its command. A shell cannot install a TERM cleanup trap

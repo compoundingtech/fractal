@@ -127,8 +127,12 @@ pub fn run_with_paths(
         !opencode_argv.is_empty(),
         "opencode driver '{runtime_id}' has no provider argv"
     );
-    let admission =
-        crate::harness_admission::admit(&opencode_argv[0], DiagnosticDriver::OpenCode, None);
+    let admission = crate::harness_admission::admit_for_agent(
+        &opencode_argv[0],
+        DiagnosticDriver::OpenCode,
+        None,
+        agent_dir,
+    );
     let version_ok = admission.passed();
     let producer_version = admission.version.clone();
     let support = admission.support();
