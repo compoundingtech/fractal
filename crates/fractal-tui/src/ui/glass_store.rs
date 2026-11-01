@@ -181,6 +181,10 @@ pub(crate) fn person_state(person: &str) -> Option<(PathBuf, String)> {
 
 /// What the file holds; nothing when it is missing, unreadable, too big or open to others.
 pub fn load(path: &Path) -> Stored {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let path = fractal_client::product_dirs::tui_read_path(path);
+    let path = path.as_ref();
+    // LIVE-MIGRATION END
     let readable = fs::metadata(path).ok().filter(|metadata| {
         metadata.len() <= MAX_BYTES && metadata.permissions().mode() & 0o077 == 0
     });

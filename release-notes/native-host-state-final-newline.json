@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Normalize the new shared host helper module final newline.",
+  "replay": {
+    "status": "none",
+    "detail": "Normalize the final newline of the new host helper module. Function bodies, shared OnceLock, re-exports, environment precedence, state paths and hostname behavior are unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Normalize the final newline of the new host helper module. Function bodies, shared OnceLock, re-exports, environment precedence, state paths and hostname behavior are unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Normalize the final newline of the new host helper module. Function bodies, shared OnceLock, re-exports, environment precedence, state paths and hostname behavior are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Normalize the final newline of the new host helper module. Function bodies, shared OnceLock, re-exports, environment precedence, state paths and hostname behavior are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normalize the final newline of the new host helper module. Function bodies, shared OnceLock, re-exports, environment precedence, state paths and hostname behavior are unchanged."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Normalize the final newline of the new host helper module. Function bodies, shared OnceLock, re-exports, environment precedence, state paths and hostname behavior are unchanged."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Normalize the final newline of the new host helper module. Function bodies, shared OnceLock, re-exports, environment precedence, state paths and hostname behavior are unchanged."
+  }
+}
