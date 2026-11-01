@@ -3086,6 +3086,11 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(got[0][0], 1)                                          # the new tree, while tree-0 is still held
         got[0][1].close()
 
+    def test_non_utf8_ticket_rules_are_unreadable(self):
+        ticket = Path(self.tmp.name) / 'ticket'
+        ticket.write_bytes(b'\xff\xfe')
+        self.assertEqual(st_test.ticket_rules(ticket), 0)
+
     def test_the_queue_orders_by_aged_rank_then_arrival_and_drops_dead_tickets(self):
         queue = Path(self.tmp.name) / 'queue'
         queue.mkdir()
