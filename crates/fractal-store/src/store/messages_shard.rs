@@ -149,8 +149,9 @@ impl Filter<'_> {
     /// The stream items this filter keeps after shard index `:after`, as a WHERE clause over
     /// `stream_messages AS item`, with `:recipients` and `:senders` as JSON arrays.
     /// Only the parties given appear, so the recipient and sender indexes stay usable. A stream
-    /// item's view applies its lifecycle in rank order, closed last, so it reads closed exactly
-    /// when this member recorded a close for it. [`page`] and [`any_after`] both use it.
+    /// item's view applies its lifecycle in [`lifecycle_rank`] order, closed last, so it reads
+    /// closed exactly when this member recorded a close for it: change the ranking and this
+    /// changes with it (page_tests compares the two). [`page`] and [`any_after`] both use it.
     fn sql(&self) -> String {
         let mut clause = String::from("item.store_index>:after");
         if self.recipients.is_some() {
