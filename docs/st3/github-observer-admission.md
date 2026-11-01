@@ -58,6 +58,16 @@ inside a send. A reservation can still correspond to no
 completed HTTP request when a connection fails, so the ledger remains a
 conservative attempt ceiling rather than proof of exact provider debits.
 
+A repository poll interrupted by local admission stages its completed REST and
+GraphQL reads in its private plugin-database cursor. The next attempt reuses those
+reads and sends only requests not completed yet. No partial observation or healthy
+completion is published: absence-based consumers see only the last complete facts.
+The poll's start watermark is fixed across continuations, and completion replaces
+the checkpoint with the ordinary cursor. Staging is limited to 1 MiB serialized
+and expires after two hours; oversized staging retains the previous cursor and
+expired staging restarts from the last complete cursor. Other failures do not
+create a checkpoint. This is not fair admission or a whole-poll reservation.
+
 Provider header history is separate: `STATE/github-admission.json.budget-history.json`
 retains the first actual `limit`, `used`, `remaining`, and reset sample for each
 resource/reset/minute, for up to 48 hours and at most 8,192 samples. These retain
