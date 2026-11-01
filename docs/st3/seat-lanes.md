@@ -241,7 +241,19 @@ ever give waits out of line and holds no one back. A seat leaves the line when i
 for a start: suspended, stopped, no longer owned, or not tried for six minutes (a crash loop, a
 workspace error). Room is held only for a seat that starts, after any envelope admission also lets it.
 A waiting seat is tried again every 30 seconds, since what seats outside lanes hold changes without a
-claim. A seat without a lane is not held. The order and
+claim. A seat without a lane is not held.
+
+To start a waiting seat now despite its fit, for the day a stale measurement holds a seat that must
+run: `st agents restart AGENT --ignore-fit --reason TEXT --as ACTOR`. The restart request records who
+asked (`--as`, a person or an agent acting for one) and why (`ignore_fit` and `reason` on its
+`runtime.action.requested` claim); the daemon logs both when the seat starts, and its lane then holds
+room like any other start.
+
+After a daemon restart the line and the reasons start empty. Seats that kept running count by their
+latest observation, so their lanes still hold room; every seat that is to start is tried in the first
+passes, and each one admitted holds its room from then on, so when every seat starts at once (a host
+that rebooted) they start in the order the passes reach them until the room is full, and the rest
+wait in line with their reasons. The order and
 the reasons live in the daemon's memory, as the envelope queue's do; a daemon restart rebuilds them
 from the next pass. `builds.slice` keeps its own cap and admission and is not counted.
 

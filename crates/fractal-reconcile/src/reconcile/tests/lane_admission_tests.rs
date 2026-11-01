@@ -108,3 +108,29 @@ agent "small" { workspace "/tmp"; command "true"; capacity cores=1 memory="4G" }
     assert!(reconciler.seat_admission.status.subject("agent/node.big", 0).is_none());
     assert!(admit("small"));
 }
+
+#[test]
+fn a_restart_that_ignores_the_fit_starts_a_waiting_seat_and_holds_its_room() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+    apply_source(&store, r#"version 2
+agent "held" { workspace "/tmp"; command "true"; capacity cores=8 memory="24G" }
+agent "operations" { workspace "/tmp"; command "true"; capacity cores=2 memory="40G" }"#, "seats");
+    observe(&store, "agent/node.held", "running");
+    let operations = store.desired_subjects().unwrap().into_iter().find(|desired| desired.subject == "agent/node.operations").unwrap();
+    let member = operations.member.as_ref().unwrap();
+    assert!(!reconciler.admit_seat_start(&operations, member, None).unwrap());
+    let request = |fields: Value| store.append_claim(&ClaimInput {
+        subject: operations.subject.clone(), kind: "runtime.action.requested".into(), actor: Some("person/avery".into()),
+        fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    // An ordinary restart still waits for room.
+    let plain = request(json!({"action": "restart"}));
+    assert!(!reconciler.admit_seat_start(&operations, member, Some(&plain)).unwrap());
+    let ignoring = request(json!({"action": "restart", "ignore_fit": true, "reason": "the measurement is stale and Operations must run"}));
+    assert!(reconciler.admit_seat_start(&operations, member, Some(&ignoring)).unwrap());
+    let status = &reconciler.seat_admission.status;
+    assert!(status.subject("agent/node.operations", 0).is_none());
+    assert!(status.state().lane_starts.contains_key("agent/node.operations"), "its room counts once it starts");
+}

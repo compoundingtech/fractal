@@ -1,11 +1,32 @@
 {
   "version": 1,
   "summary": "Where lanes are on, a laned seat starts only when its lane fits the room the host has left for lanes, and says why it waits",
-  "replay": {"status": "none", "detail": "No claim or projection changes. The wait order and reasons live in the daemon's memory, as the seat admission queue's do."},
-  "schema": {"status": "none", "detail": "No stored data changes. The admission status a daemon serves gains laneWaits, and an agent's seat_admission field can carry a lane wait's reason and place."},
-  "rules": {"status": "changed", "detail": "With lanes = \"on\", a seat whose agent declares a capacity (its own or its mission's) is started only when its lane's memory fits: the host's installed memory less max(4G, memory/8), less the lanes of its other laned seats that run or were admitted to start in the last ten minutes, less the anonymous and kernel memory of seat scopes outside lanes. Its cores must fit the host's online CPUs less max(2, cores/8). Laned seats wait in order; one larger than the host can ever give waits out of line. Seats without a lane, and hosts with lanes off, are not held."},
-  "compatibility": {"status": "none", "detail": "Local to each daemon: nothing replicates. An older daemon starts laned seats as before."},
-  "downtime": {"status": "none", "detail": "Takes effect when the daemon starts with this build on a host with lanes on."},
-  "manual": {"status": "none", "detail": "Nothing to configure. A seat that waits names the host's free room in st agents show (ADMISSION)."},
-  "recovery": {"status": "none", "detail": "Reverting starts laned seats without the fit check again. Turning lanes off on a host removes the check there."}
+  "replay": {
+    "status": "none",
+    "detail": "No claim or projection changes. The wait order and reasons live in the daemon's memory, as the seat admission queue's do."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored data changes. The admission status a daemon serves gains laneWaits, and an agent's seat_admission field can carry a lane wait's reason and place. runtime.action.requested gains an optional ignore_fit boolean."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "With lanes = \"on\", a seat whose agent declares a capacity (its own or its mission's) is started only when its lane's memory fits: the host's installed memory less max(4G, memory/8), less the lanes of its other laned seats that run or were admitted to start in the last ten minutes, less the anonymous and kernel memory of seat scopes outside lanes. Its cores must fit the host's online CPUs less max(2, cores/8). Laned seats wait in order; one larger than the host can ever give waits out of line. Seats without a lane, and hosts with lanes off, are not held."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Admission is local to each daemon: nothing about it replicates, and an older daemon starts laned seats as before. A restart request with ignore_fit carries a field an older member's schema lacks: an older member keeps that replicated claim retryable (unknown-claim-field) and admits it once it upgrades, so nothing is refused or quarantined; only the seat's own host acts on it. An older daemon ignores ignore_fit in a restart request it receives, and an older CLI has no --ignore-fit."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Takes effect when the daemon starts with this build on a host with lanes on."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Nothing to configure. A seat that waits names the host's free room in st agents show (ADMISSION). To start one now despite its fit: st agents restart AGENT --ignore-fit --reason TEXT --as ACTOR, which records who asked and why on the restart request."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting starts laned seats without the fit check again. Turning lanes off on a host removes the check there."
+  }
 }

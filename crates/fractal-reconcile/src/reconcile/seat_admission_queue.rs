@@ -6,7 +6,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if !matches!(subject.kind.as_str(), "agent" | "exec" | "pty") {
             return Ok(true); // Internal gate runners share the runtime, not seat admission.
         }
-        let lane = match self.lane_fit(subject, member)? {
+        let lane = match self.lane_fit(subject, member, request)? {
             LaneFit::Waits => return Ok(false),
             LaneFit::Fits(lane) => Some(lane),
             LaneFit::Unlaned => None,
@@ -57,12 +57,22 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Whether a laned seat's lane fits now: what the host gives lanes, less the lanes of its other
     /// live seats and what its seats outside lanes hold. Seats wait for room in order, so a large
     /// lane is not passed by smaller ones; one larger than the host can ever give waits out of line.
-    fn lane_fit(&self, subject: &DesiredSubject, member: &MemberSpec) -> Result<LaneFit> {
+    fn lane_fit(&self, subject: &DesiredSubject, member: &MemberSpec, request: Option<&crate::model::ClaimRecord>) -> Result<LaneFit> {
         let (Some(host), Some(lane)) = (self.seat_admission.lanes, member.capacity) else {
             return Ok(LaneFit::Unlaned);
         };
         if subject.kind != "agent" {
             return Ok(LaneFit::Unlaned);
+        }
+        // A person, or an agent for one, may start a seat now despite the fit; the request records
+        // who and why.
+        if let Some(request) = request.filter(|request| request.body["fields"]["ignore_fit"] == true) {
+            eprintln!(
+                "st3: {} starts despite its lane's fit at {}'s request ({}): {}",
+                subject.subject, request.actor.as_deref().unwrap_or("an unknown actor"), request.id,
+                request.body["fields"]["reason"].as_str().unwrap_or("no reason given"),
+            );
+            return Ok(LaneFit::Fits(lane));
         }
         smallclaims::touched::note_read(|| "seat-admission".into());
         let status = &self.seat_admission.status;
