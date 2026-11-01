@@ -157,7 +157,17 @@ def main():
         assert done.returncode != 0 and calls(['release', 'create']) == 1 and '403' in done.stderr, (done, current())
         done = publish(None, (['release', 'create'], 'before', 99, TIMEOUT))
         assert done.returncode != 0 and calls(['release', 'create']) == 4 and '504' in done.stderr, (done, current())
+        # Publishing that took effect on the last attempt still counts as done.
+        done = publish(None, (['release', 'edit'], 'before', 3, TIMEOUT), (['release', 'edit'], 'after', 1, TIMEOUT))
+        assert done.returncode == 0 and published() and calls(['release', 'edit']) == 4, (done, current())
 
+        # An archive without its sidecar is refused before gh is called.
+        sidecar = dist / 'fractal-web-embed.tar.gz.sha256'
+        kept = sidecar.read_text()
+        sidecar.unlink()
+        done = publish()
+        assert done.returncode != 0 and 'no SHA-256 sidecar' in done.stderr and current()['calls'] == [], (done, current())
+        sidecar.write_text(kept)
         # Archives that do not match their sidecars are refused before gh is called.
         (dist / 'fractal-web-embed.tar.gz').write_bytes(b'changed')
         done = publish()

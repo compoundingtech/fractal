@@ -60,10 +60,14 @@ def main():
         raise SystemExit('release-publish-embed: --source must be a full lowercase commit hash')
     dist = args.dist.resolve()
     files = sorted([*dist.glob('*.tar.gz'), *dist.glob('*.sha256')])
-    if not any(f.name.endswith('.tar.gz') for f in files):
+    archives = [f for f in files if f.name.endswith('.tar.gz')]
+    if not archives:
         raise SystemExit(f'release-publish-embed: {dist} holds no archive')
+    unsigned = [f.name for f in archives if not f.with_name(f.name + '.sha256').is_file()]
+    if unsigned:
+        raise SystemExit(f'release-publish-embed: these archives have no SHA-256 sidecar: {unsigned}')
     checked = subprocess.run(['sha256sum', '--check', *[f.name for f in files if f.name.endswith('.sha256')]],
-                             cwd=dist, text=True, capture_output=True)
+                             cwd=dist, text=True, capture_output=True, stdin=subprocess.DEVNULL)
     if checked.returncode != 0:
         raise SystemExit(f'release-publish-embed: the archives do not match their sidecars: {checked.stdout}{checked.stderr}')
     tag = f'embed-{args.source}'

@@ -41,6 +41,10 @@ def gh(*args, step, check=True, done=None):
             print(f'{step}: gh {" ".join(args[:2])} took effect before it failed; going on',
                   file=sys.stderr, flush=True)
             return subprocess.CompletedProcess(result.args, 0, '', '')
+    # The last attempt can also have taken effect before it failed.
+    if transient(result) and done is not None and done():
+        print(f'{step}: gh {" ".join(args[:2])} took effect before it failed; going on', file=sys.stderr, flush=True)
+        return subprocess.CompletedProcess(result.args, 0, '', '')
     if check and result.returncode != 0:
         raise SystemExit(f'{step}: gh {" ".join(args[:2])} failed: {result.stderr.strip() or result.stdout.strip()}')
     return result
