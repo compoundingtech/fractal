@@ -5107,11 +5107,11 @@ agent "seat" {
         for (old, new) in [("", "capacity cores=2"), ("capacity cores=2", "capacity cores=3"), ("capacity cores=2", "")] {
             // Accepted, with the header's reviewers, and the step itself carries unchanged.
             let (compatible, reviewers) =
-                crate::store::analyze_mission_revision(&spec(old), &spec(new), "person/author").unwrap();
+                crate::store::analyze_mission_revision(&spec(old), &spec(new), "person/requester").unwrap();
             assert_eq!(compatible, BTreeSet::from(["work".to_owned()]), "{old} -> {new}");
             assert!(reviewers.contains("person/reviewer"), "{old} -> {new}: {reviewers:?}");
         }
-        let unchanged = crate::store::analyze_mission_revision(&spec(""), &spec(""), "person/author").unwrap_err();
+        let unchanged = crate::store::analyze_mission_revision(&spec(""), &spec(""), "person/requester").unwrap_err();
         assert_eq!(unchanged.code, "unchanged-mission-revision");
     }
 

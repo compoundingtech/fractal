@@ -178,7 +178,7 @@ impl Raise {
 pub fn show_memory(bytes: u64) -> String {
     [(40, 'T'), (30, 'G'), (20, 'M'), (10, 'K')]
         .into_iter()
-        .find(|(shift, _)| bytes >= 1 << shift && bytes % (1 << shift) == 0)
+        .find(|(shift, _)| bytes >= 1 << shift && bytes.is_multiple_of(1 << shift))
         .map_or_else(|| bytes.to_string(), |(shift, unit)| format!("{}{unit}", bytes >> shift))
 }
 
