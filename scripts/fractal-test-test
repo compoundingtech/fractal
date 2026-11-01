@@ -3938,6 +3938,41 @@ class KeyedClippy(StTest):
     def clippy_notes(self):
         return [s['predicate']['observed'] for s in self.statements() if 'linux-clippy' in s['predicate']['observed']['checks']]
 
+    def test_report_python_survives_a_home_without_the_callers_profile_without_admitting_sibling_tools(self):
+        caller_bin = Path(self.tmp.name) / 'caller-bin'
+        caller_bin.mkdir()
+        # Distinct copied entry points model venv --copies; their path identities need not match.
+        for name in ('python', 'python3'):
+            shutil.copy2(sys.executable, caller_bin / name)
+        for name in ('nix', 'sibling-tool'):
+            (caller_bin / name).write_text('#!/bin/sh\nexit 99\n')
+            (caller_bin / name).chmod(0o755)
+        trusted_bin = Path(self.tmp.name) / 'canonical-bin'
+        trusted_bin.mkdir()
+        (trusted_bin / 'nix').write_text('#!/bin/sh\nexit 0\n')
+        (trusted_bin / 'nix').chmod(0o755)
+        with mock.patch.object(st_test, 'CHECK_PATH', (str(trusted_bin),)), \
+                mock.patch.object(st_test, 'resolve_nix', return_value=None), \
+                mock.patch.object(sys, 'executable', str(caller_bin / 'python')), \
+                mock.patch.dict(os.environ, HOME=str(self.home), PATH=str(caller_bin)):
+            path = st_test.check_path()
+            self.assertEqual(path, str(trusted_bin), 'canonical PATH must not include interpreter siblings')
+            environment = st_test.report_environment(self.tmp.name, dict(os.environ, PATH=path))
+        self.assertEqual(shutil.which('nix', path=environment['PATH']), str(trusted_bin / 'nix'))
+        self.assertIsNone(shutil.which('sibling-tool', path=environment['PATH']))
+        python_bin = Path(environment['PATH'].split(os.pathsep)[0])
+        self.assertEqual([entry.name for entry in python_bin.iterdir()], ['python3'])
+        for check in ('linux-clippy', 'rust-tests'):
+            self.assertEqual(LOCAL[check][0], 'python3', 'portable report argv still matches the evidence policy')
+            done = subprocess.run([LOCAL[check][0], '-I', '-c', 'print("report python works")'],
+                                  env=environment, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(done.stdout.strip(), 'report python works')
+        code, out, err = self.run_clippy('linux-clippy')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['clippy'])
+        self.assertEqual(len(self.clippy_notes()), 1)
+
     def test_unsigned_linux_clippy_is_signed_from_linux_gates_clippy_stage_which_runs_once(self):
         code, out, err = self.run_clippy('linux-gate', 'linux-clippy')
         self.assertEqual(code, 0, out + err)
