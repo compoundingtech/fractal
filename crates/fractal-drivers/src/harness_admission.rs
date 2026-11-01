@@ -4,8 +4,13 @@
 //! and the probe implementation. Version strings alone never authorize native delivery. Probes
 //! use empty disposable homes and a local model fixture; they never open a managed conversation.
 
+mod attempt;
+#[cfg(test)]
+mod attempt_tests;
 pub(crate) mod fixture;
 mod omp;
+pub use attempt::AttemptDiagnostic;
+use attempt::Capture;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
@@ -244,6 +249,7 @@ pub struct Admission {
     pub failed: Option<Reason>,
     pub cache_path: Option<PathBuf>,
     pub override_reason: Option<String>,
+    pub attempt: Option<AttemptDiagnostic>,
 }
 
 impl Admission {
@@ -276,7 +282,7 @@ impl Admission {
 
     pub fn publish(&self, publisher: &mut Publisher) {
         if let Some(reason) = self.failed {
-            publisher.publish(
+            publisher.publish_admission(
                 Stage::VersionGate,
                 reason,
                 if reason == Reason::VersionProbeFailed {
@@ -284,6 +290,7 @@ impl Admission {
                 } else {
                     Source::AdmissionProbe
                 },
+                self.attempt.clone().map(Box::new),
             );
         } else {
             publisher.clear(Stage::VersionGate);
@@ -305,26 +312,109 @@ impl Admission {
 /// Admit before taking ownership of the live seat. The cache is shared by this user's seats;
 /// callers retain their different policies: omp refuses launch, OpenCode disables delivery.
 pub fn admit(binary: &str, driver: Driver, adapter: Option<&Path>) -> Admission {
+    admit_recorded(binary, driver, adapter, None)
+}
+
+/// Persist the attempt boundary before its disposable captures disappear. Diagnostic writes
+/// never affect the gate result; the publisher reports persistence failures separately.
+pub fn admit_for_agent(
+    binary: &str,
+    driver: Driver,
+    adapter: Option<&Path>,
+    agent_dir: &Path,
+) -> Admission {
+    admit_recorded(binary, driver, adapter, Some(agent_dir))
+}
+
+fn admit_recorded(
+    binary: &str,
+    driver: Driver,
+    adapter: Option<&Path>,
+    agent_dir: Option<&Path>,
+) -> Admission {
     let cache = crate::run::harness_state_root().join("harness-admission");
-    match admit_at(binary, driver, adapter, &cache) {
-        Ok(result) => result,
+    let incarnation = crate::contracts::env("ST3_INCARNATION").unwrap_or_default();
+    observe_at(binary, driver, adapter, &cache, &incarnation, |admission| {
+        if let Some(agent_dir) = agent_dir {
+            let mut publisher = Publisher::new(
+                agent_dir,
+                driver,
+                admission.version.clone(),
+                admission.support(),
+            );
+            admission.publish(&mut publisher);
+        }
+    })
+}
+
+fn observe_at(
+    binary: &str,
+    driver: Driver,
+    adapter: Option<&Path>,
+    cache: &Path,
+    incarnation: &str,
+    publish: impl FnOnce(&Admission),
+) -> Admission {
+    let mut capture = Capture::new(incarnation);
+    let mut scratch = None;
+    let result = admit_inner(
+        binary,
+        driver,
+        adapter,
+        cache,
+        &mut capture,
+        &mut scratch,
+        Scratch::new,
+    );
+    let mut admission = match result {
+        Ok(admission) => admission,
         Err(error) => {
             tracing::warn!("{} admission indeterminate: {error:#}", driver.as_str());
+            capture.error(&error);
             Admission {
                 version: None,
                 failed: Some(Reason::AdmissionIndeterminate),
                 cache_path: None,
                 override_reason: None,
+                attempt: None,
             }
         }
+    };
+    if admission.failed.is_some() {
+        admission.attempt = Some(capture.finish(scratch.as_ref(), driver));
     }
+    // `scratch` is deliberately owned here, rather than by admit_inner. Publication therefore
+    // runs after child cleanup but before TempDir deletes version/probe stderr.
+    publish(&admission);
+    admission
 }
 
+#[cfg(test)]
 fn admit_at(
     binary: &str,
     driver: Driver,
     adapter: Option<&Path>,
     cache: &Path,
+) -> Result<Admission> {
+    admit_inner(
+        binary,
+        driver,
+        adapter,
+        cache,
+        &mut Capture::new(""),
+        &mut None,
+        Scratch::new,
+    )
+}
+
+fn admit_inner(
+    binary: &str,
+    driver: Driver,
+    adapter: Option<&Path>,
+    cache: &Path,
+    capture: &mut Capture,
+    scratch_owner: &mut Option<Scratch>,
+    create_scratch: fn() -> Result<Scratch>,
 ) -> Result<Admission> {
     let installed = installed_identity(binary, driver, adapter)?;
     let exception_path = override_path(cache, &installed)?;
@@ -351,14 +441,25 @@ fn admit_at(
             failed: None,
             cache_path: Some(exception_path),
             override_reason: Some(record.reason),
+            attempt: None,
         });
     }
     let executable = installed.executable;
-    let scratch = Scratch::new()?;
+    capture.phase("scratch", None);
+    *scratch_owner = Some(create_scratch()?);
+    let scratch = scratch_owner.as_ref().unwrap();
+    capture.phase("version", Some(Duration::from_secs(5)));
     let mut command = scratch.command(&executable);
     command.arg("--version");
     let mut child = scratch.spawn(&mut command, "version")?;
-    let status = child.wait_until(Instant::now() + Duration::from_secs(5))?;
+    let waited = child.wait_until(Instant::now() + Duration::from_secs(5));
+    if waited.is_err()
+        && let Ok(exit) = child.terminate()
+    {
+        capture.exit(exit);
+    }
+    let status = waited?;
+    capture.exit(status);
     drop(child);
     let printed = scratch.capture("version.stdout")?;
     let version = status
@@ -367,11 +468,16 @@ fn admit_at(
         .flatten()
         .map(|(token, _)| token.to_owned());
     let Some(version) = version else {
+        capture.failure(
+            "invalidVersion",
+            "version child failed or did not print a recognized release",
+        );
         return Ok(Admission {
             version: None,
             failed: Some(Reason::VersionProbeFailed),
             cache_path: None,
             override_reason: None,
+            attempt: None,
         });
     };
     let identity = Identity {
@@ -382,6 +488,7 @@ fn admit_at(
         adapter_digest: installed.adapter_digest,
         probe_digest: probe_digest(),
     };
+    capture.phase("cache", Some(Duration::from_secs(60)));
     fs::create_dir_all(cache)?;
     let key = digest(&serde_json::to_vec(&identity)?);
     let path = cache.join(format!("{}-{key}.json", driver.as_str()));
@@ -400,16 +507,22 @@ fn admit_at(
                 )
         });
     let record = match cached {
-        Some(record) => record,
+        Some(record) => {
+            if record.probe_failure.is_some() || record.measurements.iter().any(|m| !m.passed) {
+                capture.failure("cachedFailure", "the matching admission cache records a failed contract; no contract child ran in this attempt");
+            }
+            record
+        }
         None => {
+            capture.phase("contract", Some(PROBE_TIMEOUT));
             let started = Instant::now();
             let probe = match driver {
                 Driver::Omp => omp::probe(
                     &executable,
                     adapter.context("omp needs its shipped extension")?,
-                    &scratch,
+                    scratch,
                 ),
-                Driver::OpenCode => crate::opencode_session::probe_admission(&executable, &scratch)
+                Driver::OpenCode => crate::opencode_session::probe_admission(&executable, scratch)
                     .map(|measurements| {
                         let diagnostic = measurements.iter().find(|m| !m.passed).map(|m| {
                             ProbeDiagnostic {
@@ -453,8 +566,10 @@ fn admit_at(
                 }
             };
             if let Some(diagnostic) = &diagnostic {
+                capture.probe(diagnostic);
                 tracing::warn!(?diagnostic, "{} admission probe failed", driver.as_str());
             }
+            capture.phase("identityRecheck", None);
             // Replacing the binary or adapter while the probe ran cannot produce a pass for
             // either build. Next launch measures the replacement under its own identity.
             anyhow::ensure!(
@@ -475,6 +590,7 @@ fn admit_at(
                 probe_failure,
                 diagnostic,
             };
+            capture.phase("publication", None);
             crate::fsatomic::replace(
                 &path,
                 &serde_json::to_vec_pretty(&record)?,
@@ -498,6 +614,7 @@ fn admit_at(
         }),
         cache_path: Some(path),
         override_reason: None,
+        attempt: None,
     })
 }
 
@@ -732,7 +849,7 @@ impl Scratch {
             .stdin(Stdio::piped())
             .stdout(File::create(self.path(&format!("{name}.stdout")))?)
             .stderr(File::create(self.path(&format!("{name}.stderr")))?);
-        Ok(ProbeProcess(command.spawn()?))
+        Ok(ProbeProcess(command.spawn()?, false))
     }
     fn stderr_tail(&self, name: &str) -> Result<String> {
         use std::io::{Seek, SeekFrom};
@@ -769,7 +886,7 @@ impl Scratch {
     }
 }
 
-pub(crate) struct ProbeProcess(pub(crate) Child);
+pub(crate) struct ProbeProcess(pub(crate) Child, bool);
 impl ProbeProcess {
     fn wait_until(&mut self, deadline: Instant) -> Result<std::process::ExitStatus> {
         loop {
@@ -781,14 +898,22 @@ impl ProbeProcess {
         }
     }
 }
-impl Drop for ProbeProcess {
-    fn drop(&mut self) {
-        // The disposable provider may have started its channel/tools. Kill the entire probe
-        // group even if the direct child already exited, and always reap the direct child.
+impl ProbeProcess {
+    fn terminate(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        // Also kill descendants after a direct child exit, as the original Drop boundary did.
         unsafe {
             libc::kill(-(self.0.id() as i32), libc::SIGKILL);
         }
-        let _ = self.0.wait();
+        let exit = self.0.wait()?;
+        self.1 = true;
+        Ok(exit)
+    }
+}
+impl Drop for ProbeProcess {
+    fn drop(&mut self) {
+        if !self.1 {
+            let _ = self.terminate();
+        }
     }
 }
 
