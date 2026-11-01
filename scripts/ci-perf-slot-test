@@ -45,11 +45,18 @@ def validate_receipt(receipt):
     require(receipt["remaining_units"] == receipt["remaining_cgroups"] == 0)
     if receipt.get("skip") == "no-user-manager":
         require(not re.search(r"/user@\d+\.service(?:/|$)", receipt["caller_cgroup"]))
+        require(receipt["gate_slot"] == {"unit": None, "cgroup": None} and not receipt["fixtures"])
         return
+    admission = receipt["gate_slot"]
+    require(all(isinstance(admission[key], str) and admission[key] for key in ("unit", "cgroup")))
+    admitted = Path(os.path.normpath(admission["cgroup"]))
+    require(admitted.is_absolute() and admitted.name == admission["unit"])
+    require(Path(os.path.normpath(receipt["caller_cgroup"])).is_relative_to(admitted))
     fixtures = receipt["fixtures"]
     require(len(fixtures) == 2 and len({r["unit"] for r in fixtures}) == 2)
     for record in fixtures:
         require(os.path.normpath(record["caller_slice"]) == os.path.dirname(os.path.normpath(receipt["gate_slot"]["cgroup"])))
+        require(os.path.normpath(record["parent_slice"]) in receipt["scanned_roots"])
         require(record["drain"] == "empty and collected")
         require(type(record["peak_sampled_before_termination"]) is int and record["peak_sampled_before_termination"] >= 0)
         final = record["peak_final_lifecycle"]
@@ -62,8 +69,7 @@ def validate_receipt(receipt):
         require(record["manager"]["Slice"] == record["slice"] == Path(record["parent_slice"]).name)
         require(record["cgroup"] == f"{record['caller_slice']}/{record['unit']}")
         require(runtime_usec(record["manager"]["RuntimeMaxUSec"]) == record["RuntimeMaxUSec"])
-        for field in ("pid", "starttime", "cgroup", "slice", "caller_slice", "parent_slice"):
-            require(record[field])
+        require(all(record[field] for field in ("pid", "starttime", "cgroup", "slice", "caller_slice", "parent_slice")))
         require(record["unit"].startswith(f"ci-perf-slot-fixture-{receipt['invocation']}-"))
 
 
@@ -75,13 +81,13 @@ def fixture_cgroups(lane, prefix):
 
 
 def receipt_directory(path, roots):
-    assert stat.S_ISDIR(os.lstat(path).st_mode), "receipt sink must be a real directory"
+    require(stat.S_ISDIR(os.lstat(path).st_mode), "receipt sink must be a real directory")
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
-        assert info.st_uid == os.geteuid() and not info.st_mode & 0o022, "unsafe receipt directory owner or mode"
+        require(info.st_uid == os.geteuid() and not info.st_mode & 0o022, "unsafe receipt directory owner or mode")
         resolved = Path(os.path.realpath(f"/proc/self/fd/{fd}"))
-        assert not any(resolved.is_relative_to(Path(root).resolve()) for root in roots), "receipt sink is disposable"
+        require(not any(resolved.is_relative_to(Path(root).resolve()) for root in roots), "receipt sink is disposable")
         return fd
     except BaseException:
         os.close(fd)
@@ -114,7 +120,7 @@ class EvidenceTee:
 
 @contextlib.contextmanager
 def receipt_sink(path):
-    receipt = {"invocation": os.urandom(12).hex(), "fixtures": []}
+    receipt = {"invocation": os.urandom(12).hex(), "fixtures": [], "scanned_roots": []}
     if not path:
         yield receipt
         return
@@ -134,7 +140,7 @@ def receipt_sink(path):
     try:
         group = cgroup_path(Path("/proc/self/cgroup").read_text())
         admitted = os.environ.get("GATE_SLOT_SCOPE_UNIT")
-        assert not admitted or admitted in group.split("/"), "admission marker does not match kernel cgroup"
+        require(not admitted or admitted in group.split("/"), "admission marker does not match kernel cgroup")
         receipt.update(status="started", outcome="failure", caller_pid=os.getpid(),
                        caller_starttime=starttime(Path("/proc/self/stat").read_text()),
                        caller_cgroup=group,
@@ -226,11 +232,11 @@ def alive(pid):
 
 def cgroup_path(text):
     lines = text.splitlines()
-    assert lines and all(re.fullmatch(r"\d+:[^:]*:/.*", line) for line in lines), "malformed cgroup metadata"
+    require(lines and all(re.fullmatch(r"\d+:[^:]*:/.*", line) for line in lines), "malformed cgroup metadata")
     paths = [line[3:] for line in lines if line.startswith("0::")]
-    assert len(paths) == 1, "missing or duplicate unified cgroup metadata"
+    require(len(paths) == 1, "missing or duplicate unified cgroup metadata")
     path = paths[0]
-    assert path == "/" or all(part not in ("", ".", "..") for part in path[1:].split("/")), "malformed cgroup path"
+    require(path == "/" or all(part not in ("", ".", "..") for part in path[1:].split("/")), "malformed cgroup path")
     return path
 
 
@@ -289,7 +295,7 @@ for invalid in (f"{manager}/app.slice/outer.scope/child", manager, f"{manager}/i
 for metadata in ("", "not cgroup metadata", "0::relative", "0::/a\n0::/b\n", "0::/a/../b\n"):
     try:
         caller_slice(metadata)
-    except AssertionError:
+    except ValueError:
         pass
     else:
         raise AssertionError("malformed cgroup metadata must fail, not skip")
@@ -349,15 +355,12 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
     for error in (PermissionError(13, "denied", str(sink)), FileNotFoundError(2, "gone", str(sink / "child"))):
         with patch.object(os, "walk", side_effect=lambda lane, onerror: onerror(error)), TestCase().assertRaises(type(error)):
             fixture_cgroups(sink, "fixture-")
-    for final in (False, True):
-        record = {}
-        try:
-            peak(record, sink, final)
-        except FileNotFoundError:
-            assert not final
-            assert record["peak_sampled_before_termination"].startswith("unavailable")
-        else:
-            assert final and record["peak_final_lifecycle"] == "unavailable (collected)"
+    record = {}
+    with TestCase().assertRaises(FileNotFoundError):
+        peak(record, sink)
+    assert record["peak_sampled_before_termination"].startswith("unavailable")
+    peak(record, sink, final=True)
+    assert record["peak_final_lifecycle"] == "unavailable (collected)"
     real_directory = receipt_directory
     for refusal in ("symlink", "mode", "owner", "disposable", "missing"):
         link = sink / "link"
@@ -366,7 +369,7 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
         with patch.object(subprocess, "Popen") as launched, contextlib.ExitStack() as stack:
             if refusal == "owner":
                 stack.enter_context(patch.object(os, "geteuid", return_value=-1))
-            with TestCase().assertRaises((AssertionError, OSError)):
+            with TestCase().assertRaises((ValueError, OSError)):
                 receipt_directory(link if refusal == "symlink" else sink / "missing" if refusal == "missing" else sink,
                                   [sink] if refusal == "disposable" else [])
             launched.assert_not_called()
@@ -393,26 +396,32 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
                 assert outcome == "success"
             data = json.loads(next(p for p in sink.iterdir() if p.name.endswith(".json")).read_text())
             assert data["status"] == ("started" if outcome == "write-error" else "final")
-            if outcome != "write-error":
-                assert data["outcome"] == outcome
-                if outcome == "interrupted":
-                    assert data["signal"] == "SIGTERM"
+            assert outcome == "write-error" or data["outcome"] == outcome
+            assert outcome != "interrupted" or data["signal"] == "SIGTERM"
+    code = "import ast,sys; t=ast.parse(open(sys.argv[1]).read()); exec(compile(ast.Module([n for n in t.body if isinstance(n,(ast.Import,ast.ImportFrom,ast.FunctionDef))],[]),sys.argv[1],'exec')); receipt_directory(sys.argv[2],[sys.argv[2]])"
+    refused = subprocess.run([sys.executable, "-O", "-c", code, str(Path(__file__).resolve()), str(sink)], capture_output=True)
+    assert refused.returncode != 0 and b"receipt sink is disposable" in refused.stderr
     good = dict(data, outcome="success", status="final", ended_utc=utc(), remaining_units=0, remaining_cgroups=0,
-                skip="no-user-manager", caller_cgroup="/system.slice/runner.service")
+                skip="no-user-manager", caller_cgroup="/system.slice/runner.service", fixtures=[], gate_slot={"unit": None, "cgroup": None})
     validate_receipt(good)
+    parent = f"{manager}/ci.slice"
     fixture = dict(unit=f"ci-perf-slot-fixture-{good['invocation']}-0.scope", pid=1, starttime=1,
-                   slice="app.slice", caller_slice="/app.slice", parent_slice="/app.slice",
+                   slice="ci.slice", caller_slice=parent, parent_slice=parent,
                    limits={"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}, RuntimeMaxUSec=90000000,
-                   manager={"MemoryMax": "67108864", "MemorySwapMax": "0", "TasksMax": "16", "RuntimeMaxUSec": "90s", "Slice": "app.slice"},
+                   manager={"MemoryMax": "67108864", "MemorySwapMax": "0", "TasksMax": "16", "RuntimeMaxUSec": "90s", "Slice": "ci.slice"},
                    peak_sampled_before_termination=1, peak_final_lifecycle="unavailable (collected)", drain="empty and collected")
     fixtures = [dict(fixture, unit=fixture["unit"].replace("-0.scope", f"-{n}.scope")) for n in range(2)]
     for record in fixtures:
-        record["cgroup"] = f"/app.slice/{record['unit']}"
+        record["cgroup"] = f"{parent}/{record['unit']}"
         record["manager"] = dict(record["manager"], ControlGroup=record["cgroup"])
-    complete = dict(good, skip=None, fixtures=fixtures, gate_slot={"unit": "gate.scope", "cgroup": "/app.slice/gate.scope"})
+    complete = dict(good, skip=None, fixtures=fixtures, gate_slot={"unit": "gate.scope", "cgroup": f"{parent}/gate.scope"},
+                    caller_cgroup=f"{parent}/gate.scope/child", scanned_roots=[parent])
     validate_receipt(complete)
     wrong = dict(complete, gate_slot={"unit": "gate.scope", "cgroup": "/other.slice/gate.scope"})
-    for candidate, accepted in ((complete, True), (wrong, False), (dict(complete, outcome="failure"), False)):
+    for candidate, accepted in ((complete, True), (wrong, False), (dict(complete, outcome="failure"), False),
+                                (dict(complete, gate_slot={"unit": None, "cgroup": None}), False),
+                                (dict(complete, caller_cgroup="/system.slice/runner.service"), False),
+                                (dict(complete, scanned_roots=[]), False)):
         (sink / "cli.json").write_text(json.dumps(candidate))
         result = subprocess.run([sys.executable, "-O", str(Path(__file__).resolve()), "--validate-receipt", str(sink / "cli.json")], capture_output=True)
         assert (result.returncode == 0) == accepted, result.stderr.decode()
@@ -549,9 +558,11 @@ with receipt_sink(os.environ.get("CI_PERF_SLOT_RECEIPT_DIR")) as receipt, tempfi
                 until(no_fixtures, "all fixture scopes and processes are gone")
                 receipt["remaining_units"] = len(fixture_listing(systemctl, receipt["invocation"]).splitlines())
                 manager_root = Path("/sys/fs/cgroup", slice_path.lstrip("/").split(".service/", 1)[0] + ".service")
-                receipt["remaining_cgroups"] = sum(fixture_cgroups(manager_root / lane, f"ci-perf-slot-fixture-{receipt['invocation']}-")
-                                                  for lane in ("app.slice", "builds.slice"))
-                assert receipt["remaining_units"] == receipt["remaining_cgroups"] == 0, "fixture cgroups remain"
+                receipt["scanned_roots"] = sorted({str(manager_root / lane).removeprefix("/sys/fs/cgroup") for lane in ("app.slice", "builds.slice")} |
+                                                 {record.get("parent_slice", slice_path) for record in evidence.values()})
+                receipt["remaining_cgroups"] = sum(fixture_cgroups(Path("/sys/fs/cgroup", lane.lstrip("/")), f"ci-perf-slot-fixture-{receipt['invocation']}-")
+                                                  for lane in receipt["scanned_roots"])
+                require(receipt["remaining_units"] == receipt["remaining_cgroups"] == 0, "fixture cgroups remain")
                 cleaned = True
             except subprocess.TimeoutExpired as error:
                 raise AssertionError("fixture drain unconfirmed: wrapper did not exit after TERM/KILL deadlines") from error
