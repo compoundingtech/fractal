@@ -415,7 +415,7 @@ enum Fetched {
     Observations { generation: u64, outcome: Result<(Vec<fractal_client::ResourceObservation>, bool), String> },
     Inventory { generation: u64, result: InventoryRead },
     /// The objectives and budgets the Usage view shows, or why st could not say.
-    Slo { generation: u64, outcome: Result<Vec<fractal_client::SloRow>, String> },
+    Slo { generation: u64, outcome: Result<(Vec<fractal_client::SloRow>, Option<String>), String> },
     /// What was left of one objective or budget across the chart period.
     SloHistory { generation: u64, id: String, outcome: Result<fractal_client::SloHistory, String> },
     /// st's conversation search for the palette's query, or why st could not say.
@@ -731,7 +731,7 @@ pub fn run(context: Context) -> Result<()> {
                     inventory_sent = None; legacy_requested.clear(); legacy_pending.clear();
                     slo_stale = true; slo_reading = false; slo_history_asked.clear();
                     // Another member's objectives are not this one's: drop them until it answers.
-                    extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None;
+                    extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None; extras.slo_otel_url = None;
                     extras.live = false;
                     attached = None;
                     shown_tab = usize::MAX;
@@ -1208,8 +1208,9 @@ pub fn run(context: Context) -> Result<()> {
                     slo_reading = false;
                     if generation != resources_generation { continue; }
                     match outcome {
-                        Ok(rows) => {
+                        Ok((rows, otel_url)) => {
                             extras.slo = Load::Ready(rows);
+                            extras.slo_otel_url = otel_url;
                             extras.slo_stale = None;
                             // A chart open now is read again beside the fresh rows.
                             slo_history_asked.clear();
@@ -1347,7 +1348,7 @@ pub fn run(context: Context) -> Result<()> {
             slo_stale = false; slo_reading = true;
             let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
             runtime.spawn(async move {
-                let outcome = reader.slo_list().await.map(|reply| reply.value.rows).map_err(|error| super::objectives::error(&error));
+                let outcome = reader.slo_list().await.map(|reply| (reply.value.rows, reply.value.otel_ui_url)).map_err(|error| super::objectives::error(&error));
                 let _ = tx.send(Fetched::Slo { generation, outcome });
             });
         }
