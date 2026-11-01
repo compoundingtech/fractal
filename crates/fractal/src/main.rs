@@ -7291,6 +7291,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(store.clone(), interval));
     }
     spawn_response_expiry(store.clone());
+    fractal_daemon::slo::note_checkpoint_enabled(config.checkpoint.enabled);
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),

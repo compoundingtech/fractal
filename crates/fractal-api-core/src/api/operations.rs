@@ -136,6 +136,8 @@ pub async fn doctor(
     ));
     report.checks.extend(crate::github_admission::doctor_lines(client_now_ms()));
     report.checks.push(reader_store.mailbox_wake_health());
+    let (status, message) = crate::slo::store_retention_check();
+    report.checks.push(DoctorCheck { name: "store-retention".into(), status: status.into(), message });
     report.checks.push(descriptor_check());
     report.checks.push(reader_memory_check(
         reader_store.readers.usage(),
