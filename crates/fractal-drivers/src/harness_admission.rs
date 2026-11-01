@@ -27,6 +27,9 @@ use sha2::{Digest, Sha256};
 
 use crate::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage};
 
+// A cold runtime in the isolated HOME inherits the seat background policy. Give its
+// version startup headroom without changing the separately bounded contract probe.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 const SCHEMA: &str = "st.harness-admission.v1";
 const MAX_CAPTURE: u64 = 8 * 1024 * 1024;
@@ -448,11 +451,11 @@ fn admit_inner(
     capture.phase("scratch", None);
     *scratch_owner = Some(create_scratch()?);
     let scratch = scratch_owner.as_ref().unwrap();
-    capture.phase("version", Some(Duration::from_secs(5)));
+    capture.phase("version", Some(VERSION_TIMEOUT));
     let mut command = scratch.command(&executable);
     command.arg("--version");
     let mut child = scratch.spawn(&mut command, "version")?;
-    let waited = child.wait_until(Instant::now() + Duration::from_secs(5));
+    let waited = child.wait_until(Instant::now() + VERSION_TIMEOUT);
     if waited.is_err()
         && let Ok(exit) = child.terminate()
     {
@@ -1561,3 +1564,6 @@ pub(crate) mod tests {
         assert!(result.iter().all(|m| m.passed), "{result:?}");
     }
 }
+
+#[cfg(test)]
+mod version_tests;

@@ -46,7 +46,7 @@ fn timed_out_version_is_durable_before_scratch_cleanup_and_after_it() {
     let directory = tempfile::tempdir().unwrap();
     let (binary, adapter) = producer(
         directory.path(),
-        "printf 'scratch=%s\\n' \"$HOME\" >&2\nprintf 'Authorization: Bearer fixture-credential\\n' >&2\nsleep 30",
+        "printf 'scratch=%s\\n' \"$HOME\" >&2\nprintf 'Authorization: Bearer fixture-credential\\n' >&2\nwhile :; do sleep 60; done",
     );
     let agent = directory.path().join("agent");
     fs::create_dir(&agent).unwrap();
@@ -94,8 +94,8 @@ fn timed_out_version_is_durable_before_scratch_cleanup_and_after_it() {
     assert_eq!(diagnostic.incarnation, "attempt-a");
     assert_eq!(diagnostic.phase, "version");
     assert_eq!(diagnostic.outcome, "timeout");
-    assert_eq!(diagnostic.deadline_ms, Some(5000));
-    assert!(diagnostic.elapsed_ms >= 5000);
+    assert_eq!(diagnostic.deadline_ms, Some(VERSION_TIMEOUT.as_millis() as u64));
+    assert!(diagnostic.elapsed_ms >= VERSION_TIMEOUT.as_millis() as u64);
     assert_eq!(diagnostic.exit_signal, Some(libc::SIGKILL));
     assert!(
         diagnostic
