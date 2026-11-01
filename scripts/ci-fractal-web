@@ -172,6 +172,12 @@ exclusive_lanes() {
   fi
   if [ "${KIT_INPUTS:-true}" = true ]; then
     lane "UI kit strict plays (440/1440 × dark/light)" kit_plays
+    if [ "${KIT_PLAY_SET:-all}" = commit ] && [ "${KIT_CHANGED_STORIES:-[]}" != '[]' ]; then
+      lane "UI kit changed-story rendering and interaction (no CPU measurement)" \
+        env KIT_PLAY_SET=changed KIT_PLAY_A11Y=off KIT_PLAY_SHARD_INDEX=0 KIT_PLAY_SHARD_COUNT=1 \
+        node packages/fractal-ui/scripts/kit-play-gate.mjs \
+        packages/fractal-ui/storybook-static "$kit_receipt_dir/changed-stories"
+    fi
   fi
 }
 # --- end kit lane selection

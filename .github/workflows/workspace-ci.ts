@@ -921,6 +921,7 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
     outputs: {
       relevant: '${{ steps.detect.outputs.relevant }}',
       'kit-inputs': '${{ steps.detect.outputs.kit-inputs }}',
+      'changed-stories': '${{ steps.detect.outputs.changed-stories }}',
     },
     steps: [
       fractalWebRunnerStep,
@@ -985,6 +986,7 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
           // axe; scripts/kit-play-commit-set.mjs lists what it leaves out), with a raw CPU ceiling;
           // merge groups (observed and signed) and manual runs keep every story, in four cases, with axe.
           KIT_PLAY_SET: kitPlaySetExpression,
+          KIT_CHANGED_STORIES: "${{ github.event_name == 'pull_request' && needs.fractal-web-changes.outputs.changed-stories || '[]' }}",
           KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
           KIT_PLAY_WALL_GUARD_SECONDS: "${{ github.event_name == 'pull_request' && '268' || '' }}",
           // Pull requests run the app unit tests that import a changed file (all of them when a change cannot be
