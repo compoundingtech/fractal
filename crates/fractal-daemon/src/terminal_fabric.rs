@@ -21,7 +21,7 @@ use pty_client::{ClientIo, Reconnect, RouteRefusedError};
 
 pub use fractal_terminal_direct::{
     FabricTarget, ROUTE_LINE_LIMIT, ROUTE_TIMEOUT, RouteAnswer, RouteError, RouteRequest,
-    open_route, owner_peer, protocol,
+    open_route, owner_peer, owner_protocol, protocol,
 };
 
 use crate::model::LocalTerminal;

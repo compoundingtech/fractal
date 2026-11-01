@@ -19,6 +19,22 @@ pub fn protocol(fleet_id: &str) -> String {
     format!("st3/pty/{fleet_id}")
 }
 
+/// Read either exact PTY spelling advertised by this current owner at the selected node.
+/// An owner with no PTY advertisement still uses the existing exposure default.
+pub fn owner_protocol(members: &[MemberView], owner: &str, peer: &str, fleet: &str) -> String {
+    members
+        .iter()
+        .filter(|member| member.name == owner && member.state == "current")
+        .flat_map(|member| &member.endpoints)
+        .filter(|endpoint| endpoint["transport"] == "fabric" && endpoint["node"] == peer)
+        .filter_map(|endpoint| endpoint["protocol"].as_str())
+        .find(|name| {
+            name.strip_prefix("st3/pty/") == Some(fleet)
+                || name.strip_prefix("fractal/pty/") == Some(fleet)
+        })
+        .map_or_else(|| protocol(fleet), str::to_owned)
+}
+
 /// Attach to PTY session `name`, which must be `subject`'s terminal at runtime incarnation
 /// `incarnation` (`PTY_DAEMON_PID:CREATED_AT`).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -182,4 +198,35 @@ fn handshake(socket: &Path, line: &str, protocol: &str) -> Result<StdUnixStream,
         .and_then(|()| stream.set_write_timeout(None))
         .map_err(|error| unreachable("configure", error))?;
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mixed_advertisements_preserve_owner_node_and_exact_fleet() {
+        let mut member: MemberView = serde_json::from_value(json!({
+            "name":"owner", "member_key":"key", "state":"current", "mode":"peer", "start":1,
+            "endpoints":[
+                {"transport":"fabric","node":"other","protocol":"fractal/pty/fleet"},
+                {"transport":"fabric","node":"node","protocol":"fractal/pty/fleet-extra"},
+                {"transport":"fabric","node":"node","protocol":"fractal/fleet/fleet"}
+            ]
+        })).unwrap();
+        for name in ["st3/pty/fleet", "fractal/pty/fleet"] {
+            member.endpoints.push(json!({"transport":"fabric","node":"node","protocol":name}));
+            assert_eq!(owner_protocol(&[member.clone()], "owner", "node", "fleet"), name);
+            assert_eq!(owner_protocol(&[member.clone()], "other", "node", "fleet"), "st3/pty/fleet");
+            member.state = "ended".into();
+            assert_eq!(owner_protocol(&[member.clone()], "owner", "node", "fleet"), "st3/pty/fleet");
+            member.state = "current".into();
+            member.endpoints.pop();
+        }
+        assert_eq!(owner_protocol(&[member], "owner", "node", "fleet"), "st3/pty/fleet");
+        let request = RouteRequest::new("runtime", "agent/worker", "pid:created");
+        let decoded: RouteRequest = serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        assert_eq!(decoded, request);
+    }
 }
