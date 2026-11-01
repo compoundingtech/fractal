@@ -13864,13 +13864,23 @@ fn doctor_checks_run_together_in_report_order_and_a_slow_one_costs_only_its_own_
             Ok(vec![pass(name)])
         });
     }
+    // A check that can take the writer runs with nothing beside it, and keeps its place.
+    let alone_saw = AtomicUsize::new(usize::MAX);
+    {
+        let (running, alone_saw) = (&running, &alone_saw);
+        checks.check_alone("alone", move || {
+            alone_saw.store(running.load(Ordering::SeqCst), Ordering::SeqCst);
+            Ok(vec![pass("alone")])
+        });
+    }
     checks.push(pass("last"));
     let started = Instant::now();
     let report = checks.run(&clock, &state.store.readers, 3);
     let elapsed = started.elapsed();
     let shown = report.iter().map(|check| (check.name.as_str(), check.status.as_str())).collect::<Vec<_>>();
     assert_eq!(shown, [("first", "pass"), ("slow", "timeout"), ("a", "pass"), ("b", "pass"), ("c", "pass"),
-        ("d", "pass"), ("e", "pass"), ("last", "pass")]);
+        ("d", "pass"), ("e", "pass"), ("alone", "pass"), ("last", "pass")]);
+    assert_eq!(alone_saw.load(Ordering::SeqCst), 0, "a check ran beside the one that runs alone");
     let peak = peak.load(Ordering::SeqCst);
     assert!((2..=3).contains(&peak), "{peak} checks ran at once");
     // One after another they take 1.35 s. The peak above is the proof that they ran together.

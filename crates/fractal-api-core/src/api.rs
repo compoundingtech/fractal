@@ -7955,6 +7955,7 @@ pub(crate) struct DoctorChecks<'a> {
 enum DoctorSlot<'a> {
     Done(Vec<DoctorCheck>),
     Due(&'static str, DoctorWork<'a>),
+    Alone(&'static str, DoctorWork<'a>),
 }
 
 impl<'a> DoctorChecks<'a> {
@@ -7972,6 +7973,17 @@ impl<'a> DoctorChecks<'a> {
         self.slots.push(DoctorSlot::Due(name, Box::new(work)));
     }
 
+    /// A store check that can take the writer, such as one that seeds the sealed replication
+    /// snapshot: it runs by itself on the caller's thread once the others are done, so no other
+    /// check reads beside its write.
+    pub(crate) fn check_alone(
+        &mut self,
+        name: &'static str,
+        work: impl FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a,
+    ) {
+        self.slots.push(DoctorSlot::Alone(name, Box::new(work)));
+    }
+
     pub(crate) fn run(
         self,
         clock: &DoctorClock,
@@ -7980,12 +7992,17 @@ impl<'a> DoctorChecks<'a> {
     ) -> Vec<DoctorCheck> {
         let mut done = Vec::with_capacity(self.slots.len());
         let mut due = std::collections::VecDeque::new();
+        let mut alone = Vec::new();
         for (position, slot) in self.slots.into_iter().enumerate() {
             match slot {
                 DoctorSlot::Done(checks) => done.push(Some(checks)),
                 DoctorSlot::Due(name, work) => {
                     done.push(None);
                     due.push_back((position, name, work));
+                }
+                DoctorSlot::Alone(name, work) => {
+                    done.push(None);
+                    alone.push((position, name, work));
                 }
             }
         }
@@ -8014,8 +8031,11 @@ impl<'a> DoctorChecks<'a> {
             }
             drain();
         });
-        done.into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let mut done = done.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (position, name, work) in alone {
+            done[position] = Some(clock.checks(name, work));
+        }
+        done
             .into_iter()
             .flatten()
             .flatten()
@@ -8473,7 +8493,7 @@ fn doctor_report_within(
         });
         Ok(checks)
     });
-    checks.check("replication", || {
+    checks.check_alone("replication", || {
         let mut checks = Vec::new();
         match state.store.replication_status_sealed(
             state.fleet_id.is_some(),
