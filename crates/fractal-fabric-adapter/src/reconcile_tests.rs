@@ -4,6 +4,65 @@ use tokio::net::UnixListener;
 const FLEET: &str = "test-fleet";
 const OWNER: &str = "st/fleet/test-fleet";
 
+#[tokio::test]
+async fn renamed_owner_revocation_and_residuals_never_grant_pty() {
+    let root = tempfile::tempdir().unwrap();
+    let renamed = "fractal/fleet/test-fleet";
+    let removed = vec![peer("gone", OWNER, &["st3-client-v0"]), peer("gone", renamed, &["fractal-client-v0"])];
+    let (socket, server) = serve(root.path(), vec![
+            Some(list(removed, 7)),
+            Some(mutation(vec![], "complete")),
+            Some(list(vec![peer("gone", renamed, &["fractal-client-v0"])], 8)),
+            Some(mutation(vec![], "complete")),
+            Some(list(vec![peer("gone", "static", &["fractal-client-v0"])], 9)),
+    ]);
+    assert_eq!(withdraw(root.path(), &socket, FLEET).await.unwrap().state, "residual_access");
+    let requests = server.await.unwrap();
+    for (index, owner) in [(1, OWNER), (3, renamed)] {
+        assert_eq!(requests[index]["request"]["owner"], owner);
+        assert_eq!(
+            requests[index]["request"]["operations"],
+            json!([{"op":"remove_peer","node_id":"gone"}])
+        );
+    }
+}
+
+#[test]
+fn renamed_owner_reduction_and_recovered_batches_are_reader_only() {
+    let renamed = "fractal/fleet/test-fleet";
+    let services = ["fractal/fleet/test-fleet", "fractal-client-v0", "fractal/pty/test-fleet"];
+    let records = vec![peer("peer-node", renamed, &services), peer("old-node", renamed, &["st3-client-v0"])];
+    let snapshot: Snapshot = serde_json::from_value(list(records, 7)["reply"]["snapshot"].clone()).unwrap();
+    let desired = DesiredPolicy::from([(
+        "peer-node".into(),
+        BTreeSet::from(["st3/fleet/test-fleet".into()]),
+    )]);
+    let retained = retained_policy(&snapshot, renamed, &desired);
+    let operations = plan(&snapshot, renamed, &retained);
+    assert_eq!(
+        operations[0],
+        json!({"op":"remove_peer","node_id":"old-node"})
+    );
+    assert_eq!(operations[1], json!({"op":"remove_peer","node_id":"peer-node"}));
+    let mut pending = uncertain_add();
+    pending.request["owner"] = json!(renamed);
+    pending.request["operations"][1]["grants"] = json!(["fractal/fleet/test-fleet"]);
+    assert!(!pending_matches_desired(&pending, &desired));
+    pending.request["operations"][1]["grants"] = json!(["fractal/pty/test-fleet"]);
+    assert!(!pending_matches_desired(&pending, &desired));
+}
+
+#[tokio::test]
+async fn renamed_pending_addition_is_observed_never_sent() {
+    let root = tempfile::tempdir().unwrap();
+    let mut pending = uncertain_add();
+    pending.request["owner"] = json!("fractal/fleet/test-fleet");
+    let (socket, server) = serve(root.path(), vec![Some(mutation(vec![], "complete"))]);
+    complete_pending(&socket, &pending, pending_matches_desired(&pending,
+        &DesiredPolicy::from([("peer-node".into(), grants(FLEET))]))).await.unwrap();
+    assert_eq!(server.await.unwrap()[0]["request"]["operation"], "cancellation");
+}
+
 fn member(name: &str, key: &str, node: &str, state: &str) -> MemberView {
     MemberView {
         name: name.into(),
