@@ -701,26 +701,36 @@ def shared_target(tree_target=None):
 
 
 def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
-    """The cap this process runs under, as one string, or None. Only the two caps made for builds count: builds.slice, and a
-    seat's lane, app-lanes-<seat>.slice directly in app-lanes.slice (docs/st3/seat-lanes.md). The process must be inside one, and
-    that slice or a cgroup below it, on the way to the process, must hold a memory.max and a cpu.max quota: read from the kernel's
-    files, never from a name alone or a variable. Limits above the cap (any other cgroup's) do not count."""
+    """The cap this process runs under, as one string, or None. Builds and seat lanes (docs/st3/seat-lanes.md) require
+    memory.max and cpu.max at or below their anchor. A gate-slot scope directly in app-capped.slice or its heavy child
+    requires only memory.max at the scope or its parent: gate-slot does not normally set a CPU quota.
+    Read kernel files, never trust names or variables alone. Limits above the approved anchor do not count."""
     try:
         text = Path(cgroup_file).read_text()
     except OSError:
         return None
     path = next((line[3:] for line in text.splitlines() if line.startswith('0::')), '').strip('/')
     parts = path.split('/') if path else []
-    cap = next((depth for depth, part in enumerate(parts) if part == 'builds.slice' or (
-        depth > 0 and parts[depth - 1] == 'app-lanes.slice' and part.startswith('app-lanes-') and part.endswith('.slice'))), None)
-    if cap is None:
-        return None
 
     def limited(cgroup, file):  # whether CGROUP's FILE holds a limit; a missing or unreadable file (no controller) is none
         try:
             return cgroup.joinpath(file).read_text().split()[0] != 'max'
         except (OSError, IndexError):
             return False
+
+    gate = next((depth for depth, part in enumerate(parts) if depth > 1
+                 and re.fullmatch(r'gate-slot-(gate|heavy|eval)-[1-9][0-9]*(?:-[0-9]+)?\.scope', part)
+                 and (parts[depth - 2:depth] == ['app.slice', 'app-capped.slice']
+                      or parts[max(0, depth - 3):depth] == ['app.slice', 'app-capped.slice', 'app-capped-heavy.slice'])), None)
+    if gate is not None:
+        for depth in (gate + 1, gate):
+            if limited(Path(root, *parts[:depth]), 'memory.max'):
+                return f'{parts[gate]}: memory by {parts[depth - 1]}'
+
+    cap = next((depth for depth, part in enumerate(parts) if part == 'builds.slice' or (
+        depth > 0 and parts[depth - 1] == 'app-lanes.slice' and part.startswith('app-lanes-') and part.endswith('.slice'))), None)
+    if cap is None:
+        return None
 
     memory = cpu = None
     for depth in range(cap + 1, len(parts) + 1):
@@ -790,9 +800,9 @@ def governed(argv, name):
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
     evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
 
-    A caller whose own cgroup is already under a memory and a CPU limit runs the check in place: a seat with a lane
-    (docs/st3/seat-lanes.md) builds inside its own lane, never in builds.slice beside it. The kernel's limits decide, never a slice
-    name or an environment variable a caller could set. The check then runs with BUILDS_SLICE_ACTIVE=1, which a build host's cargo
+    A caller already under a build cap runs the check in place: builds.slice and seat lanes require memory and CPU limits;
+    gate-slot scopes require a memory limit (`own_cap`). The kernel's limits decide, never a name or an environment variable
+    a caller could set. The check then runs with BUILDS_SLICE_ACTIVE=1, which a build host's cargo
     front door reads as "already in a build cap": without it, that front door moves each cargo command into builds.slice, out of
     the lane. A seat's harness has it from its lane, but a job the seat starts as a unit of its own in the lane does not inherit
     it (2026-10-30, on a build host: such a run's cargo and tests ran in builds.slice).
