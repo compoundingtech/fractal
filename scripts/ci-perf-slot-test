@@ -81,8 +81,11 @@ def cgroup_path(text):
 def caller_slice(text):
     path = cgroup_path(text)
     parent = path.rsplit("/", 1)[0]
-    if not any(re.fullmatch(r"user@\d+\.service", part) for part in path.split("/")):
+    parts = path.strip("/").split("/")
+    manager_depth = next((i for i, part in enumerate(parts) if re.fullmatch(r"user@\d+\.service", part)), None)
+    if manager_depth is None:
         return None  # A --user scope would leave this caller's cgroup tree.
+    assert manager_depth < len(parts) - 2, "caller parent is not strictly below its user manager"
     assert parent.endswith(".slice"), f"caller cgroup parent is not a slice: {parent}"
     return parent
 
@@ -111,12 +114,15 @@ manager = "/user.slice/user-1000.slice/user@1000.service"
 for leaf in ("app.slice", "app.slice/app-capped.slice/app-capped-heavy.slice"):
     assert caller_slice(f"0::{manager}/{leaf}/gate-slot-heavy-1.scope\n") == f"{manager}/{leaf}"
 assert caller_slice("0::/system.slice/ci-runner.service\n") is None
-try:
-    caller_slice(f"0::{manager}/app.slice/outer.scope/child\n")
-except AssertionError:
-    pass
-else:
-    raise AssertionError("a non-slice parent must fail, not default to app.slice")
+for invalid in (f"{manager}/app.slice/outer.scope/child", manager, f"{manager}/init.scope"):
+    with patch.object(subprocess, "Popen") as launched:
+        try:
+            caller_slice(f"0::{invalid}\n")
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("a parent outside the user manager or not a slice must fail")
+        launched.assert_not_called()
 for metadata in ("", "not cgroup metadata", "0::relative", "0::/a\n0::/b\n", "0::/a/../b\n"):
     try:
         caller_slice(metadata)
