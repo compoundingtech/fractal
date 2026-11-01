@@ -207,7 +207,11 @@ class AlertsTabCodeBoundary extends React.Component<React.ComponentProps<typeof 
   render() {
     if (this.state.failed) return <div role="alert" {...stylex.props(styles.empty)}>
       <p>Alerts could not load.</p>
-      <button type="button" onClick={() => this.setState({ failed: false, Tab: makeAlertsTab() })}>Try again</button>
+      <button type="button" onClick={event => {
+        // The retry control unmounts during Suspense; keep keyboard focus on the stable selected tab.
+        event.currentTarget.closest('[data-sidebar-tabs]')?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus()
+        this.setState({ failed: false, Tab: makeAlertsTab() })
+      }}>Try again</button>
     </div>
     const Tab = this.state.Tab
     return <React.Suspense fallback={<SystemNotice kind="loading" title="Loading alerts" />}>
