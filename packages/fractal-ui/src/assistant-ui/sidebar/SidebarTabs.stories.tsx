@@ -119,7 +119,7 @@ function SidebarTabsHost({ scheme, sidebar }: { readonly scheme: Scheme; readonl
   const [selectedId, setSelectedId] = React.useState('agents')
   return <section aria-label={`Sidebar tabs ${scheme}`} data-scheme={scheme} {...stylex.props(styles.specimen, scheme === 'light' && lightTheme)}>
     <output data-testid="sidebar-tab-selection" {...stylex.props(styles.output)}>{selectedId}</output>
-    <aside aria-label="Agents sidebar" data-sidebar-host {...stylex.props(styles.sidebar)}>
+    <aside aria-label={`Agents sidebar ${scheme}`} data-sidebar-host {...stylex.props(styles.sidebar)}>
       <SidebarTabs tabs={sidebar.tabs} selectedId={selectedId} onSelectionChange={setSelectedId}>
         <div data-sidebar-scroller {...stylex.props(styles.scroller)}>
           {selectedId === 'agents' ? <div role="list" aria-label="Agents">{sidebar.agents.map(agent => <div role="listitem" key={agent.ref}><SidebarAgentRow item={agent} now={0} /></div>)}</div>
@@ -150,7 +150,17 @@ const withCounts = ['◆3 Agents', '? Alerts', '◆ Missions', 'Fleet']
 const withoutCounts = ['◆ Agents', '? Alerts', '◆ Missions', 'Fleet']
 const leading = ['needs-you', 'question', 'needs-you', 'label']
 
-const visibleText = (tablist: HTMLElement) => within(tablist).getAllByRole('tab').map(tab => tab.textContent)
+/** What the marker paints: its ::before `content`, with any unresolved attr() read from the marker. */
+const markerText = (marker: Element) => {
+  const content = getComputedStyle(marker, '::before').content
+  if (content === 'none' || content === 'normal') return ''
+  return [...content.matchAll(/attr\(\s*([\w-]+)\s*\)|"((?:[^"\\]|\\.)*)"/g)].map(([, attr, text]) => attr === undefined ? text!.replace(/\\(.)/g, '$1') : marker.getAttribute(attr) ?? '').join('')
+}
+/** Each tab as painted: the CSS-drawn marker, then the tab's DOM text (one space and the label). */
+const visibleText = (tablist: HTMLElement) => within(tablist).getAllByRole('tab').map(tab => {
+  const marker = tab.querySelector('[data-sidebar-tab-marker]')
+  return (marker === null ? '' : markerText(marker)) + tab.textContent
+})
 
 /** Every tab label paints whole: nothing in the row overflows, and the tabs end at the bar's content edge. */
 async function assertNoClip(tablist: HTMLElement) {
@@ -177,8 +187,17 @@ async function assertMarkers(section: HTMLElement, expected: { readonly names: r
   await expect(visibleText(tablist)).toEqual(fits ? expected.withCounts : expected.withoutCounts)
   const firsts = within(tablist).getAllByRole('tab').map(tab => tab.querySelector('[data-sidebar-tab-label]')!.parentElement!.firstElementChild)
   await expect(firsts.map(first => first?.getAttribute('data-sidebar-tab-marker') ?? 'label')).toEqual(expected.leading)
-  // The glyph is decorative: the tab's name carries its meaning, so the visible label stays inside the accessible name.
-  for (const marker of tablist.querySelectorAll('[data-sidebar-tab-marker]')) await expect(marker).toHaveAttribute('aria-hidden', 'true')
+  // The marker is decorative and painted by CSS: no DOM text, so a tab's only text is its label, which leads its accessible name.
+  for (const marker of tablist.querySelectorAll('[data-sidebar-tab-marker]')) {
+    await expect(marker).toHaveAttribute('aria-hidden', 'true')
+    await expect(marker.textContent).toBe('')
+    await expect(marker.getBoundingClientRect().width).toBeGreaterThan(0)
+  }
+  for (const tab of within(tablist).getAllByRole('tab')) {
+    const label = tab.querySelector('[data-sidebar-tab-label]')!.textContent!
+    await expect(tab.textContent!.trim()).toBe(label)
+    await expect(tab.getAttribute('aria-label')!.startsWith(label)).toBe(true)
+  }
   await assertNoClip(tablist)
 }
 const plain = { names, withCounts, withoutCounts, leading }
@@ -236,18 +255,22 @@ async function keyboardPlay({ canvasElement }: { readonly canvasElement: HTMLEle
   await assertMarkers(section, plain)
 }
 
-/** At the row's exact natural width every count shows; one pixel less drops every count together, and no label truncates. */
+/** At the row's exact natural width (equal tracks, each as wide as the widest tab with its count) every count shows; one pixel less drops every count together, and no label truncates. */
 async function countFitPlay({ canvasElement }: { readonly canvasElement: HTMLElement }) {
   const section = await within(canvasElement).findByRole('region', { name: /^Sidebar tabs / })
   const host = section.querySelector<HTMLElement>('[data-sidebar-host]')!
   const root = section.querySelector<HTMLElement>('[data-sidebar-tabs]')!
   const tablist = within(section).getByRole('tablist', { name: 'Sidebar' })
+  // The replica measures the equal-track row; the host's own frame (its hairline border) sits outside the bar, so it is added back.
   const natural = root.querySelector('[data-sidebar-tabs-measure]')!.getBoundingClientRect().width
-  host.style.width = `${Math.ceil(natural)}px`
+  const frame = host.getBoundingClientRect().width - root.getBoundingClientRect().width
+  host.style.width = `${Math.ceil(natural + frame)}px`
+  await expect(root.getBoundingClientRect().width).toBeGreaterThanOrEqual(natural)
   await waitFor(() => expect(root).toHaveAttribute('data-sidebar-tab-counts', 'shown'))
   await expect(visibleText(tablist)).toEqual(withCounts)
   await assertNoClip(tablist)
-  host.style.width = `${Math.floor(natural) - 1}px`
+  host.style.width = `${Math.floor(natural + frame) - 1}px`
+  await expect(root.getBoundingClientRect().width).toBeLessThan(natural)
   await waitFor(() => expect(root).toHaveAttribute('data-sidebar-tab-counts', 'dropped'))
   await expect(visibleText(tablist)).toEqual(withoutCounts)
   await expect(within(tablist).getAllByRole('tab').map(tab => tab.getAttribute('aria-label'))).toEqual(names)

@@ -57,9 +57,10 @@ const fitSlack = 0.5
 
 function TabFace({ tab, showCount }: { readonly tab: SidebarTab; readonly showCount: boolean }) {
   const marker = markerOf(tab)
-  // One text run, so the gap between marker and label is exactly one space: "◆3 Alerts", "? Missions", "! Fleet", "Agents".
+  // "◆3 Agents", "? Missions", "! Fleet", "Agents": one space between marker and label. The glyph and count are painted by CSS from
+  // data attributes, not DOM text, so the tab's only visible text is its label, which its name ("Agents, 3 need you") contains.
   return <span {...stylex.props(styles.face)}>
-    {marker === null ? null : <><span aria-hidden="true" data-sidebar-tab-marker={marker.kind} {...stylex.props(styles.marker, marker.kind === 'question' ? styles.question : marker.kind === 'needs-you' ? styles.needsYou : marker.glyph === '!' ? styles.fault : styles.status)}>{marker.glyph}{showCount && marker.count > 1 ? <span data-sidebar-tab-count>{marker.count}</span> : null}</span>{' '}</>}
+    {marker === null ? null : <><span aria-hidden="true" data-sidebar-tab-marker={marker.kind} data-sidebar-tab-glyph={marker.glyph} data-sidebar-tab-count={showCount && marker.count > 1 ? marker.count : undefined} {...stylex.props(styles.marker, marker.kind === 'question' ? styles.question : marker.kind === 'needs-you' ? styles.needsYou : marker.glyph === '!' ? styles.fault : styles.status)} />{' '}</>}
     <span data-sidebar-tab-label>{tab.label}</span>
   </span>
 }
@@ -109,7 +110,8 @@ const styles = stylex.create({
   touch: { height: g.touchTarget },
   touchTab: { height: g.touchTarget, minWidth: g.touchTarget, boxSizing: 'border-box' },
   face: { whiteSpace: 'nowrap' },
-  marker: { fontWeight: t.weightSemibold, fontVariantNumeric: 'tabular-nums' },
+  // An absent count attribute paints as empty, so a dropped count leaves the glyph alone.
+  marker: { fontWeight: t.weightSemibold, fontVariantNumeric: 'tabular-nums', '::before': { content: 'attr(data-sidebar-tab-glyph) attr(data-sidebar-tab-count)' } },
   question: { color: accent.primary },
   needsYou: { color: tone.attention },
   status: { color: ink.fgMuted },
