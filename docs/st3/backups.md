@@ -59,7 +59,9 @@ that its envelope inventory, claim sources and all graph table digests match.
 
 `store_dir = "/absolute/path"` in the daemon's TOML config, or `fractal up --store-dir
 /absolute/path`, selects the directory for exactly `claims.sqlite3`, `claims.sqlite3-wal`,
-and `claims.sqlite3-shm`. Unset configuration keeps the database in `state_dir`; there is no
+and `claims.sqlite3-shm`, and for the messages shard the daemon opens beside them at
+`shards/messages/claims.sqlite3`. A store moved without its `shards` directory opens a new,
+empty shard, which then receives the stream again from peers. Unset configuration keeps the database in `state_dir`; there is no
 automatic file move. Keep the product state directory and its identity, keys, sockets,
 message bodies, transcripts, PTYs, runtime files and caches unchanged.
 
