@@ -679,6 +679,11 @@ pub struct StepSpec {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_constraints: BTreeMap<String, Vec<String>>,
     pub timeout_ms: Option<u64>,
+    /// The lane the seat working this step holds while it holds it, raised from its own for what
+    /// it names (docs/st3/seat-lanes.md). An older member ignores it and runs the step in the
+    /// seat's own lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<fractal_runtime::Raise>,
     pub retry: RetrySpec,
     pub finally: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -771,6 +776,11 @@ pub struct MissionSpec {
     pub revision_cutover: RevisionCutover,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declarations_kdl: Option<String>,
+    /// The lane of each agent this mission and its steps declare that declares none of its own,
+    /// applied when a run materializes them (docs/st3/seat-lanes.md). An older member ignores it
+    /// and runs those agents without a lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<fractal_runtime::Capacity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_selector: Option<WorkSelector>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

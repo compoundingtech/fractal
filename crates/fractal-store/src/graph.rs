@@ -127,41 +127,85 @@ pub fn validate_mission_runtimes(
     intent: &NormalizedIntent,
     default_host: &str,
 ) -> Result<BTreeSet<String>, St3Error> {
+    type Lanes = BTreeMap<String, Option<fractal_runtime::Capacity>>;
+
     fn validate_mission(
         mission: &crate::model::MissionSpec,
         default_host: &str,
         subjects: &mut BTreeSet<String>,
+        beside: &Lanes,
     ) -> Result<(), St3Error> {
         fn validate_source(
             source: &str,
+            capacity: Option<fractal_runtime::Capacity>,
             variables: &BTreeMap<String, String>,
             default_host: &str,
             subjects: &mut BTreeSet<String>,
+            lanes: &mut Lanes,
         ) -> Result<(), St3Error> {
             let source = crate::mission::interpolate_kdl(source, variables)?;
+            let source = crate::mission::with_mission_capacity(&source, capacity)?;
             let runtime = parse_execution_intent(&source, default_host, "migration-proof")?;
             subjects.extend(runtime.subjects.keys().cloned());
+            lanes.extend(agent_lanes(&runtime.subjects));
             Ok(())
         }
 
         let variables = runtime_proof_variables(mission);
+        let mut lanes = beside.clone();
         if let Some(source) = &mission.declarations_kdl {
-            validate_source(source, &variables, default_host, subjects)?;
+            validate_source(source, mission.capacity, &variables, default_host, subjects, &mut lanes)?;
         }
         for step in mission.steps.values() {
             if let Some(source) = &step.declarations_kdl {
-                validate_source(source, &variables, default_host, subjects)?;
+                validate_source(source, mission.capacity, &variables, default_host, subjects, &mut lanes)?;
             }
+        }
+        validate_step_capacities(mission, &variables, &lanes)?;
+        for step in mission.steps.values() {
             if let Some(nested) = &step.nested_mission {
-                validate_mission(nested, default_host, subjects)?;
+                validate_mission(nested, default_host, subjects, beside)?;
             }
         }
         Ok(())
     }
 
+    fn agent_lanes(subjects: &BTreeMap<String, DesiredSubject>) -> impl Iterator<Item = (String, Option<fractal_runtime::Capacity>)> + '_ {
+        subjects.iter()
+            .filter(|(_, desired)| desired.kind == "agent")
+            .filter_map(|(subject, desired)| desired.member.as_ref().map(|member| (subject.clone(), member.capacity)))
+    }
+
+    /// A step only raises the lane of a seat declared in this publication; one declared elsewhere
+    /// is held to the same rule when the step is delivered.
+    fn validate_step_capacities(
+        mission: &crate::model::MissionSpec,
+        variables: &BTreeMap<String, String>,
+        lanes: &Lanes,
+    ) -> Result<(), St3Error> {
+        for step in mission.steps.values() {
+            let Some(raise) = step.capacity else { continue };
+            let agents = match step.work_selector.as_ref().or(mission.work_selector.as_ref()) {
+                Some(crate::model::WorkSelector::Assigned { agent }) => std::slice::from_ref(agent),
+                Some(crate::model::WorkSelector::Available { agents }) => agents.as_slice(),
+                _ => &[],
+            };
+            for agent in agents {
+                let agent = crate::mission::interpolate(agent, variables)?;
+                let Some(base) = lanes.get(&agent) else { continue };
+                // An undeclared seat counts at the base lane.
+                raise.over(base.unwrap_or(fractal_runtime::Capacity::DEFAULT)).map_err(|error| {
+                    St3Error::new("invalid-capacity", format!("step `{}` for `{agent}`: {error:#}", step.path))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    let beside = agent_lanes(&intent.subjects).collect::<Lanes>();
     let mut subjects = BTreeSet::new();
     for mission in intent.missions.values() {
-        validate_mission(mission, default_host, &mut subjects)?;
+        validate_mission(mission, default_host, &mut subjects, &beside)?;
     }
     Ok(subjects)
 }
@@ -4233,27 +4277,6 @@ fn one_bool(node: &KdlNode) -> Result<bool, St3Error> {
     }
 }
 
-/// `capacity cores=N memory="SIZE"`: the seat's lane (docs/st3/seat-lanes.md). What it leaves
-/// out is the base lane's.
-fn parse_capacity(node: &KdlNode) -> Result<fractal_runtime::Capacity, St3Error> {
-    let invalid = |message: String| St3Error::new("invalid-capacity", message);
-    ensure_only_properties(node, &["cores", "memory"])?;
-    ensure_no_children(node)?;
-    if node.entries().iter().any(|entry| entry.name().is_none()) {
-        return Err(invalid("capacity takes only cores= and memory=".into()));
-    }
-    let cores = match node.get("cores") {
-        None => None,
-        Some(KdlValue::Integer(cores)) => Some(
-            u32::try_from(*cores).map_err(|_| invalid(format!("capacity cores {cores} is out of range")))?,
-        ),
-        Some(_) => return Err(invalid("capacity cores must be a whole number".into())),
-    };
-    let memory = property_string(node, "memory")?;
-    fractal_runtime::Capacity::declared(cores, memory.as_deref())
-        .map_err(|error| invalid(format!("{error:#}")))
-}
-
 fn property_bool(node: &KdlNode, property: &str) -> Result<Option<bool>, St3Error> {
     node.entries()
         .iter()
@@ -4986,6 +5009,80 @@ agent "seat" {
             "capacity cores=1; capacity cores=2;",
         ] {
             assert!(seat(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn a_mission_lanes_its_agents_and_a_step_only_raises_its_seats_lane() {
+        const G: u64 = 1 << 30;
+        let mission = |mission_capacity: &str, step: &str| {
+            parse_intent(
+                &format!(
+                    "version 2\nagent \"example/beside\" {{ capacity cores=4; command \"true\" }}\nmission \"example/laned\" state=\"ready\" {{\n  goal \"Work.\"\n  {mission_capacity}\n  agent \"worker\" {{ command \"true\" }}\n  agent \"big\" {{ capacity cores=4 memory=\"8G\"; command \"true\" }}\n  step \"work\" {{\n    goal \"Work.\"\n    {step}\n  }}\n}}\n"
+                ),
+                "node",
+            )
+        };
+        let worker = r#"assigned-to "agent/${ST_MISSION_RUN}/worker""#;
+
+        // The mission's lane goes to each of its agents that declares none of its own.
+        let intent = mission(r#"capacity cores=2 memory="4G""#, worker).unwrap();
+        let spec = &intent.missions["example/laned"];
+        assert_eq!(spec.capacity, Some(fractal_runtime::Capacity { cores: 2, memory: 4 * G }));
+        let source = crate::mission::interpolate_kdl(
+            spec.declarations_kdl.as_deref().unwrap(),
+            &runtime_proof_variables(spec),
+        )
+        .unwrap();
+        let source = crate::mission::with_mission_capacity(&source, spec.capacity).unwrap();
+        let seats = parse_execution_intent(&source, "node", "migration-proof").unwrap();
+        let lane = |name: &str| seats.subjects[&format!("agent/migration-proof/{name}")].member.as_ref().unwrap().capacity;
+        assert_eq!(lane("worker"), Some(fractal_runtime::Capacity { cores: 2, memory: 4 * G }));
+        assert_eq!(lane("big"), Some(fractal_runtime::Capacity { cores: 4, memory: 8 * G }));
+        // Without one, the declarations are what the author wrote and nothing more is stored.
+        let undeclared = mission("", worker).unwrap();
+        let undeclared = &undeclared.missions["example/laned"];
+        assert!(matches!(
+            crate::mission::with_mission_capacity("version 2", undeclared.capacity).unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let stored = serde_json::to_value(undeclared).unwrap();
+        assert!(stored.get("capacity").is_none());
+        assert!(stored["steps"]["work"].get("capacity").is_none());
+
+        // A step raises what it names and keeps the rest of its seat's lane.
+        let raised = mission(r#"capacity cores=2 memory="4G""#, &format!("{worker}\n    capacity memory=\"16G\"")).unwrap();
+        assert_eq!(
+            raised.missions["example/laned"].steps["work"].capacity,
+            Some(fractal_runtime::Raise { cores: None, memory: Some(16 * G) })
+        );
+        // It may not lower the lane of a seat this publication declares, wherever its lane comes
+        // from: the mission, the agent itself, an agent beside the mission, or the base lane.
+        for (mission_capacity, step) in [
+            (r#"capacity cores=2 memory="4G""#, format!("{worker}\n    capacity memory=\"2G\"")),
+            ("", r#"assigned-to "agent/${ST_MISSION_RUN}/big"
+    capacity cores=2"#.to_owned()),
+            ("", r#"available-to "agent/example/beside"
+    capacity cores=2"#.to_owned()),
+            ("", format!("{worker}\n    capacity memory=\"2G\"")),
+        ] {
+            let error = mission(mission_capacity, &step).unwrap_err();
+            assert_eq!(error.code, "invalid-capacity", "{step}");
+            assert!(error.message.contains("a step may only raise its seat's lane"), "{}", error.message);
+        }
+        mission("", &format!("{worker}\n    capacity memory=\"3G\"")).unwrap();
+        // A seat declared elsewhere is checked when the step is delivered.
+        mission("", "assigned-to \"agent/example/elsewhere\"\n    capacity cores=1").unwrap();
+
+        for (mission_capacity, step) in [
+            ("", "agentless\n    capacity cores=2"),
+            ("", &format!("{worker}\n    capacity")),
+            ("", &format!("{worker}\n    capacity cores=0")),
+            ("", &format!("{worker}\n    capacity cores=2\n    capacity cores=3")),
+            ("capacity cores=2\n  capacity cores=3", worker),
+            ("capacity cores=0", worker),
+        ] {
+            assert!(mission(mission_capacity, step).is_err(), "{mission_capacity} / {step}");
         }
     }
 

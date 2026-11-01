@@ -13909,6 +13909,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let variables = run_variables(run, step, view);
         let source = crate::mission::interpolate_kdl(source, &variables)?;
+        let source = crate::mission::with_mission_capacity(&source, mission.capacity)?;
         let mut intent = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
         if assigned_agents_only {
             let selected_agent = |subject: &str, desired: &DesiredSubject| {
@@ -14179,6 +14180,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let variables = crate::store::mission_run_variables(run, &mission.revision);
         let source = crate::mission::interpolate_kdl(source, &variables)?;
+        let source = crate::mission::with_mission_capacity(&source, mission.capacity)?;
         #[cfg(any(test, feature = "test-support"))]
         self.mission_declaration_parses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -20522,6 +20524,7 @@ pub mod tests {
     #[cfg(test)]
     mod schedule_standby_parent;
     pub mod mission_eval_reuse;
+    mod mission_capacity_tests;
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;

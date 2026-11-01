@@ -1,6 +1,8 @@
 # Seat lanes (design note)
 
-Status: step 1 built (lanes on agents, behind a per-host switch); steps after it are design.
+Status: step 1 built (lanes on agents, behind a per-host switch). Step 2 in progress: missions and
+steps declare capacity (built; a mission's lane is applied, a step's is not yet); admission by fit
+is design.
 
 ## What a seat lane is
 
@@ -19,6 +21,30 @@ agent "example/builder" {
   capacity cores=1 memory="3G"     // base lane: sized for the harness thinking, not for builds
 }
 ```
+
+A mission and a step can declare one too:
+
+```kdl
+mission "example/release" state="ready" {
+  capacity cores=2 memory="4G"     // each agent here that declares no capacity of its own gets this lane
+  agent "builder" { harness "claude" {} }
+  step "build" {
+    assigned-to "agent/${ST_MISSION_RUN}/builder"
+    capacity cores=8 memory="16G"  // raises the builder's lane while it holds this step
+  }
+}
+```
+
+A mission's `capacity` is the lane of each agent declared in the mission or its steps that declares
+none of its own; the agent's own block wins. A run adds it to those agents when it materializes them,
+so the stored seat carries it like any declared lane. A nested mission declares its own. A step's
+`capacity` is the lane its claiming seat holds while it holds that step: what it names raises the
+seat's own lane, and what it leaves out stays the seat's. A step may only raise a lane: lowering a
+lane's memory under a running harness could kill the harness itself mid-step. Publication refuses a
+step whose capacity is below the lane of a seat the same publication declares (an undeclared seat
+counts at the base lane, 1 core and 3G), and an agentless step with one. A seat declared elsewhere is
+to be held to the same rule when the step is delivered. Until admission lands, a step's capacity is
+recorded and checked at publication only: its seat keeps its own lane.
 
 The declaration is `capacity`, not `lane`: the mission's named `lane "NAME" { entries … }` block is
 a merge lane (see [lanes.md](lanes.md)) and keeps that one meaning.
@@ -169,7 +195,10 @@ counts it for admission.
 ## Mixed versions
 
 The member record gains an optional `capacity` field, omitted when absent, so an undeclared seat's
-stored record and revision do not change. An older member reading a laned record drops the field
+stored record and revision do not change. The mission and step records gain one each, omitted when
+absent, so an undeclared mission's revision and its steps' definition hashes do not change. An older
+member ignores both: it materializes a mission's agents without the mission's lane (an agent that
+declares its own keeps it), and a step it delivers runs in its seat's own lane. An older member reading a laned record drops the field
 (the record has no `deny_unknown_fields`) and runs the seat without a lane. An older CLI refuses a
 file that declares `capacity` at apply (unknown child), as for any new declaration. An older daemon
 refuses a config with `lanes` set (`deny_unknown_fields`) and does not start, so set the key only on
@@ -213,4 +242,4 @@ lane. The tests:
   (`crates/fractal-reconcile/src/reconcile.rs`): an explicit stop ends the lane; an exit or a
   relaunch of a live declaration keeps it.
 
-Mission-level and step-level declarations, bursts and admission are step 2.
+Mission-level and step-level declarations (built), bursts and admission are step 2.
