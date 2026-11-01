@@ -237,6 +237,9 @@ pub async fn materialize(
     directory: &Path,
     message: &crate::model::MessageView,
 ) -> anyhow::Result<Vec<fractal_drivers::ding::AttachmentNotice>> {
+    if message.attachments.is_empty() {
+        return Ok(Vec::new());
+    }
     let client = fractal_client::Client::unix_as(socket, actor);
     materialize_with_client(&client, directory, message).await
 }
@@ -247,9 +250,6 @@ async fn materialize_with_client(
     message: &crate::model::MessageView,
 ) -> anyhow::Result<Vec<fractal_drivers::ding::AttachmentNotice>> {
     let mut notices = Vec::new();
-    if message.attachments.is_empty() {
-        return Ok(notices);
-    }
     let files = BlobDir::at(directory.to_path_buf());
     files.ensure()?;
     files.sweep(DEFAULT_RETENTION);
