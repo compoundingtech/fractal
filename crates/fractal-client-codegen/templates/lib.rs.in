@@ -80,21 +80,24 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
     let state_socket = xdg_path("XDG_STATE_HOME", ".local/state").map(|state_base| {
         product_dirs::resolve(state_base.join("st3"), state_base.join("fractal"))
             .join("run")
-            .join("st3.sock")
+            .join("fractal.sock")
     });
     match (std::env::var_os("XDG_RUNTIME_DIR"), state_socket) {
-        (Some(runtime), Ok(state_socket)) => Ok(runtime_or_published_socket(
-            &PathBuf::from(runtime).join("st3.sock"),
+        (Some(runtime), Ok(state_socket)) => Ok(default_unix_socket(
+            &PathBuf::from(runtime).join("fractal.sock"),
             &state_socket,
         )),
-        (Some(runtime), Err(_)) => Ok(PathBuf::from(runtime).join("st3.sock")),
-        (None, state_socket) => state_socket,
+        (Some(runtime), Err(_)) => {
+            let socket = PathBuf::from(runtime).join("fractal.sock");
+            Ok(default_unix_socket(&socket, &socket))
+        }
+        (None, state_socket) => state_socket.map(|socket| default_unix_socket(&socket, &socket)),
     }
 }
 
 /// The runtime default, unless nothing answers there and the daemon's published discovery link
 /// leads to a socket that does. A daemon started with `--socket` elsewhere links its state
-/// directory's `run/st3.sock` to that socket, while the runtime default can hold a dead socket
+/// directory's `run/fractal.sock` to that socket, while the runtime default can hold a dead socket
 /// left by an earlier daemon. Nothing is probed when the link leads to the default itself. The
 /// link's target is returned, not the link: a long state path can exceed the socket address limit.
 pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf {
@@ -110,6 +113,23 @@ pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf 
     } else {
         runtime.to_path_buf()
     }
+}
+
+/// Resolve default socket names without changing explicit configured endpoints.
+pub fn default_unix_socket(runtime: &Path, published: &Path) -> PathBuf {
+    let primary = runtime_or_published_socket(runtime, published);
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction.
+    if std::os::unix::net::UnixStream::connect(&primary).is_err() {
+        let legacy = runtime_or_published_socket(
+            &runtime.with_file_name("st3.sock"),
+            &published.with_file_name("st3.sock"),
+        );
+        if std::os::unix::net::UnixStream::connect(&legacy).is_ok() {
+            return legacy;
+        }
+    }
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+    primary
 }
 
 
@@ -3832,6 +3852,18 @@ mod tests {
         );
         assert_eq!(configured_socket("node = 'local'\n").unwrap(), None);
         assert!(configured_socket("socket = 7\n").is_err());
+    }
+
+    #[test]
+    fn socket_names_prefer_fractal_and_fall_back_to_a_legacy_only_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        let primary = root.path().join("fractal.sock");
+        let legacy = root.path().join("st3.sock");
+        assert_eq!(default_unix_socket(&primary, &primary), primary);
+        let _old_daemon = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+        assert_eq!(default_unix_socket(&primary, &primary), legacy);
+        let _new_daemon = std::os::unix::net::UnixListener::bind(&primary).unwrap();
+        assert_eq!(default_unix_socket(&primary, &primary), primary);
     }
 
     #[test]
