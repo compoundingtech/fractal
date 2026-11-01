@@ -1673,6 +1673,7 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             .unwrap();
         crate::store::mailbox_tests::ready(&store, "current");
         let state = AppState {
+            seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify: Arc::new(Notify::new()),

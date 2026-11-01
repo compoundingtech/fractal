@@ -7191,6 +7191,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let state = AppState {
         owning_person: config.person.clone(),
         store: store.clone(),
+        seat_admission: Arc::default(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
         node: config.node.clone(),
@@ -7227,7 +7228,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
         config.unlaned_seat.clone(),
-    )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
@@ -13855,6 +13856,9 @@ fn render_client_agent(
             let _ = writeln!(output, "STATE        {}", agent.state);
         }
     }
+    if let Some(admission) = agent.extra.get("seat_admission") {
+        let _ = writeln!(output, "ADMISSION    {}", agents_cli::admission_start_message(&agent.header.id, admission));
+    }
     if agent.state != "running"
         && let Some(line) = agent_stop_line(agent)
     {
@@ -14158,6 +14162,9 @@ fn render_client_agents(
                     agent.header.id, agent.name, agent.state
                 );
             }
+            if let Some(admission) = agent.extra.get("seat_admission") {
+                let _ = writeln!(output, "  {}", agents_cli::admission_start_message(&agent.header.id, admission));
+            }
             if agent.state != "running"
                 && let Some(line) = agent_stop_line(agent)
             {
@@ -14218,6 +14225,9 @@ fn render_client_agents(
                     agent.reachability
                 );
                 let _ = writeln!(output, "{member_prefix}   {}", agent.header.id);
+                if let Some(admission) = agent.extra.get("seat_admission") {
+                    let _ = writeln!(output, "{member_prefix}   {}", agents_cli::admission_start_message(&agent.header.id, admission));
+                }
                 // The subagents its harness runs now are its children.
                 for (index, subagent) in agent.subagents.iter().enumerate() {
                     let branch = if index + 1 == agent.subagents.len() {
@@ -19465,11 +19475,9 @@ async fn forward_projected_messages_reporting(
     // history, so inspect only projected files still in the native inbox before
     // deciding whether to archive them. A failed lookup keeps the file in place.
     for file in fractal_drivers::message::list_dir(inbox)? {
-        for reference in file
-            .tags
-            .iter()
-            .filter_map(|tag| tag.strip_prefix(TAG_PREFIX))
-        {
+        let prefix =
+            fractal_drivers::ding::fractal_tag_family(&file.tags, TAG_PREFIX, "fractal-message:");
+        for reference in file.tags.iter().filter_map(|tag| tag.strip_prefix(prefix)) {
             if active_subjects.contains(reference) || consumed_by_recipient.contains(reference) {
                 continue;
             }
@@ -19554,10 +19562,15 @@ fn sync_consumed_projected_messages(
 ) -> Result<()> {
     const TAG_PREFIX: &str = "st3-message:";
     for message in fractal_drivers::message::list_dir(inbox)? {
+        let prefix = fractal_drivers::ding::fractal_tag_family(
+            &message.tags,
+            TAG_PREFIX,
+            "fractal-message:",
+        );
         let is_consumed = message
             .tags
             .iter()
-            .filter_map(|tag| tag.strip_prefix(TAG_PREFIX))
+            .filter_map(|tag| tag.strip_prefix(prefix))
             .any(|subject| consumed_by_recipient.contains(subject));
         if is_consumed {
             fractal_drivers::message::archive_msg(inbox, archive, &message.filename)?;
@@ -19579,8 +19592,13 @@ fn projected_message_files(inbox: &Path, archive: &Path) -> Result<BTreeMap<Stri
         .into_iter()
         .chain(fractal_drivers::message::list_dir(archive)?)
         .flat_map(|message| {
+            let prefix = fractal_drivers::ding::fractal_tag_family(
+                &message.tags,
+                TAG_PREFIX,
+                "fractal-message:",
+            );
             message.tags.into_iter().filter_map(move |tag| {
-                tag.strip_prefix(TAG_PREFIX)
+                tag.strip_prefix(prefix)
                     .map(|subject| (subject.to_owned(), message.filename.clone()))
             })
         })

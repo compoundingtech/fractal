@@ -60,6 +60,7 @@ Use these documents for implementation details:
   message a restarted seat is sent with that handoff and the live state of its work.
 - [Seats across deploys](seat-deploys.md) explains how a running seat's driver and channels follow
   a replaced Fractal binary without ending the provider session, and how Fractal reports a stale message path.
+- [Binding an agent to a person's terminal](terminal-binding.md) explains `bind-terminal`: running a native harness in a shell the person already has open.
 - [Silent messages](silent-messages.md) explains the silent and wake message kinds, capped held batches, and where status and run events go.
 - [Delivery probes](delivery-probes.md) describes token-free native-channel probes, per-direction
   read latency, overdue attention, and the replicated results in `st doctor`.
@@ -119,3 +120,4 @@ A seat that sits idle holding a claimed step, with nothing set to wake it, gets 
 the step and what it waits on ([idle holders](mission-graph-runtime.md#idle-holders)).
 Fractal's only other text for agents is the skill that `st skill` prints, which describes how to use Fractal
 and sets no rules of conduct. Keep this rule when changing drivers, messages, or the skill.
+- [Manual onboarding test rig](onboarding-test-rig.md) documents release-archive fixtures and disposable Linux/macOS guest preparation.
