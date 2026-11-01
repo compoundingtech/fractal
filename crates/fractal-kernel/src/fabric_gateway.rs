@@ -254,6 +254,20 @@ mod tests {
     }
 
     #[test]
+    fn gateway_settings_read_both_service_names_without_rewriting() {
+        let root = tempfile::tempdir().unwrap();
+        for service in ["st3-client-v0", "fractal-client-v0"] {
+            let text = format!("service = '{service}'\nfabric = '/opt/fabric'\n");
+            fs::write(GatewayExposure::path(root.path()), &text).unwrap();
+            let exposure = GatewayExposure::load(root.path()).unwrap().unwrap();
+            assert_eq!(exposure.service, service);
+            assert_eq!(exposure.fabric, PathBuf::from("/opt/fabric"));
+            assert_eq!(fs::read_to_string(GatewayExposure::path(root.path())).unwrap(), text);
+        }
+        assert_eq!(DEFAULT_SERVICE, "st3-client-v0");
+    }
+
+    #[test]
     fn node_ids_and_peer_names() {
         assert!(valid_node_id(PHONE));
         assert!(!valid_node_id(&PHONE.to_uppercase()));
