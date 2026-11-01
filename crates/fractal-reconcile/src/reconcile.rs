@@ -16930,6 +16930,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let unkept_cursors = self.unkept_cursors.clone();
         let github_plugin = self.github_plugin.clone();
         let refill_mirrors = self.refill_mirrors;
+        let poller_host = self.host.clone();
         let agent_workspaces = agent_workspaces.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
@@ -17070,7 +17071,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .and_then(crate::resource::replicated_cursor),
                             _ => observation.cursor.clone(),
                         };
-                        match store.record_resource_observation_outcome(
+                        let mirrored = (spec.provider == "github.repository")
+                            .then(|| mirrored_prior(&store, &github_plugin, &poller_host, &spec, &observation.facts, cursor.as_deref()))
+                            .flatten();
+                        match store.record_resource_observation_mirrored(
                             &observer_subject,
                             &revision,
                             refresh_attempt.as_deref(),
@@ -17080,6 +17084,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             observation.next_check_unix_ms,
                             &selected,
                             Some(&current),
+                            mirrored.as_ref(),
                         ) {
                             Ok((outcome, wrote)) => {
                                 if standing {
@@ -17099,7 +17104,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 durable_changed = wrote;
                                 if spec.provider == "github.repository" {
                                     mirror_observation(
-                                        &github_plugin, &observer_subject, &spec,
+                                        &store, &github_plugin, &observer_subject, &spec,
                                         cursor.as_deref(), observation.cursor.as_deref(), &outcome.recorded_items,
                                     );
                                     // A mirror that is new, moved, restored, set aside or behind
@@ -18499,7 +18504,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .store
                 .claim_by_id(claim_id)?
                 .filter(|claim| claim.subject == name)
-                .map(|claim| claim.body));
+                // A gate on a compact item state reads its compact facts, as on an observation.
+                .map(|claim| fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body)));
         }
         self.store.latest_actual_value(subject)
     }
@@ -18682,6 +18688,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 /// look. The mirror is a cache: a failure is logged and the reads it serves fall back to the
 /// graph, never failing the observer.
 fn mirror_observation(
+    store: &Store,
     plugin: &github_plugin_store::GithubPluginStore,
     observer: &str,
     spec: &crate::model::ObserverSpec,
@@ -18700,9 +18707,107 @@ fn mirror_observation(
             })
         })
         .collect::<Vec<_>>();
-    if let Err(error) = plugin.mirror(&spec.resource, observer, &spec.locator, polled_from, cursor, &items) {
-        tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
+    let in_graph = |subject: &str| -> Result<bool> { Ok(store.latest_claim_id(subject)?.is_some()) };
+    let events = match plugin.mirror_checked(&spec.resource, observer, &spec.locator, polled_from, cursor, &items, &in_graph) {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
+            return;
+        }
+    };
+    // Each event is one keyed claim, written once, within the plugin's graph allowlist.
+    for event in events {
+        let Some(subject) = event["subject"].as_str() else { continue };
+        let mut fields = BTreeMap::from([
+            ("version".to_owned(), Value::from(fractal_schema::github_plugin::VERSION)),
+            ("item".to_owned(), event["item"].clone()),
+            ("event".to_owned(), event["event"].clone()),
+            ("observer".to_owned(), Value::String(observer.to_owned())),
+            ("at".to_owned(), event["at"].clone()),
+            ("detail".to_owned(), event["detail"].clone()),
+        ]);
+        if let Some(head) = event["head_sha"].as_str() {
+            fields.insert("head_sha".into(), Value::String(head.to_owned()));
+        }
+        let written = github_plugin_store::MANIFEST
+            .admit(subject, fractal_schema::github_plugin::EVENT, &fields)
+            .map_err(anyhow::Error::new)
+            .and_then(|()| {
+                store.append_claim(&ClaimInput {
+                    subject: subject.to_owned(),
+                    kind: fractal_schema::github_plugin::EVENT.into(),
+                    actor: None,
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("github-event:{subject}")),
+                }).map_err(|error| anyhow::anyhow!(error.message))
+            });
+        if let Err(error) = written {
+            tracing::warn!(observer, subject, "a GitHub event was not written to the graph; the mirror keeps it: {error:#}");
+        }
     }
+}
+
+/// What a repository's poller lays beside a look it records, from a filled mirror: each listed
+/// item's mirrored facts, and whether the repository is in compact mode. Compact mode, where an
+/// item's change is recorded as `vcs.item.state` alone, needs every current member of the fleet
+/// to advertise the GitHub plugin; it is decided again on each look, so a member of an older
+/// build turns snapshots back on. `None` without a filled mirror, or when reading it fails: the
+/// look is then recorded as before.
+fn mirrored_prior(
+    store: &Store,
+    plugin: &github_plugin_store::GithubPluginStore,
+    host: &str,
+    spec: &crate::model::ObserverSpec,
+    facts: &Value,
+    polled_from: Option<&str>,
+) -> Option<crate::model::MirroredPrior> {
+    let read = || -> Result<Option<crate::model::MirroredPrior>> {
+        // Only a mirror that followed every look up to the one this look starts from knows at
+        // least what the graph does.
+        if !plugin.current(&spec.resource, polled_from)? {
+            return Ok(None);
+        }
+        let mut items = HashMap::new();
+        for (segment, field) in [("pull-request", "pull_requests"), ("issue", "issues")] {
+            for number in facts.get(field).and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|item| item.get("number").and_then(Value::as_u64))
+            {
+                if let Some(item) = plugin.item(&spec.resource, number)? {
+                    items.insert(format!("{}/{segment}/{number}", spec.resource), item["facts"].clone());
+                }
+            }
+        }
+        // Compact mode fails closed: every current member of the fleet, whatever it reads,
+        // must advertise the plugin, so a member that is older, or whose dependency on this
+        // repository has not reached this poller yet, keeps reading full snapshots.
+        let membership = store.fleet_membership()?;
+        let mut holding = None;
+        for member in membership.incarnations()
+            .filter(|member| member.end.is_none() && member.name != host)
+            .map(|member| member.name.clone())
+            .collect::<BTreeSet<_>>()
+        {
+            let advertised = store.advertised_feature(&member, "github_plugin")?;
+            if advertised.as_ref().and_then(Value::as_i64).is_none_or(|version| version < 1) {
+                holding = Some(member);
+                break;
+            }
+        }
+        let compact = holding.is_none();
+        if plugin.note_compact(&spec.resource, compact) {
+            match &holding {
+                None => tracing::info!(resource = %spec.resource, "compact mode on: every member advertises the GitHub plugin; item snapshots stop"),
+                Some(member) => tracing::info!(resource = %spec.resource, member, "compact mode off: this member does not advertise the GitHub plugin, so item snapshots continue"),
+            }
+        }
+        Ok(Some(crate::model::MirroredPrior { compact, items }))
+    };
+    read().unwrap_or_else(|error| {
+        tracing::warn!(resource = %spec.resource, "the GitHub plugin mirror could not be read for a look; it is recorded from the graph: {error:#}");
+        None
+    })
 }
 
 /// Fill a repository's mirror from GitHub itself: one fresh look by the repository provider, as a
@@ -40967,6 +41072,128 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0]["event"], "closed");
         assert_eq!(events[0]["subject"], "github-event/repo/issue/3/closed");
+    }
+
+    /// In compact mode a poller records a change confined to compact facts as `vcs.item.state`
+    /// alone, and each derived event as one `github.event` claim. A change to a fact a wake or
+    /// a delivery reads, such as a new comment, still writes a full snapshot, so when polling
+    /// moves to a member without the mirror, nothing is delivered twice: the facts that drifted
+    /// in the graph are a baseline for its first look.
+    #[tokio::test]
+    async fn compact_mode_records_compact_changes_alone_and_a_move_delivers_nothing_twice() {
+        struct OnePoll {
+            facts: Value,
+            cursor: String,
+        }
+        impl ResourceProvider for OnePoll {
+            fn observe(&self, _: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts: self.facts.clone(),
+                    cursor: Some(self.cursor.clone()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "comments"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example.reader"; delivery "message" }
+subscription "comments" { observer "observer/repo"; on "comments"; to "agent/example.reader"; delivery "message" }"#,
+            "compact-mode",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let issue = |state: &str, title: &str, comments: &[u64]| serde_json::json!({
+            "node_id": "I_orchid", "number": 1, "state": state, "title": title,
+            "url": "https://github.com/acme/garden/issues/1",
+            "comments": comments.len(),
+            "recent_comments": comments.iter().map(|id| serde_json::json!({
+                "kind": "comment", "id": id, "author": "fern", "at": format!("2026-10-30T10:0{id}:00Z"),
+            })).collect::<Vec<_>>(),
+        });
+        let listing = |state: &str, title: &str, comments: &[u64]| serde_json::json!({"repository_id": 7, "issues": [issue(state, title, comments)]});
+        let poll = |plugin: Arc<github_plugin_store::GithubPluginStore>, facts: Value, cursor: &str| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
+            .with_resource_provider(Arc::new(OnePoll { facts, cursor: cursor.to_owned() }));
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            let cursor = cursor.to_owned();
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while plugin.cursor("observer/repo").unwrap() != Some(Some(cursor.clone())) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll keeps its cursor");
+            }
+        };
+        let item = "resource/repo/issue/1";
+        let count = |kind: &str| store.claims_for(item, None).unwrap().into_iter()
+            .filter(|claim| claim.kind == kind).count();
+        let delivered = || store.messages(Some("agent/example.reader"), true).unwrap().len();
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+
+        // The first look is a baseline, and the mirror fills from it.
+        poll(plugin.clone(), listing("open", "Orchid", &[]), "c1").await;
+        assert!(plugin.filled("resource/repo").unwrap());
+        assert_eq!(delivered(), 0);
+
+        // A comment is a delivery fact: it is delivered once and keeps a full snapshot.
+        let snapshots = count("resource.observed");
+        poll(plugin.clone(), listing("open", "Orchid", &[1]), "c2").await;
+        assert_eq!(delivered(), 1);
+        assert_eq!(count("resource.observed"), snapshots + 1, "a comment writes a snapshot");
+        poll(plugin.clone(), listing("open", "Orchid", &[1]), "c3").await;
+        assert_eq!(delivered(), 1, "a known comment is not delivered again");
+
+        // A close and a new title are not delivery facts: the close is compact state and one
+        // keyed event, and neither writes a snapshot.
+        let snapshots = count("resource.observed");
+        let states = count("vcs.item.state");
+        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4").await;
+        assert_eq!(count("resource.observed"), snapshots, "a compact-only change writes no snapshot");
+        assert_eq!(count("vcs.item.state"), states + 1);
+        assert_eq!(store.latest_actual_value(item).unwrap().unwrap()["facts"]["state"], "closed");
+        assert_eq!(store.claims_for("github-event/repo/issue/1/closed", None).unwrap().len(), 1);
+        let after_close = delivered();
+        // The same facts again: an unchanged look writes no snapshot and no state.
+        let (snapshots, states) = (count("resource.observed"), count("vcs.item.state"));
+        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4b").await;
+        assert_eq!((count("resource.observed"), count("vcs.item.state")), (snapshots, states), "an unchanged look records nothing");
+
+        // Polling moves to a member with no mirror. Its first look finds the title the graph
+        // never recorded: that is a baseline, and nothing is delivered twice.
+        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed", &[1]), "c5").await;
+        assert_eq!(delivered(), after_close, "a move after compact-only changes delivers nothing twice");
+
+        // A filled mirror that missed a look, as when its write failed after the graph write, is
+        // not a look's prior: the look is compared with the graph.
+        let spec = crate::graph::observer_spec(
+            &store.desired_subjects_named(&["observer/repo".into()]).unwrap()[0].desired,
+        ).unwrap();
+        let facts = listing("closed", "Orchid, renamed", &[1]);
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c4b")).is_some());
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c9")).is_none(), "behind the cursor");
+
+        // The graph moves on while this mirror and its cursor stay at the earlier look, as when
+        // the daemon stops between the graph write and the mirror write. The look from that
+        // cursor sees a comment the graph already delivered: it is not delivered again.
+        let comments = delivered();
+        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed", &[1, 2]), "c6").await;
+        assert_eq!(delivered(), comments + 1, "the second comment is delivered");
+        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1, 2]), "c7").await;
+        assert_eq!(delivered(), comments + 1, "a mirror behind the graph delivers it nothing twice");
     }
 
     /// Polling moves to a member without the plugin database, between two polls by the real
