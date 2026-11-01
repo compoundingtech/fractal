@@ -291,6 +291,18 @@ class TreeOrphansTest(unittest.TestCase):
             self.assertEqual(st_test.tree_users(self.tree, self.proc), [])
         self.assertEqual(st_test.tree_users(self.tree, self.proc / 'missing'), [])
 
+    def test_argv_paths_resolve_symlinks_before_parent_segments(self):
+        self.tree.mkdir()
+        sibling = Path(self.tmp.name, 'tree-1')
+        (sibling / 'nested').mkdir(parents=True)
+        (self.tree / 'link').symlink_to(sibling / 'nested', target_is_directory=True)
+        alias = Path(self.tmp.name, 'alias')
+        alias.symlink_to(self.tree, target_is_directory=True)
+        self.process(101, argv=[str(self.tree / 'link/driver')])
+        self.process(102, argv=[f'--file={alias}/driver'])
+        self.process(103, argv=[str(self.tree / 'link/../driver')])
+        self.assertEqual(st_test.tree_users(self.tree, self.proc), [102])
+
     def test_ancestors_referencing_the_tree_are_never_pinned_or_signalled(self):
         self.process(os.getpid(), cwd=self.tree, ppid=101)
         self.process(101, cwd=self.tree, ppid=102)
