@@ -439,13 +439,15 @@ class GovernedTest(unittest.TestCase):
                              'scope memory cap, no CPU controller')
         self.assert_in_place(self.governed_in(self.GATE, {'app-capped.slice': ('17179869184', 'max 100000')}),
                              'approved parent memory cap')
+        self.assert_in_place(self.governed_in(self.HEAVY, {'app-capped.slice': ('17179869184', 'max 100000')}),
+                             'heavy scope inherits the approved outer slice cap')
 
     def test_gate_slot_names_and_environment_without_the_right_memory_cap_do_not_count(self):
         self.assert_scoped(self.governed_in(self.HEAVY, {}), 'scope name without a cap')
         markers = {'GATE_SLOT_ADMITTED': '1', 'GATE_SLOT_SCOPE_UNIT': 'gate-slot-heavy-123.scope', 'BUILDS_SLICE_ACTIVE': '1'}
         self.assert_scoped(self.governed_in(self.SEAT, {}, markers), 'environment alone')
-        self.assert_scoped(self.governed_in(self.HEAVY, {'app-capped.slice': ('17179869184', 'max 100000')}),
-                           'limit above the heavy anchor')
+        self.assert_scoped(self.governed_in(self.HEAVY, {'app.slice': ('17179869184', 'max 100000')}),
+                           'limit above the app-capped anchor')
         self.assert_scoped(self.governed_in(self.HEAVY, {'app-capped-heavy.slice': (None, '100000 100000')}),
                            'CPU alone without a memory controller')
         misplaced = self.HEAVY.replace('app-capped.slice/', '')

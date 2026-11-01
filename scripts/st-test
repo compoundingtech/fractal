@@ -703,7 +703,7 @@ def shared_target(tree_target=None):
 def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
     """The cap this process runs under, as one string, or None. Builds and seat lanes (docs/st3/seat-lanes.md) require
     memory.max and cpu.max at or below their anchor. A gate-slot scope directly in app-capped.slice or its heavy child
-    requires only memory.max at the scope or its parent: gate-slot does not normally set a CPU quota.
+    requires only memory.max at the scope or within that approved slice chain: gate-slot does not normally set a CPU quota.
     Read kernel files, never trust names or variables alone. Limits above the approved anchor do not count."""
     try:
         text = Path(cgroup_file).read_text()
@@ -723,7 +723,8 @@ def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
                  and (parts[depth - 2:depth] == ['app.slice', 'app-capped.slice']
                       or parts[max(0, depth - 3):depth] == ['app.slice', 'app-capped.slice', 'app-capped-heavy.slice'])), None)
     if gate is not None:
-        for depth in (gate + 1, gate):
+        anchor = gate - (2 if parts[gate - 1] == 'app-capped-heavy.slice' else 1)
+        for depth in range(gate + 1, anchor, -1):
             if limited(Path(root, *parts[:depth]), 'memory.max'):
                 return f'{parts[gate]}: memory by {parts[depth - 1]}'
 
