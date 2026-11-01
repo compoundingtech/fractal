@@ -69,15 +69,26 @@ def alive(pid):
     return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
 def cgroup_path(text):
-    return next((line[3:] for line in text.splitlines() if line.startswith("0::")), "")
+    lines = text.splitlines()
+    assert lines and all(re.fullmatch(r"\d+:[^:]*:/.*", line) for line in lines), "malformed cgroup metadata"
+    paths = [line[3:] for line in lines if line.startswith("0::")]
+    assert len(paths) == 1, "missing or duplicate unified cgroup metadata"
+    path = paths[0]
+    assert path == "/" or all(part not in ("", ".", "..") for part in path[1:].split("/")), "malformed cgroup path"
+    return path
 
 
 def caller_slice(text):
-    parent = cgroup_path(text).rsplit("/", 1)[0]
-    if not any(re.fullmatch(r"user@\d+\.service", part) for part in parent.split("/")):
+    path = cgroup_path(text)
+    parent = path.rsplit("/", 1)[0]
+    if not any(re.fullmatch(r"user@\d+\.service", part) for part in path.split("/")):
         return None  # A --user scope would leave this caller's cgroup tree.
     assert parent.endswith(".slice"), f"caller cgroup parent is not a slice: {parent}"
     return parent
+
+
+def read_caller_slice(cgroup_file="/proc/self/cgroup"):
+    return caller_slice(Path(cgroup_file).read_text())
 
 def starttime(text):
     return int(text.rsplit(")", 1)[1].split()[19])  # /proc/PID/stat field 22
@@ -106,6 +117,13 @@ except AssertionError:
     pass
 else:
     raise AssertionError("a non-slice parent must fail, not default to app.slice")
+for metadata in ("", "not cgroup metadata", "0::relative", "0::/a\n0::/b\n", "0::/a/../b\n"):
+    try:
+        caller_slice(metadata)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("malformed cgroup metadata must fail, not skip")
 assert starttime("1 (name with ) spaces) " + " ".join(["S"] + ["0"] * 18 + ["12345"])) == 12345
 assert runtime_usec("1min 30s") == runtime_usec("90s") == runtime_usec("90000000us") == 90000000
 with tempfile.TemporaryDirectory() as helper_tmp:
@@ -113,6 +131,19 @@ with tempfile.TemporaryDirectory() as helper_tmp:
     for name, value in {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}.items():
         (group / name).write_text(str(value))
     assert kernel_limits(group)["pids.max"] == 16
+    try:
+        read_caller_slice(group / "unreadable")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("unreadable cgroup metadata must fail, not skip")
+    (group / "pids.max").unlink()
+    try:
+        kernel_limits(group)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("missing kernel limit readback must fail")
 test_units, test_wrappers, test_child, events = [], [], object(), []
 def fake_mask(how, mask):
     if how == signal.SIG_BLOCK:
@@ -229,7 +260,7 @@ with tempfile.TemporaryDirectory() as tmp:
     systemd_run = next((Path(d) / "systemd-run" for d in os.environ["PATH"].split(":") + ["/run/current-system/sw/bin", "/usr/bin"]
                         if (Path(d) / "systemd-run").exists()), None)
     scope_available = systemd_run and runtime and Path(runtime, "bus").exists()
-    slice_path = caller_slice(Path("/proc/self/cgroup").read_text()) if scope_available else None
+    slice_path = read_caller_slice() if scope_available else None
     if scope_available and slice_path:
         units, wrappers, scoped_pids, evidence = [], [], [], {}
         systemctl = str(systemd_run.with_name("systemctl"))
@@ -316,7 +347,7 @@ with tempfile.TemporaryDirectory() as tmp:
         finally:
             finish_fixtures()
     elif scope_available:
-        print("skipped: caller is not under a user manager; a --user scope would leave the caller's cgroup tree")
+        print("skipped: caller is not under a user manager; a --user scope would leave the caller's cgroup tree (scope-move case)")
     else:
         print("skipped: no systemd user bus for the scope case")
 
