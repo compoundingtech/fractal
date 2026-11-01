@@ -307,4 +307,75 @@ mod tests {
         store.work_action(&work.subject, "claim", &request(to, "claim-birch")).unwrap();
         assert!(store.claims_for(note, None).unwrap().is_empty());
     }
+
+    /// An acknowledgment the step refuses leaves a stream note unread, and the one it accepts
+    /// replicates: on another member, whose graph has no read of the note, the handoff is no
+    /// longer pending, so neither a claim nor a close waits on it.
+    #[test]
+    fn a_refused_stream_acknowledgment_reads_nothing_and_an_accepted_one_replicates() {
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+        let other = Store::open_memory("birch").unwrap();
+        let intent = crate::graph::parse_internal_intent("version 2\nagent \"example/alder\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/birch\" { workspace \"/tmp\"; command \"true\" }", "alder").unwrap();
+        store.apply_internal(&intent, "fixture-seats").unwrap();
+        let start = WorkStartRequest {
+            actor: "agent/example/alder".into(),
+            title: "Inspect a refused stream fixture".into(),
+            idempotency_key: "start-refused-stream".into(),
+        };
+        let work = store.start_work(&start).unwrap();
+        store.work_action(&work.subject, "claim", &request(&start.actor, "claim-alder")).unwrap();
+        let to = "agent/example/birch";
+        store
+            .handoff_work(&work.subject, &WorkHandoffRequest {
+                actor: start.actor.clone(),
+                incarnation: Some(format!("{}-one", start.actor)),
+                to: to.into(),
+                note: "Inspect the refused stream fixture next".into(),
+                evidence: Vec::new(),
+                idempotency_key: "handoff-refused-stream".into(),
+            })
+            .unwrap();
+        let note = "message/00000000000000d1";
+        shard
+            .append_claim(&ClaimInput {
+                subject: note.into(),
+                kind: "message.sent".into(),
+                actor: Some(start.actor.clone()),
+                fields: serde_json::from_value(json!({
+                    "from": start.actor, "to": to, "content": "Inspect the refused stream fixture next", "status": "sent"
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        store
+            .connection
+            .write()
+            .execute(
+                "UPDATE claims SET body=json_set(body,'$.fields.handoff_message',?2) WHERE subject=?1 AND kind='work.released'",
+                params![work.subject, note],
+            )
+            .unwrap();
+        let acknowledge = WorkAcknowledgeRequest { actor: to.into(), message: note.into() };
+        let read = || crate::store::messages_shard::mailbox_reads::lifecycle_step(&store, note, "message.read").unwrap();
+        // The note is the current handoff to its reader, but the step is no longer waiting for it.
+        let set_status = |status: &str| {
+            store.connection.write().execute("UPDATE step_runs SET status=?2 WHERE subject=?1", params![work.subject, status]).unwrap();
+        };
+        set_status("blocked");
+        assert_eq!(store.acknowledge_work(&work.subject, &acknowledge).unwrap_err().code, "stale-handoff");
+        assert!(read().is_none(), "a refused acknowledgment read the note");
+        set_status("ready");
+        store.acknowledge_work(&work.subject, &acknowledge).unwrap();
+        assert_eq!(read().map(|(actor, _)| actor), Some(to.to_owned()));
+        // The acknowledgment is a graph claim; the read is not. Another member needs only the first.
+        receive_and_project(&other, "alder", &exchange_from(&store, &ReplicationInventory::default()));
+        assert!(other.claims_for(note, None).unwrap().is_empty());
+        let replicated = other.step_run(&work.subject).unwrap().unwrap();
+        assert!(!crate::store::adhoc_work::pending_handoff(&other.readers.get(), &replicated).unwrap(), "the handoff stays pending elsewhere");
+    }
 }
