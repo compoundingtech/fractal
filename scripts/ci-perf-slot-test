@@ -56,7 +56,9 @@ def validate_receipt(receipt):
     require(len(fixtures) == 2 and len({r["unit"] for r in fixtures}) == 2)
     for record in fixtures:
         require(os.path.normpath(record["caller_slice"]) == os.path.dirname(os.path.normpath(receipt["gate_slot"]["cgroup"])))
-        require(os.path.normpath(record["parent_slice"]) in receipt["scanned_roots"])
+        parent = os.path.dirname(os.path.normpath(record["cgroup"]))
+        require(os.path.normpath(record["parent_slice"]) == parent == os.path.normpath(record["caller_slice"]))
+        require(parent in receipt["scanned_roots"])
         require(record["drain"] == "empty and collected")
         require(type(record["peak_sampled_before_termination"]) is int and record["peak_sampled_before_termination"] >= 0)
         final = record["peak_final_lifecycle"]
@@ -421,6 +423,8 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
     for candidate, accepted in ((complete, True), (wrong, False), (dict(complete, outcome="failure"), False),
                                 (dict(complete, gate_slot={"unit": None, "cgroup": None}), False),
                                 (dict(complete, caller_cgroup="/system.slice/runner.service"), False),
+                                (dict(complete, fixtures=[dict(record, parent_slice="/other/ci.slice") for record in fixtures],
+                                      scanned_roots=["/other/ci.slice"]), False),
                                 (dict(complete, scanned_roots=[]), False)):
         (sink / "cli.json").write_text(json.dumps(candidate))
         result = subprocess.run([sys.executable, "-O", str(Path(__file__).resolve()), "--validate-receipt", str(sink / "cli.json")], capture_output=True)
