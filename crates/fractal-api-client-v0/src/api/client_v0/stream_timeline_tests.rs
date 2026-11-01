@@ -81,7 +81,7 @@ async fn a_stream_item_whose_accepted_time_does_not_parse_shows_when_it_arrived(
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
     shard.connection.write()
-        .execute("UPDATE claims SET accepted_at_unix_ms='not-a-time' WHERE subject=?1", [subject])
+        .execute(/* sqlite-large-value: allow-for-now lv-h457a9419c6ed owner=fractal_api_client_v0::api::client_v0::stream_timeline_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='not-a-time' WHERE subject=?1", [subject])
         .unwrap();
     crate::store::messages_shard::stream_reads::record_arrivals(&state.store).unwrap();
     let (_, page) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
