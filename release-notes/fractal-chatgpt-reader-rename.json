@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Name the MCP adapter fractal-chatgpt and accept both paired-client socket names",
+  "replay": {"status": "none", "detail": "No graph replay or data changes."},
+  "schema": {"status": "none", "detail": "No storage schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordination rule changes."},
+  "compatibility": {"status": "changed", "detail": "The adapter accepts fractal-client.sock and st3-client.sock; control sockets and other names remain rejected. The canonical Cargo binary and Nix package are fractal-chatgpt. Nix retains the st-chatgpt package alias and executable symlink in the same derivation for existing consumers. MCP server identity is fractal-chatgpt; tools and grant authority are unchanged."},
+  "downtime": {"status": "none", "detail": "No daemon restart or service interruption is required by this adapter change."},
+  "manual": {"status": "changed", "detail": "Source builds should select --bin fractal-chatgpt. Existing Nix consumers may keep using the st-chatgpt package and executable during the rename bridge. Select the paired-client socket name provided by the running daemon."},
+  "recovery": {"status": "none", "detail": "No persistent data is changed. An older adapter can still connect through st3-client.sock while the daemon provides that name."}
+}

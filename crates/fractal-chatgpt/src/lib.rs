@@ -10,8 +10,8 @@ use std::{io::{self, Read}, path::Path, os::unix::fs::{OpenOptionsExt, MetadataE
 pub struct Adapter { client: reqwest::Client, bearer: String }
 impl Adapter {
     pub fn new(socket: &Path, credential_file: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        if socket.file_name().and_then(|name| name.to_str()) != Some("st3-client.sock") {
-            return Err("only the paired gateway st3-client.sock is permitted".into());
+        if !matches!(socket.file_name().and_then(|name| name.to_str()), Some("fractal-client.sock" | "st3-client.sock")) {
+            return Err("only the paired gateways fractal-client.sock and st3-client.sock are permitted".into());
         }
         let bearer = read_credential(credential_file)?;
         let client = reqwest::Client::builder().unix_socket(socket).build()?;
@@ -296,7 +296,7 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
 impl ServerHandler for Adapter {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("st-chatgpt",env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("fractal-chatgpt",env!("CARGO_PKG_VERSION")))
     }
     async fn list_tools(&self, _:Option<PaginatedRequestParams>, _:RequestContext<RoleServer>) -> Result<ListToolsResult,ErrorData> {
         Ok(ListToolsResult { tools: tool_definitions(), ..Default::default() })
