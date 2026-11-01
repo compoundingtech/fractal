@@ -296,6 +296,8 @@ def scrub_seat_environment():
     FRACTAL_AGENT): a check that kept them could reach the live daemon as the seat. Every check starts in `nix develop`, whose shell
     sets the dev shell's FRACTAL_* settings (flake.nix) itself, and scripts/ci-local drops the rest for its stages. ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
     starts the check); the evidence switches stay. The kept list is the only exception mechanism for a future ST_* switch."""
+    if os.environ.get('CI_PERF_SLOT_RECEIPT_DIR'):
+        os.environ['CI_PERF_SLOT_DISPOSABLE_ROOTS'] = json.dumps([str(pool_base().resolve()), str(run_tmp_root().resolve())])
     for name in [name for name in os.environ
                  if name.startswith(SEAT_PREFIXES) and name not in KEPT_SEAT and not name.startswith('ST_EVIDENCE')]:
         del os.environ[name]
