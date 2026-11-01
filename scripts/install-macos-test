@@ -113,6 +113,40 @@ class Installer(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
 
+    def test_install_receipt_ownership_cases(self):
+        destination = m.bin_dir(self.home)
+        destination.mkdir(parents=True)
+        canonical = destination / 'fractal'
+        receipt = destination / '.fractal-install.json'
+        for kind in ('receipt-aliases', 'receipt-only', 'aliases-only', 'tampered', 'symlink'):
+            with self.subTest(kind=kind):
+                canonical.symlink_to(self.built['fractal'])
+                if kind != 'receipt-only':
+                    for name in ('st', 'st3'):
+                        (destination / name).symlink_to('fractal')
+                value = {'schema': 1, 'name': 'fractal',
+                         'sha256': hashlib.sha256(canonical.read_bytes()).hexdigest()}
+                if kind != 'aliases-only':
+                    receipt.write_text(json.dumps(value))
+                if kind == 'tampered':
+                    receipt.write_text('{}')
+                if kind == 'symlink':
+                    saved = destination / 'saved-receipt'
+                    receipt.rename(saved)
+                    receipt.symlink_to(saved)
+                if kind in ('tampered', 'symlink'):
+                    with self.assertRaisesRegex(RuntimeError, r'\.fractal-install\.json.*reinstall'):
+                        m.owns_fractal(canonical, self.home)
+                elif kind == 'aliases-only':
+                    # The existing signed-app link is recognizable without a receipt.
+                    canonical.unlink()
+                    canonical.symlink_to(m.binaries(m.fixed(self.home))['fractal'])
+                    self.assertTrue(m.owns_fractal(canonical, self.home))
+                else:
+                    self.assertTrue(m.owns_fractal(canonical, self.home))
+                for path in destination.iterdir():
+                    path.unlink()
+
     def test_foreign_canonical_refusal_preserves_installed_app_and_commands(self):
         with patch.object(m, 'command', side_effect=self.command), \
                 patch.object(m, 'exchange', side_effect=self.exchange):
@@ -123,6 +157,7 @@ class Installer(unittest.TestCase):
             original = {p.relative_to(installed): p.read_bytes()
                         for p in installed.rglob('*') if p.is_file()}
             canonical = m.bin_dir(self.home) / 'fractal'
+            (canonical.parent / '.fractal-install.json').unlink()
             canonical.unlink()
             canonical.write_bytes(b'foreign canonical owner')
             self.built['fractal'].write_bytes(b'fractal-two')
@@ -271,6 +306,8 @@ class Installer(unittest.TestCase):
     def command(self, args):
         args = list(map(str, args))
         self.calls.append(args)
+        if args[1:] == ['--version', '--json']:
+            return '{"machine_version":"fixture-version","commit":"abcdef123"}'
         if args[:2] == ['launchctl', 'print']:
             raise subprocess.CalledProcessError(113, args, 'service absent')
         if args[:2] == ['launchctl', 'print-disabled']:
