@@ -38,7 +38,7 @@ fn advance_generation(control_file: &File) -> Result<()> {
     let next = current
         .checked_add(1)
         .context("catalog generation counter exhausted")?;
-    let control = crate::catalog_transaction::retained_dir_path(control_file)?;
+    let control = crate::directory::retained_dir_path(control_file)?;
     let target = control.join(GENERATION_FILE);
     match fs::symlink_metadata(&target) {
         Ok(metadata) => anyhow::ensure!(
@@ -72,7 +72,7 @@ pub(crate) fn read_generation_token(catalog: &Path) -> Result<Option<u64>> {
 }
 
 fn read_generation_from_control(control: &File) -> Result<Option<u64>> {
-    let control_path = crate::catalog_transaction::retained_dir_path(control)?;
+    let control_path = crate::directory::retained_dir_path(control)?;
     let path = control_path.join(GENERATION_FILE);
     let mut file = match OpenOptions::new()
         .read(true)
@@ -123,8 +123,8 @@ fn ensure_authoring_complete(catalog: &Path) -> Result<()> {
 }
 
 fn retained_control(catalog: &Path) -> Result<Option<(File, PathBuf)>> {
-    let root = crate::catalog_transaction::open_dir_beneath(catalog, catalog)?;
-    let file = match crate::catalog_transaction::openat_dir_nofollow(
+    let root = crate::directory::open_dir_beneath(catalog, catalog)?;
+    let file = match crate::directory::openat_dir_nofollow(
         &root,
         std::ffi::OsStr::new(CONTROL_DIR),
     ) {
@@ -132,7 +132,7 @@ fn retained_control(catalog: &Path) -> Result<Option<(File, PathBuf)>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("open catalog control directory"),
     };
-    let path = crate::catalog_transaction::retained_dir_path(&file)?;
+    let path = crate::directory::retained_dir_path(&file)?;
     Ok(Some((file, path)))
 }
 
@@ -208,7 +208,7 @@ impl CatalogLock {
             "catalog root is not a real directory: {}",
             catalog.display()
         );
-        let root = crate::catalog_transaction::open_dir_beneath(&catalog, &catalog)
+        let root = crate::directory::open_dir_beneath(&catalog, &catalog)
             .with_context(|| format!("open catalog root capability {}", catalog.display()))?;
 
         let control = catalog.join(CONTROL_DIR);
@@ -268,12 +268,12 @@ impl CatalogLock {
             let _ = fs::write(path, _control_branch);
         }
 
-        let control_file = crate::catalog_transaction::openat_dir_nofollow(
+        let control_file = crate::directory::openat_dir_nofollow(
             &root,
             std::ffi::OsStr::new(CONTROL_DIR),
         )
         .context("catalog control directory disappeared while acquiring its lock")?;
-        let control = crate::catalog_transaction::retained_dir_path(&control_file)?;
+        let control = crate::directory::retained_dir_path(&control_file)?;
         let path = control.join(LOCK_FILE);
         let file = crate::flock::open(
             &path,
@@ -351,7 +351,7 @@ impl CatalogLock {
 
     #[doc(hidden)]
     pub fn begin_generation_commit(&self) -> Result<GenerationCommit<'_>> {
-        let control = crate::catalog_transaction::retained_dir_path(&self.control)?;
+        let control = crate::directory::retained_dir_path(&self.control)?;
         let intent = control.join(GENERATION_INTENT_FILE);
         let mut file = OpenOptions::new()
             .write(true)
@@ -373,7 +373,7 @@ impl CatalogLock {
     }
 
     fn recover_generation_intent(&self) -> Result<()> {
-        let control = crate::catalog_transaction::retained_dir_path(&self.control)?;
+        let control = crate::directory::retained_dir_path(&self.control)?;
         let intent = control.join(GENERATION_INTENT_FILE);
         match fs::symlink_metadata(&intent) {
             Ok(metadata) => anyhow::ensure!(
@@ -420,7 +420,7 @@ impl GenerationCommit<'_> {
             anyhow::bail!("injected post-commit generation failure");
         }
         self.lock.advance_generation()?;
-        let control = crate::catalog_transaction::retained_dir_path(&self.lock.control)?;
+        let control = crate::directory::retained_dir_path(&self.lock.control)?;
         fs::remove_file(control.join(GENERATION_INTENT_FILE))
             .context("clear catalog generation intent")?;
         self.lock.control.sync_all()?;

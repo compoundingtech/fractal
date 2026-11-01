@@ -315,6 +315,17 @@ fn own_unit() -> Option<String> {
     Some(path.rsplit('/').next()?.to_owned())
 }
 
+/// Whether `pid` runs in the scope `unit`. `systemd-run --scope` moves itself into its scope when
+/// the user manager starts it and only then execs the task; until then the scope is loaded and
+/// empty, so a signal to it succeeds and reaches nothing. A process that cannot be read has not.
+pub(crate) fn joined(unit: &str, pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok_and(|text| {
+        text.lines()
+            .filter_map(|line| line.strip_prefix("0::"))
+            .any(|path| path.split('/').any(|part| part == unit))
+    })
+}
+
 /// Whether this process has seen the work scope `unit` empty.
 pub(crate) fn has_ended(unit: &str) -> bool {
     ENDED
