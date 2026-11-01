@@ -2722,6 +2722,20 @@ pub struct MissionRunView {
     pub scheduler_fault: Option<String>,
 }
 
+impl MissionRunView {
+    /// How this run ended, when it has: its terminal status, or the terminal or cleanup phase it
+    /// stops its seats in. A run stops its owned agents in cleanup, before it becomes terminal.
+    pub fn ended(&self) -> Option<&str> {
+        if matches!(self.status.as_str(), "completed" | "failed" | "cancelled") {
+            Some(&self.status)
+        } else if self.phase == "terminal" || self.phase.starts_with("cleanup-") {
+            Some(&self.phase)
+        } else {
+            None
+        }
+    }
+}
+
 /// A bounded slice of the root graph for human mission presentation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionRunTreePage {

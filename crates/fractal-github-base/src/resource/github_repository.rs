@@ -2273,6 +2273,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forbidden_installation_queries_do_not_cache_pat_pull_request_facts() {
+        use crate::github_http::app_read::{select, tests::{install, server}};
+        let root = tempfile::tempdir().unwrap();
+        let owner = "forbidden-pulls";
+        for app in ["gh-ci", "github-ledger"] {
+            install(root.path(), owner, app, "fixture-app", chrono::Utc::now() + chrono::Duration::minutes(60));
+        }
+        let auth = select(Some(root.path()), owner, "gh-ci", &GithubAuth::test("fixture-pat"));
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let fixture = server(move |authorization, _, body| {
+            recorded.lock().push((authorization.to_owned(), body.clone()));
+            let data = if body["query"] == OPEN_PULL_REQUESTS {
+                json!({"repository":{"pullRequests":{"pageInfo":{"hasNextPage":false},"nodes":[]}}})
+            } else {
+                assert!(body["query"] == RESOLVED_PULLS || body["query"] == RESOLVED_ISSUES);
+                json!({"nodes":[]})
+            };
+            (reqwest::StatusCode::OK, if authorization == "Bearer fixture-app" {
+                json!({"errors":[{"message":"Resource not accessible by integration"}]})
+            } else { assert_eq!(authorization, "Bearer fixture-pat"); json!({"data":data}) })
+        }).await;
+        for _ in 0..2 {
+            open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
+                Duration::ZERO, "forbidden-pulls/repo", (owner, "repo"), false, true,
+                &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        }
+        let calls = calls.lock();
+        assert_eq!(calls.len(), 12, "each query must still read the App and replay with PAT on the second observation");
+        for pair in calls.chunks_exact(2) {
+            assert_eq!(pair[0].0, "Bearer fixture-app");
+            assert_eq!(pair[1].0, "Bearer fixture-pat");
+            assert_eq!(pair[0].1, pair[1].1);
+        }
+    }
+
+    #[tokio::test]
     async fn installation_pages_split_opaque_identities_and_merge_pat_legacy_status_once_per_head() {
         use crate::github_http::app_read::{select, tests::{install, server}};
         use reqwest::StatusCode;

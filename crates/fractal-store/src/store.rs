@@ -5498,18 +5498,22 @@ impl Store {
         at_index: Option<u64>,
     ) -> Result<Option<String>> {
         let connection = self.readers.get();
-        let body: Option<String> = connection
+        let at_index = at_index.unwrap_or(i64::MAX as u64);
+        let decision: Option<(String, u64)> = connection
             .query_row(
-                "SELECT body FROM claims WHERE subject=?1 AND kind='runtime.reconcile-decision'
+                "SELECT body, store_index FROM claims WHERE subject=?1 AND kind='runtime.reconcile-decision'
              AND store_index<=?2 AND json_extract(body, '$.fields.key')='member-reconcile'
              ORDER BY store_index DESC LIMIT 1",
-                params![subject, at_index.unwrap_or(i64::MAX as u64)],
-                |row| row.get(0),
+                params![subject, at_index],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some(body) = body else {
+        let Some((body, index)) = decision else {
             return Ok(None);
         };
+        if stopped_after(&connection, subject, index, at_index)? {
+            return Ok(None);
+        }
         let body: Value = serde_json::from_str(&body)?;
         let fields = body.get("fields").unwrap_or(&body);
         Ok(
@@ -5526,18 +5530,25 @@ impl Store {
     /// The host that recorded `subject`'s current member fault, when it has one.
     pub fn member_reconcile_fault_origin(&self, subject: &str) -> Result<Option<String>> {
         let connection = self.readers.get();
-        Ok(connection
+        let Some((origin, decision, index)) = connection
             .query_row(
-                "SELECT origin, json_extract(body, '$.fields.decision') FROM claims
+                "SELECT origin, json_extract(body, '$.fields.decision'), store_index FROM claims
                  WHERE subject=?1 AND kind='runtime.reconcile-decision'
                    AND json_extract(body, '$.fields.key')='member-reconcile'
                  ORDER BY store_index DESC LIMIT 1",
                 params![subject],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, u64>(2)?)),
             )
             .optional()?
-            .filter(|(_, decision)| decision.as_deref() == Some("member-fault"))
-            .map(|(origin, _)| origin))
+        else {
+            return Ok(None);
+        };
+        if decision.as_deref() != Some("member-fault")
+            || stopped_after(&connection, subject, index, i64::MAX as u64)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(origin))
     }
 
     /// The member fault of each of `subjects` that has one at `at_index`, as
@@ -5555,16 +5566,24 @@ impl Store {
                     (SELECT body FROM claims WHERE subject=subjects.value
                        AND kind='runtime.reconcile-decision' AND store_index<=?2
                        AND json_extract(body, '$.fields.key')='member-reconcile'
+                     ORDER BY store_index DESC LIMIT 1),
+                    (SELECT store_index FROM claims WHERE subject=subjects.value
+                       AND kind='runtime.reconcile-decision' AND store_index<=?2
+                       AND json_extract(body, '$.fields.key')='member-reconcile'
                      ORDER BY store_index DESC LIMIT 1)
              FROM json_each(?1) subjects",
         )?;
         let mut decisions = Vec::new();
         for chunk in subjects.chunks(256) {
             for row in statement.query_map(params![serde_json::to_string(chunk)?, at_index], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<u64>>(2)?))
             })? {
-                let (subject, body) = row?;
-                decisions.extend(body.map(|body| (subject, body)));
+                let (subject, body, index) = row?;
+                if let (Some(body), Some(index)) = (body, index)
+                    && !stopped_after(&connection, &subject, index, at_index)?
+                {
+                    decisions.push((subject, body));
+                }
             }
         }
         let mut faults = BTreeMap::new();
@@ -22780,4 +22799,17 @@ fn fleet_hears_seats_tx(transaction: &Transaction<'_>) -> Result<bool, St3Error>
         .map_err(internal)?
         .as_deref()
         == Some("1"))
+}
+
+/// Whether the subject was stopped after the member reconcile decision at `decision_index`. A
+/// stop ends what an earlier fault was about, whichever host recorded it and whether or not that
+/// host answers, and declaring the seat again does not bring it back; a fault recorded after the
+/// stop stands.
+fn stopped_after(connection: &Connection, subject: &str, decision_index: u64, at_index: u64) -> Result<bool> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='intent.desired'
+               AND store_index>?2 AND store_index<=?3 AND json_extract(body, '$.kind')='stop')",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h0e4abbec7bce owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, decision_index, at_index], |row| row.get(0))?)
 }
