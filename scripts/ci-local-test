@@ -114,6 +114,7 @@ class CiLocal(unittest.TestCase):
         compile_ = RECORD + 'if [ -n "${SCCACHE_SERVER_UDS:-}" ] && [ ! -e "$SCCACHE_SERVER_UDS" ]; then echo "$TMPDIR" > "$SCCACHE_SERVER_UDS"; fi\n'
         done, calls = self.run_local('tests', ci_linux=compile_, SCCACHE_SERVER_UDS=str(socket), SCCACHE_DIR='/lane/cache')
         self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(calls)
         for call in calls:
             self.assertNotIn('SCCACHE_SERVER_UDS', call['env'])
             self.assertNotIn('SCCACHE_DIR', call['env'])
