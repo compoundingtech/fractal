@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A member that trims locally now also drops superseded resource observations, under the keep-set rule of checkpoint rules version 23: it keeps the newest observation of each attribution, the earliest opener, a pull request's observations back to the newest one outside \"open and out of the merge queue\", and every observation of a resource in flat facts. The idle nudge's merge-queue walk moves into github_watch as a pure function the trim tests compare between the full and the trimmed log",
+  "replay": {"status": "none", "detail": "No claim is written or read differently; local trim deletes more of this member's own copies, and their IDs go into the retired ledger."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules are unchanged; this only adds the kind to the local cut, under the rule version 23 added."},
+  "compatibility": {"status": "none", "detail": "The wire format is unchanged. Envelopes that hold a kept claim stay whole for peers."},
+  "downtime": {"status": "none", "detail": "No restart beyond the normal upgrade. After the upgrade, local cuts delete the backlog of superseded resource observations in paced chunks, at most [trim] daily_claims a day, so a large backlog takes several days."},
+  "manual": {"status": "none", "detail": "No manual step. Freed pages come back through incremental vacuum."},
+  "recovery": {"status": "none", "detail": "Reverting stops trimming the kind; what was deleted stays retired and is not re-admitted."}
+}
