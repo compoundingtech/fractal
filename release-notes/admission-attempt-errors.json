@@ -14,7 +14,7 @@
     "detail": "Admission timers, cache ordering, overrides, replication, retention and coordination rules are unchanged."
   },
   "compatibility": {
-    "status": "mixed-version",
+    "status": "changed",
     "detail": "Old local readers ignore the optional field. New graph publishers require an attempt matching the current runtime, so unfenced legacy diagnostics supply no new attempt error. Upgrade the driver and runtime owner for detailed reasons. The normal source-based probe identity changes with the implementation and causes a fresh measurement at the next applicable launch."
   },
   "downtime": {
