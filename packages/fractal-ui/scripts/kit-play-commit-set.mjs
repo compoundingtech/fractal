@@ -59,6 +59,8 @@ export const BOTH_WIDTHS = [
   'fractal-ui-transcript-composer--reading-column',
   'fractal-ui-workbench--all-states',
   'fractal-narrow-layout--decode-stale-sidebar-hosts',
+  'fractal-app-usagepane--all-states',
+  'fractal-app-usagepane--populated',
 ]
 
 const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
@@ -88,6 +90,9 @@ export const APP_CASE_OVERRIDES = new Map([
   // The production module suites prove each availability state mounts the real module; none depends on width
   // or scheme, so each state runs once, dark at desktop width (14 merge cases rather than 56).
   ...APP_MODULE_SUITE_IDS.map(id => [id, [['dark', 1440]]]),
+  // The Usage pane's served tone inks and row/chart layout run in both schemes at both widths on every commit.
+  ['fractal-app-usagepane--all-states', FULL],
+  ['fractal-app-usagepane--populated', FULL],
 ])
 // The production build includes both inventories; every named story remains required.
 export const FULL_CASE_OVERRIDES = new Map([...KIT_CASE_OVERRIDES, ...APP_CASE_OVERRIDES])

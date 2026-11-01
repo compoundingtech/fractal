@@ -15,4 +15,6 @@ export const storyGlobs: string[] = [
   // Production module suites; LiveAgentWorkspace.graph.integration.test.ts proves their identity.
   '../../../apps/fractal-web/src/web/LiveAgentWorkspace.stories.tsx',
   '../../../apps/fractal-web/src/web/ConversationPane.stories.tsx',
+  // The Usage pane over served objectives, budgets, charts and accounts.
+  '../../../apps/fractal-web/src/monitor/UsagePane.stories.tsx',
 ]

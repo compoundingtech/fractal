@@ -619,6 +619,8 @@ transcript_story = ["apps/fractal-web/src/web/TranscriptImages.stories.tsx", "ap
 assert detector_kit_paths(transcript_story) == transcript_story, "the transcript image integration story and production image cache select kit plays"
 app_story = ["apps/fractal-web/src/web/LiveAgentWorkspace.stories.tsx", "apps/fractal-web/src/web/ConversationPane.stories.tsx", "apps/fractal-web/src/fixtures/appStoryStates.ts", "apps/fractal-web/src/data/feedSync.ts"]
 assert detector_kit_paths(app_story) == app_story, "the production app suites and their state fixtures select kit plays"
+usage_story = ["apps/fractal-web/src/monitor/UsagePane.stories.tsx", "apps/fractal-web/src/monitor/UsagePane.tsx", "apps/fractal-web/src/monitor/usageFixtures.ts", "apps/fractal-web/src/monitor/usageModel.ts", "apps/fractal-web/src/data/objectivesSource.ts"]
+assert detector_kit_paths(usage_story) == usage_story, "the Usage story and its production data closure select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/web/subagentThreadFocus.ts", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
 embed_closure = ["apps/fractal-web/src/embed/Embed.stories.tsx", "apps/fractal-web/src/embed/Embed.tsx", "apps/fractal-web/src/embed/captures/provenance.json", "apps/fractal-web/src/state/storageAdapter.ts"]

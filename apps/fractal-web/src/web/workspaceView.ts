@@ -1,11 +1,12 @@
 /**
- * What the workspace body shows for the selected pane. The thread, terminal and document subjects have web surfaces; any
- * other pane states its own unavailability instead of repeating the transcript under a different tab.
+ * What the workspace body shows for the selected pane. Supported subjects and app screens have web surfaces;
+ * an unknown pane states its own unavailability instead of repeating the transcript under a different tab.
  */
 export type WorkspaceView =
   | { readonly _tag: 'Thread' }
   | { readonly _tag: 'Terminal'; readonly ref: TerminalRef }
   | { readonly _tag: 'Missions' }
+  | { readonly _tag: 'Usage' }
   | { readonly _tag: 'Document'; readonly ref: `doc/${string}` }
   | { readonly _tag: 'ViewUnavailable'; readonly ref: string; readonly reason: string }
 
@@ -23,6 +24,8 @@ export const workspaceView = (pane: { readonly ref: string } | undefined): Works
       ? { _tag: 'Terminal', ref: pane.ref }
       : pane.ref === MISSIONS_REF
         ? { _tag: 'Missions' }
+      : pane.ref === 'monitor/quota'
+        ? { _tag: 'Usage' }
         : isDocumentRef(pane.ref)
           ? { _tag: 'Document', ref: pane.ref }
         : { _tag: 'ViewUnavailable', ref: pane.ref, reason: 'This web client does not render this view yet.' }
