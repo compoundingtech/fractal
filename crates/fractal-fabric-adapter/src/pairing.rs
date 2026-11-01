@@ -25,6 +25,8 @@ const LIMIT: u64 = 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 struct Journal {
     fleet: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
     creation: String,
     deadline: u64,
     attempt: Option<String>,
@@ -37,6 +39,24 @@ struct Journal {
 }
 fn owner(fleet: &str) -> String {
     format!("st/fleet/{fleet}")
+}
+fn accepted_owner(value: &Value, fleet: &str) -> bool {
+    value.as_str().is_some_and(|value| {
+        value.strip_prefix("st/fleet/") == Some(fleet)
+            || value.strip_prefix("fractal/fleet/") == Some(fleet)
+    })
+}
+fn journal_owner(journal: &Journal) -> Result<std::borrow::Cow<'_, str>> {
+    let selected = journal.owner.as_deref().map_or_else(
+        || std::borrow::Cow::Owned(owner(&journal.fleet)),
+        std::borrow::Cow::Borrowed,
+    );
+    ensure!(
+        selected.strip_prefix("st/fleet/") == Some(journal.fleet.as_str())
+            || selected.strip_prefix("fractal/fleet/") == Some(journal.fleet.as_str()),
+        "pairing journal belongs to another fleet"
+    );
+    Ok(selected)
 }
 // Both the immutable permit and reciprocal policy are client-only. Static operator
 // terminal grants belong to Fabric configuration, never to this adapter owner.
@@ -177,7 +197,8 @@ async fn snapshot(client: &reqwest::Client) -> Result<super::LeaveSnapshot> {
         bytes.extend_from_slice(&chunk);
     }
     let snapshot =
-        serde_json::from_slice::<smallclaims::sync::PeerResponse<super::LeaveSnapshot>>(&bytes)?.value;
+        serde_json::from_slice::<smallclaims::sync::PeerResponse<super::LeaveSnapshot>>(&bytes)?
+            .value;
     ensure!(
         snapshot.persistence_error.is_none() && snapshot.membership.anchor.is_some(),
         "st membership is not durable and verified"
@@ -261,8 +282,9 @@ pub async fn invite(client: &reqwest::Client, socket: &Path, state: &Path) -> Re
                 .iter()
                 .any(|endpoint| endpoint["transport"] == "fabric"
                     && endpoint["node"] == gateway
-                    && endpoint["protocol"].as_str().is_some_and(|protocol|
-                        smallclaims::fleet::transport::is_fleet_fabric_protocol(protocol, &fleet))),
+                    && endpoint["protocol"].as_str().is_some_and(|protocol| {
+                        smallclaims::fleet::transport::is_fleet_fabric_protocol(protocol, &fleet)
+                    })),
         "sponsor lacks a unique current signed endpoint for the Fabric gateway"
     );
     let deadline = code.expires_at.min((super::now_ms() / 1000) as u64 + 600);
@@ -275,6 +297,7 @@ pub async fn invite(client: &reqwest::Client, socket: &Path, state: &Path) -> Re
     );
     let mut journal = Journal {
         fleet: fleet.clone(),
+        owner: None,
         creation: creation.clone(),
         deadline,
         attempt: None,
@@ -351,7 +374,7 @@ pub async fn tick(client: &reqwest::Client, socket: &Path, state: &Path) -> Resu
         }
         let reply = control(
             socket,
-            &json!({"type":"pairing","request":{"operation":"query","owner":owner(&journal.fleet),"creation_id":journal.creation}}),
+            &json!({"type":"pairing","request":{"operation":"query","owner":journal_owner(&journal)?,"creation_id":journal.creation}}),
         )
         .await?;
         // Fabric prunes terminal receipts after 24 hours and reports this exact
@@ -385,7 +408,7 @@ pub async fn tick(client: &reqwest::Client, socket: &Path, state: &Path) -> Resu
             journal.confirmed = state_name == "confirmed";
             super::save(&path, &journal)?;
         } else if journal.attempt.is_none() {
-            local(socket, json!({"operation":"cancel","owner":owner(&journal.fleet),"creation_id":journal.creation})).await?;
+            local(socket, json!({"operation":"cancel","owner":journal_owner(&journal)?,"creation_id":journal.creation})).await?;
         } else if state_name == "pending"
             && process(client, socket, &path, &mut journal, status)
                 .await
@@ -428,7 +451,7 @@ async fn process(
     if journal.response.is_none() {
         let reply = local(
             socket,
-            json!({"operation":"pair_receive","owner":owner(&journal.fleet),"attempt_id":attempt}),
+            json!({"operation":"pair_receive","owner":journal_owner(journal)?,"attempt_id":attempt}),
         )
         .await?;
         let message = &reply["exchange"]["message"];
@@ -467,8 +490,8 @@ async fn process(
         super::save(path, journal)?;
     }
     let payload = journal.response.as_ref().context("missing answer")?;
-    local(socket, json!({"operation":"pair_send","owner":owner(&journal.fleet),"attempt_id":attempt,"sequence":1,"digest":digest(payload),"payload":payload})).await?;
-    let reply = local(socket, json!({"operation":"pair_receive","owner":owner(&journal.fleet),"attempt_id":attempt,"ack":1})).await?;
+    local(socket, json!({"operation":"pair_send","owner":journal_owner(journal)?,"attempt_id":attempt,"sequence":1,"digest":digest(payload),"payload":payload})).await?;
+    let reply = local(socket, json!({"operation":"pair_receive","owner":journal_owner(journal)?,"attempt_id":attempt,"ack":1})).await?;
     let message = &reply["exchange"]["message"];
     if message.is_null() {
         return Ok(());
@@ -499,7 +522,7 @@ async fn process(
         &journal.fleet,
     )?;
     let policy_revision = revision(socket).await?;
-    let confirmation = json!({"operation":"confirm","owner":owner(&journal.fleet),"attempt_id":attempt,"expected_node_id":node,"expected_attempt_revision":status["attempt_revision"],"expected_policy_revision":policy_revision,"request_id":format!("confirm-{attempt}-{policy_revision}")});
+    let confirmation = json!({"operation":"confirm","owner":journal_owner(journal)?,"attempt_id":attempt,"expected_node_id":node,"expected_attempt_revision":status["attempt_revision"],"expected_policy_revision":policy_revision,"request_id":format!("confirm-{attempt}-{policy_revision}")});
     journal.confirmation = Some(confirmation.clone());
     super::save(path, journal)?;
     finish_confirmation(socket, path, journal, confirmation).await?;
@@ -728,8 +751,12 @@ pub async fn join(socket: &Path, state: &Path) -> Result<()> {
             .iter()
             .any(|endpoint| endpoint["transport"] == "fabric"
                 && endpoint["node"] == pairing.gateway
-                && endpoint["protocol"].as_str().is_some_and(|protocol|
-                    smallclaims::fleet::transport::is_fleet_fabric_protocol(protocol, &sealed.fleet_id))),
+                && endpoint["protocol"].as_str().is_some_and(|protocol| {
+                    smallclaims::fleet::transport::is_fleet_fabric_protocol(
+                        protocol,
+                        &sealed.fleet_id,
+                    )
+                })),
         "authenticated sponsor lacks signed exact Fabric endpoint"
     );
     if let Some(resume) = &start.resume {
@@ -748,7 +775,7 @@ pub async fn join(socket: &Path, state: &Path) -> Result<()> {
     let mutation = if path.exists() {
         let retained: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
         ensure!(
-            retained["request"]["owner"] == owner(&sealed.fleet_id)
+            accepted_owner(&retained["request"]["owner"], &sealed.fleet_id)
                 && retained["request"]["operations"][0]["node_id"] == pairing.gateway,
             "retained reciprocal mutation belongs to another identity"
         );

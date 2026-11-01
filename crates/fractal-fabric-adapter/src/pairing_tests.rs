@@ -20,6 +20,7 @@ fn request(node: &str) -> JoinRequest {
 fn journal() -> Journal {
     Journal {
         fleet: "fleet".into(),
+        owner: None,
         creation: "creation".into(),
         deadline: 600,
         attempt: Some("attempt".into()),
@@ -64,6 +65,20 @@ fn receive(ack: Option<u64>) -> Value {
 #[test]
 fn permit_and_reciprocal_policy_grants_are_client_only() {
     assert_eq!(grants("fleet"), json!(["st3/fleet/fleet", "st3-client-v0"]));
+}
+
+#[test]
+fn recovered_pairing_owner_is_exact_and_legacy_journals_keep_their_owner() {
+    let old = serde_json::to_value(journal()).unwrap();
+    assert!(old.get("owner").is_none());
+    let mut recovered: Journal = serde_json::from_value(old).unwrap();
+    assert_eq!(journal_owner(&recovered).unwrap(), "st/fleet/fleet");
+    for owner in ["st/fleet/fleet", "fractal/fleet/fleet"] {
+        recovered.owner = Some(owner.into());
+        assert_eq!(journal_owner(&recovered).unwrap(), owner);
+    }
+    recovered.owner = Some("fractal/fleet/other".into());
+    assert!(journal_owner(&recovered).is_err());
 }
 
 #[test]
