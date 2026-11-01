@@ -31,34 +31,40 @@ def peak(record, group, final=False):
             raise
 
 
+def require(condition, detail="invalid perf-slot receipt"):
+    if not condition:
+        raise ValueError(detail)
+
+
 def validate_receipt(receipt):
-    assert receipt["status"] == "final" and receipt["outcome"] == "success"
+    require(receipt["status"] == "final" and receipt["outcome"] == "success")
     for field in ("caller_pid", "caller_starttime", "gate_slot", "invocation", "source_head", "source_sha256",
                   "hostname", "started_utc", "ended_utc"):
-        assert receipt[field], f"missing attribution: {field}"
-    assert {"unit", "cgroup"} <= receipt["gate_slot"].keys()
-    assert receipt["remaining_units"] == receipt["remaining_cgroups"] == 0
+        require(receipt[field], f"missing attribution: {field}")
+    require({"unit", "cgroup"} <= receipt["gate_slot"].keys())
+    require(receipt["remaining_units"] == receipt["remaining_cgroups"] == 0)
     if receipt.get("skip") == "no-user-manager":
-        assert not re.search(r"/user@\d+\.service(?:/|$)", receipt["caller_cgroup"])
+        require(not re.search(r"/user@\d+\.service(?:/|$)", receipt["caller_cgroup"]))
         return
     fixtures = receipt["fixtures"]
-    assert len(fixtures) == 2 and len({r["unit"] for r in fixtures}) == 2
+    require(len(fixtures) == 2 and len({r["unit"] for r in fixtures}) == 2)
     for record in fixtures:
-        assert record["drain"] == "empty and collected"
-        assert type(record["peak_sampled_before_termination"]) is int and record["peak_sampled_before_termination"] >= 0
+        require(os.path.normpath(record["caller_slice"]) == os.path.dirname(os.path.normpath(receipt["gate_slot"]["cgroup"])))
+        require(record["drain"] == "empty and collected")
+        require(type(record["peak_sampled_before_termination"]) is int and record["peak_sampled_before_termination"] >= 0)
         final = record["peak_final_lifecycle"]
-        assert (type(final) is int and final >= 0) or final == "unavailable (collected)"
-        assert record["limits"] == {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}
-        assert record["RuntimeMaxUSec"] == 90000000
-        assert record["manager"]["MemoryMax"] == "67108864"
-        assert record["manager"]["MemorySwapMax"] == "0" and record["manager"]["TasksMax"] == "16"
-        assert record["manager"]["ControlGroup"] == record["cgroup"]
-        assert record["manager"]["Slice"] == record["slice"] == Path(record["parent_slice"]).name
-        assert record["cgroup"] == f"{record['caller_slice']}/{record['unit']}"
-        assert runtime_usec(record["manager"]["RuntimeMaxUSec"]) == record["RuntimeMaxUSec"]
+        require((type(final) is int and final >= 0) or final == "unavailable (collected)")
+        require(record["limits"] == {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16})
+        require(record["RuntimeMaxUSec"] == 90000000)
+        require(record["manager"]["MemoryMax"] == "67108864")
+        require(record["manager"]["MemorySwapMax"] == "0" and record["manager"]["TasksMax"] == "16")
+        require(record["manager"]["ControlGroup"] == record["cgroup"])
+        require(record["manager"]["Slice"] == record["slice"] == Path(record["parent_slice"]).name)
+        require(record["cgroup"] == f"{record['caller_slice']}/{record['unit']}")
+        require(runtime_usec(record["manager"]["RuntimeMaxUSec"]) == record["RuntimeMaxUSec"])
         for field in ("pid", "starttime", "cgroup", "slice", "caller_slice", "parent_slice"):
-            assert record[field]
-        assert record["unit"].startswith(f"ci-perf-slot-fixture-{receipt['invocation']}-")
+            require(record[field])
+        require(record["unit"].startswith(f"ci-perf-slot-fixture-{receipt['invocation']}-"))
 
 
 def fixture_cgroups(lane, prefix):
@@ -248,7 +254,7 @@ def starttime(text):
 
 
 def runtime_usec(value):
-    assert re.fullmatch(r"\d+(?:min|us|s)(?: \d+(?:min|us|s))*", value), value
+    require(re.fullmatch(r"\d+(?:min|us|s)(?: \d+(?:min|us|s))*", value), "invalid runtime duration")
     return sum(int(n) * {"min": 60000000, "s": 1000000, "us": 1}[unit]
                for n, unit in re.findall(r"(\d+)(min|us|s)", value))
 
@@ -260,7 +266,7 @@ def kernel_limits(group):
 
 
 if sys.argv[1:2] == ["--validate-receipt"]:
-    assert len(sys.argv) == 3
+    require(len(sys.argv) == 3, "expected --validate-receipt PATH")
     validate_receipt(json.loads(Path(sys.argv[2]).read_text()))
     print("passed: ci-perf-slot receipt")
     sys.exit(0)
@@ -360,13 +366,9 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
         with patch.object(subprocess, "Popen") as launched, contextlib.ExitStack() as stack:
             if refusal == "owner":
                 stack.enter_context(patch.object(os, "geteuid", return_value=-1))
-            try:
+            with TestCase().assertRaises((AssertionError, OSError)):
                 receipt_directory(link if refusal == "symlink" else sink / "missing" if refusal == "missing" else sink,
                                   [sink] if refusal == "disposable" else [])
-            except (AssertionError, OSError):
-                pass
-            else:
-                raise AssertionError("unsafe receipt sink accepted: " + refusal)
             launched.assert_not_called()
         link.unlink()
     sink.chmod(0o700)
@@ -407,26 +409,23 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
     for record in fixtures:
         record["cgroup"] = f"/app.slice/{record['unit']}"
         record["manager"] = dict(record["manager"], ControlGroup=record["cgroup"])
-    complete = dict(good, skip=None, fixtures=fixtures)
+    complete = dict(good, skip=None, fixtures=fixtures, gate_slot={"unit": "gate.scope", "cgroup": "/app.slice/gate.scope"})
     validate_receipt(complete)
-    for candidate, accepted in ((complete, True), (dict(complete, outcome="failure"), False)):
+    wrong = dict(complete, gate_slot={"unit": "gate.scope", "cgroup": "/other.slice/gate.scope"})
+    for candidate, accepted in ((complete, True), (wrong, False), (dict(complete, outcome="failure"), False)):
         (sink / "cli.json").write_text(json.dumps(candidate))
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--validate-receipt", str(sink / "cli.json")], capture_output=True)
+        result = subprocess.run([sys.executable, "-O", str(Path(__file__).resolve()), "--validate-receipt", str(sink / "cli.json")], capture_output=True)
         assert (result.returncode == 0) == accepted, result.stderr.decode()
     for change in ({"drain": "not confirmed"}, *({"peak_final_lifecycle": value} for value in (None, -1, "unknown")),
                    *({"manager": dict(fixtures[1]["manager"], **{field: value})}
                      for field, value in (("ControlGroup", "/wrong"), ("Slice", "wrong.slice"), ("RuntimeMaxUSec", "1s")))):
-        with TestCase().assertRaises(AssertionError):
+        with TestCase().assertRaises(ValueError):
             validate_receipt(dict(complete, fixtures=[fixtures[0], dict(fixtures[1], **change)]))
     for bad in (dict(good, status="started"), dict(good, outcome="failure"), dict(good, remaining_units=1),
                 dict(good, remaining_cgroups=1), dict(good, hostname=""), dict(good, ended_utc=""),
                 dict(good, skip=None, fixtures=[]), dict(good, skip=None, fixtures=[{"drain": "not confirmed"}] * 2)):
-        try:
+        with TestCase().assertRaises((ValueError, KeyError)):
             validate_receipt(bad)
-        except (AssertionError, KeyError):
-            pass
-        else:
-            raise AssertionError("incomplete receipt accepted")
 if sys.argv[1:] == ["--helpers-only"]:
     print("passed: ci-perf-slot helpers")
     sys.exit(0)
