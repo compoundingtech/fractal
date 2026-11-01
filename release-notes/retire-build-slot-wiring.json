@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The local checks no longer wire in the host build admission program or its build slots: scripts/ci-local, scripts/ci-local-web, scripts/fractal-test and the pre-sign worker name no BUILD_ADMISSION_*, CARGO_PRIORITY_FILE or CARGO_HEAVY_SLOTS for their stages, ask no admission program, wait for no slot before taking a pool tree, and no longer stamp, log or subtract the cargo shim's slot waits; seat lanes and builds.slice cap builds instead",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change. A run's runs.jsonl line drops tree_slot_wait_s and tree_slot_blocked_s, and its stages drop queue_waits and queue_s; nothing in the repository reads them."},
+  "rules": {"status": "changed", "detail": "Checks no longer consult a host's build admission program: scripts/ci-local's stages, the kit plays of scripts/ci-local-web, scripts/fractal-test's tree readiness (the slot-first rule and build-admission check heavy) and the heavy pre-sign worker's calm check no longer call it or read its slots, and fractal-test sets neither ADMISSION_RUN nor BUILD_ADMISSION_CLASS. A host that still runs one is no longer gated by ci-local's or st-test's own calls, only by its cargo shim. --time-limit no longer adds slot waits; --queue-limit still bounds a ci-local check's wait before ci-local starts."},
+  "compatibility": {"status": "none", "detail": "CI is unchanged. fractal-test still reads an older ci-local's stage table with its queue column. Pool size (cargo-heavy-slots) and the tree queue's order (cargo-priority) are unchanged."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step. A host may remove its build-admission program and slot configuration once nothing else on it uses them."},
+  "recovery": {"status": "none", "detail": "Revert this change."}
+}

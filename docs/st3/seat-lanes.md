@@ -8,8 +8,9 @@ is design.
 
 A seat lane is a CPU and memory cap around one seat: its harness and every process the harness
 starts, builds and test runners included. It is opt-in. A seat whose agent, mission or step
-declares no `capacity` runs exactly as it does today, with today's build admission (the cargo shim,
-`builds.slice`, `build-admission`), and sees no change.
+declares no `capacity` runs as it does without lanes: its builds run in `builds.slice` (the cargo
+shim) and nothing more. The host build slots and the `build-admission` program are retired; no
+check in this repository waits for them.
 
 A lane is a resource cap that seats cooperate with, not a security boundary. Every seat runs as the
 same user as its user manager, so a seat can change its slice's limits or start a process outside
@@ -116,9 +117,9 @@ the seat, so a restarted harness reuses it). A seat that names its own server ke
 stages leave that socket (and `SCCACHE_DIR`): a server they started kept the run's `HOME` and
 `TMPDIR`, which the run removes at exit, and every later build in the lane failed through it.
 Compiles a check sends through an account's sccache wrapper reach the host's server, so they count to
-`builds.slice`, not the lane. The build admission queue (slots, load and memory checks) still applies to a
-laned seat in step 1; its slots go only after lanes have run on every Linux member for a day without
-a guard trip.
+`builds.slice`, not the lane. The build admission queue (slots, load and memory checks) is gone: lanes
+and `builds.slice` cap builds, and `scripts/ci-local`, `scripts/fractal-test` and the pre-sign worker no
+longer consult a host's `build-admission` program or wait for its slots.
 
 The lane is carried from the reconciler to the spawn under `FRACTAL_SEAT_CAPACITY`, which the
 reconciler sets from the declaration (replacing any value the seat's own `env` names) and the

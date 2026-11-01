@@ -8,7 +8,7 @@
 
 Shadow by construction: a note signed at the host level never covers a merge_group run (.st/evidence-skip-policy.json), so nothing
 here skips, waits for or blocks a pull request or the queue. What it measures is whether a queue signer could: is the tree GitHub
-forms the tree predicted here, is the note there before the queue's gate looks, how long the run and its wait for a slot take, and
+forms the tree predicted here, is the note there before the queue's gate looks, how long the run takes, and
 does its result agree with the queue's own.
 
 observe (every minute, seconds): reads the merge queue (PR, PR head, base commit, group commit per entry) and fetches every group
@@ -24,8 +24,8 @@ enqueue can be ready before the gate looks), then the queue's entries in positio
 (the group commit as fetched, or the prediction's merge of the same two parents), and runs fractal-test from origin/main with every local
 check on it, signing as the host and pushing the notes. Only our own authors' code runs here, the host's key within reach: a tree runs when its PR and every entry ahead of it
 are by a login in the pre-sign worker's authors file (~/.config/evidence-presign/authors); every entry is still observed and
-recorded. ~/.config/evidence-queue-signer/every-author, the host operator's decision, runs every entry. fractal-test runs a heavy check
-through the host's build slot; this adds no slot.
+recorded. ~/.config/evidence-queue-signer/every-author, the host operator's decision, runs every entry. fractal-test governs its checks as
+any run (builds.slice); this adds no cap of its own.
 The pre-sign worker's stop limits apply (scripts/evidence-presign-worker). It starts on operations' terms for this host (START below):
 IO pressure under 12% (three points under the 15% stop, so a run is not started only to be killed a minute later), at least 165 GiB
 free (a cold run writes about 19 GiB above the host's 134 GiB reserve) and 20 GiB of available memory, with no wait for ten calm
@@ -36,11 +36,11 @@ is estimated from the run's start and fractal-test's per-check seconds, and the 
 seed (every minute, one run at a time): once main has moved, runs `fractal-test --seed COMMIT` on main's new tip, from origin/main like
 sign: it signs the per-crate rust-tests notes of that tree for the crates whose key has none yet and pushes them, so pull requests
 branched from main reuse them (most merges move a handful of crates; one that moves the lane, all of them). Main's code is merged
-code, the code every run on this host already builds under a pull request, so no author rule applies. Its nextest takes the host's
-build slots through the admission shim as every fractal-test build does; this adds no slot. It starts on the same terms as sign, and not
+code, the code every run on this host already builds under a pull request, so no author rule applies. Its nextest runs in
+builds.slice as every fractal-test build does; this adds no cap of its own. It starts on the same terms as sign, and not
 while another fractal-test --seed runs on the host (a seat's, or one by hand): that tick is skipped and the next one tries again. A tip
-is seeded once, whatever the outcome, with one exception: a seed that load stopped before its tests started (waiting for a build
-slot, or building) tries the same tip again on the next tick, up to SEED_TRIES tries, until a newer merge replaces it; each try is a
+is seeded once, whatever the outcome, with one exception: a seed that load stopped before its tests started (still
+building) tries the same tip again on the next tick, up to SEED_TRIES tries, until a newer merge replaces it; each try is a
 line of its own. The next merge's seed covers what one left missing. Each line records the pool cap its fractal-test ran with.
 ~/.config/evidence-queue-signer/off stops all three before they do anything.
 

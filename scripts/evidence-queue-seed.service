@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-# builds.slice: with every other build on the signing host; its nextest takes the host's build slots through the admission shim.
+# builds.slice: with every other build on the signing host, its nextest included.
 Slice=builds.slice
 Environment=PATH=%h/.local/bin:/run/current-system/sw/bin:/usr/bin:/bin
 # The same minimal environment as sign: the host's signing key and the git credential the notes push uses, nothing else.

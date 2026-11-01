@@ -1,6 +1,6 @@
 // How many browser workers the kit play gate runs at once. CI's runner is a machine of its own, so the gate fills it (at most 6, which
-// the timing receipts were measured with). On a shared dev box scripts/ci-local-web sets KIT_PLAY_WORKERS to the play stage's share of
-// the host (its cores over the build host's heavy slots), so two kit plays at once cannot take every core. An empty value is unset.
+// the timing receipts were measured with). On a dev box scripts/ci-local-web sets KIT_PLAY_WORKERS to the cores the run may use (nproc,
+// which counts a seat lane's CPU quota), so the plays cannot take more than their lane. It runs fewer, never more. An empty value is unset.
 export const MAX_WORKERS = 6
 
 export function playWorkers(env, parallelism) {
