@@ -68,7 +68,7 @@ it('keeps the roster and action trigger usable while optional controls are defer
   expect(document.activeElement).toBe(trigger)
   expect(trigger.getAttribute('aria-expanded')).toBe('true')
   await React.act(async () => { release(); await gate })
-  expect(within(document.body).getByRole('menu', { name: 'Actions for Builder' })).toBeTruthy()
+  expect(await within(document.body).findByRole('menu', { name: 'Actions for Builder' })).toBeTruthy()
   expect(container.querySelector('[data-milestone-row]')).toBe(painted)
   expect(canvas.getByRole('button', { name: 'Actions for Builder' })).toBe(trigger)
 })
