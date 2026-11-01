@@ -157,8 +157,8 @@ class DepInfo(unittest.TestCase):
         self.assertIn("::warning::linux-clippy read docs/st3/schema.md, which its input key does not cover", out)
         self.assertNotIn('::error::', out)
         self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=2 uncovered=1')
-        # ci-linux passes --warn for fleet-compat only: no default local run checks it yet, so a failure would first show in the merge
-        # queue. linux-clippy is a default local check (scripts/st-test), so CI's clippy stage fails on the same files.
+        # ci-linux passes --warn for CI's fleet-compat job only, while linux-fleet-compat is in shadow (every default local run already
+        # fails on the same files, through scripts/ci-fleet-compat-result); CI's clippy stage fails on them, as linux-clippy's local check does.
         calls = [line for line in (HERE / 'ci-linux').read_text().splitlines() if line.lstrip().startswith('python3 scripts/dep-info-check')]
         self.assertEqual(len(calls), 2, calls)
         by_check = {('linux-fleet-compat' if '--check linux-fleet-compat' in line else 'linux-clippy'): line for line in calls}
