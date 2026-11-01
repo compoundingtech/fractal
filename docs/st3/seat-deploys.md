@@ -42,6 +42,17 @@ refuses to start the provider; OpenCode starts with native delivery disabled and
 There is no rollback to a last-admitted executable. `st doctor` and the affected agent's state
 name the failed boundary and the remedy.
 
+The isolated `--version` child has a 20-second deadline, including cold runtime startup under
+the seat's inherited scheduling policy. A version timeout remains indeterminate and does not
+create measured evidence. The separate contract probe retains its 45-second deadline and all
+required checks; version completion never substitutes for them. The same scratch is reused, so
+runtime startup files created by the version child are available to the contract child.
+
+Changing this probe source changes `probeDigest`: both omp and OpenCode remeasure at their next
+launch on every host, even if the installed producer is unchanged. Install the admission-error
+diagnostics and this deadline fix together on macOS to remeasure once. macOS background seats
+keep their background policy for both children; the contract must still pass within 45 seconds.
+
 The fixture uses loopback endpoints and dummy keys, without real credentials. It needs writable
 temporary/state directories and the installed harness's normal runtime; omp also needs POSIX `sh`.
 The omp fixture supplies a scratch `--session-dir` and a synthetic `ST_AGENT` identity so a
