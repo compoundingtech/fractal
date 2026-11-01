@@ -4809,7 +4809,32 @@ fn message_delivery_value(store: &Store, to: &str, status: &str, sent_at: u128, 
     }))
 }
 
+/// The host a stream item's recipient seat runs on, when that is not this one. Its receipts are
+/// that member's local lifecycle, in its own shard, so this member cannot see how far it got.
+fn stream_item_recipient_elsewhere(store: &Store, message: &MessageView) -> anyhow::Result<Option<String>> {
+    if !crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
+        return Ok(None);
+    }
+    let owners = store.desired_subjects_named(std::slice::from_ref(&message.to))?;
+    Ok(owners
+        .first()
+        .and_then(|owner| owner.member.as_ref())
+        .map(|member| member.host.clone())
+        .filter(|host| host != store.origin()))
+}
+
+/// A stream item's status is this member's own lifecycle for it, so for a seat on this host it
+/// is labelled as graph mail is. For a seat on another host it is `unknown`: that host keeps
+/// the receipts, and claiming sent or delivered here would be a guess.
 fn message_delivery_for(store: &Store, message: &MessageView, sent_at: u128, now: u128) -> anyhow::Result<Value> {
+    if let Some(host) = stream_item_recipient_elsewhere(store, message)? {
+        return Ok(json!({
+            "state": "unknown", "phase": "unknown",
+            "reason": format!("the recipient's seat runs on {host}, which keeps this message's receipts"),
+            "age_ms": now.saturating_sub(sent_at),
+            "recipient_delivery": delivery_presence::known(&message.to).map(|path| path.to_value()),
+        }));
+    }
     let mut delivery = message_delivery_value(store, &message.to, &message.status, sent_at, now)?;
     if !matches!(message.status.as_str(), "sent" | "staged") { return Ok(delivery); }
     let Some(runtime) = store.latest_claim(&message.to, Some("runtime.observed"))? else {

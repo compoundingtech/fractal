@@ -133,7 +133,9 @@ mail stays held regardless of age; a missing receipt never authorizes another of
 window uses the original send time and the same threshold as the unread backlog. SQLite
 fences both subscriptions and receipts to the live runtime
 incarnation and replacement owner; reconnecting an older channel cannot retake ownership, including
-after a daemon restart. Socket loss creates no delivered or read receipt. Native ledgers retain
+after a daemon restart. A stream item's receipt is the exception: its fence is read on the graph
+just before the record goes to the messages shard, so a token revoked between them can still
+record one step. Socket loss creates no delivered or read receipt. Native ledgers retain
 uncertain handoffs, and successful handoffs retry lost receipt acknowledgements with stable IDs.
 No push component projects message bodies into `resources/inbox` or `resources/archive`.
 
