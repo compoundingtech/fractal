@@ -7,7 +7,7 @@ use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
 
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
-const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked"];
+const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
 
 /// A member with both seats declared, so the seat readers have something to answer.
 fn member(trims_locally: bool) -> Store {
@@ -37,9 +37,10 @@ fn local_member(_name: &str) -> Store {
 #[derive(Clone, Debug)]
 enum Write {
     Observer { observer: u8, status: u8, cursor: Option<u8> },
-    Resource { resource: u8, state: u8 },
+    /// A pull request's observation, in one of the shapes of `resource_fields`.
+    Resource { resource: u8, shape: u8 },
     /// One poll, as an observer seals it: its observation and a resource it saw, in one batch.
-    Poll { observer: u8, status: u8, resource: u8, state: u8 },
+    Poll { observer: u8, status: u8, resource: u8, shape: u8 },
     Harness { seat: u8, incarnation: u8, state: u8, restamp: bool, provider_auth: Option<bool> },
 }
 
@@ -47,10 +48,10 @@ fn write() -> impl Strategy<Value = Write> {
     prop_oneof![
         (0..3u8, 0..3u8, proptest::option::of(0..4u8))
             .prop_map(|(observer, status, cursor)| Write::Observer { observer, status, cursor }),
-        (0..3u8, 0..3u8).prop_map(|(resource, state)| Write::Resource { resource, state }),
-        (0..3u8, 0..3u8, 0..3u8, 0..3u8)
-            .prop_map(|(observer, status, resource, state)| Write::Poll { observer, status, resource, state }),
-        (0..2u8, 0..2u8, 0..5u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
+        (0..3u8, shape()).prop_map(|(resource, shape)| Write::Resource { resource, shape }),
+        (0..3u8, 0..3u8, 0..3u8, shape())
+            .prop_map(|(observer, status, resource, shape)| Write::Poll { observer, status, resource, shape }),
+        (0..2u8, 0..2u8, 0..6u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
             |(seat, incarnation, state, restamp, provider_auth)| Write::Harness {
                 seat,
                 incarnation,
@@ -62,11 +63,38 @@ fn write() -> impl Strategy<Value = Write> {
     ]
 }
 
+/// A shape of `resource_fields`, rarely the flat one, which keeps its resource's whole history.
+fn shape() -> impl Strategy<Value = u8> {
+    prop_oneof![9 => 0..6u8, 1 => Just(6u8)]
+}
+
+/// The pull request `resource` an observer watches.
+fn pull_request(resource: u8) -> String {
+    format!("resource/github/acme/garden/pull-request/{resource}")
+}
+
+/// An observation of a pull request as `observer` writes it, by shape: open outside the merge
+/// queue, queued, merged, closed, a receipt, open with its opener named, or in flat facts.
+fn resource_fields(shape: u8, observer: &str) -> serde_json::Map<String, Value> {
+    let open = json!({"state": "open", "merge_queue": null});
+    let mut fields = json!({"kind": "vcs.pull-request", "observer": observer});
+    let more = match shape {
+        0 => json!({"facts": open}),
+        1 => json!({"facts": {"state": "open", "merge_queue": {"state": "QUEUED", "position": 1}}}),
+        2 => json!({"facts": {"state": "closed", "merged": true, "merge_queue": null}}),
+        3 => json!({"facts": {"state": "closed", "merged": false, "merge_queue": null}}),
+        4 => json!({"facts": open, "attribution_only": true}),
+        5 => json!({"facts": {"state": "open", "merge_queue": null, "opened_by": "agent/node.amber"}}),
+        _ => json!({"state": "open"}),
+    };
+    fields.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+    fields.as_object().unwrap().clone()
+}
+
 fn apply(store: &Store, write: &Write, n: usize) {
-    if let Write::Poll { observer, status, resource, state } = write {
+    if let Write::Poll { observer, status, resource, shape } = write {
         let observer = format!("observer/watch-{observer}");
         let status = ["ok", "changed", "failed"][usize::from(*status)];
-        let state = ["open", "merged", "closed"][usize::from(*state)];
         let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
         let observed = append_claim_tx(
@@ -83,14 +111,10 @@ fn apply(store: &Store, write: &Write, n: usize) {
         append_claim_tx(
             &transaction,
             &store.origin,
-            &format!("resource/pr/{resource}"),
+            &pull_request(*resource),
             "resource.observed",
             None,
-            &json!({"fields": {
-                "kind": "vcs.pull-request",
-                "state": state,
-                "observer": observer,
-            }}),
+            &json!({"fields": resource_fields(*shape, &observer)}),
             &[],
             Some(&observed.batch_id),
         )
@@ -110,13 +134,9 @@ fn apply(store: &Store, write: &Write, n: usize) {
             (format!("observer/watch-{observer}"), "observer.observed", fields)
         }
         // As an observer writes it: no actor, and its observer named.
-        Write::Resource { resource, state } => {
-            let fields = BTreeMap::from([
-                ("kind".into(), json!("vcs.pull-request")),
-                ("state".into(), json!(["open", "merged", "closed"][usize::from(*state)])),
-                ("observer".into(), json!("observer/watch-0")),
-            ]);
-            (format!("resource/pr/{resource}"), "resource.observed", fields)
+        Write::Resource { resource, shape } => {
+            let fields = resource_fields(*shape, "observer/watch-0").into_iter().collect();
+            (pull_request(*resource), "resource.observed", fields)
         }
         Write::Harness { seat, incarnation, state, restamp, provider_auth } => {
             let seat = SEATS[usize::from(*seat)];
@@ -164,37 +184,65 @@ fn apply(store: &Store, write: &Write, n: usize) {
         .unwrap();
 }
 
-/// Every answer the readers of these kinds give: the whole graph, each observer's and resource's
-/// newest observation (what resources and reconcile read), each resource's observations newest
-/// first (what a GitHub watch walks back to find when a pull request left the merge queue), each
-/// seat's current harness, and each seat's status history.
+/// Every answer the readers of these kinds give: the whole graph (with the resource
+/// projection), each observer's and resource's newest observation (what resources and reconcile
+/// read), each pull request's folded state (`latest_actual`, as JSON), when it left the merge queue as the
+/// idle nudge's check walks its observations back to find out, and each seat's current harness,
+/// status history, newest turn or end, and newest `working` (when its last turn began, and whether
+/// it worked after a given time). The check's answer from the start of time decides its answer
+/// from any later time: the exit, if it is later.
 fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     let connection = store.readers.get();
     let mut seats = Vec::new();
     for observer in 0..3 {
         let newest = store.latest_claim(&format!("observer/watch-{observer}"), Some("observer.observed")).unwrap();
         seats.push(format!("observer/watch-{observer}: {:?}", newest.map(|claim| claim.body)));
-        let newest = store.latest_claim(&format!("resource/pr/{observer}"), Some("resource.observed")).unwrap();
-        seats.push(format!("resource/pr/{observer}: {:?}", newest.map(|claim| claim.body)));
-        let walked = connection
+        let subject = pull_request(observer);
+        let newest = store.latest_claim(&subject, Some("resource.observed")).unwrap();
+        seats.push(format!("{subject}: {:?}", newest.map(|claim| claim.body)));
+        // The fold inserts keys in the order it first meets them, which the trimmed log can change.
+        let folded = latest_actual(&connection, &subject).unwrap().map(|value| smallclaims::hash::canonical_json_value(&value));
+        seats.push(format!("{subject} folds to {folded:?}"));
+        // As `idle_holds` reads a thread's observations.
+        let rows = connection
             .prepare(
-                "SELECT accepted_at_unix_ms, json_extract(body, '$.fields.state') FROM claims
-                 WHERE subject=?1 AND kind='resource.observed'
-                 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, store_index DESC",
+                "SELECT json_extract(body, '$.fields.facts'), accepted_at_unix_ms,
+                 CASE WHEN json_extract(body, '$.fields.attribution_only') IN (1,'true') THEN 1 ELSE 0 END
+                 FROM claims WHERE subject=?1 AND kind='resource.observed'
+                 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, store_index DESC LIMIT ?2",
             )
             .unwrap()
-            .query_map([format!("resource/pr/{observer}")], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            .query_map(rusqlite::params![subject, fractal_github_base::github_watch::THREAD_SCAN], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?))
             })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        seats.push(format!("resource/pr/{observer} walked back: {walked:?}"));
+        let exit = fractal_github_base::github_watch::merge_queue_exit(
+            rows.into_iter().map(|(facts, at, receipt)| -> serde_json::Result<_> {
+                let facts = facts.map(|facts| serde_json::from_str::<Value>(&facts)).transpose()?.unwrap_or(Value::Null);
+                Ok((facts, at.parse::<u128>().unwrap_or_default(), receipt))
+            }),
+            0,
+        )
+        .unwrap();
+        seats.push(format!("{subject} left the merge queue: {exit:?}"));
     }
     for seat in SEATS {
         let harness = store.current_harness(seat).unwrap();
         let history = seat_status::history_at(&connection, seat, now, i64::MAX as u64).unwrap();
-        seats.push(format!("{seat}: {harness:?} {history}"));
+        let turn = super::attention_snapshot::last_turn_or_end(&connection, seat).unwrap();
+        let worked: Option<(String, Option<i64>)> = connection
+            .query_row(
+                "SELECT accepted_at_unix_ms, json_extract(body, '$.fields.observed_since_ms') FROM claims
+                 WHERE subject=?1 AND kind='harness.observed' AND json_extract(body, '$.fields.state')='working'
+                 ORDER BY store_index DESC LIMIT 1",
+                [seat],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        seats.push(format!("{seat}: {harness:?} {history} {turn:?} {worked:?}"));
     }
     (graph_digest_of(store), seats)
 }
@@ -215,14 +263,15 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     for n in 0..40 {
         apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: Some(1) }, n);
     }
+    // Queued, merged and open outside the queue in turn, and queued last.
     for n in 40..50 {
-        apply(&store, &Write::Resource { resource: 0, state: (n % 3) as u8 }, n);
+        apply(&store, &Write::Resource { resource: 0, shape: (n % 3) as u8 }, n);
     }
     let before = answers(&store, context.now_unix_ms);
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
     assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
     assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
-    assert_eq!(claims_of(&store, "resource.observed"), 10, "resource observations stay whole");
+    assert_eq!(claims_of(&store, "resource.observed"), 1, "a pull request seen queued last walks back no further");
     let retired: i64 = store
         .readers
         .get()
@@ -234,6 +283,227 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().filter(|entry| {
         entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("capture-")
     }).count(), 0);
+}
+
+/// How many claims this member retired, and whether every one of `deleted` is among them.
+fn retired_exactly(store: &Store, deleted: &BTreeSet<String>) -> bool {
+    let connection = store.readers.get();
+    let count: usize = connection.query_row("SELECT COUNT(*) FROM retired_claim_ids", [], |row| row.get(0)).unwrap();
+    let is_retired = format!(
+        "SELECT EXISTS(SELECT 1 FROM retired_claim_ids WHERE id={})",
+        smallclaims::store::retired::identity_sql("?1")
+    );
+    let mut retired = connection.prepare(/* sqlite-large-value: allow-for-now lv-h15c5aca2ae00 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ &is_retired).unwrap();
+    count == deleted.len() && deleted.iter().all(|id| retired.query_row(/* sqlite-large-value: allow-for-now lv-h79e3a98c6d5e owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ [id], |row| row.get::<_, bool>(0)).unwrap())
+}
+
+fn observer_ids(store: &Store) -> BTreeSet<String> {
+    store
+        .readers
+        .get()
+        .prepare("SELECT id FROM claims WHERE kind='observer.observed'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+fn cut_states(store: &Store) -> Vec<String> {
+    store
+        .readers
+        .get()
+        .prepare("SELECT state FROM checkpoints ORDER BY cut_unix_ms")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// A cut that drops more than the day's claims stops at the cap, stays `trimming`, and goes on
+/// the next day where it stopped; only what it deleted is retired, and the readers answer the
+/// same each day.
+#[test]
+fn a_capped_local_cut_stops_at_the_day_s_claims_and_goes_on_the_next_day() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.trim_locally_at_most(10);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let all = observer_ids(&store);
+    // Each day's clock, and what the readers answer at it from the whole log.
+    let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
+    let before: Vec<_> = contexts.iter().map(|context| answers(&store, context.now_unix_ms)).collect();
+    for (day, deleted) in [(0_u128, 10), (1, 20), (2, 29)] {
+        let context = &contexts[day as usize];
+        let actions = kinds(&step(&store, context));
+        if day < 2 {
+            assert_eq!(actions, ["deferred"], "day {day}");
+            assert_eq!(cut_states(&store), ["trimming"], "day {day}");
+        } else {
+            assert_eq!(actions.first(), Some(&"trimmed"), "day {day}: {actions:?}");
+        }
+        let gone: BTreeSet<_> = all.difference(&observer_ids(&store)).cloned().collect();
+        assert_eq!(gone.len(), deleted, "day {day}: ten a day, then the rest; the newest stays");
+        assert!(retired_exactly(&store, &gone), "day {day}: exactly what it deleted is retired");
+        assert_eq!(answers(&store, context.now_unix_ms), before[day as usize], "day {day}");
+        step(&store, context);
+        assert_eq!(all.difference(&observer_ids(&store)).count(), deleted, "day {day}: no more the same day");
+    }
+    assert!(orphans(&store).iter().all(|(_, count)| *count == 0), "{:?}", orphans(&store));
+}
+
+/// The next day's cut waits for the leftover of a capped one, then trims its own new claims
+/// with what the day has left: both in order, with the retired ledger exact.
+#[test]
+fn the_next_day_s_cut_follows_the_leftover_of_a_capped_one() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.trim_locally_at_most(10);
+    for n in 0..16 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let all_first = observer_ids(&store);
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+    // Observations of another observer after the first cut was recorded: the next cut's.
+    for n in 16..24 {
+        apply(&store, &Write::Observer { observer: 1, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let all: BTreeSet<_> = all_first.union(&observer_ids(&store)).cloned().collect();
+    let next_day = context(scratch.path(), 1);
+    let before = answers(&store, next_day.now_unix_ms);
+    // The leftover's five go first; then the new cut takes the five the day has left.
+    assert_eq!(kinds(&step(&store, &next_day)), ["trimmed", "deferred"]);
+    assert_eq!(cut_states(&store), ["trimmed", "trimming"]);
+    assert_eq!(claims_of(&store, "observer.observed"), 1 + 8 - 5);
+    assert_eq!(answers(&store, next_day.now_unix_ms), before);
+    let gone: BTreeSet<_> = all.difference(&observer_ids(&store)).cloned().collect();
+    assert!(retired_exactly(&store, &gone));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 2))).first(), Some(&"trimmed"));
+    assert!(cut_states(&store).iter().all(|state| state == "trimmed"), "{:?}", cut_states(&store));
+    assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
+    let gone: BTreeSet<_> = all.difference(&observer_ids(&store)).cloned().collect();
+    assert_eq!(gone.len(), 22);
+    assert!(retired_exactly(&store, &gone), "every deleted claim is retired, and only those");
+    assert!(orphans(&store).iter().all(|(_, count)| *count == 0), "{:?}", orphans(&store));
+}
+
+/// A member restarted while a capped cut is `trimming` goes on from where it stopped: the walk
+/// and the day's count are durable, so the same day deletes no more, and the next days the rest.
+#[test]
+fn a_restart_during_a_capped_cut_goes_on_where_it_stopped() {
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claims.sqlite3");
+    let open = |first: bool| {
+        let store = Store::open(&path, "node").unwrap();
+        store.bind_fleet(TEST_FLEET).unwrap();
+        if first {
+            store.import_retired_identities_paced(|_| {}).unwrap();
+        }
+        store.trim_locally(true).unwrap();
+        store.trim_locally_at_most(10);
+        store
+    };
+    let all = {
+        let store = open(true);
+        for n in 0..25 {
+            apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+        }
+        let all = observer_ids(&store);
+        assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+        all
+    };
+    let store = open(false);
+    assert_eq!(cut_states(&store), ["trimming"]);
+    assert_eq!(claims_of(&store, "observer.observed"), 15);
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+    assert_eq!(claims_of(&store, "observer.observed"), 15, "the same day deletes no more");
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 1))), ["deferred"]);
+    assert_eq!(claims_of(&store, "observer.observed"), 5);
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 2))).first(), Some(&"trimmed"));
+    let left = observer_ids(&store);
+    assert_eq!(left.len(), 1, "the newest stays");
+    assert!(retired_exactly(&store, &all.difference(&left).cloned().collect()));
+}
+
+/// Delete the middle of three observations of `resource` as a trim of that kind would: recorded
+/// as a tombstone first, so its preparation rebuild is deferred.
+fn defer_a_resource_delete(store: &Store, resource: u8) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    for phase in ["first", "middle", "newest"] {
+        let body = json!({"fields": {"kind": "vcs.pull-request", "state": "open", "observer": "observer/watch-0", "facts": {"phase": phase}}});
+        append_claim_tx(&transaction, &store.origin, &format!("resource/pr/{resource}"), "resource.observed", None, &body, &[], None).unwrap();
+    }
+    let middle: String = transaction
+        .query_row(
+            "SELECT id FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY store_index DESC LIMIT 1 OFFSET 1",
+            [format!("resource/pr/{resource}")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    transaction
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h4eb31bda17fb owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, updated_at_unix_ms)
+             VALUES ('checkpoint/example-resource', 0, 'trimmed', 0) ON CONFLICT(id) DO NOTHING",
+            [],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h2d276ff3d187 owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id, writer, sequence, envelope_hash, subject, kind, actor,
+                 predecessors, operation_id, request_digest, accepted_at_unix_ms, checkpoint)
+             SELECT id, 'example-writer', 1, 'example-hash', subject, kind, actor, '[]', NULL, NULL, 0,
+                 'checkpoint/example-resource' FROM claims WHERE id=?1",
+            [&middle],
+        )
+        .unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf46030d1c556 owner=fractal_store::store::local_trim_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    transaction.commit().unwrap();
+}
+
+/// What preparation answers for `subject`, and what a rebuild from every claim present answers.
+fn prepared_and_rebuilt(store: &Store, subject: &str) -> (String, String) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let prepared = format!("{:?}", super::resources::preparation_observation(&transaction, subject).unwrap());
+    super::resources::rebuild_preparation(&transaction).unwrap();
+    let rebuilt = format!("{:?}", super::resources::preparation_observation(&transaction, subject).unwrap());
+    transaction.rollback().unwrap();
+    (prepared, rebuilt)
+}
+
+/// Over a capped cut's days, what a trim's deletes deferred is rebuilt by the end of each day's
+/// run: nothing stays deferred past it, and preparation answers what a rebuild answers.
+#[test]
+fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.trim_locally_at_most(10);
+    // Superseded observer observations and each day's superseded resource observation: three
+    // days of at most ten.
+    for n in 0..27 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
+    for (day, context) in contexts.iter().enumerate() {
+        defer_a_resource_delete(&store, day as u8);
+        let deferred = |store: &Store| -> i64 {
+            store.readers.get().query_row("SELECT COUNT(*) FROM local_resource_preparation_deferred", [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(deferred(&store), 1, "day {day}: one subject waits");
+        let before = answers(&store, context.now_unix_ms);
+        step(&store, context);
+        assert_eq!(deferred(&store), 0, "day {day}: rebuilt by the end of the day's run");
+        let (prepared, rebuilt) = prepared_and_rebuilt(&store, &format!("resource/pr/{day}"));
+        assert_eq!(prepared, rebuilt, "day {day}");
+        assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}");
+        let state = if day < 2 { "trimming" } else { "trimmed" };
+        assert_eq!(cut_states(&store).last().map(String::as_str), Some(state), "day {day}");
+    }
 }
 
 /// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its
@@ -254,7 +524,7 @@ fn a_member_that_trims_locally_drops_superseded_claims_from_envelopes_it_keeps()
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
     for n in 0..20 {
-        apply(&store, &Write::Poll { observer: 0, status: (n % 3) as u8, resource: 0, state: (n % 3) as u8 }, n);
+        apply(&store, &Write::Poll { observer: 0, status: (n % 3) as u8, resource: 0, shape: 0 }, n);
     }
     store.seal_local_batches().unwrap();
     let envelopes = || -> i64 {
@@ -265,7 +535,7 @@ fn a_member_that_trims_locally_drops_superseded_claims_from_envelopes_it_keeps()
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
     assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
     assert_eq!(claims_of(&store, "observer.observed"), 1, "the newest observation stays");
-    assert_eq!(claims_of(&store, "resource.observed"), 20, "resource observations stay whole");
+    assert_eq!(claims_of(&store, "resource.observed"), 20, "a pull request open outside the queue keeps what a check reads");
     // Each poll's envelope stays whole, for its resource observation and for peers; only this
     // member's own copies of the superseded observations go, and each goes into the ledger.
     assert_eq!(envelopes(), sealed);
@@ -298,7 +568,7 @@ fn a_fresh_member_joining_from_one_that_split_envelopes_admits_them_whole_and_ag
     let context = context(scratch.path(), 0);
     let alder = local_member("alder");
     for n in 0..20 {
-        apply(&alder, &Write::Poll { observer: 0, status: (n % 3) as u8, resource: 0, state: (n % 3) as u8 }, n);
+        apply(&alder, &Write::Poll { observer: 0, status: (n % 3) as u8, resource: 0, shape: 0 }, n);
     }
     alder.seal_local_batches().unwrap();
     assert_eq!(kinds(&step(&alder, &context)), ["trimmed"]);
@@ -493,48 +763,90 @@ proptest! {
     }
 }
 
-/// The audited `harness.observed` rule drops a credential transition whose loss moves the
-/// `since` of a needs-login seat (ready without provider auth, then with, then without again),
-/// which no projection digest covers. Until a rule keeps it, local trim leaves the kind whole.
+/// A needs-login seat keeps its `since` through local trim: the rule keeps the credential report
+/// that ended the run before the current one (see #4237), while the transitions it supersedes go.
 #[test]
-fn local_trim_leaves_harness_observations_whole() {
+fn local_trim_keeps_where_a_needs_login_run_began() {
     let scratch = tempfile::tempdir().unwrap();
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
-    let history = [(1, false), (0, true), (1, false)];
+    // Ready without provider auth, then starting, working and idle with it, then working, and
+    // ready and idle without it again: the starting, working and idle in between go.
+    let history = [(0, None), (1, Some(false)), (0, Some(true)), (3, Some(true)), (2, Some(true)), (3, Some(true)), (1, Some(false)), (2, Some(false))];
     for (n, (state, provider_auth)) in history.into_iter().enumerate() {
-        let write = Write::Harness { seat: 0, incarnation: 0, state, restamp: false, provider_auth: Some(provider_auth) };
+        let write = Write::Harness { seat: 0, incarnation: 0, state, restamp: false, provider_auth };
         apply(&store, &write, n);
     }
-    for n in 3..20 {
+    for n in history.len()..20 {
         apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
     }
     let harness = claims_of(&store, "harness.observed");
     let before = answers(&store, context.now_unix_ms);
+    assert!(before.1.iter().any(|answer| answer.contains("needs-login") || answer.contains("NeedsLogin")), "{:?}", before.1);
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
-    assert_eq!(claims_of(&store, "harness.observed"), harness);
-    assert_eq!(claims_of(&store, "observer.observed"), 1);
     assert_eq!(answers(&store, context.now_unix_ms), before);
+    assert_eq!(claims_of(&store, "harness.observed"), harness - 3, "the superseded transitions go");
+    assert_eq!(claims_of(&store, "observer.observed"), 1);
 }
 
-/// A GitHub watch finds when a pull request left the merge queue by walking the request's
-/// observations back to the watch's last wake, which can be before the cut. The audited
-/// `resource.observed` rule keeps only the newest, so local trim leaves the kind whole until a
-/// rule keeps that history.
+fn harness_write() -> impl Strategy<Value = Write> {
+    (0..2u8, 0..6u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(|(incarnation, state, restamp, provider_auth)| {
+        Write::Harness { seat: 0, incarnation, state, restamp, provider_auth }
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+    /// For random histories of one seat's harness observations, over two incarnations, the
+    /// seat's current harness and status history answer the same before and after the local
+    /// trim, and the newest observation stays.
+    #[test]
+    fn a_seat_answers_the_same_from_its_full_and_trimmed_harness_observations(
+        writes in proptest::collection::vec(harness_write(), 1..40)
+    ) {
+        let scratch = tempfile::tempdir().unwrap();
+        let context = context(scratch.path(), 0);
+        let store = local_member("alder");
+        for (n, write) in writes.iter().enumerate() {
+            apply(&store, write, n);
+        }
+        let newest = store.latest_claim(SEATS[0], Some("harness.observed")).unwrap().map(|claim| claim.id);
+        let before = answers(&store, context.now_unix_ms);
+        let actions = kinds(&step(&store, &context));
+        prop_assert!(!actions.contains(&"graph-changed"), "{actions:?}");
+        prop_assert_eq!(answers(&store, context.now_unix_ms), before);
+        if let Some(id) = newest {
+            prop_assert!(store.claim_by_id(&id).unwrap().is_some(), "the newest observation {} stays", id);
+        }
+        let orphaned = orphans(&store);
+        prop_assert!(orphaned.iter().all(|(_, count)| *count == 0), "{:?}", orphaned);
+    }
+}
+
+/// The idle nudge finds when a pull request left the merge queue by walking its observations
+/// back to the one that saw it queued, which can be before the cut. Local trim keeps those and
+/// drops the open observations before them; a resource in flat facts keeps every observation.
 #[test]
-fn local_trim_leaves_resource_observations_whole() {
+fn local_trim_keeps_a_pull_requests_observations_back_to_the_merge_queue() {
     let scratch = tempfile::tempdir().unwrap();
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
-    for (n, state) in [0, 0, 2, 0].into_iter().enumerate() {
-        apply(&store, &Write::Resource { resource: 0, state }, n);
+    let writes = [(0, 0), (0, 0), (0, 1), (0, 0), (0, 0), (1, 6), (1, 0), (1, 0)];
+    for (n, (resource, shape)) in writes.into_iter().enumerate() {
+        apply(&store, &Write::Resource { resource, shape }, n);
     }
-    for n in 4..20 {
+    for n in writes.len()..20 {
         apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
     }
     let before = answers(&store, context.now_unix_ms);
+    assert!(before.1.iter().any(|answer| answer.contains("pull-request/0 left the merge queue: Some(Some(")), "{before:?}");
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
-    assert_eq!(claims_of(&store, "resource.observed"), 4);
+    let count = |resource: u8| -> i64 {
+        store.readers.get().query_row("SELECT COUNT(*) FROM claims WHERE subject=?1", [pull_request(resource)], |row| row.get(0)).unwrap()
+    };
+    assert_eq!(count(0), 3, "the queued observation and those after it stay");
+    assert_eq!(count(1), 3, "a resource in flat facts keeps every observation");
     assert_eq!(claims_of(&store, "observer.observed"), 1);
     assert_eq!(answers(&store, context.now_unix_ms), before);
 }
@@ -567,6 +879,11 @@ enum Step {
     /// Two observations of one observer in one batch: the older is not the newest of its slot
     /// yet sits in the writer's newest observer envelope, so the writer's-newest guard decides it.
     Twice(u8),
+    /// One source of a seat's status history: a harness transition (`kind` 0), observed inside
+    /// the seven-day history window or (`old`) nine days back, outside it; a runtime reset to an
+    /// incarnation (1); or a restored provider prompt (2), both dated by acceptance, inside it.
+    /// The status-history rule reads all three to judge a harness observation.
+    Seat { kind: u8, seat: u8, incarnation: u8, state: u8, old: bool },
 }
 
 fn step_strategy() -> impl Strategy<Value = Step> {
@@ -577,6 +894,8 @@ fn step_strategy() -> impl Strategy<Value = Step> {
         1 => (any::<u8>(), any::<bool>()).prop_map(|(nth, by_claim)| Step::Repair(nth, by_claim)),
         1 => (0..3u8).prop_map(Step::Shared),
         1 => (0..3u8).prop_map(Step::Twice),
+        6 => (0..3u8, 0..2u8, 0..3u8, 0..6u8, any::<bool>())
+            .prop_map(|(kind, seat, incarnation, state, old)| Step::Seat { kind, seat, incarnation, state, old }),
         1 => any::<bool>().prop_map(Step::Tombstone),
         1 => any::<u8>().prop_map(Step::PeerCite),
         1 => any::<bool>().prop_map(Step::CatchUp),
@@ -773,6 +1092,48 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
                 )
                 .unwrap();
         }
+        Step::Seat { kind, seat, incarnation, state, old } => {
+            let seat = SEATS[usize::from(*seat)];
+            let incarnation = format!("{seat}-{incarnation}");
+            let observed_at = now_ms() - if *old { 9 * smallclaims::store::checkpoint::DAY_MS } else { 0 };
+            let (kind, fields) = match kind {
+                0 => ("harness.observed", BTreeMap::from([
+                    ("state".into(), json!(STATES[usize::from(*state)])),
+                    ("driver".into(), json!("codex")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("status_transition".into(), json!(true)),
+                ])),
+                1 => ("runtime.observed", BTreeMap::from([
+                    ("status".into(), json!("running")),
+                    ("runtime_id".into(), json!(seat.trim_start_matches("agent/"))),
+                    ("incarnation_id".into(), json!(incarnation)),
+                ])),
+                _ => ("harness.diagnostic", BTreeMap::from([
+                    ("code".into(), json!("provider-auth-restored")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("driver".into(), json!("codex")),
+                    ("reason".into(), json!("fixture")),
+                    ("severity".into(), json!("warning")),
+                ])),
+            };
+            let mut fields = fields;
+            // Only a harness observation carries its own observation time; the others are dated
+            // by acceptance, inside the window.
+            if kind == "harness.observed" {
+                fields.insert("observed_at_ms".into(), json!(observed_at as u64));
+            }
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("seat-{n}")),
+                })
+                .unwrap();
+        }
         Step::Twice(observer) => {
             let mut connection = store.connection.write();
             let transaction = connection.transaction().unwrap();
@@ -826,7 +1187,8 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
 /// Stage `store` at `cut` as a local cut does, fully or scoped, and plan it.
 fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> (Vec<String>, Vec<String>, Vec<String>) {
     let kinds = smallclaims::store::LOCAL_TRIM_KINDS;
-    let staged = store.checkpoint_staged_set_scoped(cut, None, dir, scoped.then_some(kinds)).unwrap();
+    let capture = smallclaims::store::local_trim_capture_kinds();
+    let staged = store.checkpoint_staged_set_scoped(cut, None, dir, scoped.then_some(capture.as_slice())).unwrap();
     staged.protect_all_but(kinds).unwrap();
     staged.split_envelopes().unwrap();
     smallclaims::store::checkpoint_staging::without_reference_plan(|| store.plan_staged_checkpoint(&staged)).unwrap();
@@ -838,6 +1200,68 @@ fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> 
         .map(|envelope| format!("{}/{}/{}", envelope.writer, envelope.sequence, envelope.envelope_hash))
         .collect();
     (claims, envelopes, staged.guard_answers(kinds).unwrap())
+}
+
+#[test]
+fn a_local_cut_s_scoped_capture_stages_every_kind_its_rules_read() {
+    let capture = smallclaims::store::local_trim_capture_kinds();
+    for kind in smallclaims::store::LOCAL_TRIM_KINDS {
+        let missing = checkpoint_rules::kinds_read_for(kind)
+            .into_iter()
+            .filter(|read| !capture.contains(read))
+            .collect::<Vec<_>>();
+        assert!(missing.is_empty(), "judging {kind} reads {missing:?}, which a local cut does not stage");
+    }
+    // The status-history rule reads a seat's runtime resets and diagnostics.
+    assert!(checkpoint_rules::kinds_read_for("harness.observed").contains("runtime.observed"));
+}
+
+/// A seat whose harness transitions are all old, with a provider prompt raised and restored
+/// inside the history window between them: the status-history rule keeps the transition before
+/// the prompt (its predecessor, and what the restored prompt exposes), which only the
+/// diagnostics show and no harness rule keeps. A capture that left them out would drop it, and
+/// the seat's status history would change.
+#[test]
+fn a_scoped_capture_keeps_the_transition_a_seat_s_restored_prompt_depends_on() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    let seat = SEATS[0];
+    let old = (now_ms() - 9 * smallclaims::store::checkpoint::DAY_MS) as u64;
+    let mut n = 0;
+    let mut append = |kind: &str, fields: Value| -> String {
+        n += 1;
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: kind.into(),
+                actor: Some(seat.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("prompt-{n}")),
+            })
+            .unwrap()
+            .id
+    };
+    let harness = |state: &str, at: u64| json!({"state": state, "driver": "codex", "incarnation_id": "one", "observed_at_ms": at});
+    let diagnostic = |code: &str| json!({"incarnation_id": "one", "code": code, "driver": "codex", "reason": "fixture", "severity": "warning"});
+    append("harness.observed", harness("ready", old));
+    append("harness.observed", harness("working", old + 1));
+    let before_prompt = append("harness.observed", harness("idle", old + 2));
+    append("harness.diagnostic", diagnostic("provider-auth-expired"));
+    append("harness.diagnostic", diagnostic("provider-auth-restored"));
+    // Later transitions the harness rule keeps instead: the newest that is not working, and the
+    // working run the seat is in now.
+    append("harness.observed", harness("ready", old + 3));
+    append("harness.observed", harness("working", old + 4));
+    store.seal_local_batches().unwrap();
+    let cut = smallclaims::store::checkpoint::newest_due_cut(context.now_unix_ms);
+    let full = local_plan(&store, cut, &scratch.path().join("full"), false);
+    let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
+    assert!(!full.0.contains(&before_prompt), "the whole capture keeps it");
+    assert_eq!(scoped.0, full.0, "and so does the scoped one");
+    assert_eq!(scoped.1, full.1);
 }
 
 proptest! {

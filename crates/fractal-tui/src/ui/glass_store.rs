@@ -71,6 +71,9 @@ pub struct StoredPlace {
     /// The Inbox list keeps its selected card without changing the tab's pane kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<String>,
+    /// Monotonic device-local visit order, including back/forward visits.
+    #[serde(default)]
+    pub visited: u64,
 }
 
 /// Version 1: a glass was tabs, and each tab a tree of split panes.
@@ -178,6 +181,10 @@ pub(crate) fn person_state(person: &str) -> Option<(PathBuf, String)> {
 
 /// What the file holds; nothing when it is missing, unreadable, too big or open to others.
 pub fn load(path: &Path) -> Stored {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let path = fractal_client::product_dirs::tui_read_path(path);
+    let path = path.as_ref();
+    // LIVE-MIGRATION END
     let readable = fs::metadata(path).ok().filter(|metadata| {
         metadata.len() <= MAX_BYTES && metadata.permissions().mode() & 0o077 == 0
     });
@@ -253,6 +260,7 @@ mod tests {
                     tab: 0,
                     pane: "mission:mission/example/audit".into(),
                     selection: None,
+                    visited: 1,
                 },
                 StoredPlace {
                     space: "0190a1b2-0000-7000-8000-000000000001".into(),
@@ -262,6 +270,7 @@ mod tests {
                     tab: 0,
                     pane: "home:inbox".into(),
                     selection: None,
+                    visited: 2,
                 },
             ],
             history_cursor: 0,

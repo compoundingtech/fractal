@@ -72,8 +72,8 @@ fn migration_restart_hint(legacy_toggle: bool, json_output: bool) -> &'static st
     match (legacy_toggle, json_output) {
         (true, true) => "Restart st3 replication-worker for this to take effect.",
         (true, false) => "Restart fractal replication-worker for this to take effect.",
-        (false, true) => "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.",
-        (false, false) => "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.",
+        (false, true) => "Start st3 replication-worker first, then st3 up --replication-worker-pid PID; legacy exchanges stay accepted until st fleet migrate --finish.",
+        (false, false) => "Start fractal replication-worker first, then fractal up --replication-worker-pid PID; legacy exchanges stay accepted until fractal fleet migrate --finish.",
     }
 }
 
@@ -541,6 +541,15 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
     }
     let client = Client::new(endpoint.clone());
     match command {
+        FleetCommand::Anchor { command: FleetAnchorCommand::Show } => {
+            let anchor = generated_client(endpoint, None)?.fleet_anchor().await?;
+            if json_output {
+                print_value(&anchor, true)
+            } else {
+                println!("{}", anchor.fleet_anchor);
+                Ok(())
+            }
+        }
         FleetCommand::Create(args) => {
             anyhow::ensure!(
                 fractal_daemon::config::FleetFile::load(&config.state_dir)?.is_none(),
@@ -835,8 +844,8 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 }
             } else if !json_output {
                 println!(
-                    "Start fractal up and fractal replication-worker to begin syncing; fractal fleet wait \
-                     waits for the first sync to end and checks it."
+                    "Start fractal replication-worker first, then fractal up --replication-worker-pid PID; \
+                     fractal fleet wait waits for the first sync to end and checks it."
                 );
             }
             if !json_output {
@@ -1713,8 +1722,8 @@ mod output_tests {
 
     #[test]
     fn migrate_anchor_and_join_without_services_preserve_json_stdout() {
-        assert_eq!(migration_restart_hint(false, true), "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.");
-        assert_eq!(migration_restart_hint(false, false), "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.");
+        assert_eq!(migration_restart_hint(false, true), "Start st3 replication-worker first, then st3 up --replication-worker-pid PID; legacy exchanges stay accepted until st fleet migrate --finish.");
+        assert_eq!(migration_restart_hint(false, false), "Start fractal replication-worker first, then fractal up --replication-worker-pid PID; legacy exchanges stay accepted until fractal fleet migrate --finish.");
     }
 }
 

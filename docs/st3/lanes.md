@@ -1,8 +1,9 @@
 # Lanes
 
-A lane is one ordered line of entries that a mission run works through front first. The Small
-Talk merge train is a lane: each entry is a pull request, and the train updates, tests, and merges
-the front one at a time.
+A lane is one ordered line of entries that a mission run works through front first.
+A custom merge driver can use a lane of pull requests and work on its front entry.
+This repository uses GitHub's [merge queue](../ci.md#merge-queue); its former mission
+merge train is retired.
 
 This document explains the model, the declaration, the commands, how the order is stored and
 replicated, and what Fractal leaves to the run that owns the lane.
