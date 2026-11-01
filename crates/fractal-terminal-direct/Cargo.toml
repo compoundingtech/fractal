@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "4630c5eab3b104e8d252d550cedcdb169dccd38c" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallclaims = { path = "../smallclaims" }

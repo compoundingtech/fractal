@@ -7,7 +7,7 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/79d526d1be4f77bb3764dc1d880492806f8a07fc";
+    pty.url = "github:compoundingtech/pty/4630c5eab3b104e8d252d550cedcdb169dccd38c";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Merged pairing stack, including the daemon-identity restricted client.
     fabric.url = "github:compoundingtech/fabric/1e6e93e9a662a40749f91d63eeecc4e98de114bd";
@@ -617,7 +617,8 @@
             ST3_OTELITE_BIN=$(command -v otelite)
             FRACTAL_MESSAGING_COMPAT_BIN=$ST3_MESSAGING_COMPAT_BIN
             FRACTAL_OTELITE_BIN=$ST3_OTELITE_BIN
-            export ST3_MESSAGING_COMPAT_BIN ST3_OTELITE_BIN FRACTAL_MESSAGING_COMPAT_BIN FRACTAL_OTELITE_BIN
+            FRACTAL_PINNED_PTY_BIN=$(command -v pty)
+            export ST3_MESSAGING_COMPAT_BIN ST3_OTELITE_BIN FRACTAL_MESSAGING_COMPAT_BIN FRACTAL_OTELITE_BIN FRACTAL_PINNED_PTY_BIN
             export FRACTAL_OTEL_REQUIRE=1 ST3_OTEL_REQUIRE=1
             export HOME=$(mktemp -d)
             export SHELL=${pkgs.bashInteractive}/bin/bash
@@ -2037,6 +2038,9 @@
           # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
           FRACTAL_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
+          # The pty this flake pins, for crates/fractal/tests/pinned_pty.rs: a host whose PATH puts
+          # its own pty first would otherwise test that one instead. scripts/ci-local keeps it.
+          FRACTAL_PINNED_PTY_BIN = "${ptyPackage}/bin/pty";
           RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           shellHook = ''
             source ${./scripts/sccache-read-cache-env} || exit $?
