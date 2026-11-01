@@ -134,3 +134,33 @@ agent "operations" { workspace "/tmp"; command "true"; capacity cores=2 memory="
     assert!(status.subject("agent/node.operations", 0).is_none());
     assert!(status.state().lane_starts.contains_key("agent/node.operations"), "its room counts once it starts");
 }
+
+#[test]
+fn a_step_waiting_for_its_lane_is_tried_again_and_becomes_ready_where_nothing_holds_it() {
+    // A later build blocks a step with a `step lane` reason; this one, and any that follows, tries it
+    // again, so a step a newer member blocked is never stranded after a rollback to this build.
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+    apply_source(&store, r#"version 2
+mission "orchid" state="ready" {
+  goal "Build."
+  completion { when "all-steps-exhausted" }
+  agent "builder" { workspace "/tmp"; command "true" }
+  step "build" { assigned-to "agent/${ST_MISSION_RUN}/builder" }
+}"#, "orchid");
+    let run = store.create_mission_run(&crate::model::MissionRunRequest {
+        mission: "orchid".into(), revision: None, workspace: "/tmp".into(), requester: Some("person/lichen".into()),
+        mode: None, inputs: BTreeMap::new(), idempotency_key: "orchid-run".into(),
+    }).unwrap();
+    let step = |store: &Store| store.work_for_reconcile_all().unwrap().into_iter()
+        .find(|view| view.run == run.subject && view.step == "build").unwrap();
+    for _ in 0..3 {
+        reconciler.reconcile_once().unwrap();
+    }
+    assert_eq!(step(&store).status, "ready");
+    store.set_step_state(&step(&store).subject, "blocked", Some("step lane 2 cores/16.0G for agent/x does not fit: 1.0G free")).unwrap();
+    for _ in 0..2 {
+        reconciler.reconcile_once().unwrap();
+    }
+    assert_eq!(step(&store).status, "ready");
+}
