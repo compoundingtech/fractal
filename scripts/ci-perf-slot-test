@@ -52,6 +52,8 @@ def validate_receipt(receipt):
     admitted = Path(os.path.normpath(admission["cgroup"]))
     require(admitted.is_absolute() and admitted.name == admission["unit"])
     require(Path(os.path.normpath(receipt["caller_cgroup"])).is_relative_to(admitted))
+    manager = next((parent for parent in admitted.parents if re.fullmatch(r"user@\d+\.service", parent.name)), None)
+    require(manager is not None and all(str(manager / lane) in receipt["scanned_roots"] for lane in ("app.slice", "builds.slice")))
     fixtures = receipt["fixtures"]
     require(len(fixtures) == 2 and len({r["unit"] for r in fixtures}) == 2)
     for record in fixtures:
@@ -417,12 +419,13 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
         record["cgroup"] = f"{parent}/{record['unit']}"
         record["manager"] = dict(record["manager"], ControlGroup=record["cgroup"])
     complete = dict(good, skip=None, fixtures=fixtures, gate_slot={"unit": "gate.scope", "cgroup": f"{parent}/gate.scope"},
-                    caller_cgroup=f"{parent}/gate.scope/child", scanned_roots=[parent])
+                    caller_cgroup=f"{parent}/gate.scope/child", scanned_roots=[parent, f"{manager}/app.slice", f"{manager}/builds.slice"])
     validate_receipt(complete)
     wrong = dict(complete, gate_slot={"unit": "gate.scope", "cgroup": "/other.slice/gate.scope"})
     for candidate, accepted in ((complete, True), (wrong, False), (dict(complete, outcome="failure"), False),
                                 (dict(complete, gate_slot={"unit": None, "cgroup": None}), False),
                                 (dict(complete, caller_cgroup="/system.slice/runner.service"), False),
+                                (dict(complete, scanned_roots=[parent, f"{manager}/app.slice"]), False),
                                 (dict(complete, fixtures=[dict(record, parent_slice="/other/ci.slice") for record in fixtures],
                                       scanned_roots=["/other/ci.slice"]), False),
                                 (dict(complete, scanned_roots=[]), False)):
