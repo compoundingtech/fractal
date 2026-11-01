@@ -68,12 +68,12 @@ function useSidebar(): Sidebar {
     })
     // Each agent's ◆ counts the cards it requested; its mail is listed but raises no marker. Each mission's marker sits over its steps.
     const agentSources = agents.flatMap((agent): Group[] => {
-      const items = [...cards.flatMap((card, index) => card.requester_id === agent.id ? [alerts[index]!] : []), ...messages.filter(message => message.from === agent.id).map((message): Item => ({ id: message.id, glyph: '·', title: message.title, facts: `Mail, no marker · ${message.content}` }))]
+      const items = [...cards.flatMap((card, index) => card.requester_id === agent.id ? [alerts[index]!] : []), ...messages.filter(message => message.from === agent.id).map((message): Item => ({ id: message.id, glyph: '·', title: message.title ?? '', facts: `Mail, no marker · ${message.content}` }))]
       return items.length === 0 ? [] : [{ id: agent.id, title: agent.title, ...(agent.attention === undefined ? {} : { attention: agent.attention }), items }]
     })
     const missionSteps = missions.map(({ id, title, attention: marker }): Group => ({
       id, title, ...(marker === undefined ? {} : { attention: marker }),
-      items: work.filter(item => item.mission_id === id).map((item): Item => ({ id: item.id, glyph: stepGlyphs[item.state] ?? '□', title: item.title, facts: item.blocked_reason == null ? item.state : `${item.state} · ${item.blocked_reason}` })),
+      items: work.filter(item => item.mission_id === id).map((item): Item => ({ id: item.id, glyph: stepGlyphs[item.state] ?? '□', title: item.title ?? '', facts: item.blocked_reason == null ? item.state : `${item.state} · ${item.blocked_reason}` })),
     }))
     const fleet = machines.map((machine): Item => ({ id: machine.id, glyph: machineGlyph(machine), title: machine.name, metric: `${machine.occupancy.running_runtimes} running`, facts: `${machine.state} · ${machine.projects.length} projects · ${machine.work.length} work` }))
     const counted = (id: string, label: string, items: readonly { readonly attention?: Attention }[]): SidebarTab => ({
