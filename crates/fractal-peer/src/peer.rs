@@ -976,7 +976,8 @@ impl ClientRelay {
             relay_trace::result(Phase::Decode, || -> Result<_> {
                 let envelope: ApiResponse<serde_json::Value> = serde_json::from_slice(&bytes)?;
                 anyhow::ensure!(
-                    envelope.api_version == "st3.v1",
+                    smallclaims::sync::ACCEPTED_PEER_API_VERSIONS
+                        .contains(&envelope.api_version.as_str()),
                     "the peer client read protocol differs"
                 );
                 Ok(envelope)
@@ -2107,6 +2108,90 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn peer_envelope_versions_are_accepted_by_the_client_relay() {
+        assert_signed_peer_envelope_versions(CLIENT_READ_PATH).await;
+    }
+
+    #[tokio::test]
+    async fn peer_envelope_versions_are_accepted_by_seat_freshness() {
+        assert_signed_peer_envelope_versions(SEAT_FRESHNESS_PATH).await;
+    }
+
+    async fn assert_signed_peer_envelope_versions(path: &'static str) {
+        use std::future::IntoFuture as _;
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join("fleet-secret");
+        fs::write(&secret, [7_u8; 32]).unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        for version in ["st3.v1", "fractal.v1", "future.v9"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new().route(
+                path,
+                post(move |request: Bytes| async move {
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "api_version": version, "request_id": "test", "snapshot_host": "owner-node",
+                        "store_index": 0, "value": {"recorded": []}
+                    }))
+                    .unwrap();
+                    let headers = FleetAuth::test("fleet-test", &[7; 32])
+                        .response_headers_for(
+                            path,
+                            "owner-node",
+                            &body,
+                            &FleetAuth::body_digest(&request),
+                        )
+                        .unwrap();
+                    let mut response = (StatusCode::OK, body).into_response();
+                    response.headers_mut().extend(headers);
+                    response
+                }),
+            );
+            let server = tokio::spawn(axum::serve(listener, app).into_future());
+            let relay = ClientRelay::from_config(&Config {
+                node: "gateway-node".into(),
+                fleet_id: Some("fleet-test".into()),
+                shared_secret_file: Some(secret.clone()),
+                peers: vec![PeerConfig {
+                    name: "owner-node".into(),
+                    url: format!("http://{address}"),
+                }],
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap();
+            let request = ClientReadRequest {
+                authority_actor: "person/example".into(),
+                relay: None,
+                request: ClientReadOperation::Timeline {
+                    session_id: "session/example".into(),
+                    limit: 1,
+                    cursor: None,
+                },
+            };
+            let result = if path == SEAT_FRESHNESS_PATH {
+                relay
+                    .push_seat_freshness(
+                        "owner-node",
+                        &SeatFreshnessPush::default(),
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    .map(|ack| serde_json::to_value(ack.unwrap()).unwrap())
+            } else {
+                relay.read("host/owner-node", &request).await
+            };
+            server.abort();
+            let _ = server.await;
+            if version == "future.v9" {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), serde_json::json!({"recorded": []}));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn daemon_export_failures_preserve_machine_code_without_private_messages() {
