@@ -372,6 +372,11 @@ mod tests {
         set_status("ready");
         store.acknowledge_work(&work.subject, &acknowledge).unwrap();
         assert_eq!(read().map(|(actor, _)| actor), Some(to.to_owned()));
+        // A read lost after the acknowledgment committed is recorded by the repeat its error asks for.
+        shard.connection.write().execute("DELETE FROM stream_lifecycle WHERE subject=?1", [note]).unwrap();
+        assert!(read().is_none());
+        store.acknowledge_work(&work.subject, &acknowledge).unwrap();
+        assert_eq!(read().map(|(actor, _)| actor), Some(to.to_owned()));
         // The acknowledgment is a graph claim; the read is not. Another member needs only the first.
         receive_and_project(&other, "alder", &exchange_from(&store, &ReplicationInventory::default()));
         assert!(other.claims_for(note, None).unwrap().is_empty());
