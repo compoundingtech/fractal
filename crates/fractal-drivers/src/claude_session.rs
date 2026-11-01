@@ -451,7 +451,16 @@ fn development_fractal_channel_argv(
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .context("the authored Claude --mcp-config mcpServers value must be a JSON object")?;
-    if let Some(authored) = servers.get("st3") {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let server_name = if servers.contains_key("st3") {
+        "st3"
+    } else if servers.contains_key("fractal") {
+        "fractal"
+    } else {
+        "st3"
+    };
+    // LIVE-MIGRATION END
+    if let Some(authored) = servers.get(server_name) {
         anyhow::ensure!(
             authored == &st3_server,
             "the authored Claude --mcp-config already defines a different st3 server"
@@ -480,7 +489,9 @@ fn development_fractal_channel_argv(
             if existing_mcp.is_none() {
                 output.extend(["--mcp-config".to_string(), mcp.clone()]);
             }
-            output.push("--dangerously-load-development-channels=server:st3".to_string());
+            output.push(format!(
+                "--dangerously-load-development-channels=server:{server_name}"
+            ));
             index += 2;
             continue;
         }
@@ -2509,6 +2520,77 @@ mod tests {
             format!("{error:#}").contains("already defines a different st3 server"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn fractal_development_channel_preserves_authored_server_names() {
+        let server = serde_json::json!({
+            "type": "stdio", "command": "/opt/st3/bin/st3",
+            "args": ["driver", "claude-mcp", "--subject", "agent/example"]
+        });
+        for (servers, name) in [
+            (serde_json::json!({"st3": server}), "st3"),
+            (serde_json::json!({"fractal": server}), "fractal"),
+            (
+                serde_json::json!({"st3": server, "fractal": {"command": "other"}}),
+                "st3",
+            ),
+            (serde_json::json!({}), "st3"),
+            (serde_json::json!({"unknown": server}), "st3"),
+        ] {
+            let mut expected = servers.clone();
+            if !expected.as_object().unwrap().contains_key("st3")
+                && !expected.as_object().unwrap().contains_key("fractal")
+            {
+                expected["st3"] = server.clone();
+            }
+            let argv = vec![
+                "claude".into(),
+                format!(
+                    "--mcp-config={}",
+                    serde_json::json!({"mcpServers": servers})
+                ),
+                "--channels".into(),
+                crate::claude_channel::FRACTAL_CHANNEL.into(),
+            ];
+            let output = development_fractal_channel_argv(
+                argv,
+                Path::new("/opt/st3/bin/st3"),
+                Path::new("/unused"),
+                "example",
+            )
+            .unwrap();
+            let config = output
+                .iter()
+                .find_map(|arg| arg.strip_prefix("--mcp-config="))
+                .unwrap();
+            let config: serde_json::Value = serde_json::from_str(config).unwrap();
+            assert_eq!(config["mcpServers"], expected);
+            assert!(output.contains(&format!(
+                "--dangerously-load-development-channels=server:{name}"
+            )));
+        }
+        for legacy in [
+            serde_json::Value::Null,
+            serde_json::json!({"command": "other"}),
+        ] {
+            let config = serde_json::json!({"mcpServers": {"st3": legacy, "fractal": server}});
+            let argv = vec![
+                "claude".into(),
+                format!("--mcp-config={config}"),
+                "--channels".into(),
+                crate::claude_channel::FRACTAL_CHANNEL.into(),
+            ];
+            assert!(
+                development_fractal_channel_argv(
+                    argv,
+                    Path::new("/opt/st3/bin/st3"),
+                    Path::new("/unused"),
+                    "example",
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
