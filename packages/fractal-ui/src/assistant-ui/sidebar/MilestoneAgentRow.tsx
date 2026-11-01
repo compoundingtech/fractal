@@ -6,7 +6,8 @@ import { Tooltip } from '../composition/Controls'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import type { SidebarActions, SidebarAgentRow as Row } from './model'
-import { AgentHoverCard, AgentRowActions, Highlight } from './SidebarAgentRow'
+import { AgentHoverCard, DeferredRowActions } from './DeferredRowActions.tsx'
+import { Highlight } from './rowPresentation.tsx'
 import { SidebarMissionLine, missionLineHasTrigger } from './SidebarMissionLine'
 import { SidebarStatus } from './SidebarStatus'
 import { SidebarTime } from './SidebarTime'
@@ -126,10 +127,10 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     </span>
     {/* The hover card and the actions' overlays portal into the row's themed surface, so a light root gets light overlays. */}
     {!displayOnly && <>
-      <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
+      <DeferredRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
         menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />
       {hovered && !countExplained && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
-        <AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} />
+        <React.Suspense fallback={null}><AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} /></React.Suspense>
       </Popover>}
     </>}
     </ThemePortal>

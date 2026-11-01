@@ -6,7 +6,8 @@ import { Button, Dialog, DialogTrigger, MenuTrigger, Popover, Text, Tooltip, Too
 import { ThemePortal } from '../taste/ThemePortal'
 import { Menu, MenuItem, Popover as MenuPopover } from '../composition/Controls'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
-import { matchPositions, usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
+import { usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
+import { Highlight } from './rowPresentation.tsx'
 import { SidebarStatus, type DiscRefinement, type GlyphVariant } from './SidebarStatus'
 import { SidebarTime, type SidebarClock } from './SidebarTime'
 import { SidebarDuration } from './SidebarDuration'
@@ -41,18 +42,6 @@ export type SidebarAgentRowProps = SidebarClock & {
   readonly inTree?: boolean
   readonly treeExpanded?: boolean
 }
-/**
- * The host's sidebar search query. Only `Highlight` reads it, so a keystroke re-renders the
- * highlighted titles while memoized rows with unchanged props skip rendering.
- */
-export const SidebarQueryContext = React.createContext('')
-/** Fuzzy highlighting uses the upstream matcher, not a second search implementation. An explicit `query` takes precedence over `SidebarQueryContext`. */
-export function Highlight({ value, query }: { readonly value: string; readonly query?: string }) {
-  const contextQuery = React.useContext(SidebarQueryContext)
-  const matched = matchPositions({ query: query ?? contextQuery, text: value })
-  if (matched.size === 0) return <>{value}</>
-  return <>{Array.from(value, (letter, index) => matched.has(index) ? <mark key={index} {...stylex.props(styles.mark)}>{letter}</mark> : letter)}</>
-}
 function usageText(usage: Extract<Row['usage'], { _tag: 'Known' }>): string {
   return `${usage.usd === undefined ? '' : `$${usage.usd} / `}${usage.tokens} tokens; ${usageScopeLabel(usage.scope).toLowerCase()}`
 }
@@ -63,23 +52,6 @@ export const sidebarSubagentObservationText = (observation: Row['subagentObserva
     return observation.reason._tag === 'Harness' ? 'Not reported by this harness' : 'Not reported by this daemon version'
   }
   return observation?._tag === 'Unavailable' ? 'Not reported yet' : 'Subagent observations unavailable'
-}
-/** Concise label-in-name for the tree host, which cannot attach a row description. */
-export const sidebarRowAccessibleName = (row: Row): string => {
-  const parts = [row.title, row.statusLabel]
-  if (row.parentRef === undefined && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0) {
-    parts.splice(1, 0, row.subagentCount === undefined ? '? subagents' : `${row.subagentCount} ${row.subagentCount === 1 ? 'subagent' : 'subagents'}`)
-  }
-  if (row.missionContext?._tag === 'Mission') {
-    const { slug, progress, step } = row.missionContext
-    parts.push(`Mission ${slug}`)
-    if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
-    if (step._tag === 'Step') parts.push(`Step ${step.name}`)
-    if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
-    if (row.missionInfo !== undefined && row.missionInfo._tag !== 'Live') parts.push('mission info may be out of date')
-  }
-  if (row.missionContext?._tag === 'Unavailable') parts.push('mission info unavailable')
-  return parts.join(', ')
 }
 /** Reported metadata stays accessible; fields the source never reported are omitted, never described as unknown. */
 export function sidebarRowDescription(row: Row, reportedStatusOnly = false): string {
@@ -194,6 +166,8 @@ export interface AgentRowActionsProps extends SidebarClock {
   readonly wrapDetailsTrigger?: (trigger: React.ReactElement) => React.ReactNode
   readonly onDetailsPress?: () => void
   readonly onMenuOpenChange?: (isOpen: boolean) => void
+  readonly defaultMenuOpen?: boolean
+  readonly defaultDetailsOpen?: boolean
 }
 // A 320px Agents sheet, the 340px details surface and its two 8px viewport gutters.
 const compactDetailsQuery = '(max-width: 676px), (pointer: coarse)'
@@ -207,12 +181,12 @@ const compactDetailsLayout = () => window.matchMedia(compactDetailsQuery).matche
  * The row's action menu (`[data-agent-menu]`) and its keyboard-reachable reported-details dialog. Shared by every sidebar
  * row so the actions stay one implementation; hosts own only the trigger's placement and visibility.
  */
-export function AgentRowActions({ row, now, reportedStatusOnly = false, actions, onOpen, onMarkRead, anchorRef, menuTriggerRef, menuButtonStyle, wrapDetailsTrigger, onDetailsPress, onMenuOpenChange }: AgentRowActionsProps) {
+export function AgentRowActions({ row, now, reportedStatusOnly = false, actions, onOpen, onMarkRead, anchorRef, menuTriggerRef, menuButtonStyle, wrapDetailsTrigger, onDetailsPress, onMenuOpenChange, defaultMenuOpen = false, defaultDetailsOpen = false }: AgentRowActionsProps) {
   const touch = useTouchLayout()
   const compactDetails = React.useSyncExternalStore(subscribeDetailsLayout, compactDetailsLayout, () => false) || touch
   const menuItemStyle = touch ? styles.menuItemFocusNarrow : styles.menuItemFocus
   // Open from the real menu action: a synthetic click on the hidden trigger changes RAC's input modality and defers dialog focus.
-  const [detailsOpen, setDetailsOpen] = React.useState(false)
+  const [detailsOpen, setDetailsOpen] = React.useState(defaultDetailsOpen)
   const title = sidebarRowTitle(row)
   const ownerId = row.parentRef?.replace(/^agent\//, '') ?? row.id
   const canOpen = actions?.select !== undefined || onOpen !== undefined
@@ -233,7 +207,7 @@ export function AgentRowActions({ row, now, reportedStatusOnly = false, actions,
       shouldFlip containerPadding={8}
       {...stylex.props(styles.hovercard, compactDetails && styles.detailsCompact)}
     ><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={row} reportedStatusOnly={reportedStatusOnly} now={now} /></Dialog></Popover></DialogTrigger>
-    <MenuTrigger onOpenChange={onMenuOpenChange}><Button ref={menuTriggerRef} data-agent-menu="true" aria-label={`Actions for ${title}`} className={state => stylex.props(menuButtonStyle(state), touch && styles.menuNarrow).className ?? ''}><Icon name="chevron-right" /></Button><MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
+    <MenuTrigger defaultOpen={defaultMenuOpen} onOpenChange={onMenuOpenChange}><Button ref={menuTriggerRef} data-agent-menu="true" aria-label={`Actions for ${title}`} className={state => stylex.props(menuButtonStyle(state), touch && styles.menuNarrow).className ?? ''}><Icon name="chevron-right" /></Button><MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
       <MenuItem id="open" textValue="Open conversation" isDisabled={!canOpen} onAction={() => openRow(row, actions, onOpen)} style={menuItemStyle}>Open conversation{!canOpen && <Text slot="description" {...stylex.props(styles.menuReason)}>{row.subagent !== undefined && row.subagent.session_id === undefined ? 'No session reported for this subagent' : 'Conversation opening is unavailable'}</Text>}</MenuItem>
       {actions?.split !== undefined && <MenuItem id="split-right" onAction={() => actions.split?.(row.ref, 'right')} style={menuItemStyle}>Open in split right</MenuItem>}
       {actions?.split !== undefined && <MenuItem id="split-below" onAction={() => actions.split?.(row.ref, 'below')} style={menuItemStyle}>Open in split below</MenuItem>}
@@ -378,5 +352,5 @@ const styles = stylex.create({
   menuItemFocus: { outlineColor: { ':is([data-focus-visible])': ink.fgMuted } },
   menuReason: { display: 'block', whiteSpace: 'normal', fontSize: t.metaSize, lineHeight: t.metaLeading, paddingBlockEnd: s.xs },
   menuItemFocusNarrow: { outlineColor: { ':is([data-focus-visible])': ink.fgMuted }, height: 'auto', minHeight: g.touchTarget },
-  mark: { backgroundColor: surface.rowActive, color: ink.fg, fontWeight: t.weightSemibold }, children: { borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.border },
+  children: { borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.border },
 })

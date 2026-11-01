@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The live sidebar loads optional row menus, reported-details dialogs and hover cards on demand, while roster navigation, search highlighting and badges remain in the initial bundle.",
+  "replay": { "status": "none", "detail": "No graph or storage change." },
+  "schema": { "status": "none", "detail": "No schema change." },
+  "rules": { "status": "none", "detail": "No rule change." },
+  "compatibility": { "status": "none", "detail": "No API or wire change. Optional row actions may wait for their chunk on first use; the roster remains interactive." },
+  "downtime": { "status": "none", "detail": "Takes effect with the next web build; no daemon restart is required." },
+  "manual": { "status": "none", "detail": "No operator step." },
+  "recovery": { "status": "none", "detail": "Revert this commit and rebuild the web app to restore eager row overlays." }
+}
