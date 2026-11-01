@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """scripts/evidence-log against real repositories and signed records: a bare remote plays GitHub, a second bare repository is the
 host's copy. What is accepted and refused, the signed heartbeat, publishing, a deleted record reported and restored, GC lines
-before GC deletes, a head that is not ours, and a signer that fails."""
+before GC deletes, a head that is not ours, a standby host continuing the chain
+under its own pinned key, and a signer that fails."""
 import importlib.machinery
 import importlib.util
 import json
@@ -218,6 +219,28 @@ class EvidenceLog(unittest.TestCase):
         code, _, error = self.pull()
         self.assertEqual(code, 1)
         self.assertIn('not signed by a key in --log-keys', error)
+
+    def test_a_standby_host_seeded_from_the_published_head_continues_the_chain_with_its_own_pinned_key(self):
+        self.record()
+        standby_key = self.f.key('standby')
+        with open(self.log_keys, 'a') as keys:
+            keys.write(f'log/standby namespaces="git" {standby_key.with_suffix(".pub").read_text()}')
+        code, result, _ = self.pull('--publish')
+        self.assertEqual((code, result['published']), (0, True), result)
+        published = result['head']
+        standby = bare(self.f.root / 'standby.git')
+        subprocess.run(['git', '-C', str(standby), 'remote', 'add', 'origin', str(self.remote)], check=True)
+        subprocess.run(['git', '-C', str(standby), 'fetch', '-q', 'origin', '+refs/evidence-log/main:refs/evidence-log/main'], check=True)
+        signer = ['ssh-keygen', '-q', '-Y', 'sign', '-n', 'git', '-f', str(standby_key)]
+        done = subprocess.run([sys.executable, str(LOG), 'pull', '--repo', str(standby), '--signer', json.dumps(signer), '--log-keys', str(self.log_keys),
+                               '--now', str(self.now + 120), '--publish'], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        head = json.loads(done.stdout)['head']
+        show = ['git', '-C', str(standby), '-c', f'gpg.ssh.allowedSignersFile={self.log_keys}', 'show', '-s', '--format=%P %G? %GS', head]
+        self.assertEqual(subprocess.run(show, capture_output=True, text=True).stdout.split(), [published, 'G', 'log/standby'])
+        self.assertEqual(self.lines(f'trees/{self.tree[:2]}/{self.tree}', at=published),
+                         subprocess.run(['git', '-C', str(standby), 'show', f'{head}:trees/{self.tree[:2]}/{self.tree}'], capture_output=True,
+                                        text=True).stdout.splitlines(), 'the standby keeps what the log already holds')
 
     def test_a_signer_that_fails_leaves_the_log_as_it_was(self):
         self.record()
