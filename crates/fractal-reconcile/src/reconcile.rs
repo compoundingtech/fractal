@@ -10915,6 +10915,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .blocked_reason
                             .as_deref()
                             .is_some_and(|reason| reason.starts_with("step baseline `"));
+                    // Waiting for room for the lane the step raises its seat to: tried again until
+                    // it fits.
+                    let lane_blocked = view.status == "blocked"
+                        && view.blocked_reason.as_deref().is_some_and(|reason| reason.starts_with("step lane "));
                     // A blocked step that names no blocker, holds no claim and waits on no ask
                     // is a lost reason, for example a revision that carried it without one.
                     // Nothing else will move it, so recompute it like a pending step.
@@ -10939,6 +10943,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if view.status == "pending"
                         || assignment_blocked
                         || baseline_blocked
+                        || lane_blocked
                         || ready_missing_agent
                     {
                         if view
