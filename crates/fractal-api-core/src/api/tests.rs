@@ -1472,6 +1472,61 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
         .collect::<Vec<_>>(), ["head", "later", "last"]);
 }
 
+/// A stream item's receipts are its recipient member's local lifecycle. To a seat on this host
+/// its delivery reads them as graph mail's does; to a seat on another host this member holds
+/// none, so the label is `unknown`. Graph mail to that seat keeps its ordinary label.
+#[test]
+fn a_stream_items_delivery_is_unknown_while_its_seat_runs_on_another_host() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+    let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+    let workspace = root.path().display().to_string();
+    let source = format!(
+        "version 2\nagent \"example/near\" {{ host \"alder\"; command \"true\"; workspace {workspace:?} }}\nagent \"example/far\" {{ host \"birch\"; command \"true\"; workspace {workspace:?} }}\n"
+    );
+    let intent = crate::graph::parse_intent(&source, "alder").unwrap();
+    store.apply_internal(&intent, "stream-delivery").unwrap();
+    let message = |subject: &str, to: &str| ClaimInput {
+        subject: subject.into(),
+        kind: "message.sent".into(),
+        actor: Some("agent/example/sender".into()),
+        fields: serde_json::from_value(json!({
+            "from": "agent/example/sender", "to": to, "content": "probe", "status": "sent"
+        }))
+        .unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    let delivery = |subject: &str, sent_at: u128| {
+        let view = store.message(subject).unwrap().unwrap();
+        message_delivery_for(&store, &view, sent_at, sent_at).unwrap()
+    };
+    let (near, far) = ("message/00000000000000d1", "message/00000000000000d2");
+    let near_sent = shard.append_claim(&message(near, "agent/example/near")).unwrap().accepted_at_unix_ms;
+    let far_sent = shard.append_claim(&message(far, "agent/example/far")).unwrap().accepted_at_unix_ms;
+
+    let unknown = delivery(far, far_sent);
+    assert_eq!((&unknown["state"], &unknown["phase"]), (&json!("unknown"), &json!("unknown")), "{unknown}");
+    assert!(unknown["reason"].as_str().unwrap().contains("birch"), "{unknown}");
+
+    let status = |status: &str| BTreeMap::from([("status".to_owned(), json!(status))]);
+    let here = delivery(near, near_sent);
+    assert_eq!((&here["state"], &here["phase"]), (&json!("pending"), &json!("sent")), "{here}");
+    assert!(crate::store::messages_shard::record_lifecycle(
+        &store, near, "message.delivered", Some("agent/example/near"), &status("delivered"),
+    ).unwrap());
+    assert_eq!(delivery(near, near_sent)["phase"], "delivered");
+    assert!(crate::store::messages_shard::record_lifecycle(
+        &store, near, "message.read", Some("agent/example/near"), &status("read"),
+    ).unwrap());
+    assert_eq!(delivery(near, near_sent)["state"], "read");
+
+    let graph = store.append_claim(&message("message/00000000000000d3", "agent/example/far")).unwrap();
+    let graph_mail = delivery(&graph.subject, graph.accepted_at_unix_ms);
+    assert_eq!((&graph_mail["state"], &graph_mail["phase"]), (&json!("pending"), &json!("sent")), "{graph_mail}");
+}
+
 #[test]
 fn message_delivery_distinguishes_pending_acceptance_and_recipient_read() {
     let store = Store::open_memory("message-delivery-test").unwrap();
@@ -12685,6 +12740,80 @@ async fn delegated_person_work_api_preserves_identity_and_closes_person_message(
     assert_eq!(read["actor"], actor);
     let (status, repeated) = json_request(app, &path, read_body).await;
     assert_eq!(status, StatusCode::OK, "{repeated}");
+}
+
+/// A stream item to a person is closed for them by a delegated agent as graph mail is: the
+/// proof is checked against the item's sent claim in the messages shard, and the step is this
+/// member's record, carrying the proof, with nothing written to the graph.
+#[tokio::test]
+async fn a_delegated_close_of_a_stream_item_is_validated_and_recorded_locally() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        state.store.origin(),
+    )
+    .unwrap();
+    state.store.apply_internal(&intent, "delegation-stream-agent").unwrap();
+    let actor = format!("agent/{}.asker", state.store.origin());
+    let app = router(state.clone());
+    let sent = |subject: &str, from: &str, to: &str, content: &str| ClaimInput {
+        subject: subject.into(),
+        kind: "message.sent".into(),
+        actor: Some(from.into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!(from)),
+            ("to".into(), json!(to)),
+            ("content".into(), json!(content)),
+            ("status".into(), json!("sent")),
+        ]),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    let instruction = state
+        .store
+        .append_claim(&sent("message/instruction", "person/avery", &actor, "Archive the stream notice"))
+        .unwrap();
+    let notice = "message/00000000000000d1";
+    let notice_sent = shard.append_claim(&sent(notice, &actor, "person/avery", "Notice")).unwrap();
+    let (status, policy) = json_request(app.clone(), "/v1/work/delegation", json!({
+        "person":"person/avery","actor":"person/avery","actions":["close-item"],
+        "evidence":[instruction.id],"idempotency_key":"allow"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let proof = json!({"person":"person/avery","policy":policy["id"],"message":"message/instruction",
+        "quote":"Archive the stream notice","episode":notice_sent.id});
+    let path = format!("/v1/messages/{}/claims", urlencoding::encode(notice));
+    let close = |delegation: Value| json!({"lifecycle":"closed","actor":actor,"delegation":delegation,
+        "evidence":[],"idempotency_key":"close"});
+    let mut misquoted = proof.clone();
+    misquoted["quote"] = json!("Keep the stream notice");
+    let (status, refused) = json_request(app.clone(), &path, close(misquoted)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "delegation-refused");
+    let mut expected = close(proof.clone());
+    expected["expected_subject"] = json!("fixture-digest");
+    let (status, refused) = json_request(app.clone(), &path, expected).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "expected-subject-unsupported");
+    assert_eq!(state.store.message(notice).unwrap().unwrap().status, "sent");
+
+    let (status, closed) = json_request(app.clone(), &path, close(proof.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{closed}");
+    assert_eq!(closed["actor"], actor);
+    assert!(closed["id"].as_str().unwrap().starts_with("offset-receipt/"), "{closed}");
+    assert_eq!(closed["body"]["fields"]["acted_for"], "person/avery");
+    assert_eq!(closed["body"]["fields"]["delegation"], proof);
+    assert_eq!(state.store.message(notice).unwrap().unwrap().status, "closed");
+    assert_eq!(
+        crate::store::messages_shard::mailbox_reads::lifecycle_step(&state.store, notice, "message.closed")
+            .unwrap()
+            .map(|(actor, _)| actor),
+        Some(actor.clone())
+    );
+    assert!(state.store.claims_for(notice, None).unwrap().is_empty(), "the close reached the graph");
 }
 
 #[tokio::test]

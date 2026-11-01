@@ -20124,7 +20124,10 @@ async fn build_transport_observation_index(store: Arc<Store>) {
 /// Background inventory/judgment gets one quiet unit per unit of page wall time.
 /// This bounds duty to 50%.
 const SIGNATURE_BOOTSTRAP_QUIET_PER_WORK: u32 = 1;
-const SIGNATURE_BOOTSTRAP_RETRY: Duration = Duration::from_secs(30);
+/// A test build's in-memory store shares one SQLite cache, where an ordinary read beside the job
+/// is such a transient lock error; there the job tries again after a second, not half a minute.
+const SIGNATURE_BOOTSTRAP_RETRY: Duration =
+    if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(30) };
 /// A verdict drain at least this large is logged; smaller ones are ordinary sealing work.
 const SIGNATURE_BACKLOG_REPORTED: usize = 1_000;
 
