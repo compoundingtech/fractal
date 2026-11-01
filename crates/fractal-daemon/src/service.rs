@@ -1495,6 +1495,7 @@ mod tests {
         store_dir: None,
         pty_root: Some("/var/lib/pty".into()),
         socket: "/run/user/1000/fractal.sock".into(),
+        socket_is_explicit: true,
         client_gateway_socket: "/run/user/1000/fractal-client.sock".into(),
         peer_listen: Some("0.0.0.0:31313".into()),
         work_root: None,
