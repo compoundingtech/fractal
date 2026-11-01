@@ -2184,6 +2184,8 @@ pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
+    /// Daemon-local fallback for human questions, initialized before attention starts.
+    pub question_principal_default: std::sync::OnceLock<String>,
     /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
     pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
     /// Whether asks get deadlines: `[asks] deadlines`, off by default.
@@ -2575,6 +2577,7 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
@@ -2596,6 +2599,7 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
@@ -2609,6 +2613,7 @@ impl Store {
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 

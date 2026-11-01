@@ -6822,6 +6822,9 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    if let Some(person) = &config.person {
+        let _ = store.question_principal_default.set(person.clone());
+    }
     if admitted.is_some() {
         fractal_daemon::node_identity::record_store_writer(
             config, admitted.as_deref(), &config.node,

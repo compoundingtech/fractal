@@ -715,6 +715,63 @@ assert_eq!(folds(&store), before + 1, "the answer folds");
 assert_eq!(prompts(&answered), 0);
 }
 
+#[test]
+fn human_questions_use_principals_and_invalidate_on_republication() {
+    for declared in [true, false] {
+        for configured in [true, false] {
+            let store = Store::open_memory("node").unwrap();
+            if configured {
+                store.question_principal_default.set("person/fallback".into()).unwrap();
+            }
+            let workspace = tempfile::tempdir().unwrap();
+            let publish = |principal: Option<&str>, key: &str| {
+                let principal = principal.map_or_else(String::new, |person| {
+                    format!("principal {person:?};")
+                });
+                let source = format!(
+                    "version 2\nagent \"example/worker\" {{ workspace {:?}; {principal} harness \"omp\" {{}} }}\n",
+                    workspace.path().display().to_string()
+                );
+                let intent = crate::graph::parse_intent(&source, "node").unwrap();
+                let preview = store.mission(&intent, IntentInput { kdl: source, source_name: None }).unwrap();
+                store.apply_as(&intent, &preview.subject_tokens, key, Some("agent/example/publisher")).unwrap();
+            };
+            publish(declared.then_some("person/operator"), "first");
+            let seat = "agent/example/worker";
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running", "incarnation_id":"one"})),
+                ("harness.observed", json!({"state":"working", "driver":"omp",
+                    "incarnation_id":"one", "blocked_on":"human", "ask":"question",
+                    "reason":"Choose an option", "ownership_sequence":1, "transition_sequence":1})),
+            ] {
+                store.append_claim(&input(seat, kind, Some(seat), fields)).unwrap();
+            }
+            store.start_attention_list_refresher().unwrap();
+            let before = refresh_and_check(&store);
+            let expected = if declared { Some("person/operator") }
+                else if configured { Some("person/fallback") } else { None };
+            let items = store.harness_prompt_attention_items(None, now_ms()).unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].person, expected.unwrap_or(""));
+            assert_eq!(items[0].kind, "harness-prompt");
+            if expected.is_none() {
+                assert!(items[0].detail.contains("configure the daemon's person"));
+                assert!(items[0].answers.is_empty());
+                assert!(before.rows.iter().any(|row| row["attention_kind"] == "harness-prompt"));
+            }
+            publish(Some("person/replacement"), "replacement");
+            let after = refresh_and_check(&store);
+            assert!(after.rows.iter().any(|row| row["person_id"] == "person/replacement"
+                && row["attention_kind"] == "harness-prompt"));
+            assert!(!after.rows.iter().any(|row| row["person_id"] == expected.unwrap_or("")));
+            // An old incarnation must not acquire the new principal's attention.
+            store.append_claim(&input(seat, "runtime.observed", Some(seat),
+                json!({"status":"running", "incarnation_id":"two"}))).unwrap();
+            assert!(store.harness_prompt_attention_items(None, now_ms()).unwrap().is_empty());
+        }
+    }
+}
+
 /// The fleet the attention presentation reads: each agent's label, the step each holds, and the
 /// first agent in roster order holding a step of each mission. Fleets from different roster
 /// revisions with the same content are equal, so a roster that changed nothing they read
