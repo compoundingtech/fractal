@@ -270,6 +270,7 @@ Only a live declaration and its running incarnation can produce the item;
 republishing its principal invalidates attention. `under` remains non-owning.
 Permission and review prompts retain their existing ownership and answer
 authorization. This routing does not enable answering unsupported harnesses.
+Supported native question answers require the effective principal as answerer.
 Upgrade readers before publishing the child: older readers reject it.
 
 ## Accountable fleet roots
