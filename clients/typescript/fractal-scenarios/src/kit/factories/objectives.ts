@@ -28,7 +28,7 @@ export const fleetObjectives = (people: readonly CastPerson[]): ObjectivesState 
   const accounts: UsageAccount[] = [
     { name: `${handle(owner)}/claude-max`, account: `${handle(owner)}-claude`, provider: 'anthropic', plan: 'max', kind: 'subscription' },
     { name: `${handle(partner)}/codex-pro`, account: `${handle(partner)}-codex`, provider: 'openai', plan: 'pro', kind: 'subscription' },
-    { name: 'fleet/api', account: 'fleet-api', provider: 'anthropic', kind: 'api-key',
+    { name: 'atlas/api', account: 'fleet-api', provider: 'anthropic', kind: 'api-key',
       credits: { budget_microusd: 200_000_000, used_microusd: 128_400_000, unpriced_tokens: 0, period_start_ms: Date.UTC(new Date(t.now).getUTCFullYear(), new Date(t.now).getUTCMonth()) } },
   ]
   const budget = (account: UsageAccount, window: '5h' | '7d', used: number, served: Partial<SloRow>): SloRow => {
