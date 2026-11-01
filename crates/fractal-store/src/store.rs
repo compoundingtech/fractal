@@ -22785,16 +22785,15 @@ fn fleet_hears_seats_tx(transaction: &Transaction<'_>) -> Result<bool, St3Error>
         == Some("1"))
 }
 
-/// Whether the subject's current declaration is a stop that came after the member reconcile
-/// decision at `decision_index`. The stop ends what an earlier fault was about, whichever host
-/// recorded it and whether or not that host answers; a fault recorded after the stop stands.
+/// Whether the subject was stopped after the member reconcile decision at `decision_index`. A
+/// stop ends what an earlier fault was about, whichever host recorded it and whether or not that
+/// host answers, and declaring the seat again does not bring it back; a fault recorded after the
+/// stop stands.
 fn stopped_after(connection: &Connection, subject: &str, decision_index: u64, at_index: u64) -> Result<bool> {
-    let stop_index: Option<u64> = connection
+    Ok(connection
         .prepare_cached(
-            "SELECT claims.store_index FROM desired JOIN claims ON claims.id=desired.claim_id
-             WHERE desired.subject=?1 AND desired.kind='stop' AND claims.store_index<=?2",
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='intent.desired'
+               AND store_index>?2 AND store_index<=?3 AND json_extract(body, '$.kind')='stop')",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h43ff44818a24 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, at_index], |row| row.get(0))
-        .optional()?;
-    Ok(stop_index.is_some_and(|stop| stop > decision_index))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h0e4abbec7bce owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, decision_index, at_index], |row| row.get(0))?)
 }
