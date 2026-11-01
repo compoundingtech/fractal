@@ -2,7 +2,7 @@
 """scripts/evidence-log against real repositories and signed records: a bare remote plays GitHub, a second bare repository is the
 host's copy. What is accepted and refused, the signed heartbeat, publishing, a deleted record reported and restored, GC lines
 before GC deletes, a head that is not ours, a standby host continuing the chain
-under its own pinned key, and a signer that fails."""
+under its own pinned key, a second publisher's older chain refused, and a signer that fails."""
 import importlib.machinery
 import importlib.util
 import json
@@ -103,17 +103,25 @@ class EvidenceLog(unittest.TestCase):
         self.assertIn(f'as_of={result["as_of"]}', self.host_git('show', '-s', '--format=%s', result['head']))
         self.assertNotEqual(result['as_of'], self.pull()[1]['as_of'], 'each heartbeat carries its own time')
 
-    def test_publish_puts_the_head_on_the_remote_and_a_moved_remote_head_is_reported_and_replaced(self):
+    def remote_head(self):
+        return subprocess.run(['git', '-C', str(self.remote), 'rev-parse', 'refs/evidence-log/main'], capture_output=True, text=True).stdout.strip()
+
+    def test_publish_puts_the_head_on_the_remote_and_a_moved_remote_head_is_reported_and_replaced_only_by_a_head_that_continues_it(self):
         self.record()
         code, result, _ = self.pull('--publish')
         self.assertEqual((code, result['published']), (0, True), result)
-        published = subprocess.run(['git', '-C', str(self.remote), 'rev-parse', 'refs/evidence-log/main'], capture_output=True, text=True).stdout.strip()
-        self.assertEqual(published, result['head'])
-        subprocess.run(['git', '-C', str(self.remote), 'update-ref', 'refs/evidence-log/main', self.commit], check=True)  # rewound by a writer
+        first = result['head']
+        self.assertEqual(self.remote_head(), first)
+        self.assertEqual(self.pull('--publish')[1]['published'], True)
+        subprocess.run(['git', '-C', str(self.remote), 'update-ref', 'refs/evidence-log/main', first], check=True)  # rewound to an older head
         code, result, _ = self.pull('--publish')
-        self.assertEqual(result['published_head_differs'], self.commit)
-        published = subprocess.run(['git', '-C', str(self.remote), 'rev-parse', 'refs/evidence-log/main'], capture_output=True, text=True).stdout.strip()
-        self.assertEqual(published, result['head'])
+        self.assertEqual((code, result['published'], result['published_head_differs']), (0, True, first), result)
+        self.assertEqual(self.remote_head(), result['head'])
+        subprocess.run(['git', '-C', str(self.remote), 'update-ref', 'refs/evidence-log/main', self.commit], check=True)  # not the log at all
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['published'], result['published_head_differs']), (1, False, self.commit), result)
+        self.assertIn('refusing to publish', error)
+        self.assertEqual(self.remote_head(), self.commit, 'a head this copy does not continue is never overwritten')
 
     def test_a_logged_record_deleted_on_the_remote_is_an_alarm_and_restore_puts_it_back(self):
         passed = self.record()
@@ -241,6 +249,43 @@ class EvidenceLog(unittest.TestCase):
         self.assertEqual(self.lines(f'trees/{self.tree[:2]}/{self.tree}', at=published),
                          subprocess.run(['git', '-C', str(standby), 'show', f'{head}:trees/{self.tree[:2]}/{self.tree}'], capture_output=True,
                                         text=True).stdout.splitlines(), 'the standby keeps what the log already holds')
+
+    def test_of_two_publishers_the_one_whose_chain_is_older_is_refused_and_the_published_chain_keeps_going(self):
+        # hetz2 publishes, goes away; dev3 takes over from the published head; hetz2 boots with its timer on and pulls again.
+        self.record()
+        standby_key = self.f.key('standby')
+        with open(self.log_keys, 'a') as keys:
+            keys.write(f'log/standby namespaces="git" {standby_key.with_suffix(".pub").read_text()}')
+        last = self.pull('--publish')[1]['head']
+        standby = bare(self.f.root / 'standby.git')
+        subprocess.run(['git', '-C', str(standby), 'remote', 'add', 'origin', str(self.remote)], check=True)
+        subprocess.run(['git', '-C', str(standby), 'fetch', '-q', 'origin', '+refs/evidence-log/main:refs/evidence-log/main'], check=True)
+        signer = ['ssh-keygen', '-q', '-Y', 'sign', '-n', 'git', '-f', str(standby_key)]
+
+        def standby_pull():
+            self.now += 120
+            done = subprocess.run([sys.executable, str(LOG), 'pull', '--repo', str(standby), '--signer', json.dumps(signer),
+                                   '--log-keys', str(self.log_keys), '--now', str(self.now), '--publish'], capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return json.loads(done.stdout)['head']
+
+        taken_over = standby_pull()
+        self.assertEqual(self.remote_head(), taken_over)
+        code, result, error = self.pull('--publish')  # the old publisher: its new head's parent is `last`, not the standby's head
+        self.assertEqual((code, result['published']), (1, False), result)
+        self.assertIn(f'the published log head {taken_over} is not an ancestor', error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), last)
+        self.assertEqual(self.remote_head(), taken_over, 'the older chain overwrote nothing')
+        self.assertEqual(self.pull('--publish')[0], 1, 'and it keeps refusing')
+        self.assertEqual(self.remote_head(), taken_over)
+        again = standby_pull()
+        self.assertEqual(self.remote_head(), again)
+        parent = subprocess.run(['git', '-C', str(self.remote), 'rev-parse', f'{again}^'], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(parent, taken_over, 'the published chain keeps going')
+        # Seeded from the remote again, the old publisher continues the published chain.
+        self.host_git('fetch', '-q', 'origin', '+refs/evidence-log/main:refs/evidence-log/main')
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['published']), (0, True), error)
 
     def test_a_signer_that_fails_leaves_the_log_as_it_was(self):
         self.record()

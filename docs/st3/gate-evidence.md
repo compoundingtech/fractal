@@ -339,12 +339,14 @@ replacing the key is a change of `.st/evidence-log-key`, which the gate protects
 
 **A standby log host.** `.st/evidence-log-key` also pins `log/dev3`, a key made on dev3 (hetz2's key is never copied), so
 dev3 can take over if hetz2 is lost. dev3 holds the units installed but not enabled, with `--publish` off. Only one host
-publishes at a time: publishing is a forced push of `refs/evidence-log/main`, so two publishers overwrite each other.
-To switch over, first stop hetz2's timer for good, or confirm that the host is gone. Then seed dev3's copy from the
-published head (`git fetch origin +refs/evidence-log/main:refs/evidence-log/main`), so the chain continues rather
-than starting again, and only then turn on `--publish` and the timer. Without that seed, a pull on an empty copy would
-start a new chain, and publishing it would replace the log. The first pull on an empty copy checks every record before
-it commits. That takes hours at today's ref count, and the log is stale until it finishes.
+publishes at a time. A publish is a fast-forward of the head that run fetched, leased on it, so a host whose chain does not
+continue the published one (a second publisher, or a copy that was not seeded) publishes nothing and exits 1 with
+`publish_refused`. It never overwrites the other host's heads, so a hetz2 that boots after dev3 took over keeps refusing,
+loudly, until its timer is stopped. To switch over, first stop hetz2's timer for good, or confirm that the host is gone. Then
+seed dev3's copy from the published head (`git fetch origin +refs/evidence-log/main:refs/evidence-log/main`), so the chain
+continues rather than starting again, and only then turn on `--publish` and the timer. Without that seed, a pull on an empty
+copy starts a new chain that it cannot publish. The first pull on an empty copy checks every record before it commits. That
+takes hours at today's ref count, and the log is stale until it finishes.
 
 Measured 2026-10-21 against this repository: the first pull (an empty copy) accepted 4,928 records in 548 s, most of it
 checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
