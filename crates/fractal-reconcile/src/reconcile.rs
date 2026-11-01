@@ -17373,6 +17373,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     Err(error) => {
+                        let error = if let Some(checkpoint) = error.downcast_ref::<crate::resource::BudgetContinuation>() {
+                            match github_plugin.set_cursor(&observer_subject, &spec.resource, checkpoint.0.as_deref()) {
+                                Ok(()) => {
+                                    let next = checkpoint.0.clone();
+                                    kept_cursor = Some(next.clone());
+                                    completed_cursor = Some(next);
+                                    error
+                                }
+                                Err(persistence) => error.context(format!("could not keep GitHub poll continuation: {persistence:#}")),
+                            }
+                        } else {
+                            error
+                        };
                         let refusal_deadline = error.downcast_ref::<ProviderRateLimit>()
                             .map(|limit| limit.retry_at_unix_ms)
                             .or_else(|| error.downcast_ref::<LocalObserverBudget>()

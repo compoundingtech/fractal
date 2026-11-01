@@ -1341,6 +1341,14 @@ pub async fn observe_at(
     api_base: &str,
     token: Option<&GithubAuth>,
 ) -> Result<ProviderObservation> {
+    super::github_poll::observe(request, |request| observe_poll(request, api_base, token)).await
+}
+
+async fn observe_poll(
+    request: ObservationRequest,
+    api_base: &str,
+    token: Option<&GithubAuth>,
+) -> Result<ProviderObservation> {
     let cache_for = github_cache_for(&request);
     let token = token
         .filter(|value| value.is_valid())
@@ -1382,7 +1390,7 @@ pub async fn observe_at(
         .and_then(Value::as_str)
         .and_then(|name| name.split_once('/'))
         .unwrap_or((owner, repository));
-    let started = watermark_at(SystemTime::now());
+    let started = watermark_at(super::github_poll::started());
     let mut cursor = RepositoryCursor::parse(request.cursor.as_deref());
     // A cursor an earlier build moved past its look's start reads on from now instead.
     for since in [&mut cursor.items_since, &mut cursor.comments_since].into_iter().flatten() {
@@ -4743,5 +4751,43 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("repository 8"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn budget_cut_poll_resumes_without_replaying_completed_requests() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route("/repos/acme/garden/issues?state=open&per_page=100",
+            json!([issue(1, "2026-09-10T00:00:00Z", json!({"node_id": "I_orchid"}))]));
+        github.resolved_nodes(json!([{"id": "I_orchid", "state": "OPEN", "number": 1,
+            "url": "https://github.com/acme/garden/issues/1"}]));
+        let error = crate::resource::github_poll::CUTOFF.scope(2,
+            observe_at(request(&["issues"], None, None), &base, Some(&GithubAuth::test("test")))
+        ).await.unwrap_err();
+        assert!(error.downcast_ref::<crate::resource::LocalObserverBudget>().is_some());
+        let cursor = error.downcast_ref::<crate::resource::BudgetContinuation>().unwrap().0.as_deref().unwrap();
+        assert_eq!(github.take_requests().len(), 2);
+        // No ProviderObservation was returned: absence cannot close items mid-poll.
+        let complete = observe_at(request(&["issues"], Some(cursor), None), &base,
+            Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(item(&complete.facts, "issues", 1)["number"], 1);
+        let requests = github.take_requests();
+        assert!(requests.iter().all(|request| !request.starts_with("GET /repos/acme/garden ")));
+        assert!(requests.iter().all(|request| !request.starts_with("GET /repos/acme/garden/issues?")));
+        assert!(complete.cursor.as_deref().is_some_and(|cursor| !cursor.contains("poll_started_ms")));
+    }
+
+    #[tokio::test]
+    async fn non_budget_failure_keeps_no_continuation() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.refused.lock().insert("/repos/acme/garden/issues?state=open&per_page=100".into(),
+            "500 Internal Server Error".into());
+        for _ in 0..2 {
+            let error = observe_at(request(&["issues"], None, None), &base,
+                Some(&GithubAuth::test("test"))).await.unwrap_err();
+            assert!(error.downcast_ref::<crate::resource::BudgetContinuation>().is_none());
+            assert_eq!(github.take_requests().len(), 2, "ordinary failure revalidates the prefix");
+        }
     }
 }
