@@ -38,6 +38,21 @@ impl std::fmt::Display for BudgetContinuation {
 }
 impl std::error::Error for BudgetContinuation {}
 
+/// Mirror continuity follows completed observations, not private staging envelopes.
+pub fn completed_poll_cursor(cursor: Option<&str>) -> Option<std::borrow::Cow<'_, str>> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        #[serde(rename = "poll_started_ms")]
+        _poll_started_ms: u128,
+        cursor: Option<String>,
+    }
+    let cursor = cursor?;
+    match serde_json::from_str::<Envelope>(cursor) {
+        Ok(poll) => poll.cursor.map(std::borrow::Cow::Owned),
+        Err(_) => Some(std::borrow::Cow::Borrowed(cursor)),
+    }
+}
+
 fn now_ms() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
 }
@@ -56,7 +71,13 @@ impl Checkpoint {
     }
 
     fn encode(&self) -> Result<Option<String>> {
-        let encoded = serde_json::to_string(self)?;
+        let mut value = serde_json::to_value(self)?;
+        if let Some(cursor) = self.cursor.as_deref()
+            && let Ok(completed) = serde_json::from_str::<serde_json::Map<String, Value>>(cursor)
+        {
+            value.as_object_mut().expect("checkpoint is an object").extend(completed);
+        }
+        let encoded = serde_json::to_string(&value)?;
         if encoded.len() > MAX_CHECKPOINT_BYTES {
             tracing::debug!("GitHub poll checkpoint exceeds size bound; retaining previous cursor");
             return Ok(None);
@@ -140,5 +161,15 @@ mod tests {
         let encoded = checkpoint.encode().unwrap().unwrap();
         assert!(Checkpoint::restore(Some(&encoded), "repo", MAX_AGE_MS + 1).is_some());
         assert!(Checkpoint::restore(Some(&encoded), "repo", MAX_AGE_MS + 2).is_none());
+    }
+
+    #[test]
+    fn checkpoint_preserves_completed_cursor_for_old_readers_and_mirrors() {
+        let completed = r#"{"items_since":"2026-10-30T00:00:00Z","comments_since":"2026-10-30T01:00:00Z","seen":{"items":"etag"},"resume_next":"page-2"}"#;
+        let checkpoint = Checkpoint { cursor: Some(completed.into()), ..Checkpoint::default() };
+        let encoded = checkpoint.encode().unwrap().unwrap();
+        type Cursor = super::super::github_repository::RepositoryCursor;
+        assert_eq!(serde_json::from_str::<Cursor>(&encoded).unwrap(), serde_json::from_str::<Cursor>(completed).unwrap());
+        assert_eq!(completed_poll_cursor(Some(&encoded)).as_deref(), Some(completed));
     }
 }

@@ -18859,6 +18859,8 @@ fn mirror_observation(
     cursor: Option<&str>,
     recorded: &[crate::model::RecordedItem],
 ) {
+    let completed = crate::resource::completed_poll_cursor(polled_from);
+    let polled_from = completed.as_deref();
     let items = recorded
         .iter()
         .filter_map(|recorded| {
@@ -18926,6 +18928,8 @@ fn mirrored_prior(
     facts: &Value,
     polled_from: Option<&str>,
 ) -> Option<crate::model::MirroredPrior> {
+    let completed = crate::resource::completed_poll_cursor(polled_from);
+    let polled_from = completed.as_deref();
     let read = || -> Result<Option<crate::model::MirroredPrior>> {
         // Only a mirror that followed every look up to the one this look starts from knows at
         // least what the graph does.
@@ -41560,7 +41564,11 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         // keyed event, and neither writes a snapshot.
         let snapshots = count("resource.observed");
         let states = count("vcs.item.state");
+        // A suspended poll keeps the completed mirror position inside its private cursor.
+        let checkpoint = serde_json::json!({"poll_started_ms": 1, "cursor": "c3"}).to_string();
+        plugin.set_cursor("observer/repo", "resource/repo", Some(&checkpoint)).unwrap();
         poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4").await;
+        assert!(plugin.filled("resource/repo").unwrap(), "a resumed poll keeps mirror continuity");
         assert_eq!(count("resource.observed"), snapshots, "a compact-only change writes no snapshot");
         assert_eq!(count("vcs.item.state"), states + 1);
         assert_eq!(store.latest_actual_value(item).unwrap().unwrap()["facts"]["state"], "closed");

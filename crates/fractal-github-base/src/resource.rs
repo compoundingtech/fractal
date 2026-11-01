@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result, bail};
 pub mod github_gates;
 mod github_repository;
 mod github_poll;
-pub use github_poll::BudgetContinuation;
+pub use github_poll::{BudgetContinuation, completed_poll_cursor};
 pub mod github_workflows;
 pub use github_repository::{
     RECENT_COMMENTS, merge_recent_comments, recent_comment_key, replicated_cursor,
