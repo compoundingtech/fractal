@@ -516,7 +516,7 @@
           "about": "واجهة العربية — 日本語の表示 — Café — 👩🏽‍💻 🚀 — 界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界 — ~/src/atlas/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/fixtures",
           "account": "fleet-api",
           "current": "64% used",
-          "explain": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界: What fleet/api allows before anthropic stops its agents until the reset.",
+          "explain": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界: What atlas/api allows before anthropic stops its agents until the reset.",
           "id": "fleet-api/weekly",
           "kind": "budget",
           "measured_at_unix_ms": 1893497700000,
@@ -605,7 +605,7 @@
             "used_microusd": 128400000
           },
           "kind": "api-key",
-          "name": "fleet/api",
+          "name": "atlas/api",
           "provider": "anthropic"
         }
       ],
