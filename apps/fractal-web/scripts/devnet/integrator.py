@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integrate open Fractal PRs and publish an immutable production build.
 
-Version 10: isolate host publication and reject executable candidate artifact types.
+Version 11: reuse successful immutable probes when attributing build failures.
 """
 import datetime, fcntl, hashlib, json, math, os, pathlib, re, shutil, subprocess, time
 import sys
@@ -50,7 +50,7 @@ try:
 except (ValueError, TypeError) as error:
     raise SystemExit(f'invalid integrator trust configuration: {error}')
 PR_METADATA_FIELDS = 'number,headRefName,headRefOid,baseRefName,baseRefOid,changedFiles,isDraft,author,isCrossRepository,headRepositoryOwner'
-INTEGRATOR_VERSION = 10
+INTEGRATOR_VERSION = 11
 DEPENDENCY_SANDBOX_VERSION = candidate_sandbox.DEPENDENCY_POLICY
 try:
     SELECTION_BUDGET_SECONDS = float(os.environ.get('FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS', '60'))
@@ -90,7 +90,7 @@ def atomic_json(path, value):
 
 def candidate_key(private_hash):
     # Tree identity excludes ephemeral merge/stamp commit timestamps.
-    return hashlib.sha256((text('rev-parse', 'HEAD^{tree}') + private_hash).encode()).hexdigest()
+    return hashlib.sha256((str(INTEGRATOR_VERSION) + ':' + text('rev-parse', 'HEAD^{tree}') + private_hash).encode()).hexdigest()
 
 def publish_skips(row):
     if not DRY_RUN:
@@ -407,6 +407,12 @@ def prepare_dependencies():
 def probe_revision(revision):
     git('checkout','--detach',revision)
     prepare_dependencies()
+    # Probe builds are immutable too. A prior receipt proves compilation succeeded,
+    # even when another revision is now current in the probe namespace.
+    sha=text('rev-parse','HEAD')
+    receipt=pathlib.Path(required_input('FRACTAL_BUILD_ROOT'))/'live-r3-probe'/'builds'/sha/'build-receipt.json'
+    if receipt.exists():
+        return json.loads(candidate_sandbox.read_regular(receipt))['buildIdentity']['rev'] == sha
     return build('live-r3-probe').returncode == 0
 
 def build_candidate(row, private_hash, checkpoints):

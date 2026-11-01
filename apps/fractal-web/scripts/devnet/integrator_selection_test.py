@@ -57,6 +57,74 @@ class SelectionTest(unittest.TestCase):
         self.module.recovery_select_build('b' * 40)
         return str(self.module.P / 'builds' / ('a' * 40))
 
+    def test_existing_main_probe_ejects_breaking_pr_and_keeps_later_pr(self):
+        main, broken, later = ('a' * 40, 'b' * 40, 'c' * 40)
+        build_root = self.root / 'build-root'
+        receipt = build_root / 'live-r3-probe' / 'builds' / main / 'build-receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({'buildIdentity': {'rev': main}}))
+        current = {'sha': later, 'tree': 'full'}
+        builds = []
+
+        def git(*args, **kwargs):
+            if args[0] == 'checkout':
+                current['sha'] = args[-1]
+                if args[-1] == main:
+                    current['tree'] = 'reduced'
+            elif args[0] == 'merge':
+                current['sha'] = later
+            return subprocess.CompletedProcess([], 0)
+
+        def build(name):
+            builds.append((name, current['sha']))
+            # Rebuilding the existing immutable main output would fail before
+            # compilation, just like build-and-swap.sh's collision guard.
+            ok = name == 'live-r3' and current['tree'] == 'reduced'
+            return subprocess.CompletedProcess([], 0 if ok else 1)
+
+        row = {'included': [{'pr': 10}, {'pr': 11}], 'skipped': []}
+        checkpoints = [{'sha': main, 'pr': None},
+                       {'sha': broken, 'pr': 10, 'head': 'broken-head'},
+                       {'sha': later, 'pr': 11, 'head': 'later-head'}]
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root)), \
+                patch.object(self.module, 'git', side_effect=git) as commands, \
+                patch.object(self.module, 'text', side_effect=lambda *args: current['sha']), \
+                patch.object(self.module, 'candidate_key', side_effect=lambda _: current['tree']), \
+                patch.object(self.module, 'prepare_dependencies'), \
+                patch.object(self.module, 'stamp'), \
+                patch.object(self.module, 'retain_main_registry'), \
+                patch.object(self.module, 'build', side_effect=build):
+            self.assertTrue(self.module.build_candidate(row, 'overlay', checkpoints))
+        self.assertEqual(row['included'], [{'pr': 11}])
+        self.assertEqual(row['skipped'], [{'pr': 10, 'reason': 'build-break', 'files': []}])
+        self.assertEqual(builds, [('live-r3', later), ('live-r3-probe', broken),
+                                  ('live-r3', later)])
+        self.assertIn(('merge', '--no-ff', '--no-edit', 'later-head'),
+                      [call.args for call in commands.call_args_list])
+        cached = json.loads((self.module.L / 'live-r3-tree-cache.json').read_text())
+        self.assertEqual(cached['full']['ejected'], 10)
+        self.assertEqual(cached['full']['included'], [{'pr': 11}])
+
+    def test_probe_does_not_accept_receipt_for_another_revision(self):
+        sha = 'a' * 40
+        build_root = self.root / 'build-root'
+        receipt = build_root / 'live-r3-probe' / 'builds' / sha / 'build-receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({'buildIdentity': {'rev': 'b' * 40}}))
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root)), \
+                patch.object(self.module, 'git'), \
+                patch.object(self.module, 'text', return_value=sha), \
+                patch.object(self.module, 'prepare_dependencies'), \
+                patch.object(self.module, 'build') as build:
+            self.assertFalse(self.module.probe_revision(sha))
+        build.assert_not_called()
+
+    def test_tree_cache_identity_changes_with_integrator_version(self):
+        with patch.object(self.module, 'text', return_value='tree'):
+            old = self.module.candidate_key('overlay')
+            with patch.object(self.module, 'INTEGRATOR_VERSION', self.module.INTEGRATOR_VERSION + 1):
+                self.assertNotEqual(self.module.candidate_key('overlay'), old)
+
     def test_activation_replaces_serving_generation_without_down(self):
         previous = self.activation_builds()
         for rollback, observations in (

@@ -79,6 +79,15 @@ when adopting the script to reuse the existing member key. The production build
 helper and generated launchers remain deployment-owned inputs, not replacements
 for the separate launcher scripts.
 
+Failure attribution reuses a `live-r3-probe/builds/<sha>/build-receipt.json`
+whose `buildIdentity.rev` matches the prepared revision. An immutable probe output
+can remain after a different probe becomes current; rebuilding that output is
+not a compilation failure. Missing receipts still require a real build, and
+mismatched receipts are not accepted. Once a failing prefix is found, the
+integrator ejects that PR and reintegrates later accepted heads before rebuilding.
+Tree-cache identities include the integrator version, so upgrading the attribution
+logic does not replay an older unattributed failure.
+
 Deployment overlays can import `edgeOrTailnetAdmission` from `server/host.mts` and
 pass their existing edge admission as `edge`. With `origin: undefined`, it returns
 that exact policy. With a published HTTPS origin and a nonempty login allowlist,
