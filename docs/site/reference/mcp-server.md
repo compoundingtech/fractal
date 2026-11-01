@@ -84,11 +84,14 @@ Use stdio when the MCP client launches a local process:
 
 ```sh
 st-chatgpt --transport stdio \
-  --socket /PATH/TO/st3-client.sock \
+  --socket /PATH/TO/fractal-client.sock \
   --credential-file /PATH/TO/mcp-private/credential
 ```
 
-Use the daemon's **paired-client** socket, whose filename must be `st3-client.sock`, not its control socket. All paths in the examples are placeholders, not defaults.
+Use the daemon's **paired-client** socket, whose filename must be `fractal-client.sock`, not its control socket. All paths in the examples are placeholders, not defaults.
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction -->
+The adapter also accepts the legacy paired-client filename `st3-client.sock` during migration. It rejects both `fractal.sock` and `st3.sock`; an explicitly supplied path is never substituted.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal -->
 
 A generic MCP client configuration looks like this; adapt the outer configuration format to your client. Use absolute paths and keep the bearer out of the configuration:
 
@@ -99,7 +102,7 @@ A generic MCP client configuration looks like this; adapt the outer configuratio
       "command": "/PATH/TO/st-chatgpt",
       "args": [
         "--transport", "stdio",
-        "--socket", "/PATH/TO/st3-client.sock",
+        "--socket", "/PATH/TO/fractal-client.sock",
         "--credential-file", "/PATH/TO/mcp-private/credential"
       ]
     }
@@ -113,7 +116,7 @@ HTTP is the default transport. The default listen address is `127.0.0.1:8787`:
 
 ```sh
 st-chatgpt --transport http --listen 127.0.0.1:8787 \
-  --socket /PATH/TO/st3-client.sock \
+  --socket /PATH/TO/fractal-client.sock \
   --credential-file /PATH/TO/mcp-private/credential
 ```
 
@@ -182,7 +185,7 @@ The corresponding `st_*` tool names are hidden, deprecated aliases for cached cl
 | Missing-scope denial | Inspect the exact grant. Replace policy explicitly if the owner authorizes the scope; do not substitute a person credential. |
 | `response-budget-exceeded` | Request a smaller page or content range, or raise the requested byte budget within the policy maximum. A single oversized item may still fail. |
 | `page-cursor-expired` or stale content revision | Restart discovery and use newly returned cursors/read handles. Do not manufacture a cursor or reference. |
-| Socket rejected or unavailable | Use the current daemon's `st3-client.sock`, run the adapter on that machine, and check local ownership/access. A control socket is intentionally rejected. |
+| Socket rejected or unavailable | Use the current daemon's `fractal-client.sock`, run the adapter on that machine, and check local ownership/access. A control socket is intentionally rejected. |
 | Tunnel connects but tools are unavailable | Check the loopback adapter and grant first, then the operator-owned tunnel's forwarding to `/mcp` and the client's MCP support. Do not expose a non-loopback listener to bypass the problem. |
 
 For authority, consent, proof-gated reads, write semantics, and remote-access requirements, read the [external-assistant engineering contract](https://github.com/compoundingtech/fractal/blob/main/docs/st3/external-assistants.md).

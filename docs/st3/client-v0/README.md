@@ -477,16 +477,24 @@ their existing authenticated HTTP(S) gateway transport remains available.
 
 ### Tailnet carrier
 
-`st up` listens on two different Unix sockets. `st3.sock` is the privileged trusted-local API;
-`st3-client.sock` is the paired-only client gateway backed by `fabric_router`. The latter rejects
+`st up` listens on two different Unix sockets. `fractal.sock` is the privileged trusted-local API;
+`fractal-client.sock` is the paired-only client gateway backed by `fabric_router`. The latter rejects
 ordinary requests without a paired bearer credential, except for public capability negotiation
 and pairing completion. The socket
 paths can be set with `socket` and `client_gateway_socket` in `config.toml`, or with `--socket` and
 `--client-gateway-socket` for a foreground daemon. They must never name the same path.
 
+Default discovery prefers `fractal.sock` and `fractal-client.sock`; explicit endpoint
+and socket settings remain exact paths.
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction -->
+During migration, default readers fall back to the corresponding `st3.sock` or
+`st3-client.sock` only when the new name is absent. The daemon also serves the
+legacy names beside the new default sockets so older clients keep working.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal -->
+
 Without an explicit `--client-gateway-socket`, a private `st up --state-dir DIR` derives its
-gateway as `DIR/st3-client.sock`, even when `--socket` is also supplied. With only `--socket`,
-the gateway is `st3-client.sock` beside that socket. If this derived path equals the shared
+gateway as `DIR/fractal-client.sock`, even when `--socket` is also supplied. With only `--socket`,
+the gateway is `fractal-client.sock` beside that socket. If this derived path equals the shared
 default gateway (including symlinked ancestors above directories not yet created), startup
 refuses before creating daemon state. Missing path suffixes normalize `.` and `..` after
 resolving existing symlinks. Pass `--client-gateway-socket` to select the private gateway
@@ -494,9 +502,9 @@ explicitly.
 Default startup without either private flag is unchanged.
 
 For a direct tailnet connection, forward a TCP listener bound to the host's Tailscale IP to
-`st3-client.sock`. Pair the phone with `http://TAILSCALE_IP:PORT`. Tailscale encrypts the link;
+`fractal-client.sock`. Pair the phone with `http://TAILSCALE_IP:PORT`. Tailscale encrypts the link;
 the paired gateway still authenticates each client request. Never bind this listener to a public
-or LAN interface, and never forward `st3.sock`. An unauthenticated `GET /v1/client/agents`
+or LAN interface, and never forward `fractal.sock`. An unauthenticated `GET /v1/client/agents`
 must return a complete `403`. Unauthenticated `/v1/client/capabilities` exposes only public
 pairing negotiation capabilities; see [device signing](../device-signing.md). Follow the refusal
 probe with an authenticated read and
@@ -515,7 +523,7 @@ Tailscale Serve remains an optional HTTPS carrier for clients that need it. If u
 publish only the paired-only socket:
 
 ```sh
-CLIENT_GATEWAY_SOCKET="${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/st3-client.sock"
+CLIENT_GATEWAY_SOCKET="${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/fractal-client.sock"
 tailscale serve --bg --yes "unix:${CLIENT_GATEWAY_SOCKET}"
 tailscale serve status
 ```
@@ -523,7 +531,7 @@ tailscale serve status
 On macOS, verify the HTTPS route with an unauthenticated request to
 `/v1/client/agents`: the gateway should return a complete `403` response.
 If Tailscale Serve returns `502` when pointed at the Unix socket, run a persistent
-launchd-managed bridge from a loopback-only TCP port to `st3-client.sock`, then
+launchd-managed bridge from a loopback-only TCP port to `fractal-client.sock`, then
 point Tailscale Serve at that port. The bridge must bind `127.0.0.1`, reconnect to
 the socket for each request, and start independently of the Fractal daemon so a daemon
 restart does not leave the HTTPS route pointing at an absent process. Recheck the
@@ -545,7 +553,7 @@ gateway.
 The equivalent trusted-peer Fabric carrier lifecycle is:
 
 ```sh
-fabric expose st3-client-v0 --socket /ABS/st3-client.sock
+fabric expose st3-client-v0 --socket /ABS/fractal-client.sock
 fabric dial HOST st3-client-v0
 fabric unexpose st3-client-v0
 ```
@@ -554,7 +562,7 @@ Expose and unexpose change only the socket exposure; existing peer grants stay i
 the authority for access. Daemon startup never runs either carrier command, enables Funnel, or
 changes Tailscale/Fabric policy.
 
-Never point `tailscale serve` at `st3.sock`. That socket intentionally carries privileged local
+Never point `tailscale serve` at `fractal.sock`. That socket intentionally carries privileged local
 control routes and is not an authenticated remote-client boundary. The transport conformance test
 starts both Unix routers, proves the gateway rejects an ordinary local client, completes pairing on
 the Fabric-like carrier, and exercises authenticated HTTP plus terminal WebSocket traffic through
@@ -1749,7 +1757,7 @@ binding. Revocation between handler preflight and the writer transaction denies 
 write. Agent recipient existence remains required; allowlist membership is not checked.
 
 `crates/fractal-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
-Both transports use the same seven closed tools and paired-only `st3-client.sock` gateway.
+Both transports use the same seven closed tools and paired-only `fractal-client.sock` gateway.
 The adapter holds only a scoped bearer, never an approval key. The current HTTP frontend is
 loopback/no-auth for the recorded personal-tunnel dogfood exception; OAuth is the next
 frontend-auth boundary and does not alter tool arguments or daemon grants. No generic command
@@ -2095,7 +2103,7 @@ Unlike projected-screen reads, raw streams currently require a directly dialable
 they fail with `remote-unavailable` rather than replacing the stream with synthetic screens.
 The owner's replication worker advertises its Tailscale endpoint, whether discovered or set with
 a Tailscale `peer_listen`; see [Tailscale setup](../tailscale.md).
-The client-facing carrier remains a forwarder to `st3-client.sock`, never `st3.sock`.
+The client-facing carrier remains a forwarder to `fractal-client.sock`, never `fractal.sock`.
 
 
 ## Errors and evolution
