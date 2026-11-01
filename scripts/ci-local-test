@@ -494,8 +494,9 @@ class CiLocal(unittest.TestCase):
             self.assertEqual(int(Path(f"{self.log}.nice").read_text()), min(os.nice(0) + 10, 19))
 
     def test_keyed_defaults_and_explicit_values_pass_through_ci_local(self):
-        for entry, stage, variable in (('ci-clippy-keyed', 'clippy', 'CI_KEYED_CLIPPY_POLICY'),
-                                       ('ci-fleet-compat-keyed', 'fleet-compat', 'CI_KEYED_FLEET_COMPAT_POLICY')):
+        # linux-clippy's local run no longer has an entry of its own: scripts/st-test runs `ci-local clippy` unkeyed and
+        # scripts/ci-clippy-result checks the policy after the stage (docs/keyed-clippy.md, PR 2).
+        for entry, stage, variable in (('ci-fleet-compat-keyed', 'fleet-compat', 'CI_KEYED_FLEET_COMPAT_POLICY'),):
             shutil.copy(ROOT / 'scripts' / entry, self.work / 'scripts' / entry)
             for explicit in (None, '', '.st/evidence-skip-policy.json', '/custom/policy.json'):
                 with self.subTest(entry=entry, explicit=explicit):
