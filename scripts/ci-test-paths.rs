@@ -79,23 +79,59 @@ macro_rules! test_bin {
 
 /// fractal beside `fixture`, where the fractal-cli package puts it in the same target directory (`cargo
 /// test --workspace`, `-p fractal-cli`, or a nextest archive of both). A plain `cargo test -p fractal` does
-/// not build it: a missing fractal fails, and one older than the fixture may be stale and is warned about.
+/// not build it, so `verify` holds it to Cargo's own freshness rule: it fails when it is missing, when the
+/// dep-info Cargo writes beside it (`fractal.d`) is missing, or when a source file that lists is newer than
+/// it, as after a change to the CLI library that only the fixture and the tests were rebuilt for. An
+/// extracted archive is not verified: one `cargo nextest archive` built its fractal with its tests, and its
+/// dep-info names the build machine's sources.
 #[allow(dead_code)]
-pub(crate) fn fractal_beside(fixture: &std::path::Path) -> String {
+pub(crate) fn fractal_beside(fixture: &std::path::Path, verify: bool) -> Result<String, String> {
     let fractal = fixture.with_file_name("fractal");
-    let modified = |path: &std::path::Path| path.metadata().and_then(|metadata| metadata.modified());
-    match (modified(&fractal), modified(fixture)) {
-        (Err(error), _) => panic!(
-            "{} is missing ({error}): the fractal-cli package builds it; run these tests with -p fractal-cli or --workspace",
-            fractal.display()
-        ),
-        (Ok(fractal_time), Ok(fixture_time)) if fractal_time < fixture_time => eprintln!(
-            "warning: {} is older than fractal-fixture and may be stale; build it too with -p fractal-cli",
-            fractal.display()
-        ),
-        _ => {}
+    let rerun = "the fractal-cli package builds it; run these tests with -p fractal-cli or --workspace";
+    let built = fractal
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .map_err(|error| format!("{} is missing ({error}): {rerun}", fractal.display()))?;
+    if verify {
+        let dep_info = fractal.with_file_name("fractal.d");
+        let listed = std::fs::read_to_string(&dep_info)
+            .map_err(|error| format!("{} is missing ({error}), so {} cannot be checked against its sources: {rerun}",
+                dep_info.display(), fractal.display()))?;
+        if let Some(source) = dep_info_sources(&listed).into_iter().find(|source| {
+            std::fs::metadata(source).and_then(|metadata| metadata.modified()).is_ok_and(|modified| modified > built)
+        }) {
+            return Err(format!("{} is older than {}, a source it was built from: {rerun}", fractal.display(), source.display()));
+        }
     }
-    fractal.to_str().expect("test target path is UTF-8").to_owned()
+    fractal.to_str().map(str::to_owned).ok_or_else(|| "test target path is not UTF-8".to_owned())
+}
+
+/// The sources a Cargo dep-info file lists after its `target:`, with `\ ` read as a space and `\` line
+/// continuations joined.
+#[allow(dead_code)]
+pub(crate) fn dep_info_sources(text: &str) -> Vec<std::path::PathBuf> {
+    let text = text.replace("\\\n", " ");
+    let mut sources = Vec::new();
+    for line in text.lines() {
+        let Some((_, listed)) = line.split_once(": ") else { continue };
+        let mut current = String::new();
+        let mut characters = listed.chars().peekable();
+        while let Some(character) = characters.next() {
+            match character {
+                '\\' if characters.peek() == Some(&' ') => current.push(characters.next().unwrap()),
+                ' ' => {
+                    if !current.is_empty() {
+                        sources.push(std::path::PathBuf::from(std::mem::take(&mut current)));
+                    }
+                }
+                other => current.push(other),
+            }
+        }
+        if !current.is_empty() {
+            sources.push(std::path::PathBuf::from(current));
+        }
+    }
+    sources
 }
 
 /// The fractal a parent test hands down in `NEXTEST_BIN_EXE_fractal` when it reruns itself with a cleared
@@ -106,7 +142,9 @@ pub(crate) fn fractal_handed_down_or_beside<'a>(
     handed_down: Option<String>,
     fixture: impl FnOnce() -> &'a std::path::Path,
 ) -> String {
-    handed_down.unwrap_or_else(|| fractal_beside(fixture()))
+    handed_down.unwrap_or_else(|| {
+        fractal_beside(fixture(), std::env::var_os("CI_TEST_EXTRACTED").is_none()).unwrap_or_else(|error| panic!("{error}"))
+    })
 }
 
 /// The fractal executable, another package's binary, as a path string (see `fractal_handed_down_or_beside`).
@@ -127,7 +165,7 @@ macro_rules! fractal_bin {
 
 #[cfg(test)]
 mod tests {
-    use super::{fractal_handed_down_or_beside, resolve};
+    use super::{dep_info_sources, fractal_beside, fractal_handed_down_or_beside, resolve};
 
     #[test]
     fn a_library_fixture_uses_its_own_relocated_manifest() {
@@ -172,6 +210,60 @@ mod tests {
                 compiled_fixture
             }),
             "/archive/target/debug/fractal"
+        );
+    }
+
+    /// A target directory with fractal-fixture, fractal built at `built`, its dep-info listing one source
+    /// modified at `source_modified`, and that source.
+    fn target_directory(name: &str, built: std::time::SystemTime, source_modified: std::time::SystemTime) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("ci-test-paths-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("debug")).unwrap();
+        std::fs::create_dir_all(root.join("crate dir")).unwrap();
+        let source = root.join("crate dir/main.rs");
+        std::fs::write(&source, "fn main() {}").unwrap();
+        std::fs::File::options().write(true).open(&source).unwrap().set_modified(source_modified).unwrap();
+        std::fs::write(root.join("debug/fractal-fixture"), "").unwrap();
+        let fractal = root.join("debug/fractal");
+        std::fs::write(&fractal, "").unwrap();
+        std::fs::File::options().write(true).open(&fractal).unwrap().set_modified(built).unwrap();
+        let escaped = source.display().to_string().replace(' ', "\\ ");
+        std::fs::write(root.join("debug/fractal.d"), format!("{}: {escaped}\n", fractal.display())).unwrap();
+        root
+    }
+
+    #[test]
+    fn an_old_fractal_left_after_a_library_change_is_refused() {
+        // `cargo test -p fractal` after a change to the CLI library rebuilds the fixture and the tests but not
+        // fractal, which the fractal-cli package builds: its sources are newer than it.
+        let now = std::time::SystemTime::now();
+        let root = target_directory("stale", now - std::time::Duration::from_secs(600), now);
+        let error = fractal_beside(&root.join("debug/fractal-fixture"), true).unwrap_err();
+        assert!(error.contains("older than") && error.contains("main.rs") && error.contains("-p fractal-cli"), "{error}");
+        // An extracted archive is not checked against sources: one archive run built fractal with its tests.
+        assert!(fractal_beside(&root.join("debug/fractal-fixture"), false).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_fractal_newer_than_its_sources_is_used() {
+        let now = std::time::SystemTime::now();
+        let root = target_directory("fresh", now, now - std::time::Duration::from_secs(600));
+        assert_eq!(
+            fractal_beside(&root.join("debug/fractal-fixture"), true).unwrap(),
+            root.join("debug/fractal").to_str().unwrap()
+        );
+        std::fs::remove_file(root.join("debug/fractal.d")).unwrap();
+        let error = fractal_beside(&root.join("debug/fractal-fixture"), true).unwrap_err();
+        assert!(error.contains("fractal.d is missing"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dep_info_sources_read_escaped_spaces_and_continuations() {
+        assert_eq!(
+            dep_info_sources("/t/debug/fractal: /a/b.rs /a/with\\ space.rs \\\n /c/d.rs\n"),
+            ["/a/b.rs", "/a/with space.rs", "/c/d.rs"].map(std::path::PathBuf::from)
         );
     }
 
