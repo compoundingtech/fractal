@@ -3666,7 +3666,7 @@ struct AgentRestartArgs {
     #[arg(long)]
     fresh_session: bool,
     /// Start the agent now even if its lane does not fit the host's free room, for when a stale
-    /// measurement holds a seat that must run. Needs --reason; who asked and why are recorded.
+    /// measurement holds an agent that must run. Needs --reason; who asked and why are recorded.
     #[arg(long, requires = "reason")]
     ignore_fit: bool,
     /// Why the agent starts despite its lane's fit (with --ignore-fit).
