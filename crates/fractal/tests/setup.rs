@@ -762,6 +762,44 @@ fn prepared_receipts_recover_setup_before_and_after_executable_replacement() {
 }
 
 #[test]
+fn receipt_verification_explains_missing_or_unreadable_executable() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for case in ["missing", "dangling", "directory", "unreadable"] {
+        let fixture = Fixture::new();
+        fixture.unpack_archive();
+        let bin = fixture.path("home/.local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let receipt = bin.join(".fractal-install.json");
+        fs::write(&receipt, serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "name": "fractal", "sha256": "0".repeat(64),
+        })).unwrap()).unwrap();
+        let target = bin.join("fractal");
+        match case {
+            "dangling" => symlink("missing-image", &target).unwrap(),
+            "directory" => fs::create_dir(&target).unwrap(),
+            "unreadable" => {
+                // Root can read mode 000; missing/dangling/directory still apply.
+                if unsafe { libc::geteuid() } == 0 {
+                    continue;
+                }
+                fs::write(&target, b"old image").unwrap();
+                fs::set_permissions(&target, fs::Permissions::from_mode(0o000)).unwrap();
+            }
+            _ => {}
+        }
+        let output = fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--receipt-verify"]).arg(&bin).output().unwrap();
+        assert!(!output.status.success(), "{case}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&format!(
+            "invalid install receipt {}; reinstall Fractal", receipt.display(),
+        )), "{case}: {stderr}");
+    }
+}
+
+#[test]
 fn receipt_helpers_finalize_prepared_identity_for_physical_and_managed_images() {
     if fractal_daemon::test_support::supervise_test() {
         return;

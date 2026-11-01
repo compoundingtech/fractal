@@ -228,7 +228,9 @@ exec "{real}" "$@"
     (payload / 'bin/st3').unlink()
     (payload / 'bin/fractal').rename(payload / 'bin/st3')
     retained = payload / 'bin/st3'
-    retained.write_text(retained.read_text().replace('fractal-fixture', 'retained-st3-fixture').replace('abcdef123', '012345678'))
+    retained.write_text(retained.read_text().replace('fractal-fixture', 'retained-st3-fixture').replace('abcdef123', '012345678').replace(
+        'if [ "${1:-}" = setup ]; then exec python3 "' + str(repo / 'scripts/fixtures/install-receipt-cli') + '" "$0" "$@"; fi',
+        'if [ "${1:-}" = setup ]; then echo "unknown option: --receipt-verify" >&2; exit 2; fi'))
     (payload / 'bin/st').unlink()
     (payload / 'bin/st').symlink_to('st3')
     for name in ['stui', 'st3-migrate']: shutil.copy(payload / 'bin/st3', payload / 'bin' / name)
@@ -247,6 +249,15 @@ exec "{real}" "$@"
     canonical_before = (installed / 'fractal').read_bytes()
     assert not (installed / 'fractal').is_symlink()
     assert all((installed / name).readlink() == Path('fractal') for name in ['st', 'st3'])
+    # Even a full alias layout cannot waive a bad receipt for an old release.
+    ownership = installed / '.fractal-install.json'
+    saved_ownership = ownership.read_bytes()
+    ownership.write_text('{}')
+    result = install('--tag', 'v0.3.17', '--bin-dir', str(installed), '--no-run')
+    assert result.returncode != 0 and 'invalid install receipt' in result.stderr and 'reinstall Fractal' in result.stderr, result
+    assert (installed / 'fractal').read_bytes() == canonical_before
+    assert (installed / 'st3').is_symlink()
+    ownership.write_bytes(saved_ownership)
     result = install('--tag', 'v0.3.17', '--bin-dir', str(installed))
     assert result.returncode == 0 and result.stdout.endswith('retained-st3-fixture\n') and result.stderr == '', result
     assert (installed / 'fractal').read_bytes() == canonical_before and not (installed / 'fractal').is_symlink()
