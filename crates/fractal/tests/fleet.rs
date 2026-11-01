@@ -6258,6 +6258,18 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     o.start().await;
     merged.insert(2, (third, "sent".to_owned()));
     assert_eq!(listed(&o).await, merged);
+    // Pages by sender, and without a recipient, list the release's mail before the stream's.
+    let page = |query: &'static str| {
+        let client = o.client();
+        async move {
+            let page: MessagePage = client.get(&format!("/v1/messages/page?{query}")).await.unwrap();
+            page.items.into_iter().map(|item| item.subject).collect::<Vec<_>>()
+        }
+    };
+    let subjects = merged.iter().map(|(subject, _)| subject.clone()).collect::<Vec<_>>();
+    assert_eq!(page("include_closed=true").await, subjects);
+    assert_eq!(page("from=agent/fleet-sender&include_closed=true").await, [stream]);
+    assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
 }
 
 /// The previous release never holds the messages shard: it is never dialed for it, and its

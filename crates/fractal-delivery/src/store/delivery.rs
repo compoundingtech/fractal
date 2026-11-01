@@ -693,10 +693,23 @@ impl DeliveryStore for Store {
                   AND ", message_desired_recipient_match!(), "
              )"
         ))?;
+        // Hydration selects canonical actual state and desired fallbacks. Filtering raw
+        // historical claim fields here would misclassify edited/declarative messages.
+        let matches = |message: &MessageView| {
+            recipient.as_deref().is_none_or(|to| message.to == to)
+                && sender.as_deref().is_none_or(|from| message.from == from)
+                && subject.is_none_or(|title| message.title.as_deref() == Some(title))
+                && subject_prefix.is_none_or(|prefix| {
+                    message.title.as_deref().is_some_and(|title| title.starts_with(prefix))
+                })
+                && (include_closed || message.status != "closed")
+        };
+        let mut last_read = None;
         let mut output: Vec<MessageView> = Vec::new();
         while let Some(row) = rows.next()? {
             let resource: String = row.get(0)?;
             let created_index = row.get(1)?;
+            last_read = Some(created_index);
             // Match the unfiltered recipient listing's discovery domain, not just the
             // hydrated recipient. In particular, a root-body legacy send alone is not
             // discovered by that endpoint; a matching declaration/native send can be.
@@ -710,16 +723,7 @@ impl DeliveryStore for Store {
                 }
             }
             let message = self.message_view_cached(&connection, &resource, created_index)?;
-            // Hydration selects canonical actual state and desired fallbacks. Filtering raw
-            // historical claim fields here would misclassify edited/declarative messages.
-            if recipient.as_deref().is_none_or(|to| message.to == to)
-                && sender.as_deref().is_none_or(|from| message.from == from)
-                && subject.is_none_or(|title| message.title.as_deref() == Some(title))
-                && subject_prefix.is_none_or(|prefix| {
-                    message.title.as_deref().is_some_and(|title| title.starts_with(prefix))
-                })
-                && (include_closed || message.status != "closed")
-            {
+            if matches(&message) {
                 if output.len() == limit {
                     let next = output.last().map(|message| message.created_index);
                     return Ok((output, next));
@@ -727,7 +731,25 @@ impl DeliveryStore for Store {
                 output.push(message);
             }
         }
-        Ok((output, None))
+        drop(rows);
+        if fractal_store::store::messages_shard::shard(self).is_none() {
+            return Ok((output, None));
+        }
+        // The graph's matches are all listed; the page goes on into the stream, whose rows
+        // name each party as it was sent, so a party is matched by every name it goes by.
+        let names = |party: &str| recipient_names(&connection, party, message_bare_recipient(party));
+        let recipients = recipient.as_deref().map(names).transpose()?;
+        let senders = sender.as_deref().map(names).transpose()?;
+        let (stream, more) = self.stream_page_after(
+            recipients.as_deref(),
+            senders.as_deref(),
+            after.unwrap_or(0),
+            limit - output.len(),
+            matches,
+        )?;
+        output.extend(stream);
+        let next = stream_cursor(more, &output, last_read);
+        Ok((output, next))
     }
 
     fn messages_page_for_delivery(
@@ -1127,6 +1149,7 @@ impl DeliveryStore for Store {
             desired: connection.prepare_cached("SELECT claim_id FROM desired WHERE subject=?1")
                 .map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hea5ac5c547c1 owner=fractal_delivery::store::delivery TODO=trace-statement-and-value-representation */ [&fence.subject], |row| row.get(0))
                 .optional().map_err(internal)?,
+            stream: fractal_store::store::messages_shard::mailbox_reads::position(self).map_err(internal)?,
         })
     }
 
@@ -1172,7 +1195,10 @@ impl DeliveryStore for Store {
                 |row| row.get(0),
             )
             .map_err(internal)?;
-        Ok(changed != 0 || mailbox_owner_key(&connection, fence)? != mark.owner)
+        let stream = fractal_store::store::messages_shard::mailbox_reads::changed_subjects(
+            self, &recipient, &bare_recipient, messages, mark.stream,
+        ).map_err(internal)?;
+        Ok(changed != 0 || !stream.is_empty() || mailbox_owner_key(&connection, fence)? != mark.owner)
     }
 
     fn claims_since_only_quiet_notifications(&self, after_index: u64) -> Result<bool> {
