@@ -123,14 +123,15 @@ LOCAL = {
     # report (scripts/ci-clippy-result, as rust-tests records ci-rust-test-result); the stage itself runs once, in linux-gate's run when that
     # runs here, else alone (RUN_CLIPPY). Right after linux-gate, so it signs from that run's report.
     'linux-clippy': ['python3', 'scripts/ci-clippy-result'],
+    # The fleet-compat stage (the previous release's st3 against this tree's), keyed by what it reads, the same way: the recorded command
+    # reads the stage's report (scripts/ci-fleet-compat-result); the stage runs once, in linux-gate's run when that runs here, else alone
+    # (RUN_FLEET_COMPAT).
+    'linux-fleet-compat': ['python3', 'scripts/ci-fleet-compat-result'],
     # The web lane as ONE shard that covers every kit play and app test (scripts/ci-local-web); it runs only when a web input changed.
     'fractal-web': ['nix', 'develop', '.#web', '-c', 'bash', 'scripts/ci-local-web'],
     # One signature per workspace crate (docs/per-crate-test-signing.md): the recorded command is the small script that reads one crate's
     # result out of the run's JUnit report; the run itself is RUN_TESTS, for the crates that have no passing note for their key.
     'rust-tests': ['python3', 'scripts/ci-rust-test-result'],
-    # The fleet-compat stage alone (the previous release's st3 against this tree's), keyed by what it reads. Opt-in while linux-gate's own
-    # run still includes fleet-compat, so a default run never runs it twice: `--check linux-fleet-compat` signs it.
-    'linux-fleet-compat': ['nix', 'develop', '-c', 'bash', 'scripts/ci-fleet-compat-keyed'],
 }
 RUST_TESTS = 'rust-tests'
 RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]
@@ -139,9 +140,24 @@ RUN_TESTS = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']
 # The clippy stage alone, for a linux-clippy note when linux-gate does not run here (signed, a lane edit, not selected); its report goes to
 # CI_CLIPPY_REPORT, as linux-gate's run writes it when linux-clippy is selected too.
 LINUX_CLIPPY = 'linux-clippy'
-# Checks whose local notes carry their input key (source_inputs), so a tree with the same key reuses them, as CI's notes for them do.
-KEYED = frozenset({LINUX_CLIPPY})
 RUN_CLIPPY = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'clippy']
+# The fleet-compat stage alone, for a linux-fleet-compat note when linux-gate does not run here; its report goes to CI_FLEET_COMPAT_REPORT.
+LINUX_FLEET_COMPAT = 'linux-fleet-compat'
+RUN_FLEET_COMPAT = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'fleet-compat']
+# The checks signed from one of linux-gate's stages: {check: (the stage, the variable the stage writes its report to, the variable the
+# check's recorded command reads it from)}. stage_alone(check) is the stage's command when it runs alone.
+STAGE_SIGNED = {
+    LINUX_CLIPPY: ('clippy', 'CI_CLIPPY_REPORT', 'CLIPPY_REPORT'),
+    LINUX_FLEET_COMPAT: ('fleet-compat', 'CI_FLEET_COMPAT_REPORT', 'FLEET_COMPAT_REPORT'),
+}
+
+
+def stage_alone(check):
+    return {LINUX_CLIPPY: RUN_CLIPPY, LINUX_FLEET_COMPAT: RUN_FLEET_COMPAT}[check]
+
+
+# Checks whose local notes carry their input key (source_inputs), so a tree with the same key reuses them, as CI's notes for them do.
+KEYED = frozenset(STAGE_SIGNED)
 # nextest: 0 every test passed, 100 some test failed (the report is complete either way), 4 the selection matched no test.
 RUN_COMPLETED = frozenset({0, 4, 100})
 # The signer refuses an input longer than 500 characters (scripts/evidence-sign); a full run's filterset is longer than that.
@@ -153,10 +169,10 @@ BUILDS = frozenset({'linux-gate', 'linux-clippy', 'linux-fleet-compat', 'fractal
 # the same workspace build and selection), so the tests are not run twice. When the gate skips linux-gate's tests stage on the per-crate
 # notes, linux-gate's local command shrinks to clippy and fleet-compat and rust-tests runs the crates without a note itself
 # (docs/per-crate-test-signing.md, step 5).
-# linux-clippy runs by default too, signed from linux-gate's clippy stage. linux-gate keeps that stage while linux-clippy is in shadow: a
-# shadow note skips nothing, so a linux-gate run without it would sign no linux-gate note and CI would run clippy again (the shrink comes
-# after the flip, with rust-tests').
-OPT_IN = frozenset({'linux-fleet-compat'})
+# linux-clippy and linux-fleet-compat run by default too, signed from linux-gate's clippy and fleet-compat stages. linux-gate keeps those
+# stages while the checks are in shadow: a shadow note skips nothing, so a linux-gate run without them would sign no linux-gate note and CI
+# would run them again (the shrink comes after each flip, with rust-tests').
+OPT_IN = frozenset()
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate', 'linux-clippy'})  # rust-tests is not: a test's result does not depend on the base
 # What the fractal-web note records about the run, as CI's aggregate note does (scripts/ci-evidence-signing): one shard, every kit
@@ -2760,8 +2776,9 @@ def run_main(argv, cleanup):
 
                 setup_seconds = round(time.monotonic() - (round_started if round_number else main_started))  # fetch and the clean tree (the members are fetched when a check first needs them)
                 gate_report = Path(scratch) / 'linux-gate-nextest-junit.xml'
-                gate_clippy = Path(scratch) / 'linux-gate-clippy'  # linux-gate's clippy stage report, for linux-clippy's note (scripts/ci-clippy-result)
-                ran = set()  # the checks whose command ran in this round (linux-gate's tells linux-clippy where its stage ran)
+                # linux-gate's clippy and fleet-compat stage reports, for linux-clippy's and linux-fleet-compat's notes (STAGE_SIGNED)
+                gate_stages = {check: Path(scratch) / f'linux-gate-{stage}' for check, (stage, *_) in STAGE_SIGNED.items()}
+                ran = set()  # the checks whose command ran in this round (linux-gate's tells linux-clippy and linux-fleet-compat where their stages ran)
                 stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
                 def run_one(name, output=None):
                     """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
@@ -2814,10 +2831,12 @@ def run_main(argv, cleanup):
                     if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
                         # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
                         environment['CI_TEST_JUNIT'] = str(gate_report)
-                    if name == 'linux-gate' and LINUX_CLIPPY in checks and 'clippy' in LOCAL[name]:
-                        # linux-clippy signs from this run's clippy stage (the same stage, its cargo messages and dep-info): ask it for its report.
-                        environment['CI_CLIPPY_REPORT'] = str(gate_clippy)
-                    if name in BUILDS and name != LINUX_CLIPPY:
+                    for check, (stage, report_variable, _) in STAGE_SIGNED.items():
+                        if name == 'linux-gate' and check in checks and stage in LOCAL[name]:
+                            # linux-clippy (linux-fleet-compat) signs from this run's clippy (fleet-compat) stage, the same stage, its cargo
+                            # messages and dep-info: ask it for its report.
+                            environment[report_variable] = str(gate_stages[check])
+                    if name in BUILDS and name not in STAGE_SIGNED:
                         # A test that cannot run on this host (no unprivileged user namespace, say) skips outside CI and writes its id here;
                         # the note records the list as env_skips, so the evidence says which tests did not run on this machine. rust-tests
                         # reads linux-gate's list for its per-crate records, so it is written even under a base wrapper without --input-file.
@@ -2847,22 +2866,22 @@ def run_main(argv, cleanup):
                     streams = output is None and CI_LOCAL in LOCAL[name]
                     limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
                     environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
-                    if name == LINUX_CLIPPY:
-                        # The clippy stage runs once: linux-gate's run in this round already ran it, else it runs here alone. Either way the note
+                    if name in STAGE_SIGNED:
+                        # The stage runs once: linux-gate's run in this round already ran it, else it runs here alone. Either way the note
                         # records the report reader (LOCAL) and which run made the report (run_command_sha256).
+                        (stage, report_variable, reader_variable), alone = STAGE_SIGNED[name], stage_alone(name)
                         if 'linux-gate' in ran:
-                            report, run_sha = gate_clippy, hashlib.sha256(json.dumps([LOCAL['linux-gate']]).encode()).hexdigest()
+                            report, run_sha = gate_stages[name], hashlib.sha256(json.dumps([LOCAL['linux-gate']]).encode()).hexdigest()
                             if not (report / 'passed').is_file():
-                                return (name, 'NOT SIGNED', 0, "linux-gate's clippy stage did not pass in this run"), True, False
+                                return (name, 'NOT SIGNED', 0, f"linux-gate's {stage} stage did not pass in this run"), True, False
                         else:
-                            report, run_sha = Path(scratch) / 'linux-clippy-report', hashlib.sha256(json.dumps([RUN_CLIPPY]).encode()).hexdigest()
-                            stage = dict(environment, CI_CLIPPY_REPORT=str(report))
-                            code = run_limited(governed(RUN_CLIPPY, name), limit, cwd=directory, env=stage, stdout=output,
-                                               stderr=subprocess.STDOUT if output else None)
+                            report, run_sha = Path(scratch) / f'{name}-report', hashlib.sha256(json.dumps([alone]).encode()).hexdigest()
+                            code = run_limited(governed(alone, name), limit, cwd=directory, env=dict(environment, **{report_variable: str(report)}),
+                                               stdout=output, stderr=subprocess.STDOUT if output else None)
                             if code != 0:
                                 return (name, 'timed out' if code == 124 else f'FAILED ({code})', round(time.monotonic() - started),
-                                        'the clippy stage failed: nothing signed' + queue_note(limit)), True, False
-                        environment['CLIPPY_REPORT'] = str(report)
+                                        f'the {stage} stage failed: nothing signed' + queue_note(limit)), True, False
+                        environment[reader_variable] = str(report)
                         environment = report_environment(scratch, environment)
                         wrap += ['--input', f'run_command_sha256={run_sha}']
                     pre_start = None
