@@ -3938,6 +3938,28 @@ class KeyedClippy(StTest):
     def clippy_notes(self):
         return [s['predicate']['observed'] for s in self.statements() if 'linux-clippy' in s['predicate']['observed']['checks']]
 
+    def test_report_python_survives_a_home_without_the_callers_profile_and_keeps_path_canonical(self):
+        caller_bin = Path(self.tmp.name) / 'caller-bin'
+        caller_bin.mkdir()
+        (caller_bin / 'python3').write_text('#!/bin/sh\nexit 99\n')
+        (caller_bin / 'python3').chmod(0o755)
+        # Model a host where only the caller's profile supplied Python; none of the fixed directories or nix's directory does.
+        with mock.patch.object(st_test, 'CHECK_PATH', ()), mock.patch.object(st_test, 'resolve_nix', return_value=None), \
+                mock.patch.dict(os.environ, HOME=str(self.home), PATH=str(caller_bin)):
+            path = st_test.check_path()
+        interpreter_bin = str(Path(sys.executable).resolve().parent)
+        self.assertEqual(path.split(':'), [interpreter_bin])
+        for check in ('linux-clippy', 'rust-tests'):
+            self.assertEqual(LOCAL[check][0], 'python3', 'portable report argv still matches the evidence policy')
+            done = subprocess.run([LOCAL[check][0], '-I', '-c', 'import sys; print(sys.executable)'],
+                                  env=dict(GIT_ENV, HOME=str(self.home), PATH=path), capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(Path(done.stdout.strip()).resolve(), Path(sys.executable).resolve())
+        code, out, err = self.run_clippy('linux-clippy')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['clippy'])
+        self.assertEqual(len(self.clippy_notes()), 1)
+
     def test_unsigned_linux_clippy_is_signed_from_linux_gates_clippy_stage_which_runs_once(self):
         code, out, err = self.run_clippy('linux-gate', 'linux-clippy')
         self.assertEqual(code, 0, out + err)

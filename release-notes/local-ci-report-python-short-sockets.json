@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Local CI script tests use a short independent Watchman fixture socket path, and report commands retain the running Python toolchain when HOME hides the caller's profile.",
+  "replay": {"status": "none", "detail": "No persisted data changes."},
+  "schema": {"status": "none", "detail": "No storage or wire schema changes."},
+  "rules": {"status": "none", "detail": "The canonical check PATH includes the running interpreter's resolved toolchain directory, like the existing nix toolchain directory. Report argv and evidence policy remain unchanged; arbitrary caller PATH entries are not retained."},
+  "compatibility": {"status": "none", "detail": "Existing report commands and signed evidence keep their portable command names."},
+  "downtime": {"status": "none", "detail": "No service restart is needed."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Reverting restores the previous local test and toolchain lookup behavior; no data recovery is needed."}
+}
