@@ -369,12 +369,14 @@ class PoolTreeTest(unittest.TestCase):
 
 
 class GovernedTest(unittest.TestCase):
-    """A building check runs in builds.slice unless its caller's own cgroup is already under a memory and a CPU limit."""
+    """A building check stays inside a kernel-verified build, lane or gate-slot cap; otherwise it takes builds.slice."""
 
     LANE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/app-lanes-seat_1_0a1b2c3d4e5f.slice/st3-seat-1-0.scope'
     BUILDS = 'user.slice/user-1000.slice/user@1000.service/builds.slice/run-p1-i1.scope'
     SEAT = 'user.slice/user-1000.slice/user@1000.service/app.slice/st3-seat-1-0.scope'
     LANE_SLICE = 'app-lanes-seat_1_0a1b2c3d4e5f.slice'
+    GATE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-capped.slice/gate-slot-gate-123-456.scope'
+    HEAVY = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-capped.slice/app-capped-heavy.slice/gate-slot-heavy-123.scope'
 
     def tree(self, tmp, leaf, limits):
         """A cgroup v2 tree under TMP whose every level is unlimited but the ones LIMITS names ({level: (memory.max, cpu.max)})."""
@@ -428,6 +430,30 @@ class GovernedTest(unittest.TestCase):
     def test_a_capped_lane_or_build_scope_runs_in_place(self):
         self.assert_in_place(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), 'lane')
         self.assert_in_place(self.governed_in(self.BUILDS, {'builds.slice': ('34359738368', '1000000 100000')}), 'builds.slice')
+
+    def test_a_memory_capped_gate_slot_and_its_descendants_run_in_place(self):
+        limits = {'app-capped-heavy.slice': ('17179869184', 'max 100000')}
+        self.assert_in_place(self.governed_in(self.HEAVY, limits), 'shared heavy memory cap, no CPU quota')
+        self.assert_in_place(self.governed_in(self.HEAVY + '/child', limits), 'descendant of heavy scope')
+        self.assert_in_place(self.governed_in(self.GATE, {'gate-slot-gate-123-456.scope': ('10737418240', None)}),
+                             'scope memory cap, no CPU controller')
+        self.assert_in_place(self.governed_in(self.GATE, {'app-capped.slice': ('17179869184', 'max 100000')}),
+                             'approved parent memory cap')
+
+    def test_gate_slot_names_and_environment_without_the_right_memory_cap_do_not_count(self):
+        self.assert_scoped(self.governed_in(self.HEAVY, {}), 'scope name without a cap')
+        markers = {'GATE_SLOT_ADMITTED': '1', 'GATE_SLOT_SCOPE_UNIT': 'gate-slot-heavy-123.scope', 'BUILDS_SLICE_ACTIVE': '1'}
+        self.assert_scoped(self.governed_in(self.SEAT, {}, markers), 'environment alone')
+        self.assert_scoped(self.governed_in(self.HEAVY, {'app-capped.slice': ('17179869184', 'max 100000')}),
+                           'limit above the heavy anchor')
+        self.assert_scoped(self.governed_in(self.HEAVY, {'app-capped-heavy.slice': (None, '100000 100000')}),
+                           'CPU alone without a memory controller')
+        misplaced = self.HEAVY.replace('app-capped.slice/', '')
+        self.assert_scoped(self.governed_in(misplaced, {'app-capped-heavy.slice': ('17179869184', 'max 100000')}),
+                           'heavy slice outside app-capped.slice')
+        daemon = self.SEAT.rsplit('/', 1)[0] + '/smalltalk.service'
+        self.assert_scoped(self.governed_in(daemon, {'smalltalk.service': ('9663676416', '100000 100000')}),
+                           'daemon memory cap is not a build cap')
 
     def test_an_uncapped_caller_is_scoped_whatever_its_name_or_environment_says(self):
         self.assert_scoped(self.governed_in(self.SEAT, {}, {'BUILDS_SLICE_ACTIVE': '1'}), 'environment')
