@@ -162,13 +162,6 @@ def receipt_sink(path):
             signal.signal(sig, handler)
         os.close(fd)
 
-
-if sys.argv[1:2] == ["--validate-receipt"]:
-    assert len(sys.argv) == 3
-    validate_receipt(json.loads(Path(sys.argv[2]).read_text()))
-    print("passed: ci-perf-slot receipt")
-    sys.exit(0)
-
 slot = str(Path(__file__).resolve().parent / "ci-perf-slot")
 
 
@@ -264,6 +257,13 @@ def kernel_limits(group):
     limits = {name: int((group / name).read_text()) for name in ("memory.max", "memory.swap.max", "pids.max")}
     assert limits == {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}, limits
     return limits
+
+
+if sys.argv[1:2] == ["--validate-receipt"]:
+    assert len(sys.argv) == 3
+    validate_receipt(json.loads(Path(sys.argv[2]).read_text()))
+    print("passed: ci-perf-slot receipt")
+    sys.exit(0)
 
 
 # Fake cgroup lines exercise hierarchy-preserving leaf slice selection without a user bus.
@@ -409,15 +409,15 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
         record["manager"] = dict(record["manager"], ControlGroup=record["cgroup"])
     complete = dict(good, skip=None, fixtures=fixtures)
     validate_receipt(complete)
+    for candidate, accepted in ((complete, True), (dict(complete, outcome="failure"), False)):
+        (sink / "cli.json").write_text(json.dumps(candidate))
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--validate-receipt", str(sink / "cli.json")], capture_output=True)
+        assert (result.returncode == 0) == accepted, result.stderr.decode()
     for change in ({"drain": "not confirmed"}, *({"peak_final_lifecycle": value} for value in (None, -1, "unknown")),
                    *({"manager": dict(fixtures[1]["manager"], **{field: value})}
                      for field, value in (("ControlGroup", "/wrong"), ("Slice", "wrong.slice"), ("RuntimeMaxUSec", "1s")))):
-        try:
+        with TestCase().assertRaises(AssertionError):
             validate_receipt(dict(complete, fixtures=[fixtures[0], dict(fixtures[1], **change)]))
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError("invalid fixture receipt accepted")
     for bad in (dict(good, status="started"), dict(good, outcome="failure"), dict(good, remaining_units=1),
                 dict(good, remaining_cgroups=1), dict(good, hostname=""), dict(good, ended_utc=""),
                 dict(good, skip=None, fixtures=[]), dict(good, skip=None, fixtures=[{"drain": "not confirmed"}] * 2)):
