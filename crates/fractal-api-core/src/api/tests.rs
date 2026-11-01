@@ -4892,6 +4892,24 @@ async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks(
     );
 }
 
+/// Items the shard admitted stay admitted when this member cannot record where they arrived:
+/// the waiters still wake, and the receive that brought them does not fail, so a peer never
+/// retries an exchange over a local recording.
+#[tokio::test]
+async fn a_stream_arrival_that_cannot_be_recorded_still_wakes_event_waiters() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+    let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    shard.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h26f127af3754 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE stream_arrivals").unwrap();
+    assert!(crate::store::messages_shard::stream_reads::record_arrivals(&state.store).is_err());
+    let mut events = state.event_notify.subscribe();
+    let before = *events.borrow_and_update();
+    replication::stream_admitted(&state).await;
+    assert!(events.has_changed().unwrap(), "a failed recording skipped the wake");
+    assert_eq!(*events.borrow(), before + 1);
+}
+
 #[test]
 fn agents_subagents_are_reported_only_for_observing_drivers() {
     let store = Store::open_memory("subagent-observers").unwrap();
