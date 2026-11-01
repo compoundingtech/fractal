@@ -313,7 +313,7 @@ exceptions. Status reports a graph digest over the complete projection registry,
 plus one digest for every table. The original six-table hash remains a compatibility field on
 the peer protocol; it cannot prove that every shared outcome agrees.
 
-Shared reducers use `store/canonical.rs`. `canonical_sql` expands `CANONICAL_ASC(ALIAS)` and
+Shared reducers use `crates/smallclaims/src/store/canonical.rs`. `canonical_sql` expands `CANONICAL_ASC(ALIAS)` and
 `CANONICAL_DESC(ALIAS)` in a query; `CANONICAL_ORDER` and its descending counterpart format the
 same order for existing claim queries. In-memory comparisons use `claim_key` or
 `key_from_record`, and claim-to-claim predicates use `after_sql`. Legacy batch position is its
@@ -472,14 +472,10 @@ and graph/table convergence after upgrading the older registry.
 
 ## Projection digest coverage and cost
 
-`store/projection_digest.rs::TABLES` lists 24 shared tables:
-
-`operations`, `blobs`, `documents`, `desired`, `arrangements`, `arrangement_registers`,
-`message_index`, `resource_observations`, `glass_heads`, `person_directive_notes`,
-`custom_registrations`, `custom_sources`, `custom_dependencies`, `mission_revisions`,
-`mission_definitions`, `mission_runs`, `mission_run_deadlines`, `mission_run_after`,
-`run_generations`, `step_runs`, `revision_proposals`, `planning_sessions`,
-`planning_candidates`, `planning_previews`.
+[`PROJECTION_DIGEST_TABLES` in `crates/fractal-store/src/store.rs`](../../crates/fractal-store/src/store.rs)
+is the production registry of shared tables and their excluded columns. Use that registry,
+rather than the test-only `store/projection_digest.rs::TABLES` alias, for the current inventory.
+`st replication status` prints a `table-digest` entry for each covered table.
 
 Every column joins the digest by default. Only document, message and mission-revision
 arrival indexes, `arrangements.changed_index`, and the effective step lease expiry/change
@@ -500,8 +496,7 @@ old claim row while another rejected it before admission; both exclude it from c
 and operation projections. The original wire bytes remain committed by authenticated envelope
 inventory, and the repair and replacement remain shared claim sources. A local
 `projection_digest_repaired_claims` cache retains the exclusion after receipt cleanup; repair
-record updates and cached source digests commit or roll back together. Registry version 5
-backfills existing repairs once, and operation rules version 2 rebuilds older operation rows.
+record updates and cached source digests commit or roll back together.
 
 Operations are logical rows over the hot operation table and operation facts retained in
 checkpoint tombstones. Trimming a claim changes its storage representation, preserving its
@@ -519,7 +514,7 @@ rollback and commit therefore change rows and cached digest state together. SHA-
 table name, column schema, count and sum; a sorted map of those table digests commits the graph.
 Shared columns are encoded in sorted name order, including the logical operation row. A fresh
 schema and an additive migration can place the same column at different physical positions;
-that layout does not change the digest. Registry version 6 rebuilds older physical-order caches.
+that layout does not change the digest.
 These are diagnostic digests; authenticated envelopes and signatures remain the replication
 integrity boundary. Work scales with changed row bytes, plus the fixed-size accumulator.
 Reading all table digests reads one small cache, independent of retained history size. Operations
@@ -554,7 +549,7 @@ This projection is independent of the claim/resource vocabulary and replication 
 ## Add any machine
 
 Install Fractal on the new machine and configure the person who operates it, as described in the
-[README](../getting-started.md#daemon-details). On an existing listening member, invite the new name:
+[installation guide](../site/getting-started/install.md#set-up-your-machine). On an existing listening member, invite the new name:
 
 ```sh
 st fleet invite beacon
