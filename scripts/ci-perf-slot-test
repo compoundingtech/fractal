@@ -10,13 +10,32 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 slot = str(Path(__file__).resolve().parent / "ci-perf-slot")
 
 
-def start(env, *args, command):
-    return subprocess.Popen([sys.executable, slot, *args, "--", *command], env=env,
+def start(env, *args, command, signal_mask=None):
+    # The test is single-threaded; restore the child's mask before exec, not the parent's protected registration window.
+    restore_mask = (lambda: signal.pthread_sigmask(signal.SIG_SETMASK, signal_mask)) if signal_mask is not None else None
+    return subprocess.Popen([sys.executable, slot, *args, "--", *command], env=env, preexec_fn=restore_mask,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def launch_fixture(unit, units, wrappers, env, *args, command):
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    try:
+        units.append(unit)
+        victim = start(env, *args, command=command, signal_mask=previous)
+        wrappers.append(victim)
+        return victim
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def fixture_listing(systemctl, pid):
+    return subprocess.check_output([systemctl, "--user", "list-units", f"ci-perf-slot-fixture-{pid}-*",
+                                    "--all", "--no-legend", "--plain"], text=True)
 
 
 def until(condition, what, seconds=10):
@@ -82,6 +101,24 @@ with tempfile.TemporaryDirectory() as helper_tmp:
     for name, value in {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}.items():
         (group / name).write_text(str(value))
     assert kernel_limits(group)["pids.max"] == 16
+test_units, test_wrappers, test_child, events = [], [], object(), []
+def fake_mask(how, mask):
+    if how == signal.SIG_BLOCK:
+        assert mask == {signal.SIGINT, signal.SIGTERM}
+        events.append("blocked")
+        return set()
+    assert test_units == ["fixture.scope"] and test_wrappers == [test_child]
+    events.append("pending signal delivered after registration")
+def fake_start(*args, **kwargs):
+    assert test_units == ["fixture.scope"] and kwargs["signal_mask"] == set()
+    events.append("launch")
+    return test_child
+with patch.object(signal, "pthread_sigmask", side_effect=fake_mask), patch.dict(globals(), start=fake_start):
+    assert launch_fixture("fixture.scope", test_units, test_wrappers, {}, command=["true"]) is test_child
+assert events == ["blocked", "launch", "pending signal delivered after registration"]
+with patch.object(subprocess, "check_output", return_value="") as listing:
+    fixture_listing("systemctl", 123)
+    assert listing.call_args.args[0][3] == "ci-perf-slot-fixture-123-*"
 if sys.argv[1:] == ["--helpers-only"]:
     print("passed: ci-perf-slot helpers")
     sys.exit(0)
@@ -188,14 +225,19 @@ with tempfile.TemporaryDirectory() as tmp:
                     group = record.get("cgroup", f"{slice_path}/{unit}")
                     with contextlib.suppress(OSError):
                         record["memory.peak"] = int(Path("/sys/fs/cgroup", group.lstrip("/"), "memory.peak").read_text())
-                    subprocess.run([systemctl, "--user", "stop", unit], capture_output=True)
                 for wrapper in wrappers:
                     if wrapper.poll() is None:
+                        wrapper.terminate()
+                    try:
+                        wrapper.wait(10)
+                    except subprocess.TimeoutExpired:
                         wrapper.kill()
-                    wrapper.wait(10)
+                        wrapper.wait(10)
+                # Stop after wrapper exit: a launch already in flight must not register a scope after our stop.
+                for unit in units:
+                    subprocess.run([systemctl, "--user", "stop", unit], capture_output=True)
                 def no_fixtures():
-                    listed = subprocess.check_output([systemctl, "--user", "list-units", "ci-perf-slot-fixture-*",
-                                                      "--all", "--no-legend", "--plain"], text=True)
+                    listed = fixture_listing(systemctl, os.getpid())
                     return not listed.strip() and not any(alive(pid) for pid in scoped_pids)
                 until(no_fixtures, "all fixture scopes and processes are gone")
                 cleaned = True
@@ -215,14 +257,12 @@ with tempfile.TemporaryDirectory() as tmp:
         try:
             for n, mode in enumerate(("kill", "timeout")):
                 unit = f"ci-perf-slot-fixture-{os.getpid()}-{n}.scope"
-                units.append(unit)
                 scoped.unlink(missing_ok=True)
                 command = [str(systemd_run), "--user", "--scope", "--quiet", "--collect",
                            f"--slice={Path(slice_path).name}", f"--unit={unit}",
                            "-p", "MemoryMax=64M", "-p", "MemorySwapMax=0", "-p", "TasksMax=16",
                            "-p", "RuntimeMaxSec=90", "--", "bash", "-c", script]
-                victim = start(env, *(("--timeout", "1s") if mode == "timeout" else ()), command=command)
-                wrappers.append(victim)
+                victim = launch_fixture(unit, units, wrappers, env, *(("--timeout", "1s") if mode == "timeout" else ()), command=command)
                 until(lambda: scoped.exists() and scoped.read_text().strip(), "scoped run started")
                 scoped_pid = int(scoped.read_text())
                 scoped_pids.append(scoped_pid)
