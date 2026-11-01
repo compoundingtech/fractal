@@ -150,8 +150,8 @@ JSON carries `seat_admission`. Authorized replacement starts are labelled
 Inspect host admission using `st doctor --json`: `performance.seatAdmission`
 contains `mode`, `reason`, `pendingCount`, and `oldestPendingAgeSecs`, plus the
 pending seats and admitted replacements. The same host object is exposed as
-`seatAdmission` by `/v1/health` and current `/v1/status` reads. These are live,
-process-local observations, not replicated claims. Historical status and agent
+`seatAdmission` by current `/v1/status` reads. These are live, process-local
+observations, not replicated claims. Historical status and agent
 history do not acquire current admission facts; a daemon restart rebuilds the
 queue from current declarations rather than replaying presentation metadata.
 

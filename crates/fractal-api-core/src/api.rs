@@ -7196,7 +7196,6 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "build": {"commit": fractal_drivers::version::build_commit()},
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
-        "seatAdmission": state.seat_admission.snapshot(admission_now()),
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
     })))
