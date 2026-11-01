@@ -6,6 +6,8 @@
 """
 import base64
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
@@ -56,8 +58,11 @@ def main(argv):
         git(tmp, 'init', '-q', str(repo))
         (repo / 'flake.lock').write_text('{"nodes":{}}\n')
         (repo / 'a').write_text('one\n')
+        (repo / '.st').mkdir()
+        (repo / '.st/evidence-keys').write_text(signers.read_text())
         git(repo, 'add', '.')
         git(repo, 'commit', '-q', '-m', 'one')
+        git(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
         signer = json.dumps([sys.executable, str(SIGN)])
         toolchain = hashlib.sha256(b'drv').hexdigest()
 
@@ -565,9 +570,11 @@ os.execv({real_git!r}, ['git', *args])
         lane_argv = ['sh', '-c', 'echo lane']
         (lane_repo / '.st/required-lanes.json').write_text(json.dumps(
             {'version': 1, 'lanes': {'linux-gate': {'argv': lane_argv, 'definition_paths': ['scripts/lane.sh']}}}))
+        (lane_repo / '.st/evidence-keys').write_text(signers.read_text())
         git(lane_repo, 'add', '.')
         git(lane_repo, 'commit', '-q', '-m', 'base')
         base = git(lane_repo, 'rev-parse', 'HEAD')
+        git(lane_repo, 'update-ref', 'refs/remotes/origin/main', base)
 
         def lane_wrap(command, *extra, check='linux-gate'):
             return run([sys.executable, str(WRAP), '--check', check, '--toolchain-sha256', toolchain, '--signer', signer,
@@ -580,7 +587,10 @@ os.execv({real_git!r}, ['git', *args])
         noted = json.loads(done.stderr.decode()[done.stderr.decode().index('{'):])
         lane_inputs = json.loads(git(tmp / 'scratch.git', 'cat-file', 'blob', git(tmp / 'scratch.git', 'ls-tree', '-r', noted['record']).split()[2])
                                  )['predicate']['observed']['inputs']
-        verifier = __import__('importlib.machinery').machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         expected_digest = verifier.lane_definition(
             str(lane_repo), git(lane_repo, 'rev-parse', base + '^{tree}'), git(lane_repo, 'rev-parse', 'HEAD^{tree}'),
             verifier.lane_rules(git(lane_repo, 'show', base + ':.st/required-lanes.json'), 'linux-gate'))['sha256']
@@ -610,6 +620,41 @@ os.execv({real_git!r}, ['git', *args])
         assert plain.returncode == 0
         print('passed: --lanes-from records the lane digest as the tree defines it (the base\'s when untouched, the edited one for a lane edit), '
               'and refuses another argv, a missing lane or lane file, signing nothing')
+
+        # Lane-bound signatures use the selected base definition, not a historical verifier path constant.
+        (lane_repo / '.fractal').mkdir()
+        new_argv = ['sh', '-c', 'echo new lane']
+        (lane_repo / '.fractal/required-lanes.json').write_text(json.dumps(
+            {'version': 1, 'lanes': {'linux-gate': {'argv': new_argv, 'definition_paths': ['scripts/lane.sh']}}}))
+        git(lane_repo, 'add', '.')
+        git(lane_repo, 'commit', '-qm', 'conflicting layouts: new lane wins')
+        both_base = git(lane_repo, 'rev-parse', 'HEAD')
+        for layout in ('both', 'new-only'):
+            if layout == 'new-only':
+                (lane_repo / '.st/required-lanes.json').unlink()
+                git(lane_repo, 'add', '-u')
+                git(lane_repo, 'commit', '-qm', 'new-only lanes')
+            selected_base = git(lane_repo, 'rev-parse', 'HEAD')
+            selected = lane_wrap(new_argv, '--lanes-from', selected_base)
+            assert selected.returncode == 0, (layout, selected.stderr.decode())
+            noted = json.loads(selected.stderr.decode()[selected.stderr.decode().index('{'):])
+            selected_inputs = json.loads(git(
+                tmp / 'scratch.git', 'cat-file', 'blob',
+                git(tmp / 'scratch.git', 'ls-tree', '-r', noted['record']).split()[2]))['predicate']['observed']['inputs']
+            selected_definition = verifier.lane_definition(
+                str(lane_repo), git(lane_repo, 'rev-parse', selected_base + '^{tree}'),
+                git(lane_repo, 'rev-parse', 'HEAD^{tree}'),
+                verifier.lane_rules(git(lane_repo, 'show', selected_base + ':.fractal/required-lanes.json'), 'linux-gate'))
+            assert selected_inputs['lane_definition_sha256'] == selected_definition['tree_sha256'], selected_inputs
+            rejected = lane_wrap(lane_argv, '--lanes-from', selected_base)
+            assert rejected.returncode == 1, (layout, rejected.stderr.decode())
+        # A selected malformed new definition must not sign using the valid old definition.
+        (lane_repo / '.st/required-lanes.json').write_text(git(lane_repo, 'show', both_base + ':.st/required-lanes.json'))
+        (lane_repo / '.fractal/required-lanes.json').write_text('{malformed')
+        git(lane_repo, 'add', '.')
+        git(lane_repo, 'commit', '-qm', 'malformed new lane with valid old fallback')
+        rejected = lane_wrap(lane_argv, '--lanes-from', git(lane_repo, 'rev-parse', 'HEAD'))
+        assert rejected.returncode == 1, rejected.stderr.decode()
 
         def crate_wrap(crate, command, keys_file=signers, *extra):
             tree_id = git(repo, 'rev-parse', 'HEAD^{tree}')

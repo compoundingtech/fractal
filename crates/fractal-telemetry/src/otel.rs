@@ -942,6 +942,51 @@ pub fn record_wal_checkpoint(
     span.end();
 }
 
+/// Admission identities stay in rate-limited logs, never in metric labels.
+fn register_mailbox_legacy_metrics(provider: &SdkMeterProvider) {
+    use opentelemetry::metrics::MeterProvider as _;
+
+    provider.meter("fractal.mailbox")
+        .u64_observable_counter("fractal_mailbox_legacy_admissions_total")
+        .with_description("Successful legacy mailbox PTY identity admissions using only a live daemon start token")
+        .with_unit("{admission}")
+        .with_callback(|observer| {
+            observer.observe(fractal_runtime::mailbox_legacy_admissions_total(), &[]);
+        })
+        .build();
+}
+
+#[cfg(test)]
+#[test]
+fn mailbox_legacy_counter_exports_the_process_total_without_identity_labels() {
+    use opentelemetry_sdk::metrics::{
+        InMemoryMetricExporter, PeriodicReader,
+        data::{AggregatedMetrics, MetricData},
+    };
+
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_reader(PeriodicReader::builder(exporter.clone()).build())
+        .build();
+    register_mailbox_legacy_metrics(&provider);
+    provider.force_flush().unwrap();
+    let batches = exporter.get_finished_metrics().unwrap();
+    let metric = batches.iter()
+        .flat_map(|batch| batch.scope_metrics())
+        .flat_map(|scope| scope.metrics())
+        .find(|metric| metric.name() == "fractal_mailbox_legacy_admissions_total")
+        .expect("daemon registers the legacy admission counter even at zero");
+    let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+        panic!("legacy admissions must export as a u64 counter");
+    };
+    assert!(sum.is_monotonic());
+    let points = sum.data_points().collect::<Vec<_>>();
+    assert_eq!(points.len(), 1);
+    assert_eq!(points[0].value(), fractal_runtime::mailbox_legacy_admissions_total());
+    assert_eq!(points[0].attributes().count(), 0);
+    provider.shutdown().unwrap();
+}
+
 /// Process metrics belong only to the daemon and are sampled by the SDK reader.
 fn register_daemon_memory_metrics(provider: &SdkMeterProvider) {
     use opentelemetry::metrics::MeterProvider as _;
@@ -1137,6 +1182,7 @@ impl Telemetry {
                         .build();
                     if matches!(unit, Unit::Daemon) {
                         register_daemon_memory_metrics(&provider);
+                        register_mailbox_legacy_metrics(&provider);
                         telemetry.runtime_lag = register_runtime_lag(&provider);
                     }
                     opentelemetry::global::set_meter_provider(provider.clone());

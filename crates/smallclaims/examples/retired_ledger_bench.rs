@@ -10,12 +10,12 @@ use std::time::{Duration, Instant};
 
 const CHUNK: u64 = 10_000;
 const TRIGGERS: [&str; 6] = [
-    "retired_claim_recorded_v1",
-    "retired_claim_rewritten_v1",
-    "retired_claim_withdrawn_v1",
-    "retired_envelope_recorded_v1",
-    "retired_envelope_rewritten_v1",
-    "retired_envelope_withdrawn_v1",
+    "retired_claim_recorded_v2",
+    "retired_claim_rewritten_v2",
+    "retired_claim_withdrawn_v2",
+    "retired_envelope_recorded_v2",
+    "retired_envelope_rewritten_v2",
+    "retired_envelope_withdrawn_v2",
 ];
 
 fn tombstones(from: u64, to: u64) -> (Vec<EnvelopeTombstone>, Vec<ClaimTombstone>) {

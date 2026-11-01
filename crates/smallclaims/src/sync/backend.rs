@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::answers::{AnswersCheck, AnswersReply, AnswersRequest};
 use crate::claim::ReplicaEnvelopeId;
 use crate::fleet::FleetView;
 use crate::fleet::handshake::JoinRequest;
@@ -105,6 +106,22 @@ pub trait Backend: Clone + Send + Sync + 'static {
         carrier: Option<crate::replication::ReplicationCarrier>,
         failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> impl Future<Output = Result<()>> + Send;
+
+    /// This node's answers per claim kind (see [`crate::answers`]), or `None` when it keeps
+    /// none, which a peer reads as a build without them. A store this process holds itself keeps
+    /// none: a pass over every claim on request is what a daemon's answers cache avoids. A member
+    /// without answers asks no peer for theirs.
+    fn answers(
+        &self,
+        _request: &AnswersRequest,
+    ) -> impl Future<Output = Result<Option<AnswersReply>>> + Send {
+        async { Ok(None) }
+    }
+
+    /// Record what a daily answers check found.
+    fn record_answers_check(&self, _check: &AnswersCheck) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
 
     /// Publish host-local worker progress without adding replicated claims.
     fn record_worker(

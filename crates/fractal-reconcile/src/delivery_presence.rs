@@ -94,6 +94,116 @@ pub fn unprotected_reason(reason: &str) -> bool {
 #[derive(Clone)]
 struct Uncertain { fence: crate::mailbox::Fence, owner: u64, since: Instant, failures: u8 }
 
+#[derive(Clone)]
+struct Refusal {
+    incarnation: String,
+    code: String,
+}
+
+/// A refused bind is diagnostic evidence, never mailbox custody or a heartbeat.
+pub fn bind_refused(fence: &crate::mailbox::Fence, code: &str) {
+    if fence.component == "delivery"
+        && let Ok(mut rows) = presence().refusals.lock()
+    {
+        rows.insert(fence.subject.clone(), Refusal {
+            incarnation: fence.incarnation.clone(), code: code.into(),
+        });
+        notify(&fence.subject);
+    }
+}
+
+/// Successful admission supersedes refusal evidence from the previous incarnation as well.
+pub fn bind_recovered(fence: &crate::mailbox::Fence) {
+    if fence.component == "delivery"
+        && let Ok(mut rows) = presence().refusals.lock()
+    {
+        rows.remove(&fence.subject);
+    }
+}
+
+/// The readers' clock (the system clock unless a clock snapshot or a simulation holds it), so one
+/// evaluation dates every state it reports from the same instant.
+fn unix_ms() -> u64 {
+    u64::try_from(smallclaims::store::now_ms()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn successor_binding_clears_predecessor_refusal_for_incarnation_agnostic_reads() {
+        let subject = "agent/example/refused-predecessor-healthy-successor";
+        let old = crate::mailbox::Fence::new(subject, "old", "delivery");
+        let new = crate::mailbox::Fence::new(subject, "new", "delivery");
+        bind_refused(&old, "mailbox-runtime-indeterminate");
+        bind_recovered(&new);
+        record_fenced(&new, &json!({
+            "transport":"omp-channel", "ready":true, "pid":std::process::id(),
+            "image":presence().image,
+        }).to_string());
+        let known = known(subject).expect("successor heartbeat is visible to message delivery");
+        assert_ne!(known.state, "refused");
+        assert!(!known.reason.as_deref().unwrap_or_default().contains("mailbox-runtime-indeterminate"));
+    }
+
+    #[tokio::test]
+    async fn bind_422_exports_refusal_and_writes_warning() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        if std::env::var_os("FRACTAL_REFUSAL_STATE_TEST").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "delivery_presence::refusal_tests::bind_422_exports_refusal_and_writes_warning", "--nocapture"])
+                .env("FRACTAL_REFUSAL_STATE_TEST", "1")
+                .env("XDG_STATE_HOME", root.path())
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let log = std::fs::read_to_string(root.path().join("st3/driver-api-warnings.log")).unwrap();
+            assert!(log.contains("delivery refused: mailbox-runtime-indeterminate (HTTP 422)"), "{log}");
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = crate::client::Endpoint::Http(format!("http://{}", listener.local_addr().unwrap()));
+        let subject = "agent/example/bind-422-state-and-warning";
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            let _ = stream.read(&mut bytes).await.unwrap();
+            // Inject an authority refusal at the same diagnostic seam as the bind route.
+            bind_refused(&crate::mailbox::Fence::new(subject, "current", "delivery"),
+                "mailbox-runtime-indeterminate");
+            let body = r#"{"code":"mailbox-runtime-indeterminate","message":"forced refusal","details":{}}"#;
+            stream.write_all(format!("HTTP/1.1 422 Unprocessable Entity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let mut fence = crate::client::Fence::new(subject, "current", "delivery");
+        assert!(tokio::time::timeout(Duration::from_millis(250),
+            fence.bind(&crate::client::Client::new(endpoint))).await.is_err());
+        server.await.unwrap();
+        let state = assess_current(subject, "omp", Some("current")).to_value();
+        assert_eq!(state["state"], "refused");
+        assert_eq!(state["reason"], "delivery refused: mailbox-runtime-indeterminate");
+        assert!(state["since_unix_ms"].is_u64());
+    }
+
+    #[test]
+    fn refused_bind_is_visible_until_recovery_without_resetting_since() {
+        let fence = crate::mailbox::Fence::new("agent/example/refused-delivery-state", "current", "delivery");
+        bind_refused(&fence, "mailbox-runtime-indeterminate");
+        let first = assess_current(&fence.subject, "omp", Some("current"));
+        assert_eq!(first.state, "refused");
+        assert_eq!(first.reason.as_deref(), Some("delivery refused: mailbox-runtime-indeterminate"));
+        assert!(first.stale());
+        assert!(first.to_value()["since_unix_ms"].is_u64());
+        bind_refused(&fence, "mailbox-runtime-indeterminate");
+        assert_eq!(assess_current(&fence.subject, "omp", Some("current")).since_unix_ms, first.since_unix_ms);
+        assert_ne!(assess_current(&fence.subject, "omp", Some("successor")).state, "refused");
+        bind_recovered(&fence);
+        assert_ne!(assess_current(&fence.subject, "omp", Some("current")).state, "refused");
+    }
+}
+
+type IncarnationStateClocks = HashMap<String, (&'static str, u64)>;
+
 struct Presence {
     started: Instant,
     image: Option<String>,
@@ -102,6 +212,8 @@ struct Presence {
     ownership: Mutex<HashMap<String, Ownership>>,
     observations: Mutex<std::collections::HashSet<std::path::PathBuf>>,
     uncertain: Mutex<HashMap<String, Uncertain>>,
+    refusals: Mutex<HashMap<String, Refusal>>,
+    state_since: Mutex<HashMap<String, IncarnationStateClocks>>,
     /// Attachment-push title streams waiting on a subject, one sender per watched subject.
     watchers: Mutex<HashMap<String, watch::Sender<u64>>>,
     /// The title binding of each live stream that has been sent an attachment frame.
@@ -118,6 +230,8 @@ fn presence() -> &'static Presence {
         ownership: Mutex::new(HashMap::new()),
         observations: Mutex::default(),
         uncertain: Mutex::default(),
+        refusals: Mutex::default(),
+        state_since: Mutex::default(),
         watchers: Mutex::new(HashMap::new()),
         pushed: Mutex::new(HashMap::new()),
     })
@@ -623,11 +737,12 @@ pub struct Assessment {
     pub reason: Option<String>,
     pub polled_seconds_ago: Option<u64>,
     pub transport: Option<String>,
+    pub since_unix_ms: Option<u64>,
 }
 
 impl Assessment {
     pub fn stale(&self) -> bool {
-        self.state == "stale"
+        matches!(self.state, "stale" | "refused")
     }
 
     pub fn to_value(&self) -> Value {
@@ -636,6 +751,7 @@ impl Assessment {
             "reason": self.reason,
             "polled_seconds_ago": self.polled_seconds_ago,
             "transport": self.transport,
+            "since_unix_ms": self.since_unix_ms,
         })
     }
 }
@@ -718,6 +834,23 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
         assessment.reason = Some(format!("ownership proof unavailable{}; established stream retained, new effects held and automatic recovery deferred; {}s",
             if proof.failures >= 3 { ": suspect after three checks" } else { "" }, proof.since.elapsed().as_secs()));
     }
+    if let Some(refusal) = presence.refusals.lock().ok().and_then(|rows|
+        rows.get(recipient).filter(|r| incarnation.is_none_or(|i| i == r.incarnation)).cloned())
+    {
+        assessment.state = "refused";
+        assessment.reason = Some(format!("delivery refused: {}", refusal.code));
+    }
+    if let Ok(mut rows) = presence.state_since.lock() {
+        if !rows.contains_key(recipient) { rows.insert(recipient.into(), HashMap::new()); }
+        let incarnations = rows.get_mut(recipient).expect("inserted seat");
+        let incarnation = incarnation.unwrap_or_default();
+        if !incarnations.contains_key(incarnation) {
+            incarnations.insert(incarnation.into(), (assessment.state, unix_ms()));
+        }
+        let row = incarnations.get_mut(incarnation).expect("inserted incarnation");
+        if row.0 != assessment.state { *row = (assessment.state, unix_ms()); }
+        assessment.since_unix_ms = Some(row.1);
+    }
     assessment
 }
 
@@ -765,6 +898,7 @@ fn assess_beat(
                 )),
                 polled_seconds_ago: None,
                 transport: None,
+                since_unix_ms: None,
             };
         }
         return Assessment {
@@ -775,6 +909,7 @@ fn assess_beat(
             )),
             polled_seconds_ago: None,
             transport: None,
+            since_unix_ms: None,
         };
     };
     let stale = |reason: String| Assessment {
@@ -782,6 +917,7 @@ fn assess_beat(
         reason: Some(reason),
         polled_seconds_ago: Some(age.as_secs()),
         transport: report.transport.clone(),
+        since_unix_ms: None,
     };
     if age > POLL_STALE_AFTER {
         return stale(format!(
@@ -798,6 +934,7 @@ fn assess_beat(
             )),
             polled_seconds_ago: Some(age.as_secs()),
             transport: report.transport,
+            since_unix_ms: None,
         };
     }
     if report.ready == Some(false) {
@@ -866,6 +1003,7 @@ fn assess_beat(
             reason: outdated,
             polled_seconds_ago: Some(age.as_secs()),
             transport: report.transport,
+            since_unix_ms: None,
         },
         unprotected,
     )
@@ -1334,6 +1472,17 @@ mod tests {
     // unattached monitor is stale at any age, and an attached one is never consulted.
     #[test]
     fn title_report_age_never_changes_the_assessment() {
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        // One instant for every reading: the state goes stale and back below, so each return to
+        // current restarts `since`, and two clock reads a millisecond apart would differ.
+        const AT: u128 = 1_800_000_000_000;
+        smallclaims::store::set_thread_clock(Some(AT));
         let recipient = "agent/attachment-monitor-age";
         let mut delivery = crate::mailbox::Fence::new(recipient, "current", "delivery");
         delivery.epoch = 1;
@@ -1352,6 +1501,7 @@ mod tests {
         // The delivery beat alone is current, so only the monitor can make the seat stale below.
         assert!(!without_monitor.stale(), "{without_monitor:?}");
         assert_eq!(without_monitor.state, "current", "{without_monitor:?}");
+        assert_eq!(without_monitor.since_unix_ms, Some(AT as u64), "{without_monitor:?}");
         record_fenced(
             &title,
             &json!({"transport":"claude-channel", "ready":false,

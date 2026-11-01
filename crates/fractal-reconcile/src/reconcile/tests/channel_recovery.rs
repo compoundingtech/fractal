@@ -85,19 +85,23 @@ fn attachment(store: &Store, incarnation: &str, attached: bool) -> u128 {
         .accepted_at_unix_ms
 }
 
+/// Whether recovery acted: it parked the seat, or it recorded a restart request, which it leaves
+/// to the ordinary restart path in the same evaluation. These tests call that path themselves.
 fn recover(
     reconciler: &Reconciler<FakeRuntime>,
     desired: &DesiredSubject,
     incarnation: &str,
     at: u128,
 ) -> Result<bool> {
-    reconciler.reconcile_claude_channel_recovery(
+    let requested = attempts(&reconciler.store).len();
+    let parked = reconciler.reconcile_claude_channel_recovery(
         desired,
         desired.member.as_ref().unwrap(),
         Some(&claude_seat_pty("orchid", "running", incarnation)),
         None,
         at,
-    )
+    )?;
+    Ok(parked || attempts(&reconciler.store).len() > requested)
 }
 
 fn attempts(store: &Store) -> Vec<crate::model::ClaimRecord> {
@@ -303,6 +307,84 @@ fn channel_recovery_rechecks_then_restarts_once_and_ignores_a_stale_incarnation(
     assert!(!recover(&restarted, &desired, "orchid-one", since + 30_000).unwrap());
 }
 
+/// A restart that recovery requests is carried out in the pass that requests it, as a changed
+/// declaration is. Left to the next pass, it waited for the rest of the pass that wrote it, which
+/// took minutes on a loaded daemon.
+#[test]
+fn a_recovery_restart_is_carried_out_in_the_pass_that_requests_it() {
+    let (store, runtime, reconciler, _) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-one")];
+    smallclaims::store::set_thread_clock(Some(since + 10_000));
+    let pass = reconciler.reconcile_once();
+    smallclaims::store::set_thread_clock(None);
+    pass.unwrap();
+    assert_eq!(attempts(&store).len(), 1);
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+}
+
+/// A park still ends its evaluation. The ordinary restart path does not run after it, so the last
+/// attempt is not completed as if its replacement had been observed, and nothing is stopped
+/// until the parked seat's next evaluation.
+#[test]
+fn a_recovery_park_still_ends_its_evaluation() {
+    let (store, runtime, reconciler, desired) = setup();
+    for (index, backoff) in [10_000, 20_000, 40_000].into_iter().enumerate() {
+        let incarnation = format!("orchid-{index}");
+        let since = attachment(&store, &incarnation, false);
+        assert!(recover(&reconciler, &desired, &incarnation, since + backoff).unwrap());
+    }
+    let last = attempts(&store).pop().unwrap();
+    attachment(&store, "orchid-parked", false);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-parked")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().len(), 1);
+    let completion = format!("agent-restart-completed:{}", last.id);
+    assert!(store.operation_claim(&completion).unwrap().is_none());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+}
+
+/// After a deploy each driver has to reach the new daemon again before its channel reads as
+/// attached, and a loaded daemon can take minutes to answer. A seat that was attached before
+/// this daemon started is charged no attempt inside the startup grace; after it, an unattached
+/// seat recovers as before.
+#[test]
+fn a_seat_attached_before_the_daemon_started_waits_out_the_startup_grace() {
+    let (store, _, mut reconciler, desired) = setup();
+    let attached_at = attachment(&store, "orchid-one", true);
+    reconciler.started_at_unix_ms = attached_at + 1;
+    let since = attachment(&store, "orchid-one", false);
+    let grace_ends = attached_at + 1 + 10 * 60 * 1_000;
+    let (result, deadline) = smallclaims::touched::record_due(|| {
+        recover(&reconciler, &desired, "orchid-one", since + 10_000)
+    });
+    assert!(!result.unwrap());
+    assert_eq!(deadline, Some(grace_ends));
+    assert!(!recover(&reconciler, &desired, "orchid-one", grace_ends - 1).unwrap());
+    assert!(attempts(&store).is_empty());
+    assert!(recover(&reconciler, &desired, "orchid-one", grace_ends).unwrap());
+    assert_eq!(attempts(&store).len(), 1);
+}
+
+#[test]
+fn the_startup_grace_is_only_for_a_channel_attached_under_an_earlier_daemon() {
+    // Attached only after this daemon started: the usual ten seconds.
+    let (store, _, mut reconciler, desired) = setup();
+    let attached_at = attachment(&store, "orchid-one", true);
+    reconciler.started_at_unix_ms = attached_at - 1;
+    let since = attachment(&store, "orchid-one", false);
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+
+    // A predecessor's attachment proves nothing about this incarnation's channel.
+    let (store, _, mut reconciler, desired) = setup();
+    let attached_at = attachment(&store, "orchid-zero", true);
+    let since = attachment(&store, "orchid-one", false);
+    reconciler.started_at_unix_ms = attached_at + 1;
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+}
+
 #[test]
 fn channel_initialized_during_recheck_keeps_its_incarnation() {
     let (store, runtime, reconciler, desired) = setup();
@@ -484,7 +566,7 @@ fn a_brief_automatic_recovery_does_not_reset_the_durable_attempt_budget() {
     let since = attachment(&store, "orchid-one", false);
     recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap();
     let request = attempts(&store).pop().unwrap();
-    attachment(&store, "orchid-two", true);
+    let attached_at = attachment(&store, "orchid-two", true);
     store
         .append_claim(&ClaimInput {
             subject: SEAT.into(),
@@ -497,14 +579,17 @@ fn a_brief_automatic_recovery_does_not_reset_the_durable_attempt_budget() {
         })
         .unwrap();
     let since = attachment(&store, "orchid-two", false);
-    let fresh = Reconciler::new(
+    let mut fresh = Reconciler::new(
         store.clone(),
         runtime,
         "node".into(),
         Arc::new(Notify::new()),
     );
-    assert!(!recover(&fresh, &desired, "orchid-two", since + 10_000).unwrap());
-    assert!(recover(&fresh, &desired, "orchid-two", since + 20_000).unwrap());
+    // The daemon restarted after the replacement attached, so it first waits out its startup
+    // grace; the attempt it then charges is still the second.
+    fresh.started_at_unix_ms = attached_at + 1;
+    assert!(!recover(&fresh, &desired, "orchid-two", since + 20_000).unwrap());
+    assert!(recover(&fresh, &desired, "orchid-two", attached_at + 1 + 10 * 60 * 1_000).unwrap());
     assert!(
         attempts(&store).last().unwrap().body["fields"]["reason"]
             .as_str()

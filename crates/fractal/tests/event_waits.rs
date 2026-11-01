@@ -43,19 +43,24 @@ impl Daemon {
             event_notify: watch::channel(0_u64).0,
             server: None,
         };
-        let state = AppState { store: daemon.store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: daemon.event_notify.clone(),
-        node: "wait-node".into(),
-        state_dir: root.join("daemon"),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        owning_person: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = AppState {
+            store: daemon.store.clone(),
+            notify: Arc::new(Notify::new()),
+            event_notify: daemon.event_notify.clone(),
+            node: "wait-node".into(),
+            state_dir: root.join("daemon"),
+            pty_root: root.join("pty"),
+            pty_binary: PathBuf::from("pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            owning_person: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let socket = daemon.socket();
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let thread = std::thread::spawn(move || {

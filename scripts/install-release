@@ -7,11 +7,14 @@ bin_dir=""
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 instance="${FRACTAL_INSTANCE-${ST_INSTANCE:-}}"
 quiet=false
+source_preflight=false
 while (($#)); do
   case $1 in
     --bin-dir) bin_dir=${2:?--bin-dir needs a directory}; shift 2 ;;
     --instance) instance=${2:?--instance needs a name}; shift 2 ;;
     --quiet) quiet=true; shift ;;
+    # Internal source-installer entry point: share ownership policy, not payloads.
+    --source-preflight) source_preflight=true; shift ;;
     -h | --help) echo 'Usage: ./install.sh [--bin-dir DIRECTORY] [--instance NAME] [--quiet]'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -88,17 +91,96 @@ refuse_nix_path() (
         path=$(normalize_path "$path")
     done
 )
-for name in st3 st pty fractal; do refuse_nix_path "$bin_dir/$name"; done
+ownership_names=(fractal st3 st stui)
+if $source_preflight; then ownership_names+=(st3-migrate); else ownership_names+=(pty); fi
+for name in "${ownership_names[@]}"; do refuse_nix_path "$bin_dir/$name"; done
+macos_home=
+macos_app=
+if [[ $(uname -s) == Darwin ]]; then
+  macos_home="${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME:-$HOME}}"
+  mkdir -p "$macos_home"
+  macos_home=$(cd "$macos_home" && pwd)
+  macos_app=$(python3 - "$macos_home" "$source_preflight" <<'PY'
+import os
+from pathlib import Path
+import sys
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+app = os.environ.get('FRACTAL_MACOS_APP_PATH', os.environ.get('ST_MACOS_APP_PATH'))
+default = Path(sys.argv[1]) / 'Applications/SmallTalk.app'
+instance = os.environ.get('FRACTAL_INSTANCE')
+if sys.argv[2] == 'true' and instance:
+    # Source installs let the helper choose its instance default; archives
+    # explicitly pass their shared-app default as --app below.
+    default = Path(sys.argv[1]) / '.st-instance' / instance / 'app/SmallTalk.app'
+print(Path(app).expanduser().absolute() if app else default)
+PY
+)
+fi
+# A physical install is owned only with both reverse aliases. Historical installs
+# used the exact fractal -> st3 link; arbitrary executables are never adopted.
+refuse_foreign_fractal() {
+  local canonical="$bin_dir/fractal" target name directory candidate destination_directory="$bin_dir"
+  if [[ -e $canonical || -L $canonical ]]; then
+    if [[ -L $canonical ]]; then
+      target=$(readlink "$canonical")
+      [[ $target == st3 || $target == "$bin_dir/st3" ||
+        ( -n $macos_app && $target == "$macos_app/Contents/MacOS/fractal" ) ]] || {
+        echo "install: refusing to replace foreign fractal command: $canonical" >&2; return 1;
+      }
+    elif [[ -f $canonical && -x $canonical ]]; then
+      for name in st st3; do
+        [[ -L $bin_dir/$name ]] && target=$(readlink "$bin_dir/$name") &&
+          [[ $target == fractal || $target == "$canonical" ]] || {
+            echo "install: refusing to replace foreign fractal command: $canonical" >&2; return 1;
+          }
+      done
+    else
+      echo "install: refusing to replace foreign fractal command: $canonical" >&2; return 1
+    fi
+  fi
+  # An explicit instance coexists with the default login command; its own
+  # destination still requires positive ownership above.
+  [[ -z $instance ]] || return 0
+  local -a directories
+  # Match the helper's resolved-parent exclusion without resolving link targets.
+  if [[ -n $macos_app ]]; then destination_directory=$(cd "$bin_dir" && pwd -P); fi
+  IFS=: read -ra directories <<< "${PATH:-}"
+  for directory in "${directories[@]}"; do
+    directory=${directory:-.}
+    [[ -d $directory ]] || continue
+    if [[ -n $macos_app ]]; then
+      directory=$(cd "$directory" && pwd -P)
+    else
+      directory=$(cd "$directory" && pwd)
+    fi
+    [[ $directory != "$destination_directory" ]] || continue
+    candidate="$directory/fractal"
+    if [[ -e $candidate || -L $candidate ]]; then
+      if [[ -L $candidate ]]; then
+        target=$(readlink "$candidate")
+        [[ $target == "$canonical" || $target == "$bin_dir/st3" ||
+          ( -n $macos_app && $target == "$macos_app/Contents/MacOS/fractal" ) ]] && continue
+      fi
+      echo "install: refusing to install: PATH contains a foreign fractal command: $candidate" >&2
+      return 1
+    fi
+  done
+}
+mkdir -p "$bin_dir"
+bin_dir=$(cd "$bin_dir" && pwd)
+# Refuse foreign commands before either version or service-status probes.
+refuse_foreign_fractal
+if $source_preflight; then exit 0; fi
 installed_version() {
   local version
   version=$("$1" --version 2>/dev/null) || version=unknown
   printf '%s' "${version:-unknown}"
 }
 old_version=unknown
-new_version=$(installed_version "$source_dir/st3")
+new_version=$(installed_version "$source_dir/fractal")
 daemon_running=false
 existing=false
-for name in st3 st; do
+for name in fractal st3 st; do
   if [[ -e $bin_dir/$name || -L $bin_dir/$name ]]; then
     existing=true
     if [[ -x $bin_dir/$name ]]; then
@@ -113,15 +195,15 @@ done
 if $existing && ! $quiet; then
   printf 'Upgrading Fractal %s → %s in %s\n' "$old_version" "$new_version" "$bin_dir"
 fi
-binaries=(st3 pty)
+binaries=(fractal pty)
 for binary in "${binaries[@]}"; do
-  [[ -f $source_dir/$binary && -x $source_dir/$binary ]] || {
+  [[ -f $source_dir/$binary && -x $source_dir/$binary && ! -L $source_dir/$binary ]] || {
     echo "missing executable: $binary" >&2; exit 1;
   }
 done
 web_source="$source_dir/../share/fractal-web"
 [[ -f $web_source/index.html ]] || { echo "missing web assets: share/fractal-web/index.html" >&2; exit 1; }
-for name in "${binaries[@]}" st stui; do
+for name in "${binaries[@]}" st st3 stui; do
   [[ ! -d $bin_dir/$name ]] || { echo "refusing to replace directory: $name" >&2; exit 1; }
 done
 mkdir -p "$bin_dir"
@@ -136,9 +218,18 @@ macos=false
 macos_job=
 macos_locked=false
 macos_lock=
-macos_home=
-macos_app=
 macos_helper="$(cd "$(dirname "$0")" && pwd)/install-macos.py"
+previous_entry_is_unchanged() {
+  local previous current
+  if [[ $(uname -s) == Darwin ]]; then
+    previous=$(stat -f '%d:%i' "$1" 2>/dev/null) || return 1
+    current=$(stat -f '%d:%i' "$2" 2>/dev/null) || return 1
+  else
+    previous=$(stat -c '%d:%i' -- "$1" 2>/dev/null) || return 1
+    current=$(stat -c '%d:%i' -- "$2" 2>/dev/null) || return 1
+  fi
+  [[ -n $previous && -n $current && $previous == "$current" ]]
+}
 cleanup() {
   status=$?
   trap - EXIT
@@ -156,8 +247,9 @@ cleanup() {
     fi
     if $restore_bins; then
       mkdir -p "$stage/restore" || restored=false
-      for name in "${binaries[@]}" st stui; do
+      for name in "${binaries[@]}" st st3 stui; do
         if [[ -e $stage/previous/$name || -L $stage/previous/$name ]]; then
+          previous_entry_is_unchanged "$stage/previous/$name" "$bin_dir/$name" && continue
           # Keep backups intact; hard links need no executable-sized allocation.
           ln -P "$stage/previous/$name" "$stage/restore/$name" && \
             mv -f "$stage/restore/$name" "$bin_dir/$name" || restored=false
@@ -204,9 +296,9 @@ take_lock "$bin_dir/.smalltalk-install.lock"
 locked=true
 stage=$(mktemp -d "$bin_dir/.smalltalk-install.XXXXXX")
 mkdir "$stage/previous"
-for name in "${binaries[@]}" st stui; do
+for name in "${binaries[@]}" st st3 stui; do
   if [[ -e $bin_dir/$name || -L $bin_dir/$name ]]; then
-    cp -pP "$bin_dir/$name" "$stage/previous/$name"
+    ln -P "$bin_dir/$name" "$stage/previous/$name"
   fi
 done
 cp -R "$web_source" "$stage/web"
@@ -216,22 +308,11 @@ for binary in "${binaries[@]}"; do
   chmod 0755 "$stage/$binary"
 done
 # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-ln -s st3 "$stage/st"
+ln -s fractal "$stage/st"
+ln -s fractal "$stage/st3"
 # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 if [[ $(uname -s) == Darwin ]]; then
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  macos_home="${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME:-$HOME}}"
-  mkdir -p "$macos_home"
-  macos_home=$(cd "$macos_home" && pwd)
-  macos_app=$(python3 - "$macos_home" <<'PY'
-import os
-from pathlib import Path
-import sys
-# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-app = os.environ.get('FRACTAL_MACOS_APP_PATH', os.environ.get('ST_MACOS_APP_PATH'))
-print(Path(app).expanduser().absolute() if app else Path(sys.argv[1]) / 'Applications/SmallTalk.app')
-PY
-)
   macos_lock="$(dirname "$macos_app")/.${macos_app##*/}.archive-install.lock"
   mkdir -p "$(dirname "$macos_app")"
   # Different bin directories can still install the same app. This is separate
@@ -241,8 +322,11 @@ PY
   refuse_nix_path "$macos_app"
   if [[ -e $macos_app ]] && ! $existing; then
     existing=true
-    old_version=$(installed_version "$macos_app/Contents/MacOS/st3")
-    status=$("$macos_app/Contents/MacOS/st3" service status --json 2>/dev/null | tr -d '[:space:]') || status=
+    app_binary="$macos_app/Contents/MacOS/fractal"
+    # Read retained pre-cutover apps without changing their signed contents.
+    [[ -x $app_binary ]] || app_binary="$macos_app/Contents/MacOS/st3"
+    old_version=$(installed_version "$app_binary")
+    status=$("$app_binary" service status --json 2>/dev/null | tr -d '[:space:]') || status=
     case "$status" in *'"running":true'*) daemon_running=true ;; esac
     if ! $quiet; then
       printf 'Upgrading Fractal %s → %s in %s\n' "$old_version" "$new_version" "$macos_app"
@@ -273,42 +357,23 @@ if [[ -e $web_dir || -L $web_dir ]]; then
 fi
 web_replaced=true
 mv "$stage/web" "$web_dir"
-for name in "${binaries[@]}" st; do
-  if [[ $macos == true && $name == st3 ]]; then continue; fi
+for name in "${binaries[@]}" st st3; do
+  if [[ $macos == true && ( $name == fractal || $name == st || $name == st3 ) ]]; then continue; fi
   mv -f "$stage/$name" "$bin_dir/$name"
 done
 # Retire the old executable; no alias or shim remains.
 rm -f -- "$bin_dir/stui"
-if ! $macos; then
-  foreign_path=false
-  IFS=: read -ra path_dirs <<< "${PATH:-}"
-  for path_dir in "${path_dirs[@]}"; do
-    path_dir=${path_dir:-.}
-    [[ -d $path_dir ]] || continue
-    path_dir=$(cd "$path_dir" && pwd)
-    [[ $path_dir != "$bin_dir" ]] || continue
-    if [[ -e $path_dir/fractal || -L $path_dir/fractal ]]; then
-      [[ -L $path_dir/fractal && $(readlink "$path_dir/fractal") == "$bin_dir/st3" ]] || foreign_path=true
-    fi
-  done
-  if [[ -L $bin_dir/fractal && ( $(readlink "$bin_dir/fractal") == st3 || $(readlink "$bin_dir/fractal") == "$bin_dir/st3" ) ]]; then
-    ln -s st3 "$stage/fractal"
-    mv -f "$stage/fractal" "$bin_dir/fractal"
-  elif $foreign_path || [[ -e $bin_dir/fractal || -L $bin_dir/fractal ]] || ! ln -s st3 "$bin_dir/fractal" 2>/dev/null; then
-    printf 'install: leaving fractal unchanged: destination %s/fractal or PATH contains a foreign command; use st, or move the foreign fractal and reinstall to enable the alias.\n' "$bin_dir" >&2
-  fi
-fi
 committed=true
 if $existing && ! $quiet; then
-  printf 'Installed CLI: %s → %s\n' "$old_version" "$(installed_version "$bin_dir/st3")"
+  printf 'Installed CLI: %s → %s\n' "$old_version" "$(installed_version "$bin_dir/fractal")"
 fi
 if $daemon_running; then
   printf 'A daemon is running; it keeps its current build until you restart it: ' >&2
-  printf '%q ' "$bin_dir/st" >&2
+  printf '%q ' "$bin_dir/fractal" >&2
   if [[ -n $instance ]]; then printf '%q %q ' --instance "$instance" >&2; fi
   printf 'service restart. Check with `fractal doctor` afterwards.\nUpgrade guide: https://fractal.how/docs/guides/upgrading\n' >&2
 fi
 if ! $quiet; then
-  printf 'Installed st3, st -> st3, and pty in %s\n' "$bin_dir"
+  printf 'Installed fractal, st -> fractal, st3 -> fractal, and pty in %s\n' "$bin_dir"
   echo 'Running services were not restarted.'
 fi

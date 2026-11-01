@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The terminal UI remembers content destinations across spaces, with back/forward navigation, Ctrl+A then t to open an agent terminal from its conversation, and Enter to attach detached terminal panes.",
+  "replay": {"status": "none", "detail": "No runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema change; device-local workspace format 3 adds bounded navigation history and still reads formats 1 and 2."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "changed", "detail": "Binding cutover: Ctrl+] no longer attaches a terminal; Enter attaches an already detached terminal pane. From an agent conversation in Fractal TUI, Ctrl+A opens agent actions, then t (Terminal) opens its terminal. The guidance correction adds no Attach control and changes no keyboard meanings. Ctrl+[ and Ctrl+] navigate with enhanced keyboard input. Legacy Ctrl+5 goes forward. Leader [ and ] navigate on all terminals. Attached programs keep direct chords. Older daemons still send attention text advertising the old Ctrl+] attachment shortcut or an Attach control until those daemons upgrade; follow the current TUI route instead. Saved-session conversation history survives workspace reopen and pruning; moved tabs restore in their current split."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No manual upgrade step."},
+  "recovery": {"status": "none", "detail": "No runtime recovery change."}
+}

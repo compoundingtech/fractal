@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Test only: fractal-api-core's SQL message page tests and the selector claim-edit test publish pending message selectors before they page at the store's own index. A commit folds selectors for at most 10 ms of wall time, so on a loaded host a fixture message, an edit's supersession or a deletion's promotion could still be pending, and a page was cut below the snapshot it was asked for or still showed a promoted row as superseded.",
+  "replay": {
+    "status": "none",
+    "detail": "No record, signature or storage format changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Test only."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Test only."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the change."
+  }
+}

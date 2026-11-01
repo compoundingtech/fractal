@@ -3,10 +3,11 @@
 
   scripts/ci-sparse-tree --repo DIR --check NAME --into EMPTY_DIR [--policy FILE] [--link PATH]...
 
-The check's `inputs` (.st/evidence-skip-policy.json, checks.NAME.inputs) are the paths its evidence key covers: a pull request that
+The check's `inputs` (evidence-skip-policy.json, checks.NAME.inputs) are the paths its evidence key covers: a pull request that
 changes none of them reuses an earlier signature. A check that runs in this copy can read nothing else, so one that reads outside its
 inputs fails instead of passing on a stale signature, and the declared list cannot drift from what the check reads. Each input is a
 tracked file or a directory; one that matches no tracked file is an error (the list names what exists).
+During arn:lmig:smalltalk:2026-10-27-dot-fractal-config, a declared pair `.st`, `.fractal` requires at least one layout, not both.
 --link PATH symlinks an untracked directory of the repository into the copy when it exists (the megarepo members under repos/, which the
 tests that run genie import): environment the inputs pin (megarepo.lock, flake.lock), not an input of its own.
 """
@@ -17,6 +18,16 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config
+def config_path(root, name):
+    new = root / '.fractal' / name
+    try:
+        new.lstat()
+    except FileNotFoundError:
+        return root / '.st' / name
+    return new
 
 
 def tracked(repo):
@@ -43,6 +54,11 @@ def select(files, inputs):
         if not hits:
             unmatched.append(item)
         chosen.update(hits)
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — a declared pair needs one layout.
+    pair = {'.st', '.fractal'}
+    if pair <= {item.rstrip('/') for item in inputs} and any(
+            name.startswith(('.st/', '.fractal/')) for name in chosen):
+        unmatched = [item for item in unmatched if item not in pair]
     return sorted(chosen), unmatched
 
 
@@ -63,12 +79,12 @@ def main(argv):
     parser.add_argument('--repo', required=True, type=Path)
     parser.add_argument('--check', required=True)
     parser.add_argument('--into', required=True, type=Path)
-    parser.add_argument('--policy', type=Path, help='default: .st/evidence-skip-policy.json in the repo')
+    parser.add_argument('--policy', type=Path, help='default: .fractal/evidence-skip-policy.json, then .st only if absent')
     parser.add_argument('--link', action='append', default=[], metavar='PATH', help='an untracked directory to symlink into the copy when it exists')
     args = parser.parse_args(argv)
     if args.into.exists() and any(args.into.iterdir()):
         raise SystemExit(f'ci-sparse-tree: {args.into} is not empty')
-    names, unmatched = select(tracked(args.repo), declared_inputs(args.policy or args.repo / '.st/evidence-skip-policy.json', args.check))
+    names, unmatched = select(tracked(args.repo), declared_inputs(args.policy or config_path(args.repo, 'evidence-skip-policy.json'), args.check))
     if unmatched:
         raise SystemExit(f'ci-sparse-tree: inputs of {args.check} that match no tracked file: {", ".join(unmatched)}')
     args.into.mkdir(parents=True, exist_ok=True)

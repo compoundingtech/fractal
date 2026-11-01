@@ -104,6 +104,49 @@ pub fn resolve_tool(override_path: Option<&Path>, name: &str) -> Option<PathBuf>
     })
 }
 
+/// Find the pairing helper: new then legacy environment, beside this executable, then
+/// each PATH directory. Within each directory the new executable name wins.
+/// Configured paths are returned even if absent, so callers retain their absence policy.
+pub fn resolve_fabric_adapter() -> Result<Option<PathBuf>> {
+    let executable = std::env::current_exe().ok();
+    let paths = std::env::var_os("PATH");
+    discover_fabric_adapter(
+        std::env::var_os("FRACTAL_FABRIC_ADAPTER").as_deref(),
+        std::env::var_os("ST_FABRIC_ADAPTER").as_deref(),
+        executable.as_deref().and_then(Path::parent),
+        paths.as_deref(),
+    )
+}
+
+fn discover_fabric_adapter(
+    new_env: Option<&std::ffi::OsStr>,
+    old_env: Option<&std::ffi::OsStr>,
+    beside: Option<&Path>,
+    paths: Option<&std::ffi::OsStr>,
+) -> Result<Option<PathBuf>> {
+    if let (Some(new), Some(old)) = (new_env, old_env) {
+        anyhow::ensure!(
+            new == old,
+            "FRACTAL_FABRIC_ADAPTER and ST_FABRIC_ADAPTER name different paths; \
+             unset one or set both to the same path"
+        );
+    }
+    if let Some(path) = new_env.or(old_env) {
+        return Ok(Some(PathBuf::from(path)));
+    }
+    let in_directory = |directory: &Path| {
+        ["fractal-fabric-adapter", "st-fabric-adapter"]
+            .into_iter()
+            .map(|name| directory.join(name))
+            .find(|candidate| candidate.is_file())
+    };
+    Ok(beside.and_then(in_directory).or_else(|| {
+        paths.and_then(|paths| {
+            std::env::split_paths(paths).find_map(|directory| in_directory(&directory))
+        })
+    }))
+}
+
 #[derive(Debug)]
 struct CommandFailure(String);
 
@@ -342,9 +385,19 @@ pub async fn tailscale_addresses(tailscale: &Path) -> Result<Vec<IpAddr>> {
     Ok(parse_tailscale_ips(&run(tailscale, &["ip"]).await?))
 }
 
+pub const LEGACY_FLEET_PROTOCOL_PREFIX: &str = "st3/fleet/";
+pub const FRACTAL_FLEET_PROTOCOL_PREFIX: &str = "fractal/fleet/";
+
+/// Accept only either fleet protocol name bound to this exact fleet.
+pub fn is_fleet_fabric_protocol(protocol: &str, fleet_id: &str) -> bool {
+    [LEGACY_FLEET_PROTOCOL_PREFIX, FRACTAL_FLEET_PROTOCOL_PREFIX]
+        .into_iter()
+        .any(|prefix| protocol.strip_prefix(prefix) == Some(fleet_id))
+}
+
 /// The default Fabric protocol for a fleet, so a throwaway fleet never collides with another.
 pub fn default_fabric_protocol(fleet_id: &str) -> String {
-    format!("st3/fleet/{fleet_id}")
+    format!("{LEGACY_FLEET_PROTOCOL_PREFIX}{fleet_id}")
 }
 
 /// The `fabric` command, which talks to the local Fabric daemon.
@@ -701,6 +754,53 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn fleet_protocol_names_are_bound_to_the_exact_fleet() {
+        for prefix in [LEGACY_FLEET_PROTOCOL_PREFIX, FRACTAL_FLEET_PROTOCOL_PREFIX] {
+            assert!(is_fleet_fabric_protocol(
+                &format!("{prefix}fleet-a"),
+                "fleet-a"
+            ));
+            assert!(!is_fleet_fabric_protocol(
+                &format!("{prefix}fleet-b"),
+                "fleet-a"
+            ));
+            assert!(!is_fleet_fabric_protocol(
+                &format!("{prefix}fleet-a/extra"),
+                "fleet-a"
+            ));
+        }
+        for protocol in ["other/fleet/fleet-a", "fractal/pty/fleet-a", "st3/fleet-a"] {
+            assert!(!is_fleet_fabric_protocol(protocol, "fleet-a"));
+        }
+        assert_eq!(default_fabric_protocol("fleet-a"), "st3/fleet/fleet-a");
+    }
+
+    #[test]
+    fn advertised_fleet_protocol_names_are_read_without_rewriting_routes() {
+        for prefix in [LEGACY_FLEET_PROTOCOL_PREFIX, FRACTAL_FLEET_PROTOCOL_PREFIX] {
+            let protocol = format!("{prefix}fleet-a");
+            let route = Route::Fabric {
+                node: "node-a".into(),
+                protocol: protocol.clone(),
+            };
+            assert_eq!(
+                parse_route(&format!("fabric://node-a/{protocol}")),
+                Some(route.clone())
+            );
+            assert_eq!(
+                routes_from_endpoints(
+                    &[json!({"transport": "fabric", "node": "node-a", "protocol": protocol})],
+                    LocalTransports {
+                        fabric: true,
+                        ..LocalTransports::default()
+                    },
+                ),
+                vec![route],
+            );
+        }
+    }
 
     #[test]
     fn carrier_comes_from_the_dial_route_including_overrides() {
@@ -1209,6 +1309,65 @@ mod tests {
             "echo '{\"socket\":\"dials/node-b.sock\"}'",
         ));
         assert!(relative.dial_socket("node-b", "p").await.is_err());
+    }
+
+    #[test]
+    fn fabric_adapter_environment_precedence_and_conflict() {
+        let new = std::ffi::OsStr::new("new-adapter");
+        let old = std::ffi::OsStr::new("old-adapter");
+        for (new_env, old_env, expected) in [
+            (Some(new), None, new),
+            (None, Some(old), old),
+            (Some(new), Some(new), new),
+        ] {
+            assert_eq!(
+                discover_fabric_adapter(new_env, old_env, Some(Path::new(".")), None).unwrap(),
+                Some(PathBuf::from(expected))
+            );
+        }
+        let error = discover_fabric_adapter(Some(new), Some(old), None, None).unwrap_err();
+        assert!(error.to_string().contains("FRACTAL_FABRIC_ADAPTER and ST_FABRIC_ADAPTER"));
+        assert!(error.to_string().contains("different paths"));
+    }
+
+    #[test]
+    fn fabric_adapter_location_and_name_precedence() {
+        let root = tempfile::tempdir().unwrap();
+        let directories = ["beside", "first", "second"].map(|name| root.path().join(name));
+        for directory in &directories {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let paths = std::env::join_paths(&directories[1..]).unwrap();
+        let candidates: Vec<_> = directories.iter().flat_map(|directory| {
+            ["fractal-fabric-adapter", "st-fabric-adapter"]
+                .map(|name| directory.join(name))
+        }).collect();
+        for candidate in &candidates {
+            std::fs::write(candidate, "").unwrap();
+        }
+        for (new, old) in [(Some("configured"), None), (None, Some("configured"))] {
+            assert_eq!(
+                discover_fabric_adapter(
+                    new.map(std::ffi::OsStr::new),
+                    old.map(std::ffi::OsStr::new),
+                    Some(&directories[0]),
+                    Some(&paths),
+                ).unwrap(),
+                Some(PathBuf::from("configured"))
+            );
+        }
+        for expected in &candidates {
+            // Removing each winner proves both names at every location and that a
+            // legacy name in an earlier directory beats a new name later on.
+            assert_eq!(
+                discover_fabric_adapter(None, None, Some(&directories[0]), Some(&paths)).unwrap(),
+                Some(expected.clone())
+            );
+            std::fs::remove_file(expected).unwrap();
+        }
+        let absent = discover_fabric_adapter(None, None, Some(&directories[0]), Some(&paths))
+            .unwrap();
+        assert!(absent.is_none());
     }
 
     #[test]

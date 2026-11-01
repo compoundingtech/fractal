@@ -32,6 +32,17 @@ BASE_SCRIPTS = ('ci-rust-test-notes', 'ci-rust-test-result', 'rust-test-keys', '
                 'evidence-publish')
 SHARDS = ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4')
 TOOLCHAIN = hashlib.sha256(b'/nix/store/example-dev-shell.drv').hexdigest()
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live checkout only.
+def root_config(name):
+    path = ROOT / '.fractal' / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return ROOT / '.st' / name
+    return path
+
 SYSTEM = ' '.join(subprocess.run(['uname', '-sm'], capture_output=True, text=True).stdout.split())
 QUEUE = {'GITHUB_EVENT_NAME': 'merge_group', 'GITHUB_REF': 'refs/heads/gh-readonly-queue/main/pr-7-abc'}
 
@@ -94,7 +105,7 @@ class Fixture(unittest.TestCase):
             self.write(f'crates/{name}/src/lib.rs', f'// {name}\n')
         self.write('.st/rust-test-inputs.json', json.dumps({'global': ['Cargo.toml', 'Cargo.lock'], 'crates': {name: {'extra': []} for name in self.CRATES},
                                                             'no_tests': ['empty']}))
-        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        policy = json.loads(root_config('evidence-skip-policy.json').read_text())
         self.write('.st/evidence-skip-policy.json', json.dumps({'version': 1, 'checks': {'rust-tests': policy['checks']['rust-tests']}}))
         self.write('.st/evidence-keys', f'fleet/ci namespaces="git" {pub[0]} {pub[1]}\n')
         for script in BASE_SCRIPTS:
@@ -282,6 +293,18 @@ class Rule2PerCrateUnion(Fixture):
         self.assertEqual(done.returncode, 1)
         self.assertIn('merge-only shards must be skipped', done.stdout)
 
+    def test_main_proof_uses_all_four_shards_without_forging_its_event(self):
+        self.queue_shards(*self.GREEN)
+        env = self.environment(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/main', CI_TEST_TOPOLOGY='merge-group')
+        planned = self.planned(env)
+        self.assertEqual(planned['event_name'], 'push')
+        self.assertEqual(planned['partitions'], [f'hash:{index}/4' for index in range(1, 5)])
+        missing = self.needs()
+        missing['linux-tests-shard-4']['result'] = 'skipped'
+        done, _ = self.plan(dict(env, NEEDS_JSON=json.dumps(missing)))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('linux-tests-shard-4=skipped', done.stdout)
+
 
 class Rule3NothingFromPartialData(Fixture):
     def refused(self, why, env=None):
@@ -362,6 +385,25 @@ class Rule4NoPassingNoteForFailedOrFlaky(Fixture):
         self.assertEqual(planned['run_attempt'], '2')
 
 
+class ConfigLayoutBridge(Fixture):
+    def test_no_tests_reads_the_selected_base_layout_without_legacy_rescue(self):
+        """arn:lmig:smalltalk:2026-10-27-dot-fractal-config"""
+        here = os.getcwd()
+        os.chdir(self.work)
+        self.addCleanup(os.chdir, here)
+        self.write('.fractal/rust-test-inputs.json', '{"no_tests": ["preferred"]}')
+        git(self.work, 'add', '-A')
+        git(self.work, 'commit', '-q', '-m', 'preferred inputs')
+        preferred = git(self.work, 'rev-parse', 'HEAD')
+        self.assertEqual(notes.no_tests(self.base), {'empty'})
+        self.assertEqual(notes.no_tests(preferred), {'preferred'})
+        self.write('.fractal/rust-test-inputs.json', '{broken')
+        git(self.work, 'add', '-A')
+        git(self.work, 'commit', '-q', '-m', 'malformed preferred inputs')
+        with self.assertRaises(notes.Refused):
+            notes.no_tests('HEAD')
+
+
 class Rule5SameKeysAndRecordsAsStTest(Fixture):
     def test_ci_and_st_test_compute_the_same_key_for_every_crate(self):
         git(self.work, 'checkout', '-q', '-b', 'feature')
@@ -409,7 +451,7 @@ class Rule5SameKeysAndRecordsAsStTest(Fixture):
         self.assertEqual((result.get('satisfied'), result.get('reason')), (False, 'crate_uncovered'), result)
         for crate in ('alpha', 'beta', 'empty', 'idle'):
             self.assertIn(f'{crate} (untrusted_level)', result['detail'])
-        rule = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['rust-tests']['kinds']['wrapper']
+        rule = json.loads(root_config('evidence-skip-policy.json').read_text())['checks']['rust-tests']['kinds']['wrapper']
         self.assertNotIn('fleet', rule['trust_levels'])
         keys = {entry['crate']: entry['key'] for entry in planned['crates']}
         for statement in self.statements():
@@ -460,6 +502,14 @@ class Rule5SameKeysAndRecordsAsStTest(Fixture):
 
 
 class Rule6PublishedFailSoft(unittest.TestCase):
+    def test_explicit_topology_changes_planning_not_signing_authority(self):
+        self.assertEqual(notes.planning_event('push', 'merge-group'), 'merge_group')
+        self.assertEqual(notes.planning_event('push', ''), 'push')
+        self.assertEqual(len(notes.expected_shards(notes.planning_event('push', 'merge-group'))[0]), 4)
+        for event, topology in [('pull_request', 'merge-group'), ('workflow_dispatch', 'merge-group'), ('push', 'unknown')]:
+            with self.assertRaises(notes.Refused):
+                notes.planning_event(event, topology)
+
     def test_the_note_job_is_fail_soft_takes_its_scripts_from_the_base_and_judges_before_the_key(self):
         blocks = workflow_blocks()
         job = blocks['evidence-note-rust-tests']
@@ -498,7 +548,7 @@ class Rule6PublishedFailSoft(unittest.TestCase):
             self.assertEqual(artifact, f'rust-test-junit-{name}-${{{{ github.run_attempt }}}}')
             self.assertTrue(notes.ARTIFACT.fullmatch(artifact.replace('${{ github.run_attempt }}', '3')), artifact)
         # The rust-tests policy entry is enforced (2026-10-28): a pull request skips rust-tests on per-crate notes.
-        self.assertIs(json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['rust-tests']['enforce'], True)
+        self.assertIs(json.loads(root_config('evidence-skip-policy.json').read_text())['checks']['rust-tests']['enforce'], True)
 
     def test_the_shard_partitions_are_the_workflow_s(self):
         blocks = workflow_blocks()

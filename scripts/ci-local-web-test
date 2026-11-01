@@ -16,6 +16,12 @@ python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": 
 '''
 
 
+def cores():
+    """The cores the script divides: nproc's, which counts a CPU quota on the caller's cgroup (a seat's lane), where the
+    affinity mask still names every core of the host."""
+    return int(subprocess.run(['nproc'], capture_output=True, text=True, check=True).stdout)
+
+
 class CiLocalWeb(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -84,7 +90,7 @@ class CiLocalWeb(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         env = calls[-1]['env']
         self.assertEqual(env['KIT_PLAY_ADMISSION_BIN'], str(admission))
-        self.assertEqual(env['KIT_PLAY_WORKERS'], str(max(1, len(os.sched_getaffinity(0)) // 2)))
+        self.assertEqual(env['KIT_PLAY_WORKERS'], str(max(1, cores() // 2)))
         # The admission program reads its limits and queue under the account's home, which the stages' HOME hides.
         self.assertEqual(env['BUILD_ADMISSION_CONFIG'], f'{self.home}/.config/build-admission')
         self.assertEqual(env['BUILD_ADMISSION_STATE'], f'{self.home}/.local/state/st3/operations')
@@ -94,7 +100,7 @@ class CiLocalWeb(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         env = calls[-1]['env']
         self.assertEqual(env['KIT_PLAY_ADMISSION_BIN'], '')
-        self.assertEqual(env['KIT_PLAY_WORKERS'], str(len(os.sched_getaffinity(0))))  # one heavy slot when the host names none
+        self.assertEqual(env['KIT_PLAY_WORKERS'], str(cores()))  # one heavy slot when the host names none
         self.assertNotIn('BUILD_ADMISSION_CONFIG', env)
 
     def test_the_host_watchman_service_is_named_by_its_socket(self):

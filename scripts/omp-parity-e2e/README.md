@@ -9,7 +9,7 @@ an original transcript, or simulates a live OMP process.
 From the repository root, with previously built binaries:
 
 ```bash
-scripts/omp-parity-e2e/run --st3 "$PWD/target/debug/st3" --out "$PWD/tmp/omp-parity-e2e"
+scripts/omp-parity-e2e/run --st3 "$PWD/target/debug/fractal" --out "$PWD/tmp/omp-parity-e2e"
 ```
 
 Optional: add `--corpus /absolute/path/to/session.jsonl` for private first-page

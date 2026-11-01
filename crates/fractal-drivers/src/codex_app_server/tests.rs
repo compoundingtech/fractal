@@ -8794,6 +8794,149 @@ fn the_control_pump_keeps_a_retryable_disconnect_alive_for_the_next_turn() {
     );
 }
 
+/// Codex 0.160.1 retries a sampling request a few times within seconds, then fails the turn with
+/// "exceeded retry limit, last status: 429 Too Many Requests" (seen on 2026-10-26). The
+/// frames below are in the order that night's app-server log shows: the thread's `systemError`,
+/// the typed `error` with `willRetry: false`, then the failed `turn/completed`. The seat must stay
+/// up, read `rateLimited`, and take the turn st sends when its backoff resumes the session.
+#[test]
+fn a_429_past_codexs_retries_keeps_the_seat_up_rate_limited_for_st_to_resume() {
+    let tmp = crate::canonical_tempdir();
+    let _stop_exclusive = stop_flag_tests();
+    let config = delivery_config(tmp.path());
+    let agent_dir = config.agent_dir.clone();
+    let server_config = config.clone();
+    let socket = tmp.path().join("server.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let limited = json!({"responseTooManyFailedAttempts":{"httpStatusCode":429}});
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(TEST_EVENT_TIMEOUT)).unwrap();
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialize"
+        );
+        write_json_message(
+            &mut websocket,
+            &json!({"id": 0, "result": {"userAgent": "fake"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialized"
+        );
+        for frame in [
+            json!({"method":"thread/started", "params":{"thread":{"id":"thread-main", "status":{"type":"idle"}}}}),
+            json!({"method":"turn/started", "params":{"threadId":"thread-main", "turn":{"id":"turn-limited"}}}),
+            json!({"method":"thread/status/changed", "params":{"threadId":"thread-main", "status":{"type":"systemError"}}}),
+            error_frame("turn-limited", limited.clone(), false),
+            json!({"method":"turn/completed", "params":{"threadId":"thread-main", "turn":{"id":"turn-limited", "status":"failed", "error":{"message":"exceeded retry limit, last status: 429 Too Many Requests", "codexErrorInfo":limited}}}}),
+        ] {
+            write_json_message(&mut websocket, &frame).unwrap();
+        }
+        // Wait for the test to read the rate-limited record, then resume as st's backoff does.
+        finished_rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap();
+        let filename = message::send_to_inbox(
+            &server_config.inbox,
+            "daemon/runtime",
+            None,
+            None,
+            &[],
+            "The rate-limit (429 Too Many Requests) backoff elapsed. Resume in this existing session; do not create a replacement worker.",
+        )
+        .unwrap();
+        loop {
+            let request = read_json_message(&mut websocket).unwrap().unwrap();
+            match request["method"].as_str().unwrap() {
+                "account/read" => write_json_message(&mut websocket, &json!({"id":request["id"], "result":{"account":{"type":"apiKey"}}})).unwrap(),
+                "thread/read" => write_json_message(&mut websocket, &json!({"id":request["id"], "result":{"thread":{"id":"thread-main", "status":{"type":"systemError"}, "turns":[]}}})).unwrap(),
+                "turn/start" => {
+                    assert_eq!(request["params"]["threadId"], "thread-main", "the same session");
+                    write_json_message(&mut websocket, &json!({"id":request["id"], "result":{"turn":{"id":"turn-resumed"}}})).unwrap();
+                    for frame in [
+                        json!({"method":"turn/started", "params":{"threadId":"thread-main", "turn":{"id":"turn-resumed"}}}),
+                        json!({"method":"item/completed", "params":{"threadId":"thread-main", "turnId":"turn-resumed", "item":{"type":"userMessage", "id":"item-resumed", "clientId":request["params"]["clientUserMessageId"], "content":[]}}}),
+                        json!({"method":"thread/status/changed", "params":{"threadId":"thread-main", "status":{"type":"idle"}}}),
+                        json!({"method":"turn/completed", "params":{"threadId":"thread-main", "turn":{"id":"turn-resumed", "status":"completed"}}}),
+                    ] {
+                        write_json_message(&mut websocket, &frame).unwrap();
+                    }
+                    finished_rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap();
+                    return filename;
+                }
+                other => panic!("unexpected request: {other}"),
+            }
+        }
+    });
+    let stream = UnixStream::connect(&socket).unwrap();
+    let shutdown = stream.try_clone().unwrap();
+    let websocket = initialize_control(stream).unwrap().unwrap();
+    let control_path = tmp.path().join("state/control-state.json");
+    let pump_path = control_path.clone();
+    let binding_path = tmp.path().join("state/binding.json");
+    let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let pump = thread::spawn(move || {
+        pump_control(
+            websocket,
+            &binding_path,
+            &pump_path,
+            &runtime,
+            None,
+            Some(config),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        )
+    });
+    assert!(matches!(
+        rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap(),
+        ControlEvent::Bound
+    ));
+    // The record is published before each event: read it as events arrive, until it settles.
+    let record_once = |wanted: &dyn Fn(&harness_state::Observed) -> bool| {
+        let deadline = Instant::now() + TEST_EVENT_TIMEOUT;
+        loop {
+            let record = harness_state::read(&harness_state::harness_state_path(&agent_dir), None);
+            if record.as_ref().is_some_and(wanted) || Instant::now() > deadline {
+                return record.expect("an observed record must exist");
+            }
+            let _ = rx.recv_timeout(Duration::from_millis(50));
+        }
+    };
+    assert!(wait_for_observed_state(&control_path, &rx, |observed| matches!(
+        observed,
+        CodexObservedState::TerminalError { .. }
+    )));
+    let limited = record_once(&|record| record.reason.as_deref() == Some("rateLimited"));
+    let limited_diagnostic = turn_diagnostic(&agent_dir);
+    finished_tx.send(()).unwrap();
+    let resumed = record_once(&|record| {
+        record.state == harness_state::Activity::Idle && record.reason.is_none()
+    });
+    finished_tx.send(()).unwrap();
+    let filename = server.join().unwrap();
+    let _ = shutdown.shutdown(Shutdown::Both);
+    pump.join().unwrap();
+    assert_eq!(
+        limited.state,
+        harness_state::Activity::Idle,
+        "a 429 past Codex's retries must not end the incarnation"
+    );
+    assert_eq!(limited.reason.as_deref(), Some("rateLimited"));
+    let driver_diagnostic::Observed::Failure(failure) = limited_diagnostic else {
+        panic!("the rate-limited turn must keep its diagnostic")
+    };
+    assert_eq!(failure.reason, driver_diagnostic::Reason::TurnConnection);
+    assert_eq!(resumed.state, harness_state::Activity::Idle);
+    assert_eq!(resumed.reason, None, "the resumed turn went through");
+    assert_eq!(
+        ledger_entry(tmp.path(), &filename).unwrap().phase,
+        delivery_ledger::Phase::Consumed
+    );
+}
+
 #[test]
 fn retryable_connection_projection_requires_a_completed_turn_and_typed_evidence() {
     for final_error in [
@@ -8846,7 +8989,11 @@ fn retryable_connection_projection_requires_a_completed_turn_and_typed_evidence(
             &json!({"method":"turn/completed", "params":{"threadId":"thread-main", "turn":{"id":"turn-a", "status":"failed"}}}),
         );
         let observation = observed_record(&agent_dir);
-        let retryable = final_error.is_none() || final_error == Some(json!("other"));
+        // A connection cause, Codex's own retries spent or not, leaves a thread that takes the
+        // next turn: the seat stays idle and st backs off. Any other final cause ends it.
+        let retryable = final_error.is_none()
+            || final_error == Some(json!("other"))
+            || final_error == Some(json!("responseStreamDisconnected"));
         assert_eq!(
             observation.state,
             if retryable {
@@ -8861,8 +9008,6 @@ fn retryable_connection_projection_requires_a_completed_turn_and_typed_evidence(
                 "connection"
             } else if final_error == Some(json!("internalServerError")) {
                 "internal"
-            } else if final_error == Some(json!("responseStreamDisconnected")) {
-                "connection"
             } else {
                 "unclassified"
             })
@@ -9371,4 +9516,113 @@ fn managed_launch_argv_carries_access_mode_flags() {
         // A hand-run driver has no install policy and keeps its authored argv.
         assert_eq!(crate::claude_session::managed_claude_argv(None, workspace, authored.clone()), authored);
     }
+}
+
+#[test]
+fn a_seat_start_trusts_its_work_root_and_a_second_start_changes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    let config = home.join("config.toml");
+    let existing = "# Avery's codex config\nmodel = \"gpt-5\"\n\n[projects.\"/other\"]\ntrust_level = \"trusted\"\n";
+    fs::write(&config, existing).unwrap();
+    let root = tmp.path().join("work");
+    fs::create_dir_all(&root).unwrap();
+    let args = vec![
+        "--cd".to_string(),
+        root.display().to_string(),
+        "boot".to_string(),
+    ];
+
+    let admitted = admit_controlled_workspace_at(&config, &args).unwrap();
+
+    assert_eq!(admitted, fs::canonicalize(&root).unwrap());
+    let first = fs::read_to_string(&config).unwrap();
+    assert!(first.starts_with(existing), "the existing config was rewritten: {first}");
+    let parsed: toml::Value = toml::from_str(&first).unwrap();
+    assert_eq!(
+        parsed["projects"][admitted.to_str().unwrap()]["trust_level"].as_str(),
+        Some("trusted")
+    );
+    assert_eq!(parsed["projects"]["/other"]["trust_level"].as_str(), Some("trusted"));
+
+    admit_controlled_workspace_at(&config, &args).unwrap();
+    assert_eq!(fs::read_to_string(&config).unwrap(), first, "a second start changed the config");
+    // Only the seat's config.toml exists: no login file was created or touched.
+    let mut names: Vec<String> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["config.toml"]);
+}
+
+#[test]
+fn a_seat_start_creates_a_missing_config_and_trusts_only_the_last_work_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("codex-home").join("config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let first = tmp.path().join("first");
+    let last = tmp.path().join("last");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&last).unwrap();
+    let args = vec![
+        "-C".to_string(),
+        first.display().to_string(),
+        format!("--cd={}", last.display()),
+    ];
+
+    let admitted = admit_controlled_workspace_at(&config, &args).unwrap();
+
+    assert_eq!(admitted, fs::canonicalize(&last).unwrap());
+    let parsed: toml::Value = toml::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+    let projects = parsed["projects"].as_table().unwrap();
+    assert_eq!(projects.len(), 1, "{projects:?}");
+    assert_eq!(
+        projects[admitted.to_str().unwrap()]["trust_level"].as_str(),
+        Some("trusted")
+    );
+}
+
+#[test]
+fn a_seat_start_trusts_the_declared_workspace_when_the_argv_names_no_usable_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let declared = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    let cases: [Vec<String>; 2] = [
+        // A `--cd` whose directory does not exist: Codex reports it, the start is not stopped here.
+        vec![
+            "--cd".to_string(),
+            tmp.path().join("absent").display().to_string(),
+        ],
+        // An option this parser does not know fails closed there; the start must still get a root.
+        vec!["--an-option-from-a-newer-codex".to_string(), "boot".to_string()],
+    ];
+
+    for (index, args) in cases.into_iter().enumerate() {
+        let config = tmp.path().join(format!("config-{index}.toml"));
+        let admitted = admit_controlled_workspace_at(&config, &args).unwrap();
+        assert_eq!(admitted, declared, "case {index}");
+        let parsed: toml::Value = toml::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            parsed["projects"][declared.to_str().unwrap()]["trust_level"].as_str(),
+            Some("trusted"),
+            "case {index}"
+        );
+    }
+}
+
+#[test]
+fn a_seat_start_fails_when_the_config_cannot_be_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("work");
+    fs::create_dir_all(&root).unwrap();
+    // The config's parent is a regular file, so the entry cannot be written.
+    let blocker = tmp.path().join("blocker");
+    fs::write(&blocker, "").unwrap();
+    let config = blocker.join("config.toml");
+    let args = vec!["--cd".to_string(), root.display().to_string()];
+
+    let error = admit_controlled_workspace_at(&config, &args).unwrap_err();
+
+    assert!(format!("{error:#}").contains("admitting Codex workspace"), "{error:#}");
 }

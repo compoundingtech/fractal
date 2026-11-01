@@ -66,11 +66,14 @@ def selectors(base, scratch):
             for name, function in CHECKS.items()}
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for copy-only execution.
+def config_path(base, path):
+    new = path.replace('.st/', '.fractal/', 1)
+    return new if git('ls-tree', '--full-tree', '-z', base, '--', new) else path
+
+
 def declared(base):
-    try:
-        policy = json.loads(git('show', f'{base}:{POLICY}'))
-    except (RuntimeError, ValueError):
-        return {}
+    policy = json.loads(git('show', f'{base}:{config_path(base, POLICY)}'))
     return {name: entry['inputs'] for name, entry in policy.get('checks', {}).items()
             if name in CHECKS and isinstance(entry, dict) and isinstance(entry.get('inputs'), list)}
 

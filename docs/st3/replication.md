@@ -26,6 +26,8 @@ routes for backward compatibility. To let fleet preference select the carrier,
 remove the explicit override. Legacy operation without `fleet.toml` retains
 Tailscale-first automatic routing among locally available carriers.
 
+Fabric fleet readers accept `st3/fleet/<fleet>` and `fractal/fleet/<fleet>` for the same fleet; default writers still use `st3/fleet/<fleet>`.
+
 Use `st fleet transports add fabric --prefer` to enable Fabric and move it to the
 front, or to prefer an already enabled Fabric route without changing its saved
 protocol or exposure. An add without `--prefer` appends a new carrier and leaves
@@ -38,8 +40,11 @@ transport, and rejects a carrier absent from the list. An already-first carrier
 is a no-op, including no service restart. Changes are locked, saved atomically,
 and publish the existing enabled endpoints before refreshing services.
 These are local settings: choose the preference on each member independently.
-Installed services restart automatically; otherwise restart both `st3 daemon` and
-`st3 replication-worker` as instructed, including when using `--no-service`.
+Installed services restart automatically. Without services, start
+`fractal replication-worker` first, retain its PID, then start
+`fractal up --replication-worker-pid PID`. On Linux the daemon pins that process
+generation before listening; this option is refused for service-managed daemons. A manual
+worker restart requires restarting the foreground daemon with the new PID.
 The daemon reloads peer-relay transport settings; the worker reloads replication
 transport settings. Restarting only the worker leaves the running daemon's relay
 preference and enabled transports unchanged.
@@ -47,13 +52,50 @@ preference and enabled transports unchanged.
 ## Local adapter membership and leave authority
 
 Local adapters may read `GET /v1/internal/fleet/membership` on the daemon's Unix
-socket. Its response is the sealed `smallclaims::fleet::FleetView`: `anchor`,
+socket. Internal routes (`/v1/internal/...`) serve only the node's own processes: its
+replication worker, its adapters and its operator's CLI. They refuse seat callers, meaning a
+process running under an agent seat's harness, with `foreign-agent-actor`. A seat reads the
+fleet views it may see through public routes with the same answers: `GET /v1/fleet/status`,
+`/v1/fleet/membership`, `/v1/fleet/admission-residue` and `/v1/fleet/invites`. The CLI and the
+client use those first, and fall back to the internal route on a daemon that predates them. Its response is the sealed `smallclaims::fleet::FleetView`: `anchor`,
 `members`, and legacy removals. A member's `member_key` identifies its incarnation;
 names are not identity. `state = "current"` is application membership authority.
 An ended member is not authorized for ordinary replication or owner RPC, even if
 a transport temporarily remains available for leave completion. Published
 endpoints describe routes, not grants or live reachability. This endpoint remains
 a read-only membership projection and does not start or renew leave grace.
+
+On Linux worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
+`/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
+Unix connector's kernel-observed process generation with the replication worker.
+Services use the supervisor-observed worker; foreground operation uses the explicitly
+enrolled process. An unrelated unbound process is not a worker.
+
+The optional top-level daemon TOML key `worker_ingress_generation_check` accepts
+exactly `"observe"` or `"enforce"`; omission means `"observe"`. Unknown values fail
+configuration parsing at startup. Changing the mode requires restarting the daemon.
+In observe mode, unavailable or nonmatching evidence logs
+`fractal: worker authority observation would refuse ROUTE` and admits the request.
+Observe does not close the unbound local caller authority gap.
+In enforce mode, authentication precedes body decoding and unavailable or nonmatching
+process/supervisor evidence fails closed. Re-observation admits a restarted supervised
+worker and revokes its predecessor, including inherited connections.
+
+Deploy with observe first. Before enabling enforce on a member, retain at least
+24 hours of journal evidence covering replication and the other worker-only route
+classes, including worker restarts. Review unexpected would-refuse entries before
+changing that member's configuration; roll enforcement out one member at a time.
+
+On macOS these routes retain existing admission and emit `unverified-platform`,
+not an authentication success. The unbound local caller authority gap remains
+open: `LOCAL_PEERPID` and `LOCAL_PEERTOKEN` resolve through a live numeric PID;
+after PID reuse they can attribute a surviving socket to the wrong worker.
+
+This Linux boundary does not protect against same-UID service-manager takeover or
+ptrace of the trusted worker. User-service ownership and process debugging
+remain host trust assumptions; process pinning is not a separate-user sandbox.
+Operator fleet routes retain their existing local authority boundary.
+
 
 Adapters that retain a departing member's transport must instead make their
 decision from one `GET /v1/internal/fleet/leave-state` response:
@@ -310,6 +352,37 @@ session. Relays require it for session detail and child conversation reads; abse
 incompatible advertisements, and discovery HTTP 404/405, return HTTP 422 `peer-too-old`
 with “This host runs an older Fractal version; update it to open subagent conversations.”
 No session-detail POST or changed child ID is sent to that peer.
+
+Seat freshness has its own member-authenticated route, `POST /v1/peer/seat-freshness`, on which
+a seat's host pushes when it last heard its seats. A re-stamp that changes nothing stays in the
+host's local observation log, so this is how another member hears a resting seat.
+
+The push is reactive:
+- A commit on the host wakes its pusher. Within 10 seconds of that commit it reads the newest
+  local `harness.observed` of every seat its declarations place on it, in one statement.
+- It sends each other member, or configured peer, only the seats that changed since its last
+  push to that member. Every member is sent at once, directly, never through a relay hop. A push
+  names up to 2,048 seats, each with its incarnation and the time the host heard it.
+- It pushes only to a member whose own newest `daemon.started` advertises
+  `features.seat_freshness = 1`. A member whose `daemon.started` changed restarted, and gets
+  every seat again.
+- A failed push is retried a minute later, with or without a new commit, and the round runs once
+  when the daemon starts. Otherwise nothing is sent while nothing changes.
+
+The receiver takes a pushed time later than its own clock plus a minute as that time, so a host
+whose clock runs ahead can't keep a seat looking fresh. A bound harness is refused on the
+daemon's `/v1/internal/seat-freshness`: only the replication worker, which authenticated the
+sender, records a push. The receiver records a seat only when its declaration places the seat on
+the member that pushed it, keeps the newest time per seat and incarnation in memory, and answers with the seats it
+recorded. A seat it left out, such as one whose declaration hasn't reached it yet, stays owed. The
+host retries it a minute later without waiting for a commit, then less often while it stays owed,
+doubling up to every 15 minutes. An agent card's freshness and a
+mail hold read the latest of the replicated report, the local log, and that time. The card's
+90-second rule ages it, so a host that stops pushing reads stale.
+
+A member that doesn't advertise the feature is never pushed to, and it keeps reading replicated
+re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the
+route records nothing. Its peers read the replicated report, as before.
 
 Writers emit only three-field child IDs. At the link boundary, readers still accept
 two-field native-parent/task links because open or bookmarked links can outlive the
@@ -799,6 +872,8 @@ Each exchange also carries a claim-range summary: claim-range protocol version 1
 
 When the claims differ and an exchange moved no envelopes, the dialing worker walks the difference as the lowest-priority sync work, at most four round trips per exchange. Each round trip is an ordinary summary exchange whose inventory carries one bounded `claim_range_query`, and the peer answers in its exchange's `claim_ranges`: every non-empty top range (64 tops by the first six bits of a claim ID), then the leaves of at most 4 differing tops (4,096 leaves by the first three hex digits), then the IDs of at most 8 differing leaves (at most 4,096 IDs beyond the first leaf), then the envelopes carrying at most 512 claims the walker found it lacks. Those envelopes travel with the peer's ordinary exchange and are admitted like any other; no projection image or peer result is installed. A claim the walker has retired is never asked for, and a range the peer holds nothing in is not descended, since only the peer's claims can be missing here. A walk runs once for each pair of whole-set digests, so claims one side retired, or holds that the other lacks, cost one walk until either side's claims change; an answer from an index still folding claims in is asked again at the next exchange. A peer without the claim-range protocol ignores the query and is never walked.
 
+Between members that trim locally (`[trim] local`), the summary also carries `retired`: the same summary of the claim IDs the sender retired (`retired_claim_ids`, namespace 1 of the range index), sent only once that namespace has folded. A member that also trims locally compares it, and the walk descends the retired ranges beside the retained ones, in the same queries (`claim_range_query.retired`). A retired ID the peer lists and this member lacks is recorded as retired here when the answer arrives; nothing is fetched. So the set travels: a member never admits, asks for or serves a claim another member deleted, even when the claim comes from a member that still holds it or runs an older build. Recording one changes this member's retired digest, so an unfinished retired walk continues under the new pair. Ordinary members and older builds neither send nor read `retired`.
+
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
 A compact answer therefore lists the differing ranges that hold a live envelope first and the
 payloadless ones after, and each answer starts each group at a different range, so successive
@@ -1151,6 +1226,88 @@ for it; a daemon that never checks shows neither the line nor the row. A miss is
 other target's: the fault goes to the fleet's fault agent, and while a peer still differs the
 replication check fails `st doctor` as above.
 
+### Answers across members
+
+A member that trims on its own (`[trim] local`) deletes claims its peers may still hold, so two
+members stop holding the same claims and their envelope and claim digests no longer settle a
+comparison. What must still agree is what readers answer. `smallclaims::answers`
+summarizes that per claim kind, at a cut, so members can compare it:
+
+- A kind's answer for one key, a subject and the writer that wrote it, is the key's newest claim
+  in canonical order. A trim keeps every key's newest claim, so trimming changes no answer.
+- A key counts once its newest claim is older than the cut. A key with a newer claim is still
+  moving and is left out; the cut never selects an older claim, which a trimmed member may no
+  longer hold. A member that computes before a key's newer claim arrives still counts the key,
+  so two members that computed minutes apart can differ only in such keys. Each kind also
+  reports `before_cut`, a digest over every key's newest claim older than the cut, moving keys
+  included: members that still hold those claims agree on it whenever they computed, and a kind
+  whose `before_cut` agrees is no difference. Where it does not, because one member trimmed a
+  moving key's older claim, the keys a narrowing lists carry each moving key, marked `moving`,
+  and a key moving on either member is no difference.
+- Each kind reports its counted `keys`, its `claims` older than the cut, and a digest over its
+  keys and answers. `claims` is compared only between members that trim the same way, have
+  finished trimming the same checkpoint (`trimmed_cut_unix_ms`), and had no later trim
+  unfinished while they computed (`trim_unfinished`): a day's trim deletes claims older than the
+  answers cut, so two members that computed either side of it count different claims and answer
+  the same.
+- A claim that a `record.repaired` replaced counts nowhere. Whether a member still holds one
+  depends on whether it admitted or wrote it before the repair arrived (#4282), so the summary
+  leaves out every claim in `projection_digest_repaired_claims`.
+- Each key falls in one of 256 buckets by a hash of the key, with a digest per bucket, so a
+  difference narrows to a bucket and then to its keys without listing a whole kind.
+
+A summary reads every claim on a reader connection, ten thousand claims per statement in index
+order, so no statement holds a read snapshot (and the WAL) for minutes: ten minutes or more on a
+store of three million claims. It is taken once a cut and kept, never per request. The
+property test `a_trim_that_keeps_each_newest_claim_answers_the_same` holds the trim invariant for
+random histories and cuts.
+
+Once a day each member compares its answers with every peer it dials. The cut is the start of the
+UTC day, and the check waits an hour into the day so replication has brought every member what
+was written before it. A member asks a peer only after an exchange with it moved nothing, over the
+signed peer route `/v1/peer/answers`, authenticated like an exchange. The daemon computes its
+answers on a thread of its own, answering `pending` until it has them, so a request never waits
+for a pass over the store. It keeps the summary for the rest of the cut's day, and beside its
+database (`claims.sqlite3.answers.json`, readable by its owner only), so a restart and every
+peer's ask at the same cut are answered from it rather than computed again; a new build computes
+again. The summary also records the newest claim admitted when it was computed. A claim keeps
+the time its origin accepted it, so a member that was offline replays claims older than the cut
+after the summary was taken; before answering from a kept summary the member looks for a claim
+admitted since that is older than the cut, a short range of the primary key, and computes again
+if it finds one. A claim accepted after the cut only moves its key.
+
+When a kind differs the member compares again two hours later. A difference that lasts two hours
+is narrowed:
+bucket digests for each differing kind, then the keys of the differing buckets, eight buckets a
+read; while every key found moves on one member, the next eight are read, until a key differs or
+every differing bucket is read. Up to eight claim kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
+its keys come with the summary. A kind whose differing keys all moved, with the same `claims`
+where those compare, is no difference. The member records
+one `operational.failure` on its own `daemon/NODE` subject with the condition
+`answers-disagreement`, an episode per member pair, and a `reproduction` that names every
+differing kind with its counts and up to twenty keys, each with both members' answers. The fault
+goes to the agent `[trim] notify` names (`notify = "agent/..."`), or the fleet's fault agent
+without it. While the pair's fault is open, later differences add nothing; the first check of the
+pair that agrees ends it with `operational.recovered`. Each difference is a bug in trimming,
+replication or a reader: it becomes a failing test, then a fix. Nothing repairs it from a peer.
+
+A peer on a build without the route answers 404 and is not compared.
+
+Some readers fold a subject's claims rather than read its newest one. A trim can keep every
+key's newest claim and still change what they answer, by dropping an older claim they fold: a
+dropped credential transition moves a seat's needs-login since (#4237). So the daemon's summary
+also covers the readers the checkpoint proof reads (`checkpoint_rules::subject_answers`):
+current harness, status history, actual state and source, incarnations and working since,
+reconcile decisions, usage, loop and timing. They run for every seat (`agent/*`) and step
+(`step-run/*`) whose newest claim is older than the cut. Each field is its own pseudo-kind,
+`reader/NAME`, keyed by subject with a digest of the answer, and narrows to subjects like any
+kind. A subject still written at the cut is left out that day, as a kind's moving keys are.
+A fold reader has no `before_cut`, so a member serving a kept summary first reads which counted
+subjects now have a claim at or after the cut, one index read each (0.1 s for 23,000 subjects on
+a store of 52 GB), marks them moving and counts the readers again without them. Two members that
+computed hours apart, such as either side of a restart onto a new build, then leave out the same
+seats: a seat whose held usage readings were flushed late moves on both.
+
 ### First sync
 
 A machine that joins with `st fleet join` records a first sync. It ends, `verified`, at the first
@@ -1288,9 +1445,67 @@ sealing. Every participant must seal, so this stops trimming for the whole fleet
 checkpoint agreement. It is off by default. The member then seals, verifies and applies no new
 checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
 had already committed still finishes; a checkpoint it was still recording stays recorded as it was
-and is not treated as a deletion. It still syncs with every peer as before. Like `enabled = false`,
-it stops the old checkpoints on the other members until a person excuses it. No claim family is
-trimmed locally yet.
+and is not treated as a deletion. Like `enabled = false`, it stops the old checkpoints on the other
+members until a person excuses it.
+
+Each day such a member trims its own due cut (the day before yesterday, as for a shared checkpoint):
+it captures the set before the cut, plans the drop with the same audited rules and guards a shared
+checkpoint uses, and trims it, with no seal, verification or copy-proof. Its capture stages only
+what judging the kinds it drops reads: the envelopes that hold one of their claims or a claim in the
+same operation, the same for every runtime reset and harness diagnostic (`LOCAL_TRIM_CONTEXT_KINDS`:
+the status-history rule judges a seat's harness observations with them, and keeps a transition a
+reset or a restored prompt depends on), the protections naming those claims, each writer's newest envelope, and the claims
+citing the ones it could drop. Citations come from a cache the cut keeps (`local_trim_citations`):
+each cut first reads the claims that arrived since the last, in arrival order, committing each page
+with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only if it is present and
+sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
+drop as a capture of the whole store. Only the kinds in
+`LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
+and the trimmed log: today `observer.observed`, `harness.observed` and `resource.observed`. Everything
+else is kept, as a protected claim is.
+An envelope that holds a kept claim stays whole, with its payload and signatures, so peers can still
+fetch and verify it; a dropped claim inside it loses only this member's own copies (its claim row,
+raw record, signature and verdict rows; its stored position stays, as every position does), its ID goes into the retired ledger, and
+admitting the envelope again restores neither the claim nor its record. Shared checkpoints keep
+envelopes atomic. `resource.observed` keeps what its readers walk back through (rules version
+23), such as a pull request's observations back to the newest one outside "open and out of the
+merge queue", which the idle nudge walks to find when it left the queue; the test compares that
+walk, the folded state and the projection between the full and the trimmed log. `harness.observed`
+joined once its rule kept the credential report where a seat's needs-login run begins (rules
+version 24, see #4237). Two checks stand in for the
+proof. A plan that would drop the newest claim of any subject and kind is refused before anything
+is recorded. While deleting, every chunk compares the projection digests before and after and
+stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, opens
+an operational fault (`local-trim-stopped`) for the agent `[trim] notify` names, and halts local
+trim until `st replication checkpoint resume --reason TEXT` is run, by a person or, on
+such a member, by the `[trim] notify` agent (`--as agent/...`). No other agent may: resuming past a
+stop is the safety decision. The stopped cut is set aside and the next day's cut goes on, and the
+resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
+The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
+disk cannot hold.
+Deleting a cut walks only that cut's own tombstones, recorded after every earlier checkpoint's,
+and keeps its place in `meta` so a restart goes on from it; a cut that dropped nothing is trimmed
+at once. A member deletes at most `[trim] daily_claims` claims a day (100,000 unless set; about
+1.7 h of paced deletion on a 53 GB member). A cut that drops more stops at that count, stays
+`trimming`, and goes on the next day where it stopped; the next cut begins only after it finishes,
+with what the day has left, so a large first cut drains over several days instead of one long
+trim. The day's count is kept in `meta` (`local_trim_day`) in the deleting transaction, so a
+restart neither repeats nor exceeds it.
+
+On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
+what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges
+the ledger once: an identity adoption withdrew, or that only a checkpoint that never committed
+recorded, was not a deletion and leaves it. From then on an identity enters the ledger only as it is
+deleted, in the deleting transaction, never when a cut records it: a cut that stops before trimming,
+or a chunk that rolls back, retires nothing a peer could learn. Admission then refuses a retired envelope or claim from
+any peer, whatever its build; the inventory lists a retired envelope as held without payload, so a
+peer never sends it; and the member serves no retired envelope or claim, even while a copy is still
+held. It still syncs everything else with every peer as before. Turning the setting off stops
+reading the ledger as the authority. The retired claim IDs travel between such members by claim-range walk, as
+"Protocol" describes.
+
+`[trim] notify = "agent/..."` names the agent that receives a fault when the daily answers check
+finds this member and a peer answering differently; see [Answers across members](#answers-across-members).
 
 ## Recovery
 

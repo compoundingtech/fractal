@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Clarify that the instance isolation proof acts as a person and must run outside a seat's process tree because mutations cannot act as another identity.",
+  "replay": {"status": "none", "detail": "Documentation only; no replay or stored-data changes."},
+  "schema": {"status": "none", "detail": "No database or wire schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint, authorization or fleet coordination rule changes."},
+  "compatibility": {"status": "none", "detail": "Existing seat ancestry binding and foreign-agent-actor behavior are unchanged."},
+  "downtime": {"status": "none", "detail": "Documentation only; no daemon restart or service interruption."},
+  "manual": {"status": "none", "detail": "No upgrade action is required for existing installations."},
+  "recovery": {"status": "none", "detail": "No recovery behavior or state transitions change."}
+}

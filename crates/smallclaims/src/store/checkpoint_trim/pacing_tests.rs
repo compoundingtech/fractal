@@ -210,3 +210,129 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
         Duration::ZERO
     );
 }
+
+#[test]
+fn a_local_walk_visits_only_its_own_cuts_tombstones() {
+    let mut db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h1b0708ce8e80 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
+             accepted_at_unix_ms INTEGER, checkpoint TEXT, PRIMARY KEY(writer,sequence,envelope_hash));
+         CREATE TABLE replica_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
+             PRIMARY KEY(writer,sequence,envelope_hash));
+         CREATE TABLE checkpoint_claims(id TEXT PRIMARY KEY, operation_id TEXT, writer TEXT,
+             sequence INTEGER, envelope_hash TEXT, checkpoint TEXT);
+         CREATE INDEX claim_envelope ON checkpoint_claims(writer,sequence,envelope_hash);
+         CREATE TABLE claims(id TEXT PRIMARY KEY);",
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    // Every earlier checkpoint's tombstones come first, then the cut's own.
+    for sequence in 1..=10_000 {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h3ed673b5c629 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes VALUES('w', ?1, 'h', 0, 'checkpoint/old')", [sequence]).unwrap();
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-h55b982191075 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES(printf('old-%05d', ?1), NULL, 'w', ?1, 'h', 'checkpoint/old')",
+            [sequence],
+        )
+        .unwrap();
+    }
+    for sequence in 1..=2 {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h05e8b31a243c owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes VALUES('cut', ?1, 'h', 0, 'checkpoint/cut')", [sequence]).unwrap();
+    }
+    for n in 1..=3 {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h02af172fc00e owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES(printf('cut-%d', ?1), NULL, 'cut', 9, 'h', 'checkpoint/cut')", [n])
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    crate::sqlite::observe(&mut db);
+    let tx = db.transaction().unwrap();
+    let mut cursor = TrimCursor {
+        local: Some(LocalWalk { checkpoint: "checkpoint/cut".into(), envelope: 10_000, claim: 10_000 }),
+        ..TrimCursor::default()
+    };
+    let work = crate::sqlite::work::SqliteWorkScope::start();
+    let mut steps = 0;
+    while next_trim_rows(&tx, &mut cursor).unwrap().is_some() {
+        steps += 1;
+    }
+    let work = work.finish();
+    assert_eq!(steps, 5, "two envelopes and three claims, and none of the 20,000 earlier tombstones");
+    assert!(work.statements > 0, "SQLite work instrumentation did not run");
+    assert!(work.vm_steps < 2_000, "the walk read past its own tombstones: {work:?}");
+}
+
+#[test]
+fn a_local_cut_trims_only_its_tombstones_and_goes_on_from_where_it_stopped() {
+    let store = Arc::new(Store::open_memory("alder", Arc::new(Plain)).unwrap());
+    store.trim_locally(true).unwrap();
+    let claims: Vec<_> = (0..5)
+        .map(|n| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("note/{n}"),
+                    kind: "example.note".into(),
+                    actor: None,
+                    fields: BTreeMap::from([("text".into(), json!(n))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        })
+        .collect();
+    let tombstone = |claim: &ClaimRecord| ClaimTombstone {
+        id: claim.id.clone(),
+        operation_id: claim.operation_id.clone(),
+        writer: "alder".into(),
+        sequence: 1,
+        envelope_hash: "envelope".into(),
+        subject: claim.subject.clone(),
+        kind: claim.kind.clone(),
+        actor: claim.actor.clone(),
+        predecessors: claim.predecessors.clone(),
+        request_digest: claim.request_digest.clone(),
+        accepted_at_unix_ms: claim.accepted_at_unix_ms,
+    };
+    let (old, cut) = ("checkpoint/2026-01-01", "checkpoint/2026-01-02");
+    {
+        // An earlier checkpoint's tombstone whose claim is still here: only a walk of every
+        // tombstone would reach it.
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        record_checkpoint_tombstones_tx(&tx, old, &[], &[tombstone(&claims[0])]).unwrap();
+        tx.commit().unwrap();
+    }
+    store.set_checkpoint_state(cut, 2, "trimming").unwrap();
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        let cut_tombstones: Vec<_> = claims[1..].iter().map(tombstone).collect();
+        record_checkpoint_tombstones_tx(&tx, cut, &[], &cut_tombstones).unwrap();
+        tx.commit().unwrap();
+    }
+    let exists = |id: &str| store.claim_by_id(id).unwrap().is_some();
+    store.set_trim_chunk_envelopes(1);
+    store.set_trim_fault(Some(TrimFault::AfterChunk(2)));
+    let mut actions = Vec::new();
+    assert!(store.finish_trim_paced(cut, &mut actions, |_| {}).is_err());
+    // Two chunks deleted two claims; the walk kept its place.
+    assert_eq!(claims[1..].iter().filter(|claim| !exists(&claim.id)).count(), 2);
+    let walk = store.local_walk(cut).unwrap().unwrap();
+    let second: i64 = store
+        .readers
+        .get()
+        .query_row("SELECT rowid FROM checkpoint_claims WHERE id=?1", [&claims[2].id], |row| row.get(0))
+        .unwrap();
+    assert_eq!(walk.claim, second);
+    store.finish_trim_paced(cut, &mut actions, |_| {}).unwrap();
+    assert!(matches!(actions.last(), Some(CheckpointAction::Trimmed { claims: 2, .. })), "{actions:?}");
+    assert!(claims[1..].iter().all(|claim| !exists(&claim.id)));
+    assert!(exists(&claims[0].id), "an earlier checkpoint's tombstone is not this cut's to walk");
+    assert_eq!(local_checkpoint(&store.readers.get(), cut).unwrap().unwrap().0, "trimmed");
+    let left: Option<String> = store
+        .readers
+        .get()
+        .query_row("SELECT value FROM meta WHERE key=?1", [local_walk_key(cut)], |row| row.get(0))
+        .optional()
+        .unwrap();
+    assert_eq!(left, None, "a finished walk leaves nothing behind");
+}

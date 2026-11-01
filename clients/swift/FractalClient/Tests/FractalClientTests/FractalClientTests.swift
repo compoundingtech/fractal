@@ -6,6 +6,46 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
+    func testRevisionedAgentsCommandAndGoldenFrames() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        func fixture(_ name: String) throws -> Data {
+            try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/agents-publication-\(name).json"))
+        }
+        let command = try JSONEncoder().encode(AgentsPublicationSubscribe(id: "roster"))
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: command) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: fixture("subscribe")) as? NSDictionary)
+        guard case .snapshotChunk(let chunk) = try JSONDecoder().decode(AgentsCollectionEvent.self, from: fixture("chunk")) else {
+            return XCTFail("Expected snapshot chunk")
+        }
+        XCTAssertEqual(chunk.collection, "agents")
+        XCTAssertEqual(chunk.snapshot.publishedAt, "2026-10-10T12:00:00.000Z")
+        XCTAssertEqual(chunk.publication.revision, 42)
+        XCTAssertEqual(chunk.publication.statusWatermark.localFrontier, 17)
+        XCTAssertEqual(chunk.chunkIndex, 0)
+        XCTAssertEqual(chunk.chunkCount, 2)
+        XCTAssertEqual(chunk.order, ["agent/a"])
+        XCTAssertFalse(chunk.hasMore)
+        guard case .changes(let delta) = try JSONDecoder().decode(AgentsCollectionEvent.self, from: fixture("changes")) else {
+            return XCTFail("Expected delta")
+        }
+        XCTAssertEqual(delta.collection, "agents")
+        XCTAssertEqual(delta.snapshot.publishedAt, "2026-10-10T12:00:01.000Z")
+        XCTAssertEqual(delta.publication.revision, 43)
+        XCTAssertEqual(delta.baseRevision, 42)
+        XCTAssertEqual(delta.removes, ["agent/b"])
+        XCTAssertFalse(delta.hasMore)
+        guard case .error(let error) = try JSONDecoder().decode(AgentsCollectionEvent.self, from: fixture("row-too-large")) else {
+            return XCTFail("Expected permanent error")
+        }
+        XCTAssertEqual(error.collection, "agents")
+        XCTAssertEqual(error.code, .agentsPublicationRowTooLarge)
+        XCTAssertEqual(error.retryable, false)
+        let legacy = try JSONDecoder().decode(CollectionNotice.self, from: Data(#"{"kind":"resync","id":"roster"}"#.utf8))
+        XCTAssertNil(legacy.collection)
+        XCTAssertNil(legacy.retryable)
+    }
+
     func testPushRegistrationRoundTripAndRedactedDescription() throws {
         let registration = PushRegistration(token: String(repeating: "ab", count: 32),
             environment: .development, bundleID: "example.push", appVersion: "1.0")
@@ -23,6 +63,68 @@ final class FractalClientTests: XCTestCase {
         XCTAssertNil(response.value.environment)
     }
 
+    func testOrderedMembershipContractAndVersionedBodies() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("fixtures/clients/ordered-memberships-v2.json"))
+        let fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        func bytes(_ key: String) throws -> Data { try JSONSerialization.data(withJSONObject: XCTUnwrap(fixture[key])) }
+        let parameters = try JSONDecoder().decode(ArrangementMembershipEditParameters.self,
+            from: JSONSerialization.data(withJSONObject: XCTUnwrap((fixture["edit"] as? [String: Any])?["parameters"])))
+        let request = try ActionRequest.arrangementMembershipEdit(id: "action/membership-edit",
+            idempotencyKey: "membership-edit-ada-0001", fence: Fence(snapshotID: "snapshot/host-a/1842/2fc9", subjectRevisions: [:]), parameters: parameters)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? NSDictionary, fixture["edit"] as? NSDictionary)
+        let page = try JSONDecoder().decode(OrderedMembershipPage.self, from: bytes("page"))
+        XCTAssertNil(page.items[0].position.bucket)
+        XCTAssertEqual(page.items[0].id, page.items[0].member)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(page)) as? NSDictionary, fixture["page"] as? NSDictionary)
+        let first = try JSONDecoder().decode(OrderedMembershipCollectionFrame.self, from: bytes("snapshot_frame"))
+        let state = try XCTUnwrap(first.membership)
+        XCTAssertEqual(state, OrderedMembershipState(container: "arrangement/person/ada/019a0000-0000-7000-8000-000000000001", liveCount: 2, changedIndex: 1842))
+        let snapshotFrame = try XCTUnwrap(fixture["snapshot_frame"] as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as? NSDictionary, snapshotFrame["membership"] as? NSDictionary)
+        let changed = try JSONDecoder().decode(OrderedMembershipCollectionFrame.self, from: bytes("changes_frame"))
+        let changedState = try XCTUnwrap(changed.membership)
+        // An edit outside the window repeats the window; only the container's state moves.
+        let outside = try JSONDecoder().decode(OrderedMembershipCollectionFrame.self, from: bytes("outside_window_changes_frame"))
+        let outsideState = try XCTUnwrap(outside.membership)
+        XCTAssertEqual(outside.upserts?.isEmpty, true)
+        XCTAssertEqual(outside.removes?.isEmpty, true)
+        XCTAssertEqual(outside.order, changed.order)
+        XCTAssertEqual(outside.hasMore, changed.hasMore)
+        XCTAssertEqual(outsideState.liveCount, changedState.liveCount)
+        XCTAssertGreaterThan(outsideState.changedIndex, changedState.changedIndex)
+        for key in ["snapshot_frame", "changes_frame"] {
+            var missing = try XCTUnwrap(fixture[key] as? [String: Any])
+            missing["membership"] = nil
+            XCTAssertThrowsError(try JSONDecoder().decode(OrderedMembershipCollectionFrame.self, from: JSONSerialization.data(withJSONObject: missing)))
+            var partial = try XCTUnwrap(fixture[key] as? [String: Any])
+            var membership = try XCTUnwrap(partial["membership"] as? [String: Any])
+            membership["changed_index"] = nil
+            partial["membership"] = membership
+            XCTAssertThrowsError(try JSONDecoder().decode(OrderedMembershipCollectionFrame.self, from: JSONSerialization.data(withJSONObject: partial)))
+        }
+        let resync = try JSONDecoder().decode(OrderedMembershipCollectionFrame.self, from: Data(#"{"kind":"resync","id":"sidebar"}"#.utf8))
+        XCTAssertNil(resync.membership)
+        let body = try JSONDecoder().decode(ArrangementBody.self, from: bytes("body"))
+        guard case .v2 = body else { return XCTFail("Expected version 2") }
+        var invalid = try XCTUnwrap(fixture["body"] as? [String: Any])
+        invalid["version"] = 3
+        XCTAssertThrowsError(try JSONDecoder().decode(ArrangementBody.self, from: JSONSerialization.data(withJSONObject: invalid)))
+        invalid["version"] = 2; invalid["placements"] = [:] as [String: String]
+        XCTAssertThrowsError(try JSONDecoder().decode(ArrangementBody.self, from: JSONSerialization.data(withJSONObject: invalid)))
+        let legacyData = try Data(contentsOf: root.appendingPathComponent("fixtures/clients/arrangements-v1.json"))
+        let legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: legacyData) as? [String: Any])
+        let resource = try XCTUnwrap(legacy["resource"] as? [String: Any])
+        let v1 = try JSONDecoder().decode(ArrangementBody.self, from: JSONSerialization.data(withJSONObject: XCTUnwrap(resource["body"])))
+        guard case .v1 = v1 else { return XCTFail("Expected version 1") }
+        for raw in ["unsupported-membership-container", "membership-owner-forbidden", "invalid-membership-member", "invalid-membership-bucket",
+                    "invalid-membership-key", "invalid-membership-operations", "invalid-arrangement-version", "invalid-arrangement-body", "membership-edit-too-large"] {
+            let code = try JSONDecoder().decode(ErrorCode.self, from: Data("\"\(raw)\"".utf8))
+            if case .unknown = code { XCTFail("\(raw) decoded as unknown") }
+            XCTAssertEqual(String(decoding: try JSONEncoder().encode(code), as: UTF8.self), "\"\(raw)\"")
+        }
+    }
     func testUsageAggregationSchemaLiteralsDecode() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
@@ -656,6 +758,26 @@ final class FractalClientTests: XCTestCase {
         file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertNil(request.value(forHTTPHeaderField: "traceparent"), file: file, line: line)
         XCTAssertNil(request.value(forHTTPHeaderField: "tracestate"), file: file, line: line)
+    }
+
+    func testAttentionPresentationDecodesALaunchPreviewAnUnavailableLaunchAndAPrompt() throws {
+        let decode = { (json: String) in try JSONDecoder().decode(AttentionPresentation.self, from: Data(json.utf8)) }
+        let base = #""tier":"today","kind":"launch","agent":null,"raised_by":null,"waiting":null"#
+        let preview = try decode(#"{\#(base),"launch":{"variant":"variant/default","goals":["Audit."],"asks_you":1,"steps":[{"path":"approve","title":"Approve","assignee":{"kind":"st","agent":null,"label":"st"},"after":["prepare"],"asks_you":true}],"agents":[{"id":"agent/example/oak","label":"Oak","harness":"claude","host":null}]}}"#)
+        XCTAssertEqual(preview.launch?.variant, "variant/default")
+        XCTAssertEqual(preview.launch?.steps?.first?.assignee.kind, "st")
+        XCTAssertEqual(preview.launch?.asksYou, 1)
+        XCTAssertNil(preview.launch?.unavailable)
+        let unavailable = try decode(#"{\#(base),"launch":{"unavailable":{"reason":"No mission yet.","diagnostics":["a blocker"]}}}"#)
+        XCTAssertNil(unavailable.launch?.variant)
+        XCTAssertEqual(unavailable.launch?.unavailable?.diagnostics, ["a blocker"])
+        let prompt = try decode(#"{\#(base),"prompt":{"calls":[{"call_id":"call-1","tool":"Bash","input":"{}","input_complete":true}],"answers":["allow","deny"],"allow":true}}"#)
+        XCTAssertEqual(prompt.prompt?.calls?.first?.callID, "call-1")
+        XCTAssertEqual(prompt.prompt?.allow, true)
+        let unread = try decode(#"{\#(base),"prompt":{"calls":null,"answers":[],"allow":false,"unknown_reason":"the timeline cannot be read"}}"#)
+        XCTAssertNil(unread.prompt?.calls)
+        // A row from a daemon that serves neither still decodes.
+        XCTAssertNil(try decode("{\(base)}").launch)
     }
 }
 

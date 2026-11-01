@@ -7,7 +7,7 @@
 fn shifted_keys_are_typed_as_a_keyboard_protocol_terminal_sends_them() {
     let output = std::process::Command::new("python3")
         .arg(test_env!("CARGO_MANIFEST_DIR", "/../fractal-tui/tests/pty_smoke.py"))
-        .arg(test_env!("CARGO_BIN_EXE_st3"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal"))
         .arg("--only-shifted-keys")
         .arg("--ui")
         .env("ST3_PERSON", "person/alex").env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
@@ -26,7 +26,7 @@ fn shifted_keys_are_typed_as_a_keyboard_protocol_terminal_sends_them() {
 fn bare_st_seats_and_redirected_streams_keep_help() {
     let output = std::process::Command::new("python3")
         .arg(test_env!("CARGO_MANIFEST_DIR", "/../fractal-tui/tests/pty_smoke.py"))
-        .arg(test_env!("CARGO_BIN_EXE_st3"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal"))
         .arg("--only-entrypoint")
         .output()
         .expect("python3 is required by the PTY smoke");

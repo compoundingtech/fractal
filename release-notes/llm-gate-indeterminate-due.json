@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "An LLM gate whose runner's status can't be read is re-evaluated when its time limit passes, so the runner is stopped and the gate fails on time instead of at the next full pass",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "The gate's verdicts are unchanged. While the runner's status read 'indeterminate', nothing marked the gate, so its time limit was enforced only at the reconciler's next full pass."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "An older build enforces the limit at its next full pass."}
+}

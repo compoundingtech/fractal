@@ -1,6 +1,7 @@
 import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type FractalClient, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import type { InventoryName } from '@fractal/views';
 import { InventoryFeed, type InventoryHandlers } from './inventoryFeed';
+import type { SidebarArrangement } from './sidebarEdits';
 import type { HeartbeatSocketFactory } from './collectionSocket';
 import type { ConversationHeader, HeaderField } from '@fractal/views';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type Foreground, type TerminalFollowHandlers } from './terminalControls';
@@ -41,7 +42,7 @@ export type GlassesHandlers = {
 };
 
 export type ArrangementsHandlers = {
-  onArrangements: (arrangements: Arrangement[]) => void;
+  onArrangements: (arrangements: SidebarArrangement[]) => void;
   onIssue: (issue: string) => void;
 };
 
@@ -361,8 +362,10 @@ export class Feed {
   }
 
   private frame(frame: CollectionFrame, received: number): void {
+    // The app holds no ordered-membership window; its windows hold resources.
     if (this.inventory.frame(frame)) return;
     const id = 'id' in frame ? frame.id : undefined;
+    if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') return;
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === ARRANGEMENTS) {
       const follow = this.arrangements;
       if (!follow) return;
@@ -371,7 +374,7 @@ export class Feed {
       follow.window = next;
       this.loaded(ARRANGEMENTS);
       follow.handlers.onIssue('');
-      follow.handlers.onArrangements(next.items.filter((item): item is Arrangement => item.kind === 'arrangement' && item.owner === follow.person));
+      follow.handlers.onArrangements(next.items.filter((item): item is SidebarArrangement => item.kind === 'arrangement' && item.body.version === 1 && item.owner === follow.person));
     } else if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === GLASSES) {
       const follow = this.glasses;
       if (!follow) return;

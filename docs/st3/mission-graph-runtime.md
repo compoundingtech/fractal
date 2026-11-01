@@ -1022,6 +1022,71 @@ also sends the requester one message from `daemon/runtime` with the answer. A re
 can use `st work cancel-ask STEP --as AGENT --summary TEXT`. An unclaimed live requester can
 use `--new-run NAME`; claimed work must name `--step`. Repeated keys return the same source.
 
+#### Deadlines
+
+With `[asks] deadlines` on, every ask has a deadline, so no ask holds its asker forever. The
+option is off by default: deadlines add fields to the replicated `work.person-asked` and
+`work.person-done` claims, which a member on an older build keeps as retryable and does not show
+until it upgrades, and an older web client refuses `daemon/runtime` as an answer's respondent, so an
+operator turns it on once every member and the web client run a build that reads them.
+While it is off, no ask records a deadline, an ask that names `--deadline` or `--default` is
+refused with `ask-deadlines-off`, and no ask resolves by itself. `--deadline 4h` (or
+`deadline_ms` on the client `work.ask` action) names one between 1m and 30d. Without it the fleet default
+applies: 24 hours, or `[asks] default_deadline` in the daemon config, which reloads without a
+restart. The ask claim records the absolute `deadline_unix_ms`, so every member shows the same
+deadline. `--default ID` (`default_answer`) names the structured request's answer that applies
+at the deadline: a decision's accept or decline answer, or a choice's option. A request-changes
+answer needs the person's words, so it cannot be a default, and a free-text or feedback ask has
+none.
+
+```toml
+[asks]
+deadlines = true           # off by default; turn on once every member runs this build
+default_deadline = "24h"   # 1m to 30d
+```
+
+At the deadline the member that took the ask writes `work.person-done` as `daemon/runtime` with
+`resolved_by: "deadline"`. The ask leaves the person's home and its origin resumes as it would
+after an answer; a `--new-run` asker gets a `Timed out:` message. Its `person_answers` entry has
+`resolved_by: "deadline"` and respondent `daemon/runtime`. When the ask named a default, its
+answer is that default exactly as the person's choice of it would read (its `id`, `label` and
+own outcome, such as `decline`); without one there is no answer object. No new outcome is added,
+so a client that does not know `resolved_by` still decodes the answer; `work show` prints the
+entry as `timed_out`. A retry with the same idempotency key must name the same deadline
+(recorded as `deadline_ms` when the asker named one) and default, or it is refused with
+`idempotency-conflict`. The reconciler arms one wake for the earliest deadline among the asks it
+resolves, so nothing polls for them.
+
+Only the ask's own member applies the default, but the person may answer on any member. A member
+with deadlines on refuses a person's answer stored at or after the ask's `deadline_unix_ms` with
+`stale-fence`: the time the answer's claim is written decides, not when it was sent, and the
+refusal rolls that write back. A member with deadlines off accepts it, so the refusal holds
+everywhere only once deadlines are on on every member; such a late answer is then dropped as below.
+An answer made before the deadline can still reach the ask's member after the default was applied
+there. Then the person's answer stands and the default does not: every member keeps, of an ask's
+responses, a person's answer accepted before the deadline (or, for an ask made without one, before
+the default was applied) over the default, and drops a person's answer accepted after it. Members
+hold the same claims with the same accept times, so they agree. The asking step's `person_answers`
+then lists only the person's answer, its constraints say the answer replaces the default, and when
+the answer reaches the ask's member, it sends the asker one "Answered before its deadline" message,
+because the step may already have resumed on the default. A `--new-run` asker, which hears of
+answers by message, then has three: "Timed out" from the ask's member, the person's answer from
+the member they answered on, and that notice, which says the answer replaced the default.
+
+An ask made by a build without deadlines, or while they were off, carries none. Its deadline is
+the fleet default counted from the first reconcile pass on this member that saw deadlines on (the
+`person_ask_deadlines_since_unix_ms` key in its `meta` table; a pass that sees deadlines off
+removes it, so turning them on again counts afresh), or from when it was
+asked, whichever is later. Old asks therefore do not all resolve at once when deadlines are
+turned on. An update waits for nobody and has no deadline.
+
+The person's home shows each ask's deadline and default. The attention row carries
+`deadline_at` and, when the ask names one, `default_answer` (`{id, label}`). The web app, the
+terminal interface and the phone word it the same way, for example `answer within 3h, or
+“Keep it open” applies` or `answer within 2d, or it times out`. The member keeps its
+`[asks] default_deadline` in `meta` (`person_ask_default_deadline_ms`), so the home and the
+reconciler count an older ask's deadline from the same default.
+
 #### Structured requests
 
 `st work ask --request FILE` (or `request` on the client `work.ask` action) adds a typed question
@@ -1811,7 +1876,7 @@ The subject is exactly `agent/example/cos/standing/cos`; placement does not chan
 The seat's bare `fresh-context` node starts a new harness session before each step it claims, even when the step has no `fresh-context` node. Omit it when the seat should retain context across ordinary steps.
 Messages use sender-chosen `kind: silent | wake`, defaulting to wake for every seat. Silent messages wait for a real wake; see [silent messages](silent-messages.md).
 
-A seat's bare `handles-faults` node makes it the fleet's fault agent: it receives each fault that no step assignee or agent requester owns, such as a failed loop on a run a person requested. When several live seats carry it, the first by subject takes them. Faults never go to a person's attention.
+A seat's bare `handles-faults` node makes it the fleet's fault agent: it receives each fault that no step assignee or agent requester owns, such as a failed loop on a run a person requested. Only one live seat may carry it: publishing a second is refused with `fault-agent-taken`, so the flag moves by stopping its holder or dropping it there. When two members each accepted a different holder, neither is the fault agent until one steps down, and a fault no agent owns stays visible in `st doctor`. A fault dismissal (`st missions dismiss-fault`) counts only from a person or from the seat that held the flag when it was written. Faults never go to a person's attention.
 
 Two seat faults reach that owner so a seat that cannot start is never found by looking. A seat parked by the crash-loop guard is a fault that carries the driver's last `harness.diagnostic` (its code and reason). A seat that is declared to run but that no runtime observation has ever described for ten minutes, which `st agents ls` shows as `desired`, is a fault too ("An agent seat has not started", with the same diagnostic, or the note that the driver never ran). Both end when the seat's runtime is observed or its declaration changes. A mission's seat reaches the run's requester first, like any other fault. A seat that restarts always (the default) is not left stopped for good: its parked launch is retried after one minute, then two, four, eight, sixteen and thirty, at most six times since its last successful launch, and each retry is a `retry` reconcile decision that names the failure before it (and the owner run, when the seat has one). A retry that starts the seat ends the fault; after the sixth, one `retries-exhausted` decision says the launch stays stopped until `st agents restart` or a changed declaration. Other restart policies are not retried. `st` runs the first `pty` on the launch PATH that accepts `--env NAME`, so an older build earlier on the PATH no longer parks every restart.
 Codex compares the model ID and effort returned by a saved-thread resume with the declaration exactly. If Codex normalizes a declared model alias to a different ID, the driver fails before binding; three failed starts park the seat under the Codex crash-loop guard until its declaration changes.
@@ -1956,8 +2021,10 @@ the offline peer has no history; the startup barrier and durable occurrence dedu
 Schedules declaring a standby keep positive comparisons blocking even when stale, on both
 primary and standby. Placement/ownership changes retain the same conservative policy:
 if any retained schedule declaration names another primary, declares a standby, or differs
-in owner run/generation/step, stale positive counts still block. This deliberately includes
-completed historical moves and removed standbys rather than guessing when a move is settled.
+in owner run or declaring step, stale positive counts still block. A new generation of
+the same owning run with the same declaring step (including no step) is a revision, not
+an ownership change. This deliberately includes completed historical moves and removed
+standbys rather than guessing when a move is settled.
 Staged or conflicting owned-set changes remain fenced by the existing ownership guard,
 including at the due callback. No elapsed timeout grants takeover authority.
 

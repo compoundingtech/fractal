@@ -62,6 +62,73 @@ pub struct ExecRuntime {
     state_dir: PathBuf,
     log_dir: PathBuf,
     owned_children: Arc<Mutex<BTreeMap<u32, Child>>>,
+    unlaned_seat: Option<crate::UnlanedSeatPlacement>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExecTeardownCaller {
+    EndIf,
+    SignalIf,
+    EndLeftovers,
+    EndLeftoversLater,
+    SpawnReplacement,
+    Remove,
+}
+
+fn teardown_span(
+    id: &str,
+    caller: ExecTeardownCaller,
+    expected_generation: Option<&str>,
+    observation: Option<&ExecObservation>,
+) -> tracing::Span {
+    let (status, generation) = match observation {
+        Some(ExecObservation::Running(generation)) => ("running", Some(generation)),
+        Some(ExecObservation::Exited(generation)) => ("exited", Some(generation)),
+        Some(ExecObservation::Indeterminate(_)) => ("indeterminate", None),
+        None => ("missing", None),
+    };
+    let span = tracing::info_span!(
+        "exec_teardown",
+        ?caller,
+        runtime_id = id,
+        expected_incarnation = expected_generation.unwrap_or("not_applicable"),
+        observed_incarnation = "unavailable",
+        operation_id = "unavailable",
+        start_operation_id = "unavailable",
+        registry_status = status,
+        registry_pid = tracing::field::Empty,
+        registry_created_at = tracing::field::Empty,
+        registry_exit_code = tracing::field::Empty,
+        registry_exit_signal = tracing::field::Empty,
+        registry_group_exited = tracing::field::Empty,
+        recorded_scope = "unavailable",
+        tagged_scope = "not_applicable",
+        spawn_lock = "not_applicable",
+        start_token = tracing::field::Empty,
+    );
+    if let Some(generation) = generation {
+        span.record("observed_incarnation", generation.generation_id.as_str());
+        span.record("start_operation_id", generation.start_operation.as_deref().unwrap_or("unavailable"));
+        span.record("registry_pid", generation.pid);
+        span.record("registry_created_at", tracing::field::display(generation.created_at_unix_ms));
+        span.record("registry_exit_code", tracing::field::debug(generation.exit_code));
+        span.record("registry_exit_signal", tracing::field::debug(generation.exit_signal));
+        span.record("registry_group_exited", generation.group_exited);
+        span.record("recorded_scope", generation.scope_unit.as_deref().unwrap_or("not_applicable"));
+        span.record("start_token", generation.start_token);
+    } else {
+        for field in [
+            "registry_pid",
+            "registry_created_at",
+            "registry_exit_code",
+            "registry_exit_signal",
+            "registry_group_exited",
+            "start_token",
+        ] {
+            span.record(field, "unavailable");
+        }
+    }
+    span
 }
 
 impl ExecRuntime {
@@ -71,7 +138,14 @@ impl ExecRuntime {
             state_dir,
             log_dir,
             owned_children: Arc::new(Mutex::new(BTreeMap::new())),
+            unlaned_seat: None,
         }
+    }
+
+    /// Set only by the daemon's seat runtime, never inferred from ambient environment.
+    pub fn with_unlaned_seat(mut self, policy: Option<crate::UnlanedSeatPlacement>) -> Self {
+        self.unlaned_seat = policy;
+        self
     }
 
     pub fn spawn(
@@ -130,7 +204,7 @@ impl ExecRuntime {
         fs::create_dir_all(&self.log_dir)?;
         // What the previous generation left running ends before its replacement starts. Each
         // launch has a scope of its own, so this never reaches the replacement.
-        if let Err(error) = self.end_leftovers(id) {
+        if let Err(error) = self.end_leftovers_for(id, ExecTeardownCaller::SpawnReplacement) {
             eprintln!(
                 "st3: WARN what the last generation of {id} left running did not end: {error:#}"
             );
@@ -177,8 +251,17 @@ impl ExecRuntime {
             .iter()
             .map(OsString::as_os_str)
             .collect::<Vec<_>>();
-        let mut command =
-            crate::isolate::wrap_in(&unit, program.as_os_str(), &argument_refs, Some(env));
+        // The lane is the scope's, never the task's environment.
+        let mut env = env.clone();
+        let lane = crate::lane::prepare(crate::lane::Capacity::take(&mut env), id)?;
+        let mut command = crate::isolate::wrap_in(
+            &unit,
+            program.as_os_str(),
+            &argument_refs,
+            Some(&env),
+            lane.as_ref(),
+            self.unlaned_seat.as_ref(),
+        );
         command
             .current_dir(cwd)
             .stdin(Stdio::null())
@@ -194,7 +277,17 @@ impl ExecRuntime {
             });
         }
         if let Some(guard) = guard {
-            guard()?;
+            guard().inspect_err(|error| {
+                tracing::debug!(
+                    caller = "spawn_inner",
+                    runtime_id = id,
+                    operation_id = env.get("ST3_START_OPERATION").map_or("unavailable", String::as_str),
+                    guard_decision = "skip",
+                    reason = "spawn_guard_rejected",
+                    %error,
+                    "exec spawn guard rejected"
+                );
+            })?;
         }
         let child = command.spawn().context("spawn detached exec")?;
         *child_created = true;
@@ -233,7 +326,7 @@ impl ExecRuntime {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let mut generation: ExecGeneration = match serde_json::from_slice(&bytes) {
+        let generation: ExecGeneration = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
             Err(error) => return Ok(Some(ExecObservation::Indeterminate(error.to_string()))),
         };
@@ -252,33 +345,26 @@ impl ExecRuntime {
         if generation.exit_code.is_some() || generation.exit_signal.is_some() {
             return self.observe_exited_group(id, generation).map(Some);
         }
-        let owned_exit = {
-            let mut children = self
-                .owned_children
-                .lock()
-                .expect("exec child mutex poisoned");
-            let status = children
-                .get_mut(&generation.pid)
-                .map(Child::try_wait)
-                .transpose()?
-                .flatten();
-            if status.is_some() {
-                children.remove(&generation.pid);
-            }
-            status
-        };
-        if let Some(status) = owned_exit {
-            generation.exit_code = status.code();
-            generation.exit_signal = exit_signal(&status);
-            self.write_generation(id, &generation)?;
-            return self.observe_exited_group(id, generation).map(Some);
+        if let Some(status) = self.take_owned_exit(generation.pid)? {
+            return self.observe_owned_exit(id, generation, status).map(Some);
         }
+        #[cfg(test)]
+        BEFORE_IDENTITY.with(|hook| {
+            if let Some(hook) = &*hook.borrow() {
+                hook(generation.pid);
+            }
+        });
         match process_identity(generation.pid) {
             Ok((state, token)) if token == generation.start_token && state != 'Z' => {
                 Ok(Some(ExecObservation::Running(generation)))
             }
+            // An owned child that exited after the look above is a zombie until it is reaped,
+            // so its status is still there to take.
             Ok((_state, token)) if token == generation.start_token => {
-                self.observe_exited_group(id, generation).map(Some)
+                match self.take_owned_exit(generation.pid)? {
+                    Some(status) => self.observe_owned_exit(id, generation, status).map(Some),
+                    None => self.observe_exited_group(id, generation).map(Some),
+                }
             }
             Ok(_) => Ok(Some(ExecObservation::Exited(generation))),
             Err(error) if process_is_absent(&error) => {
@@ -289,11 +375,69 @@ impl ExecRuntime {
         }
     }
 
+    /// Reaps `pid` if it is a child this runtime started and it has exited.
+    fn take_owned_exit(&self, pid: u32) -> Result<Option<std::process::ExitStatus>> {
+        let mut children = self
+            .owned_children
+            .lock()
+            .expect("exec child mutex poisoned");
+        let status = children
+            .get_mut(&pid)
+            .map(Child::try_wait)
+            .transpose()?
+            .flatten();
+        if status.is_some() {
+            children.remove(&pid);
+        }
+        Ok(status)
+    }
+
+    fn observe_owned_exit(
+        &self,
+        id: &str,
+        mut generation: ExecGeneration,
+        status: std::process::ExitStatus,
+    ) -> Result<ExecObservation> {
+        generation.exit_code = status.code();
+        generation.exit_signal = exit_signal(&status);
+        self.write_generation(id, &generation)?;
+        self.observe_exited_group(id, generation)
+    }
+
     fn observe_exited_group(
         &self,
         id: &str,
-        generation: ExecGeneration,
+        mut generation: ExecGeneration,
     ) -> Result<ExecObservation> {
+        // The leader can exit after observe's first status probe. Reap a waitable
+        // child before persisting group completion, including while descendants live.
+        // A zombie leader thread can still have live sibling threads: never block
+        // waiting for the whole process to exit while holding the child-map mutex.
+        if generation.exit_code.is_none() && generation.exit_signal.is_none() {
+            let owned_exit = {
+                let mut children = self
+                    .owned_children
+                    .lock()
+                    .expect("exec child mutex poisoned");
+                let status = children
+                    .get_mut(&generation.pid)
+                    .map(Child::try_wait)
+                    .transpose()?;
+                if matches!(status, Some(Some(_))) {
+                    children.remove(&generation.pid);
+                }
+                status
+            };
+            match owned_exit {
+                Some(Some(status)) => {
+                    generation.exit_code = status.code();
+                    generation.exit_signal = exit_signal(&status);
+                    self.write_generation(id, &generation)?;
+                }
+                Some(None) => return Ok(ExecObservation::Running(generation)),
+                None => {}
+            }
+        }
         match observe_exited_group(generation)? {
             ExecObservation::Exited(mut generation) => {
                 generation.group_exited = true;
@@ -316,7 +460,10 @@ impl ExecRuntime {
     /// its process group and every process that left that group, so the scope gets the signal
     /// where there is one. Once the group has ended, what it left in its scope ends.
     fn end_if(&self, id: &str, expected_generation: Option<&str>, signal: i32) -> Result<()> {
-        let generation = match self.observe(id)? {
+        let observation = self.observe(id)?;
+        let span = teardown_span(id, ExecTeardownCaller::EndIf, expected_generation, observation.as_ref());
+        let _entered = span.enter();
+        let generation = match observation {
             Some(ExecObservation::Running(generation)) => generation,
             Some(ExecObservation::Exited(generation)) => {
                 if let Some(unit) = &generation.scope_unit {
@@ -325,19 +472,33 @@ impl ExecRuntime {
                     } else {
                         crate::SCOPE_GRACE
                     };
+                    tracing::info!(signal, guard_decision = "allow", reason = "exited_generation_leftovers", incarnation_guard = "not_applied_to_exited_generation", "ending exited exec work scope");
                     crate::end_scope(unit, grace)?;
+                } else {
+                    tracing::debug!(signal, guard_decision = "skip", reason = "exited_generation_without_scope", "exec teardown needs no signal");
                 }
                 return Ok(());
             }
-            Some(ExecObservation::Indeterminate(_)) | None => return Ok(()),
+            Some(ExecObservation::Indeterminate(error)) => {
+                tracing::debug!(guard_decision = "skip", reason = "indeterminate_generation", %error, "exec teardown skipped");
+                return Ok(());
+            }
+            None => {
+                tracing::debug!(guard_decision = "skip", reason = "missing_generation", "exec teardown skipped");
+                return Ok(());
+            }
         };
         if expected_generation.is_some_and(|expected| expected != generation.generation_id) {
+            tracing::debug!(signal, guard_decision = "skip", reason = "incarnation_mismatch", "exec teardown rejected");
             anyhow::bail!("exec `{id}` changed incarnation before signal {signal}");
         }
         if let Some(unit) = &generation.scope_unit {
+            tracing::info!(signal, guard_decision = "allow", reason = "running_generation_scope", "signalling exec work scope");
             match crate::signal_scope(unit, signal) {
                 Ok(true) => return Ok(()),
-                Ok(false) => {}
+                Ok(false) => {
+                    tracing::debug!(signal, reason = "scope_signal_not_sent", "falling back to exec process group");
+                }
                 Err(error) => eprintln!(
                     "st3: WARN exec {id}'s scope missed signal {signal}, so only its group gets it: {error:#}"
                 ),
@@ -352,10 +513,15 @@ impl ExecRuntime {
         expected_generation: Option<&str>,
         signal: i32,
     ) -> Result<()> {
-        let Some(ExecObservation::Running(generation)) = self.observe(id)? else {
+        let observation = self.observe(id)?;
+        let span = teardown_span(id, ExecTeardownCaller::SignalIf, expected_generation, observation.as_ref());
+        let _entered = span.enter();
+        let Some(ExecObservation::Running(generation)) = observation else {
+            tracing::debug!(signal, guard_decision = "skip", reason = "generation_not_running", "exec signal skipped");
             return Ok(());
         };
         if expected_generation.is_some_and(|expected| expected != generation.generation_id) {
+            tracing::debug!(signal, guard_decision = "skip", reason = "incarnation_mismatch", "exec signal rejected");
             anyhow::bail!("exec `{id}` changed incarnation before signal {signal}");
         }
         signal_group(id, generation.pid, signal)
@@ -381,8 +547,20 @@ impl ExecRuntime {
     /// Ends what an ended exec left running in its work scope. A running exec keeps everything:
     /// [`Self::stop_if`] ends it.
     pub fn end_leftovers(&self, id: &str) -> Result<()> {
-        if let Some(unit) = self.leftover_scope(id)? {
-            crate::end_scope(&unit, crate::SCOPE_GRACE)?;
+        self.end_leftovers_for(id, ExecTeardownCaller::EndLeftovers)
+    }
+
+    fn end_leftovers_for(&self, id: &str, caller: ExecTeardownCaller) -> Result<()> {
+        let observation = self.observe(id)?;
+        let span = teardown_span(id, caller, None, observation.as_ref());
+        let _entered = span.enter();
+        if let Some(ExecObservation::Exited(generation)) = observation
+            && let Some(unit) = &generation.scope_unit
+        {
+            tracing::info!(guard_decision = "allow", reason = "exited_generation_leftovers", "ending exec leftover scope");
+            crate::end_scope(unit, crate::SCOPE_GRACE)?;
+        } else {
+            tracing::debug!(guard_decision = "skip", reason = "no_exited_generation_scope", "exec leftover teardown skipped");
         }
         Ok(())
     }
@@ -390,17 +568,36 @@ impl ExecRuntime {
     /// [`Self::end_leftovers`] on a background worker. A scope already seen empty costs one read
     /// of the exec's record.
     pub fn end_leftovers_later(&self, id: &str) {
-        let Ok(Some(unit)) = self.leftover_scope(id) else {
+        let observation = self.observe(id);
+        let span = teardown_span(id, ExecTeardownCaller::EndLeftoversLater, None, observation.as_ref().ok().and_then(Option::as_ref));
+        if observation.is_err() {
+            span.record("registry_status", "unavailable");
+        }
+        let _entered = span.enter();
+        if let Err(error) = &observation {
+            tracing::debug!(guard_decision = "skip", reason = "generation_observation_failed", %error, "deferred exec leftover observation failed");
+        }
+        let Ok(Some(ExecObservation::Exited(generation))) = observation else {
+            tracing::debug!(guard_decision = "skip", reason = "no_verified_exited_generation", "deferred exec leftover teardown skipped");
+            return;
+        };
+        let Some(unit) = generation.scope_unit else {
+            tracing::debug!(guard_decision = "skip", reason = "no_recorded_scope", "deferred exec leftover teardown skipped");
             return;
         };
         if crate::isolate::has_ended(&unit) {
+            tracing::debug!(guard_decision = "skip", reason = "scope_already_ended", "deferred exec leftover teardown skipped");
             return;
         }
         let id = id.to_owned();
+        let worker_span = span.clone();
         crate::isolate::end_later(unit.clone(), move || {
-            crate::end_scope(&unit, crate::SCOPE_GRACE)
-                .map(|_| ())
-                .with_context(|| format!("end what exec `{id}` left running"))
+            worker_span.in_scope(|| {
+                tracing::info!(guard_decision = "allow", reason = "deferred_exited_generation_leftovers", "ending exec leftover scope");
+                crate::end_scope(&unit, crate::SCOPE_GRACE)
+                    .map(|_| ())
+                    .with_context(|| format!("end what exec `{id}` left running"))
+            })
         });
     }
 
@@ -428,7 +625,7 @@ impl ExecRuntime {
 
     pub fn remove(&self, id: &str) -> Result<()> {
         // The record is the last place that names the exec's work scope.
-        self.end_leftovers(id)?;
+        self.end_leftovers_for(id, ExecTeardownCaller::Remove)?;
         for path in [
             self.record_path(id),
             self.previous_record_path(id),
@@ -511,13 +708,23 @@ fn observe_exited_group(generation: ExecGeneration) -> Result<ExecObservation> {
 }
 
 fn signal_group(id: &str, group: u32, signal: i32) -> Result<()> {
+    tracing::info!(
+        runtime_id = id,
+        process_group = group,
+        signal,
+        guard_decision = "allow",
+        reason = "signal_process_group",
+        "signalling exec process group"
+    );
     let result = unsafe { libc::kill(-(group as i32), signal) };
     if result != 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() != Some(libc::ESRCH) {
+            tracing::debug!(runtime_id = id, process_group = group, signal, %error, "exec process group signal failed");
             return Err(error)
                 .with_context(|| format!("signal {signal} to exec `{id}`'s process group"));
         }
+        tracing::debug!(runtime_id = id, process_group = group, signal, guard_decision = "skip", reason = "process_group_absent", "exec process group already absent");
     }
     Ok(())
 }
@@ -552,8 +759,20 @@ fn process_group_is_live(group: u32) -> Result<bool> {
             let mut fields = tail.split_whitespace();
             let state = fields.next();
             let process_group = fields.nth(1).and_then(|field| field.parse::<u32>().ok());
-            if process_group == Some(group) && state != Some("Z") {
-                return Ok(true);
+            if process_group == Some(group) {
+                if state != Some("Z") {
+                    return Ok(true);
+                }
+                // A zombie main thread may leave live worker threads behind. Field 20
+                // counts those threads even though /proc lists only group leaders.
+                let thread_count = tail
+                    .split_whitespace()
+                    .nth(17)
+                    .context("process stat lacks a thread count")?
+                    .parse::<u32>()?;
+                if thread_count > 1 {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
@@ -638,6 +857,17 @@ fn process_identity(pid: u32) -> Result<(char, u64)> {
     }
 }
 
+#[cfg(test)]
+type IdentityHook = Box<dyn Fn(u32)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Runs in `observe` between taking an owned child's status and reading its process, so a
+    /// test can make the child exit in that window.
+    static BEFORE_IDENTITY: std::cell::RefCell<Option<IdentityHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128) -> String {
     let mut hash = Sha256::new();
     hash.update(id.as_bytes());
@@ -650,6 +880,15 @@ fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_exec_runtime_has_no_unlaned_seat_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert!(runtime.unlaned_seat.is_none());
+        let configured = runtime.with_unlaned_seat(Some(crate::seat_placement::tests::policy()));
+        assert!(configured.unlaned_seat.is_some());
+    }
     use std::thread;
     use std::time::Duration;
 
@@ -910,6 +1149,389 @@ mod tests {
         panic!("the exec did not exit");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_owned_exec_that_exits_while_it_is_observed_keeps_its_exit_code() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let go = root.path().join("go");
+        runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "while [ ! -e go ]; do sleep 0.01; done; exit 3".into(),
+                ]),
+                root.path(),
+                &std::env::vars().collect(),
+            )
+            .unwrap();
+        // The child is still running when observe takes its status, and has exited, unreaped,
+        // when observe reads its process.
+        BEFORE_IDENTITY.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |pid| {
+                fs::write(&go, "").unwrap();
+                for _ in 0..3000 {
+                    if process_identity(pid).unwrap().0 == 'Z' {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                panic!("the exec never exited");
+            }))
+        });
+        let observed = runtime.observe("work").unwrap();
+        BEFORE_IDENTITY.with(|hook| *hook.borrow_mut() = None);
+        let Some(ExecObservation::Exited(generation)) = observed else {
+            panic!("unexpected exec observation: {observed:?}");
+        };
+        assert_eq!(generation.exit_code, Some(3));
+        assert_eq!(wait_for_exit(&runtime, "work").exit_code, Some(3));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reaps_an_owned_child_before_committing_its_terminal_record() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let release_path = root.path().join("release");
+        let release_name = std::ffi::CString::new(release_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(release_name.as_ptr(), 0o600) }, 0);
+        let generation = runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "read release < \"$1\"; exit 7".into(),
+                    "sh".into(),
+                    release_path.to_str().unwrap().into(),
+                ]),
+                root.path(),
+                &std::env::vars().collect(),
+            )
+            .unwrap();
+        let mut release = fs::OpenOptions::new()
+            .write(true)
+            .open(release_path)
+            .unwrap();
+        // Hold the child alive through observe's first status probe, then make it exit
+        // before the process-identity probe. The FIFO and pidfd make the race deterministic.
+        assert!(
+            runtime
+                .owned_children
+                .lock()
+                .unwrap()
+                .get_mut(&generation.pid)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, generation.pid, 0) };
+        assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+        let exited = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        writeln!(release, "exit").unwrap();
+        drop(release);
+        let mut event = libc::pollfd {
+            fd: exited.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut event, 1, -1) }, 1);
+        assert_ne!(event.revents & libc::POLLIN, 0);
+        assert_eq!(process_identity(generation.pid).unwrap().0, 'Z');
+
+        let observed = runtime.observe_exited_group("work", generation).unwrap();
+        let ExecObservation::Exited(ended) = observed else {
+            panic!("unexpected exec observation: {observed:?}");
+        };
+        assert_eq!(ended.exit_code, Some(7));
+        assert_eq!(ended.exit_signal, None);
+        assert!(ended.group_exited);
+        assert!(runtime.owned_children.lock().unwrap().is_empty());
+        let reopened = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert_eq!(
+            reopened.observe("work").unwrap(),
+            Some(ExecObservation::Exited(ended))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_owned_leader_exit_keeps_its_status_while_a_descendant_is_running() {
+        use std::io::BufRead as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let _kill = KillOnDrop(runtime.clone());
+        let descendant_release = root.path().join("descendant-release");
+        let descendant_pid = root.path().join("descendant-pid");
+        let leader_release = root.path().join("leader-release");
+        for path in [&descendant_release, &descendant_pid, &leader_release] {
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        }
+        let generation = runtime
+                .spawn(
+                    "work",
+                    &crate::Launch::Argv(vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "sh -c 'read release < \"$1\"' sh \"$1\" & printf '%s\\n' \"$!\" > \"$2\"; read release < \"$3\"; exit 7".into(),
+                        "sh".into(),
+                        descendant_release.to_str().unwrap().into(),
+                        descendant_pid.to_str().unwrap().into(),
+                        leader_release.to_str().unwrap().into(),
+                    ]),
+                    root.path(),
+                    &std::env::vars().collect(),
+                )
+                .unwrap();
+        let mut pid = String::new();
+        std::io::BufReader::new(fs::File::open(descendant_pid).unwrap())
+            .read_line(&mut pid)
+            .unwrap();
+        let descendant = pid.trim().parse::<u32>().unwrap();
+        let pidfd = |pid: u32| {
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+            unsafe { OwnedFd::from_raw_fd(fd as i32) }
+        };
+        let wait = |fd: &OwnedFd| {
+            let mut event = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(unsafe { libc::poll(&mut event, 1, -1) }, 1);
+            assert_ne!(event.revents & libc::POLLIN, 0);
+        };
+        let leader_exited = pidfd(generation.pid);
+        let descendant_exited = pidfd(descendant);
+        // As in the no-descendant regression, the child exits between the first status
+        // probe and the process-identity probe. The descendant stays blocked on its FIFO.
+        assert!(
+            runtime
+                .owned_children
+                .lock()
+                .unwrap()
+                .get_mut(&generation.pid)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        let mut release = fs::OpenOptions::new()
+            .write(true)
+            .open(leader_release)
+            .unwrap();
+        writeln!(release, "exit").unwrap();
+        drop(release);
+        wait(&leader_exited);
+        assert_eq!(process_identity(generation.pid).unwrap().0, 'Z');
+
+        let observed = runtime.observe_exited_group("work", generation).unwrap();
+        let ExecObservation::Running(running) = observed else {
+            panic!("the live descendant must keep its group running: {observed:?}");
+        };
+        assert_eq!(running.exit_code, Some(7));
+        assert!(!running.group_exited);
+        assert!(runtime.owned_children.lock().unwrap().is_empty());
+        assert_eq!(
+            runtime.observe("work").unwrap(),
+            Some(ExecObservation::Running(running))
+        );
+
+        let mut release = fs::OpenOptions::new()
+            .write(true)
+            .open(descendant_release)
+            .unwrap();
+        writeln!(release, "exit").unwrap();
+        drop(release);
+        wait(&descendant_exited);
+        let Some(ExecObservation::Exited(ended)) = runtime.observe("work").unwrap() else {
+            panic!("the group must stop running once its descendant exits");
+        };
+        assert_eq!(ended.exit_code, Some(7));
+        assert!(ended.group_exited);
+        let reopened = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert_eq!(
+            reopened.observe("work").unwrap(),
+            Some(ExecObservation::Exited(ended))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_owned_exec_with_a_zombie_leader_thread_is_running() {
+        assert_zombie_leader_thread_is_running(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_adopted_exec_with_a_zombie_leader_thread_is_running() {
+        assert_zombie_leader_thread_is_running(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_zombie_leader_thread_is_running(adopted: bool) {
+        use std::io::BufRead as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let ready_path = root.path().join("ready");
+        let release_path = root.path().join("release");
+        for path in [&ready_path, &release_path] {
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        }
+        let ready = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&ready_path)
+            .unwrap();
+        // pthread_exit terminates only the main thread. The worker reports readiness
+        // after the kernel exposes that thread as Z, then lives until explicitly released.
+        let fixture = r#"
+import ctypes, os, sys, threading
+pid = os.getpid()
+def worker():
+    while open(f'/proc/{pid}/stat').read().rsplit(') ', 1)[1].split()[0] != 'Z':
+        os.sched_yield()
+    with open(sys.argv[1], 'w') as ready:
+        ready.write('ready\n')
+    with open(sys.argv[2]) as release:
+        release.readline()
+    os._exit(7)
+threading.Thread(target=worker).start()
+libc = ctypes.CDLL(None)
+libc.pthread_exit.argtypes = [ctypes.c_void_p]
+libc.pthread_exit.restype = None
+libc.pthread_exit(None)
+"#;
+        let generation = runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec![
+                    "python3".into(),
+                    "-c".into(),
+                    fixture.into(),
+                    ready_path.to_str().unwrap().into(),
+                    release_path.to_str().unwrap().into(),
+                ]),
+                root.path(),
+                &std::env::vars().collect(),
+            )
+            .unwrap();
+        // A pidfd confines cleanup to this process even after its PID is reaped/reused.
+        // It must also bypass observe, which blocks in the broken implementation.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, generation.pid, 0) };
+        assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+        struct Cleanup(ExecRuntime, u32, OwnedFd);
+        impl Cleanup {
+            fn kill(&self) -> std::io::Result<()> {
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        self.2.as_raw_fd(),
+                        libc::SIGKILL,
+                        std::ptr::null::<libc::siginfo_t>(),
+                        0,
+                    )
+                };
+                if result == 0 {
+                    return Ok(());
+                }
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ESRCH) {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.kill();
+                if let Some(mut child) = self.0.owned_children.lock().unwrap().remove(&self.1) {
+                    let _ = child.wait();
+                }
+            }
+        }
+        let cleanup = Cleanup(runtime.clone(), generation.pid, unsafe {
+            OwnedFd::from_raw_fd(fd as i32)
+        });
+        let mut event = libc::pollfd {
+            fd: ready.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut event, 1, 10_000) },
+            1,
+            "worker never became ready"
+        );
+        let mut line = String::new();
+        std::io::BufReader::new(ready).read_line(&mut line).unwrap();
+        assert_eq!(line, "ready\n");
+        assert_eq!(process_identity(generation.pid).unwrap().0, 'Z');
+        assert!(
+            runtime
+                .owned_children
+                .lock()
+                .unwrap()
+                .get_mut(&generation.pid)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none(),
+            "the process must not yet be waitable"
+        );
+        let observing = if adopted {
+            ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+        } else {
+            runtime.clone()
+        };
+        let (send, receive) = std::sync::mpsc::channel();
+        let observer = thread::spawn(move || {
+            send.send(observing.observe("work")).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(10));
+        if result.is_err() {
+            cleanup.kill().unwrap();
+            observer.join().unwrap();
+            panic!("observe blocked on a zombie leader thread with a live worker");
+        }
+        observer.join().unwrap();
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Some(ExecObservation::Running(generation.clone()))
+        );
+        assert_eq!(
+            runtime.observe("work").unwrap(),
+            Some(ExecObservation::Running(generation))
+        );
+        let mut release = fs::OpenOptions::new()
+            .write(true)
+            .open(release_path)
+            .unwrap();
+        writeln!(release, "exit").unwrap();
+        drop(release);
+        let ended = wait_for_exit(&runtime, "work");
+        assert_eq!(ended.exit_code, Some(7));
+        assert!(ended.group_exited);
+    }
+
     #[test]
     fn retains_the_current_and_previous_log_generations() {
         let root = tempfile::tempdir().unwrap();
@@ -1048,6 +1670,251 @@ mod tests {
         }
         unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         panic!("background process {pid} outlived its exec");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_file(root: &Path, name: &str) -> String {
+        for _ in 0..3000 {
+            if let Ok(text) = fs::read_to_string(root.join(name))
+                && text.ends_with('\n')
+            {
+                return text.trim().to_owned();
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the exec never wrote {name}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cgroup_of(pid: u32) -> PathBuf {
+        let text = fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
+        let path = text.lines().find_map(|line| line.strip_prefix("0::")).unwrap();
+        Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'))
+    }
+
+    /// The cgroup of the scope `generation` runs in, once `systemd-run` has moved it there.
+    #[cfg(target_os = "linux")]
+    fn scope_cgroup(generation: &ExecGeneration) -> PathBuf {
+        let unit = generation.scope_unit.as_deref().unwrap();
+        for _ in 0..500 {
+            let cgroup = cgroup_of(generation.pid);
+            if cgroup.ends_with(unit) {
+                return cgroup;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the exec never entered its scope {unit}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cpu_usage(cgroup: &Path) -> Duration {
+        let stat = fs::read_to_string(cgroup.join("cpu.stat")).unwrap();
+        let usec = stat
+            .lines()
+            .find_map(|line| line.strip_prefix("usage_usec "))
+            .unwrap();
+        Duration::from_micros(usec.trim().parse().unwrap())
+    }
+
+    /// A seat id no other test run on this host uses, so concurrent runs never share a lane.
+    #[cfg(target_os = "linux")]
+    fn lane_test_id(name: &str) -> String {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+        format!("lane-test.{name}.{}.{nanos}", std::process::id())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn systemctl_show(unit: &str, property: &str) -> String {
+        let output = std::process::Command::new("systemctl")
+            .args(["--user", "show", &format!("--property={property}"), "--value", unit])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// Stops a test's exec and ends its lane when dropped, so a failing test leaves nothing behind.
+    #[cfg(target_os = "linux")]
+    struct LaneOnDrop(ExecRuntime, String);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for LaneOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill(&self.1);
+            let slice = crate::lane::seat_slice(&self.1);
+            for verb in ["stop", "revert"] {
+                let _ = std::process::Command::new("systemctl").args(["--user", verb, &slice]).output();
+            }
+        }
+    }
+
+    /// Starts `launch` as seat `id` in a lane of one core and 256 MiB; returns its generation and
+    /// the cgroup of the scope it runs in.
+    #[cfg(target_os = "linux")]
+    fn spawn_laned(runtime: &ExecRuntime, id: &str, root: &Path, launch: &str) -> (ExecGeneration, PathBuf) {
+        let lane = crate::lane::Capacity { cores: 1, memory: 256 << 20 };
+        let mut environment = scope_environment();
+        environment.insert(crate::lane::CAPACITY_ENV.into(), lane.to_string());
+        let _switch = crate::lane::TEST_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::lane::set_enforced(true);
+        let generation = runtime.spawn(id, &crate::Launch::Shell(launch.into()), root, &environment);
+        crate::lane::set_enforced(false);
+        let generation = generation.unwrap();
+        let cgroup = scope_cgroup(&generation);
+        (generation, cgroup)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_until(what: &str, done: impl Fn() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("{what}");
+    }
+
+    /// A seat lane (docs/st3/seat-lanes.md) is the seat's own slice, capped, and each launch of its
+    /// task is a scope inside it: the task and every child share its cores, a child that left its
+    /// session included; the task never sees the lane's launch key and its builds are told to stay
+    /// in place. A job the seat starts as its own unit in the slice outlives a restart of the task,
+    /// and ending the lane (a seat stopped for good) ends the job and the slice's limits. A host
+    /// with lanes off starts the same declaration without one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_lane_caps_the_seat_keeps_its_jobs_across_a_restart_and_ends_for_good() {
+        if crate::isolation_mode() != crate::Isolation::Scope || !crate::isolate::systemd_254() {
+            eprintln!("skipped: no systemd 254 user scopes");
+            return;
+        }
+        // Off (the default): the declaration is ignored and the task starts as it does today.
+        let off = tempfile::tempdir().unwrap();
+        let unlaned = ExecRuntime::new(off.path().join("exec"), off.path().join("logs"));
+        let _kill_unlaned = KillOnDrop(unlaned.clone());
+        let mut environment = scope_environment();
+        environment.insert(
+            crate::lane::CAPACITY_ENV.into(),
+            crate::lane::Capacity { cores: 1, memory: 256 << 20 }.to_string(),
+        );
+        let switch = crate::lane::TEST_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = unlaned
+            .spawn("work", &crate::Launch::Shell("exec sleep 600".into()), off.path(), &environment)
+            .unwrap();
+        drop(switch);
+        let cgroup = scope_cgroup(&generation);
+        assert!(cgroup.parent().unwrap().ends_with("app.slice"), "{}", cgroup.display());
+        assert_eq!(fs::read_to_string(cgroup.join("memory.max")).unwrap().trim(), "max");
+        unlaned.stop_if("work", Some(&generation.generation_id)).unwrap();
+        wait_for_exit(&unlaned, "work");
+        assert!(!crate::lane::prepared_for_test("work"), "a seat without a lane holds no slot");
+
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let id = lane_test_id("restart");
+        let _lane = LaneOnDrop(runtime.clone(), id.clone());
+        let job = format!("{}-job.service", crate::isolate::sanitize(&id));
+        let (generation, cgroup) = spawn_laned(
+            &runtime,
+            &id,
+            root.path(),
+            &format!(
+                "echo \"${{BUILDS_SLICE_ACTIVE:-unset}} ${{FRACTAL_SEAT_CAPACITY:-unset}} $FRACTAL_LANE_SLICE\" > lane.env; \
+                 (setsid sh -c 'echo $$ > orphan.pid; exec sleep 600' &); \
+                 systemd-run --user --quiet --unit={job} --slice=\"$FRACTAL_LANE_SLICE\" sleep 600; \
+                 echo spin > spin.start; \
+                 for n in 1 2; do timeout 1 sh -c 'while :; do :; done' & done; wait; \
+                 echo done > spin.done; exec sleep 600"
+            ),
+        );
+        let slice_name = crate::lane::seat_slice(&id);
+        let slice = cgroup.parent().unwrap().to_path_buf();
+        assert!(slice.ends_with(format!("app.slice/app-lanes.slice/{slice_name}")), "{}", slice.display());
+        assert_eq!(fs::read_to_string(slice.join("cpu.max")).unwrap().trim(), "100000 100000");
+        assert_eq!(fs::read_to_string(slice.join("memory.max")).unwrap().trim(), (256u64 << 20).to_string());
+        assert_eq!(fs::read_to_string(slice.join("memory.swap.max")).unwrap().trim(), (64u64 << 20).to_string());
+        assert_eq!(systemctl_show(generation.scope_unit.as_deref().unwrap(), "OOMPolicy"), "continue");
+
+        assert_eq!(wait_for_file(root.path(), "lane.env"), format!("1 unset {slice_name}"));
+        let orphan = read_orphan(root.path());
+        assert_eq!(cgroup_of(orphan), cgroup, "a child that left its session is still in the lane");
+
+        // Two spinning children share one core.
+        wait_for_file(root.path(), "spin.start");
+        let (started, used) = (std::time::Instant::now(), cpu_usage(&slice));
+        wait_for_file(root.path(), "spin.done");
+        let (elapsed, used) = (started.elapsed(), cpu_usage(&slice) - used);
+        assert!(
+            used.as_secs_f64() <= elapsed.as_secs_f64() * 1.25,
+            "two spinners used {used:?} of CPU in {elapsed:?} under a one-core lane"
+        );
+        assert_eq!(systemctl_show(&job, "ActiveState"), "active");
+
+        // A restart: the task's scope ends with what it started, the lane and its job stay.
+        runtime.stop_if(&id, Some(&generation.generation_id)).unwrap();
+        wait_for_exit(&runtime, &id);
+        assert_gone_soon(orphan);
+        wait_until("the restarted task's scope outlived its stop", || !cgroup.exists());
+        let (restarted, again) = spawn_laned(&runtime, &id, root.path(), "exec sleep 600");
+        assert_eq!(again.parent().unwrap(), slice, "a restart starts in the seat's own lane");
+        assert_eq!(systemctl_show(&job, "ActiveState"), "active", "the job outlived the restart");
+
+        // An end asked before a launch does not end the lane that launch runs in: a seat stopped
+        // for good and started again at once keeps its new lane.
+        let stale_end = crate::lane::request_end_for_test(&id);
+        runtime.stop_if(&id, Some(&restarted.generation_id)).unwrap();
+        wait_for_exit(&runtime, &id);
+        let (relaunched, _) = spawn_laned(&runtime, &id, root.path(), "exec sleep 600");
+        stale_end().unwrap();
+        assert!(matches!(runtime.observe(&id).unwrap(), Some(ExecObservation::Running(_))));
+        assert_eq!(systemctl_show(&job, "ActiveState"), "active", "a stale end left the lane's job");
+
+        // Stopped for good after a daemon restart, which forgets what the old process prepared:
+        // the lane still ends, its job with it, and its limits are gone.
+        runtime.stop_if(&id, Some(&relaunched.generation_id)).unwrap();
+        wait_for_exit(&runtime, &id);
+        crate::lane::forget_for_test(&id);
+        crate::lane::end(&id);
+        wait_until("the lane's job outlived the lane", || systemctl_show(&job, "ActiveState") != "active");
+        wait_until("the lane outlived its end", || !slice.exists());
+        wait_until("the lane's limits outlived its end", || {
+            systemctl_show(&slice_name, "MemoryMax") == "infinity"
+        });
+        wait_until("the lane's slot outlived its end", || !crate::lane::prepared_for_test(&id));
+    }
+
+    /// A child that asks for more memory than its lane holds is killed inside the lane, and only
+    /// that child ends: the task that started it keeps running.
+    ///
+    /// Ignored by default: it makes an OOM kill on purpose. Run it where the host guard subtracts
+    /// `app-lanes.slice` (docs/st3/seat-lanes.md), after telling whoever runs the guard.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "kills a process on purpose; run where the host guard subtracts app-lanes.slice"]
+    fn a_child_over_its_lane_memory_is_killed_and_the_task_keeps_running() {
+        assert!(crate::isolate::systemd_254(), "needs systemd 254 user scopes");
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let id = lane_test_id("oom");
+        let _lane = LaneOnDrop(runtime.clone(), id.clone());
+        // 384 MiB against a lane of 256 MiB and 64 MiB of swap.
+        let (_, cgroup) = spawn_laned(
+            &runtime,
+            &id,
+            root.path(),
+            "setsid sh -c 'head -c 402653184 /dev/zero | tail -c 402653184 > /dev/null; echo $? > hog.status'; \
+             echo alive > after.hog; exec sleep 600",
+        );
+        assert_eq!(wait_for_file(root.path(), "hog.status"), "137");
+        assert_eq!(wait_for_file(root.path(), "after.hog"), "alive");
+        let events = fs::read_to_string(cgroup.parent().unwrap().join("memory.events")).unwrap();
+        let kills: u64 = events
+            .lines()
+            .find_map(|line| line.strip_prefix("oom_kill "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(kills >= 1, "{events}");
+        assert!(matches!(runtime.observe(&id).unwrap(), Some(ExecObservation::Running(_))));
     }
 
     /// Kills the test's exec when dropped, so a failing test leaves nothing behind.

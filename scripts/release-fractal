@@ -9,7 +9,7 @@ if [[ ${1:-} == --dry-run ]]; then
   dry_run=true
   shift
 fi
-binaries=(st3)
+binaries=(fractal)
 runtime_binaries=("${binaries[@]}" pty)
 target=${1:?expected Rust target}
 out=${2:?expected output directory}
@@ -23,9 +23,8 @@ if $dry_run; then
   printf 'cargo build --release --locked --target %s -p fractal\n' "$target"
   printf 'stage bin/%s\n' "${runtime_binaries[@]}"
   printf 'nix build .#fractal-web --no-link --print-out-paths; stage share/fractal-web\n'
-  printf 'link bin/fractal -> st3\n'
   # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-  printf 'link bin/st -> st3\n'
+  printf 'link bin/st -> fractal\nlink bin/st3 -> fractal\n'
   # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
   printf 'archive %s/fractal-%s.tar.gz\n' "$out" "$target"
   # arn:lmig:smalltalk:2026-10-20-release-artifact-aliases — sunset 2026-11-01 (#3032).
@@ -116,9 +115,9 @@ if [[ $target == *apple* ]]; then
     rm -rf "$work/$package/bin/StListen.app" "$speech"
   fi
 fi
-ln -s st3 "$work/$package/bin/fractal"
 # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-ln -s st3 "$work/$package/bin/st"
+ln -s fractal "$work/$package/bin/st"
+ln -s fractal "$work/$package/bin/st3"
 # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 install -m 0755 scripts/install-release "$work/$package/install.sh"
 install -m 0755 scripts/install-macos.py "$work/$package/install-macos.py"
@@ -153,14 +152,17 @@ tar -C "$work" -czf "$archive" "$package"
 # Verify the delivered bytes, not just the pre-archive staging directory.
 mkdir "$work/extracted"
 tar -C "$work/extracted" -xzf "$archive"
-test "$(readlink "$work/extracted/$package/bin/fractal")" = st3
+test -f "$work/extracted/$package/bin/fractal"
+test ! -L "$work/extracted/$package/bin/fractal"
+test "$(readlink "$work/extracted/$package/bin/st")" = fractal
+test "$(readlink "$work/extracted/$package/bin/st3")" = fractal
 mkdir -p "$work/install-home"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 FRACTAL_MACOS_INSTALL_HOME="$work/install-home" ST_MACOS_INSTALL_HOME="$work/install-home" FRACTAL_MACOS_APP_PATH="$work/installed/SmallTalk.app" ST_MACOS_APP_PATH="$work/installed/SmallTalk.app" \
   "$work/extracted/$package/install.sh" --bin-dir "$work/installed"
 test -f "$work/share/fractal-web/index.html"
 # Query outside the build checkout: installed tools must retain their baked source identity.
-(cd "$work/extracted" && "$work/installed/st" --version --json) > "$work/version.json"
+(cd "$work/extracted" && "$work/installed/fractal" --version --json) > "$work/version.json"
 python3 - "$work/version.json" <<'PY_VERSION'
 import json, subprocess, sys, tomllib
 import os
@@ -169,7 +171,8 @@ expected = stamp['version'] + '+' + stamp['rev']
 actual = json.load(open(sys.argv[1]))['machine_version']
 assert actual == expected, f'installed version {actual!r}, expected {expected!r}'
 PY_VERSION
-"$work/installed/st3" --version
+"$work/installed/fractal" --version
+"$work/installed/fractal" --help >/dev/null
 "$work/installed/st3" --help >/dev/null
 "$work/installed/st" --help >/dev/null
 "$work/installed/pty" --version
@@ -177,7 +180,7 @@ PY_VERSION
 env -u FRACTAL_AGENT -u ST_AGENT HOME="$work/install-home" XDG_CONFIG_HOME="$work/install-home/.config" \
   XDG_CACHE_HOME="$work/install-home/.cache" XDG_STATE_HOME="$work/install-home/.local/state" \
   FRACTAL_PERSON=person/release-smoke ST3_PERSON=person/release-smoke FRACTAL_ENDPOINT="$work/absent.sock" ST3_ENDPOINT="$work/absent.sock" \
-  python3 crates/fractal-tui/tests/pty_smoke.py "$work/installed/st" --ui --no-panic
+  python3 crates/fractal-tui/tests/pty_smoke.py "$work/installed/fractal" --ui --no-panic
 # arn:lmig:smalltalk:2026-10-20-release-artifact-aliases — sunset 2026-11-01 (#3032).
 # Retain the historical root directory as well as the asset name for old installers.
 legacy="smalltalk-$target"

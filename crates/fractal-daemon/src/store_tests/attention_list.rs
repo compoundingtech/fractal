@@ -344,6 +344,7 @@ store.publish_attention_list(
         owners: before.owners.clone(),
         rows: Arc::clone(&before.rows),
         fleet: None,
+        ask_deadline_policy: before.ask_deadline_policy,
     },
     false,
 );
@@ -419,12 +420,71 @@ store.publish_attention_list(
         owners: before.owners.clone(),
         rows: Arc::clone(&before.rows),
         fleet: None,
+        ask_deadline_policy: before.ask_deadline_policy,
     },
     false,
 );
 let after = refresh_and_check(&store);
 assert!(after.evaluated_at_unix_ms > stale);
 assert_eq!(store.attention_list_folds().get("clock"), Some(&1));
+}
+
+/// The deadline policy lives in `meta`, not in claims. Turning deadlines on or off or changing
+/// the default wakes the refresher, and its next refresh serves the new deadline at once, well
+/// within the clock period and with no claim written; a pass that changes no policy wakes it not.
+#[test]
+fn the_published_list_follows_the_deadline_policy_without_a_claim() {
+let (store, _, request) = fixture();
+let wake = store.start_attention_list_refresher().unwrap();
+let woken = || futures_util::FutureExt::now_or_never(wake.notified()).is_some();
+// Asked while deadlines are off, so the claim records no deadline of its own.
+let ask = store.ask_person(&request).unwrap();
+let served = |publication: &AttentionPublication| {
+    publication
+        .rows
+        .iter()
+        .find(|row| row["source_id"] == ask.subject)
+        .expect("the ask is on the home")["deadline_at"]
+        .clone()
+};
+let at = |ms: u128| json!(fractal_store::client_values::client_timestamp(ms));
+let policy_folds = || store.attention_list_folds().get("ask deadline policy").copied().unwrap_or(0);
+let mut revisions = store.subscribe_attention_list();
+assert_eq!(served(&refresh_and_check(&store)), Value::Null);
+woken();
+revisions.borrow_and_update();
+// Each policy change wakes the refresher, folds once and gives windows a new revision.
+let mut follows = |change: &str, expected: Value| {
+    assert!(woken(), "{change} wakes the refresher");
+    let index = store.index().unwrap();
+    let folded = policy_folds();
+    let published = refresh_and_check(&store);
+    assert_eq!(published.cut, index, "{change}: no claim was written");
+    assert_eq!(policy_folds(), folded + 1, "{change} folds the list");
+    assert!(revisions.has_changed().unwrap(), "{change}: windows reread");
+    revisions.borrow_and_update();
+    assert_eq!(served(&published), expected, "{change}");
+};
+store.set_ask_deadlines(true);
+let on = now_ms();
+store.reconcile_person_asks_at(on).unwrap();
+let day = fractal_store::store::person_work::DEFAULT_ASK_DEADLINE_MS as u128;
+follows("turning deadlines on", at(on + day));
+store.reconcile_person_asks_at(on + 1).unwrap();
+assert!(!woken(), "a pass while already counting changes no policy");
+store.set_default_ask_deadline_ms(2 * 3_600_000).unwrap();
+follows("a new default", at(on + 2 * 3_600_000));
+store.set_default_ask_deadline_ms(2 * 3_600_000).unwrap();
+assert!(!woken(), "the same default again changes nothing");
+store.set_ask_deadlines(false);
+store.reconcile_person_asks_at(now_ms()).unwrap();
+follows("turning deadlines off", Value::Null);
+store.reconcile_person_asks_at(now_ms()).unwrap();
+assert!(!woken(), "a pass while off changes no policy");
+let folded = policy_folds();
+refresh_and_check(&store);
+assert_eq!(policy_folds(), folded, "an unchanged policy folds nothing");
+assert!(!revisions.has_changed().unwrap());
 }
 
 #[test]
@@ -493,6 +553,7 @@ let shared_at = |publication: &AttentionPublication, cut: u64| {
         owners: AttentionPublication::index_owners(&rows),
         rows: Arc::new(rows),
         fleet: None,
+        ask_deadline_policy: publication.ask_deadline_policy,
     }
 };
 let without_at = |publication: &AttentionPublication, cut: u64| AttentionPublication {
@@ -505,6 +566,7 @@ let without_at = |publication: &AttentionPublication, cut: u64| AttentionPublica
     owners: publication.owners.clone(),
     rows: Arc::clone(&publication.rows),
     fleet: None,
+    ask_deadline_policy: publication.ask_deadline_policy,
 };
 let delta = |publication: &AttentionPublication| {
     store
@@ -562,6 +624,7 @@ let at = |publication: &AttentionPublication, cut: u64, rows: Vec<Value>| Attent
     owners: AttentionPublication::index_owners(&rows),
     rows: Arc::new(rows),
     fleet: None,
+    ask_deadline_policy: publication.ask_deadline_policy,
 };
 // A seat blocked on a person is a new prompt: its observation folds.
 store

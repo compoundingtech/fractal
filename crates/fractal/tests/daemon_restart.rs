@@ -26,8 +26,7 @@ struct Daemon {
     socket: PathBuf,
     store: Arc<Store>,
     event_notify: watch::Sender<u64>,
-    server: Option<tokio::task::JoinHandle<()>>,
-    isolated_server: Option<(tokio::sync::oneshot::Sender<()>, std::thread::JoinHandle<()>)>,
+    server: Option<(tokio::sync::oneshot::Sender<()>, std::thread::JoinHandle<()>)>,
 }
 
 impl Daemon {
@@ -55,7 +54,6 @@ impl Daemon {
             store: Arc::new(store),
             event_notify: watch::channel(0_u64).0,
             server: None,
-            isolated_server: None,
         }
     }
 
@@ -70,25 +68,47 @@ impl Daemon {
         self.start_isolated_app(app).await;
     }
 
-    fn state(&self) -> AppState {
-        AppState { owning_person: None,
-        store: self.store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: self.event_notify.clone(),
-        node: "restart-node".into(),
-        state_dir: self.root.join("daemon"),
-        pty_root: self.root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    async fn start_isolated_app(&mut self, app: axum::Router) {
+        self.serve(app, true).await;
     }
 
-    // Dropping this runtime also closes upgraded WebSocket connections, just as exiting
-    // the daemon does. Aborting only the listener would leave those tasks alive.
-    async fn start_isolated_app(&mut self, app: axum::Router) {
+    fn state(&self) -> AppState {
+        AppState {
+            owning_person: None,
+            store: self.store.clone(),
+            notify: Arc::new(Notify::new()),
+            event_notify: self.event_notify.clone(),
+            node: "restart-node".into(),
+            state_dir: self.root.join("daemon"),
+            pty_root: self.root.join("pty"),
+            pty_binary: PathBuf::from("pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        }
+    }
+
+    async fn start_with_binding(&mut self, native: bool) {
+        let app = fractal_daemon::api::router(self.state());
+        self.serve(app, native).await;
+    }
+
+    /// The API `start` serves, with `routes` added to it.
+    async fn start_with_routes(&mut self, routes: axum::Router) {
+        let app = fractal_daemon::api::router(self.state()).merge(routes);
+        self.serve(app, false).await;
+    }
+
+    // The API serves on a runtime of its own. Dropping it at `stop` ends every connection the
+    // way exiting the daemon does: upgraded WebSocket connections, and requests still in flight.
+    // Aborting only the listener would leave those tasks alive, and a request accepted just
+    // before the stop could still read the graph afterwards and answer from it.
+    async fn serve(&mut self, app: axum::Router, bound: bool) {
         let socket = self.socket.clone();
         let store = self.store.clone();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -99,35 +119,20 @@ impl Daemon {
                 .build()
                 .unwrap();
             runtime.block_on(async {
-                tokio::select! {
-                    result = fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store) => {
-                        result.unwrap();
+                let serve = async {
+                    if bound {
+                        fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store).await
+                    } else {
+                        fractal_daemon::api::serve_unix(&socket, app).await
                     }
+                };
+                tokio::select! {
+                    result = serve => result.unwrap(),
                     _ = stopped => {}
                 }
             });
         });
-        self.isolated_server = Some((stop, thread));
-        wait_until(
-            "the isolated daemon accepts connections",
-            Duration::from_secs(5),
-            || std::os::unix::net::UnixStream::connect(&self.socket).is_ok(),
-        )
-        .await;
-    }
-
-    async fn start_with_binding(&mut self, native: bool) {
-        let state = self.state();
-        let socket = self.socket.clone();
-        self.server = Some(tokio::spawn(async move {
-            let store = state.store.clone();
-            let app = fractal_daemon::api::router(state);
-            if native {
-                let _ = fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store).await;
-            } else {
-                let _ = fractal_daemon::api::serve_unix(&socket, app).await;
-            }
-        }));
+        self.server = Some((stop, thread));
         wait_until(
             "the daemon accepts connections",
             Duration::from_secs(5),
@@ -138,13 +143,9 @@ impl Daemon {
 
     /// Stop the API the way an exiting daemon does: the socket file stays and refuses.
     async fn stop(&mut self) {
-        if let Some((stop, thread)) = self.isolated_server.take() {
+        if let Some((stop, thread)) = self.server.take() {
             let _ = stop.send(());
             tokio::task::spawn_blocking(move || thread.join().unwrap()).await.unwrap();
-        }
-        if let Some(server) = self.server.take() {
-            server.abort();
-            let _ = server.await;
         }
         wait_until(
             "the stopped daemon refuses new connections",
@@ -220,9 +221,10 @@ impl Daemon {
             .collect()
     }
 
+    /// Diagnostics of every code: observability codes are in the local observation log.
     fn has_diagnostic(&self, subject: &str, incarnation: &str, code: &str) -> bool {
         self.store
-            .claims_for(subject, Some("harness.diagnostic"))
+            .observations_for(subject, "harness.diagnostic")
             .unwrap_or_default()
             .into_iter()
             .any(|claim| {
@@ -238,10 +240,7 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        if let Some(server) = self.server.take() {
-            server.abort();
-        }
-        if let Some((stop, thread)) = self.isolated_server.take() {
+        if let Some((stop, thread)) = self.server.take() {
             let _ = stop.send(());
             let _ = thread.join();
         }
@@ -757,7 +756,7 @@ time.sleep(300)
     let owned = fractal_drivers::harness_state::read(&record, None).unwrap();
     wait_until("the quiet seat's channel attaches", Duration::from_secs(10), || {
         daemon.has_diagnostic(seat, incarnation, "claude-channel-attached")
-            && daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap()
+            && daemon.store.observations_for(seat, "harness.diagnostic").unwrap()
                 .iter().any(|claim| {
                     claim.body["fields"]["code"] == "claude-channel-initialized"
                         && claim.body["fields"]["incarnation_id"] == incarnation
@@ -808,7 +807,7 @@ time.sleep(300)
     assert!(before["delivery"]["reason"].as_str().is_some_and(|reason| {
         reason.contains(warning)
     }), "{before}");
-    let initialized = daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap();
+    let initialized = daemon.store.observations_for(seat, "harness.diagnostic").unwrap();
     assert!(initialized.iter().any(|claim| {
         claim.body["fields"]["code"] == "claude-channel-initialized"
             && claim.body["fields"]["incarnation_id"] == incarnation
@@ -962,6 +961,63 @@ async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     );
 }
 
+/// How a request ended: the first bytes of an answer, or a close before any.
+#[derive(Debug, PartialEq)]
+enum Ending {
+    Answered(String),
+    Closed,
+}
+
+/// Send one request and wait up to 10 s for it to end. A timeout fails the test: it shows
+/// neither an answer nor a close.
+fn request_ending(socket: &Path, path: &str) -> Ending {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: st3\r\n\r\n").unwrap();
+    let mut buffer = [0u8; 4096];
+    match stream.read(&mut buffer) {
+        Ok(0) => Ending::Closed,
+        Ok(read) => Ending::Answered(String::from_utf8_lossy(&buffer[..read]).into_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => Ending::Closed,
+        Err(error) => panic!("the request was neither answered nor closed: {error}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_daemon_cannot_answer_a_request_it_was_already_handling() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(directory.path());
+    // A handler that says it has started, then waits until the test lets it answer.
+    let (entered, handler_entered) = std::sync::mpsc::channel::<()>();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let held = {
+        let release = release.clone();
+        axum::routing::get(move || {
+            let (entered, release) = (entered.clone(), release.clone());
+            async move {
+                let _ = entered.send(());
+                release.acquire().await.unwrap().forget();
+                "answered after the stop"
+            }
+        })
+    };
+    daemon.start_with_routes(axum::Router::new().route("/test/held", held)).await;
+    let socket = daemon.socket.clone();
+    let client = std::thread::spawn(move || request_ending(&socket, "/test/held"));
+    tokio::task::spawn_blocking(move || handler_entered.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the held handler starts");
+    daemon.stop().await;
+    // A handler that outlived the stop answers now: stopping only the listener left it running.
+    release.add_permits(1);
+    let ending = tokio::task::spawn_blocking(move || client.join().unwrap()).await.unwrap();
+    assert_eq!(ending, Ending::Closed);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail() {
     if fractal_daemon::test_support::supervise_test() {
@@ -1038,10 +1094,11 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     )
     .await;
     assert_alive(&mut driver, "a running Claude driver");
-    // The graph records the delivery outage and its recovery for this incarnation.
+    // The seat's node records the delivery outage and its recovery for this incarnation, in
+    // its local observation log: they are observability codes.
     let diagnostics = daemon
         .store
-        .claims_for(seat, Some("harness.diagnostic"))
+        .observations_for(seat, "harness.diagnostic")
         .unwrap()
         .into_iter()
         .map(|claim| {
@@ -1077,7 +1134,11 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
         "the driver wrote into the seat's terminal: {terminal}"
     );
     let log = driver_log(root);
-    assert!(log.contains("is not reachable"), "{log}");
+    // The outage shows up as a refused connection, or as a page request the stop cut short.
+    assert!(
+        log.contains("is not reachable") || log.contains("closed the connection before it answered"),
+        "{log}"
+    );
     assert!(log.contains("may be restarting"), "{log}");
     assert!(
         log.contains("retrying every 1s until the daemon is back"),
@@ -1088,6 +1149,161 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
         "{log}"
     );
     assert!(!log.contains("st3 up") && !log.contains("fractal up"), "{log}");
+}
+
+#[cfg(target_os = "linux")]
+async fn initial_bind_observes_binary_replacement(driver: &'static str) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = fractal_daemon::test_support::evidence_tempdir();
+    let root = root.path();
+    let seat = "agent/follow-before-bind";
+    let incarnation = "follow-before-bind:current";
+    let mut daemon = Daemon::new(root);
+    daemon.observe_running(seat, incarnation);
+    let (bind_sent, bind_received) = std::sync::mpsc::channel::<Value>();
+    let (admitted_sent, admitted_received) = std::sync::mpsc::channel();
+    let bind_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let release_bind = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = release_bind.clone();
+    let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(
+        axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let bind_sent = bind_sent.clone();
+                let admitted_sent = admitted_sent.clone();
+                let attempts = bind_attempts.clone();
+                let release = release.clone();
+                async move {
+                    if request.uri().path() == "/v1/mailbox/bind" {
+                        let (parts, body) = request.into_parts();
+                        let body = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                        let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        bind_sent.send(serde_json::from_slice(&body).unwrap()).unwrap();
+                        if attempt == 0 {
+                            // The predecessor's first request never receives a response.
+                            return std::future::pending::<axum::response::Response>().await;
+                        }
+                        release.acquire().await.unwrap().forget();
+                        let response = next.run(axum::extract::Request::from_parts(parts, axum::body::Body::from(body))).await;
+                        admitted_sent.send(response.status()).unwrap();
+                        return response;
+                    }
+                    next.run(request).await
+                }
+            },
+        ),
+    );
+    daemon.start_isolated_app(app).await;
+    let installed = root.join("followed-binary");
+    std::os::unix::fs::symlink(test_bin!("fractal-fixture"), &installed).unwrap();
+    let paths = fractal_drivers::driver_paths::Paths {
+        root: root.join("managed"),
+        agent_dir: root.join("managed/agent"),
+        session_dir: root.join("managed/session"),
+    };
+    fractal_drivers::harness_events::enable(&paths.agent_dir, incarnation).unwrap();
+    let owner = "follow-before-bind-owner";
+    let sequence = fractal_drivers::harness_state::claim(
+        &paths.agent_dir, "follow-before-bind", driver, owner,
+    ).unwrap();
+    let (session_env, seq_env, runtime_env) = if driver == "omp" {
+        (fractal_drivers::omp_session::CHANNEL_SESSION,
+         fractal_drivers::omp_session::CHANNEL_SEQ,
+         fractal_drivers::omp_session::CHANNEL_RUNTIME_ID)
+    } else {
+        (fractal_drivers::pi_session::CHANNEL_SESSION,
+         fractal_drivers::pi_session::CHANNEL_SEQ,
+         fractal_drivers::pi_session::CHANNEL_RUNTIME_ID)
+    };
+    let mut channel = TestSeat(Some(
+        seat_command(root, &daemon.socket)
+            .env("ST_AGENT", seat)
+            .env("ST3_BIN", &installed)
+            .env("ST3_MAILBOX_TRANSPORT", "push")
+            .env("ST_TEST_REPLACEMENT_BIN", test_bin!("fractal-fixture"))
+            .envs(paths.environment("follow-before-bind"))
+            .env(session_env, owner).env(seq_env, sequence.to_string()).env(runtime_env, incarnation)
+            .arg("--catalog").arg(root.join("catalog"))
+            .args(["driver", &format!("{driver}-channel"), "--identity", "follow-before-bind"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().unwrap(),
+    ));
+    let output = channel.stdout.take().unwrap();
+    let (frames, received) = std::sync::mpsc::channel::<Value>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(frame) = serde_json::from_str(&line) {
+                let _ = frames.send(frame);
+            }
+        }
+    });
+    assert_eq!(received.recv_timeout(Duration::from_secs(10)).unwrap()["type"], "hello");
+    let initial_fence = bind_received.recv_timeout(Duration::from_secs(10)).expect("initial bind started");
+    let mut input = channel.stdin.take().unwrap();
+    writeln!(input, "{}", json!({"type":"state", "state":"idle"})).unwrap();
+    input.flush().unwrap();
+    // A write larger than this pipe's capacity cannot finish until the reader has
+    // consumed the preceding complete frame. Leave the padding as a partial line.
+    use std::os::fd::AsRawFd as _;
+    let capacity = unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETPIPE_SZ) };
+    assert!(capacity > 0);
+    input.write_all(&vec![b' '; usize::try_from(capacity).unwrap() + 1]).unwrap();
+    let replacement = root.join("replacement");
+    std::fs::write(&replacement, concat!(
+        "#!/bin/sh\n",
+        "if [ \"$1\" = resume-probe ]; then echo 'st3-resume 1'; exit 0; fi\n",
+        "cat \"$ST3_CHANNEL_RESUME\"\n",
+        "printf '\\n'\n",
+        "exec \"$ST_TEST_REPLACEMENT_BIN\" \"$@\"\n",
+    )).unwrap();
+    std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&replacement, &installed).unwrap();
+    let resumed = received.recv_timeout(Duration::from_secs(15))
+        .expect("a channel stuck in initial bind must execute its replacement");
+    assert_eq!(resumed["state"]["incarnation"], incarnation);
+    assert_eq!(resumed["state"]["pending"]["fence"], initial_fence);
+    assert!(resumed["state"]["pending"]["state"].is_null(), "no frame was accepted before admission");
+    let mut buffered: fractal_drivers::reexec::LineBuffer =
+        serde_json::from_value(resumed["state"]["lines"].clone()).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&buffered.next_line().unwrap()).unwrap()["state"], "idle");
+    assert_eq!(bind_received.recv_timeout(Duration::from_secs(10)).unwrap(), initial_fence);
+    let idle_events = || fractal_drivers::harness_events::pending(&paths.agent_dir, 100).unwrap()
+        .into_iter().filter(|event| event.kind == "harness-state" && event.payload["state"] == "idle").count();
+    assert_eq!(idle_events(), 0, "replacement must not observe input while its bind is held");
+    let mut wake = fractal_drivers::harness_events::bind_wake_pipe(&paths.agent_dir).unwrap();
+    release_bind.add_permits(1);
+    assert!(admitted_received.recv_timeout(Duration::from_secs(10)).unwrap().is_success(),
+        "the released replacement bind must actually be admitted");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while idle_events() == 0 {
+        use std::os::fd::AsRawFd as _;
+        let mut descriptor = libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "buffered observation did not run after admission");
+        let timeout = i32::try_from(remaining.as_millis()).unwrap();
+        assert!(unsafe { libc::poll(&mut descriptor, 1, timeout) } > 0, "observation wake timed out");
+        let mut bytes = [0; 256];
+        let _ = wake.read(&mut bytes).unwrap();
+    }
+    assert_eq!(idle_events(), 1, "buffered observation runs exactly once without more stdin");
+    let stderr = channel.stop();
+    daemon.stop().await;
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_channel_follows_binary_while_initial_mailbox_bind_is_stuck() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    initial_bind_observes_binary_replacement("pi").await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn omp_channel_follows_binary_while_initial_mailbox_bind_is_stuck() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    initial_bind_observes_binary_replacement("omp").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1103,13 +1319,25 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     daemon.observe_running(seat, incarnation);
     daemon.start().await;
 
+    let channel_stderr = root.join("omp-channel-stderr.log");
+    let assert_channel_alive = |channel: &mut Child| {
+        if let Some(status) = channel.try_wait().unwrap() {
+            let stderr = std::fs::read_to_string(&channel_stderr).unwrap();
+            std::fs::write(
+                root.join("omp-channel-exit.txt"),
+                format!("{status:?}\n{status}\n{stderr}"),
+            )
+            .unwrap();
+            panic!("the omp channel exited during the daemon outage: {status}; stderr: {stderr}");
+        }
+    };
     let mut channel = seat_command(root, &daemon.socket)
         .arg("--catalog")
         .arg(root.join("catalog"))
         .args(["driver", "omp-channel", "--identity", "restart-omp"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(std::fs::File::create(&channel_stderr).unwrap()))
         .spawn()
         .unwrap();
     let mut input = channel.stdin.take().unwrap();
@@ -1132,7 +1360,7 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     input.flush().unwrap();
     daemon.send("message/restart-omp-mail", seat, "COPPER KITE");
     tokio::time::sleep(Duration::from_millis(2_500)).await;
-    assert_alive(&mut channel, "the omp channel");
+    assert_channel_alive(&mut channel);
     assert!(daemon.harness_states(seat, incarnation).is_empty());
 
     daemon.start().await;
@@ -1175,9 +1403,10 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
         },
     )
     .await;
-    assert_alive(&mut channel, "the omp channel");
+    assert_channel_alive(&mut channel);
 
-    let stderr = stop(channel);
+    let _ = stop(channel);
+    let stderr = std::fs::read_to_string(&channel_stderr).unwrap();
     assert!(stderr.is_empty(), "the channel wrote to stderr: {stderr}");
     let log = driver_log(root);
     assert!(log.contains("may be restarting"), "{log}");
@@ -2193,12 +2422,11 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
         selected.claim, before.claim,
         "component initialization changed the selected activity claim"
     );
-    let diagnostics: Vec<_> = claims
+    // Initialization is an observability code, in this node's local observation log.
+    let observed = daemon.store.observations_for("agent/quartz", "harness.diagnostic").unwrap();
+    let diagnostics: Vec<_> = observed
         .iter()
-        .filter(|claim| {
-            claim.kind == "harness.diagnostic"
-                && claim.body["fields"]["code"] == "claude-channel-initialized"
-        })
+        .filter(|claim| claim.body["fields"]["code"] == "claude-channel-initialized")
         .collect();
     assert_eq!(
         diagnostics.len(),
@@ -2886,7 +3114,7 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
                 || {
                     !daemon
                         .store
-                        .claims_for("agent/quartz", Some("harness.diagnostic"))
+                        .observations_for("agent/quartz", "harness.diagnostic")
                         .unwrap()
                         .is_empty()
                 },
@@ -2896,7 +3124,7 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
             tokio::time::sleep(Duration::from_millis(2200)).await;
             let claims = daemon
                 .store
-                .claims_for("agent/quartz", Some("harness.diagnostic"))
+                .observations_for("agent/quartz", "harness.diagnostic")
                 .unwrap();
             assert_eq!(claims.len(), 1);
             assert_eq!(claims[0].body["fields"]["code"], "claude-channel-initialized");

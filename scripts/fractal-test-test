@@ -9,6 +9,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import shlex
 import time
 import os
 from pathlib import Path
@@ -28,6 +29,10 @@ PRIVATE_TMPDIR = tempfile.mkdtemp()
 os.environ['TMPDIR'] = PRIVATE_TMPDIR
 tempfile.tempdir = None
 atexit.register(shutil.rmtree, PRIVATE_TMPDIR, ignore_errors=True)
+# Local pushes clear GIT_CONFIG_COUNT for receive-pack, but preserve GIT_CONFIG_GLOBAL.
+# Disable maintenance in the receiver too: detached work can race fixture cleanup.
+PRIVATE_GIT_CONFIG = Path(PRIVATE_TMPDIR) / 'gitconfig'
+PRIVATE_GIT_CONFIG.write_text('[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n')
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -45,7 +50,7 @@ DATE = '2026-10-14T12:00:00Z'
 # XDG_RUNTIME_DIR is a private one: a run takes a tree only when a build slot is free, and the host's own cargo slots (busy while this
 # suite runs as a check on a build host) are no test's business; a test that wants slots makes its own.
 GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI', 'XDG_STATE_HOME', 'ST_TEST_RUNS', 'CARGO_HEAVY_SLOTS', 'BUILD_ADMISSION_BIN')},
-               XDG_RUNTIME_DIR=PRIVATE_TMPDIR, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
+               XDG_RUNTIME_DIR=PRIVATE_TMPDIR, GIT_CONFIG_GLOBAL=str(PRIVATE_GIT_CONFIG), GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
                GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='gc.auto', GIT_CONFIG_VALUE_0='0', GIT_CONFIG_KEY_1='maintenance.auto', GIT_CONFIG_VALUE_1='false',
                GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t',
                GIT_COMMITTER_EMAIL='t@example.invalid', GIT_AUTHOR_DATE=DATE, GIT_COMMITTER_DATE=DATE)
@@ -61,12 +66,196 @@ def git(repo, *args, stdin=None):
     return done.stdout.decode().strip()
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live checkout fixtures follow the selected layout.
+def checkout_config(name):
+    path = ROOT / '.fractal' / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        path = ROOT / '.st' / name
+    return path
+
+
 def apparent_gb(path):
     """Pool-cap policy fixtures count file lengths, independently of filesystem allocation and compression."""
     return sum(file.stat().st_size for file in path.rglob('*') if file.is_file()) / 1e9
 
 
 NEEDS_TREE = st_test.needs_tree
+
+
+class ConfigBridgeTest(unittest.TestCase):
+    """Real Git objects and individually copied readers, without sibling resolver imports."""
+
+    def test_extracted_readers_select_only_the_pinned_layout(self):
+        names = ('st-test', 'evidence-wrap', 'evidence-prepush', 'evidence-log', 'ci-evidence-observe',
+                 'ci-evidence-presign-notice')
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            repo = root / 'repo'
+            repo.mkdir()
+            git(repo, 'init', '-q')
+            for directory in ('.st', '.fractal'):
+                (repo / directory).mkdir()
+            modules = {}
+            for name in names:
+                target = root / name
+                shutil.copyfile(ROOT / 'scripts' / name, target)
+                loader = importlib.machinery.SourceFileLoader(name.replace('-', '_') + '_bridge', str(target))
+                module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+                loader.exec_module(module)
+                modules[name] = module
+            old = repo / '.st/required-lanes.json'
+            new = repo / '.fractal/required-lanes.json'
+            old.write_text('{"lanes":{"old":{}}}')
+            git(repo, 'add', '.')
+            git(repo, 'commit', '-qm', 'old')
+            old_revision = git(repo, 'rev-parse', 'HEAD')
+            with contextlib.chdir(repo), mock.patch.dict(os.environ, GIT_ENV, clear=True):
+                def assert_layout(revision, expected):
+                    for name, module in modules.items():
+                        with self.subTest(reader=name, layout=expected):
+                            if name == 'ci-evidence-presign-notice':
+                                self.assertEqual(set(module.lanes_at(revision)), {expected})
+                            elif name in ('evidence-log', 'ci-evidence-observe'):
+                                self.assertEqual(module.config_path(repo, revision, 'required-lanes.json'),
+                                                 f'{".st" if expected == "old" else ".fractal"}/required-lanes.json')
+                            else:
+                                self.assertEqual(module.config_path(revision, 'required-lanes.json'),
+                                                 f'{".st" if expected == "old" else ".fractal"}/required-lanes.json')
+                    self.assertEqual(modules['st-test'].lane_names(revision), {expected})
+                    executed = subprocess.run(
+                        [sys.executable, '-I', '-c',
+                         'import json,runpy,sys; m=runpy.run_path(sys.argv[1]); print(json.dumps(sorted(m["lane_names"](sys.argv[2]))))',
+                         str(root / 'st-test'), revision],
+                        cwd=repo, env=GIT_ENV, capture_output=True, text=True)
+                    self.assertEqual(executed.returncode, 0, executed.stderr)
+                    self.assertEqual(json.loads(executed.stdout), [expected])
+                assert_layout(old_revision, 'old')
+                new.write_text('{"lanes":{"new":{}}}')
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'both')
+                assert_layout('HEAD', 'new')
+                assert_layout(old_revision, 'old')  # candidate new data cannot change old trust.
+                self.assertEqual(modules['st-test'].branch_point(old_revision, 'HEAD'), 'HEAD')
+                for directory, label in (('.st', 'old'), ('.fractal', 'new')):
+                    (repo / directory / 'evidence-skip-policy.json').write_text(json.dumps({'checks': {label: {}}}))
+                    (repo / directory / 'rust-test-inputs.json').write_text(json.dumps({'no_tests': [label]}))
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'both policies and no-tests lists')
+                self.assertEqual(modules['st-test'].policy_checks('HEAD'), ['new'])
+                self.assertEqual(modules['st-test'].listed_no_tests('HEAD'), ['new'])
+                old.unlink()
+                git(repo, 'add', '-u')
+                git(repo, 'commit', '-qm', 'new only')
+                assert_layout('HEAD', 'new')
+                new.write_text('{malformed')
+                old.write_text('{"lanes":{"old":{}}}')
+                (repo / '.fractal/evidence-skip-policy.json').write_text('{malformed')
+                (repo / '.fractal/rust-test-inputs.json').write_text('{malformed')
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'malformed selected config')
+                for module in (modules['st-test'], modules['ci-evidence-presign-notice']):
+                    with self.assertRaises(ValueError):
+                        (module.lane_names if hasattr(module, 'lane_names') else module.lanes_at)('HEAD')
+                with self.assertRaises(ValueError):
+                    modules['st-test'].branch_point(old_revision, 'HEAD')
+                with self.assertRaises(ValueError):
+                    modules['st-test'].policy_checks('HEAD')
+                with self.assertRaises(ValueError):
+                    modules['st-test'].listed_no_tests('HEAD')
+                blob = git(repo, 'rev-parse', 'HEAD:.fractal/required-lanes.json')
+                (repo / '.git/objects' / blob[:2] / blob[2:]).unlink()
+                with self.assertRaises(modules['st-test'].Failure):
+                    modules['st-test'].config_blob('HEAD', 'required-lanes.json')
+                with self.assertRaises(modules['st-test'].Failure):
+                    modules['st-test'].branch_point(old_revision, 'HEAD')
+                with self.assertRaises(RuntimeError):
+                    modules['ci-evidence-presign-notice'].lanes_at('HEAD')
+                for name, module in modules.items():
+                    with self.subTest(reader=name, missing_revision=True), self.assertRaises(Exception):
+                        if name == 'ci-evidence-presign-notice':
+                            module.lanes_at('missing-revision')
+                        elif name in ('evidence-log', 'ci-evidence-observe'):
+                            module.config_path(repo, 'missing-revision', 'required-lanes.json')
+                        else:
+                            module.config_path('missing-revision', 'required-lanes.json')
+
+    def test_branch_point_compares_normalized_selected_lanes_across_layouts(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            repo = Path(scratch)
+            git(repo, 'init', '-q')
+            (repo / '.st').mkdir()
+            lanes = {'lanes': {'demo': {'argv': ['run'], 'ci_inputs': ['b', 'a']}, 'other': {'argv': ['old']}}}
+            (repo / '.st/required-lanes.json').write_text(json.dumps(lanes))
+            git(repo, 'add', '.')
+            git(repo, 'commit', '-qm', 'old layout')
+            point = git(repo, 'rev-parse', 'HEAD')
+            (repo / '.fractal').mkdir()
+            preferred = repo / '.fractal/required-lanes.json'
+            preferred.write_text(json.dumps(lanes, indent=2, sort_keys=True))
+            git(repo, 'add', '.')
+            git(repo, 'commit', '-qm', 'new layout and formatting')
+            with contextlib.chdir(repo), mock.patch.dict(os.environ, GIT_ENV, clear=True):
+                self.assertEqual(st_test.branch_point(point, 'HEAD'), point)
+                lanes['lanes']['other']['argv'] = ['new']
+                preferred.write_text(json.dumps(lanes))
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'unselected lane changes')
+                with mock.patch.object(st_test, 'CHECKS', ['demo']):
+                    self.assertEqual(st_test.branch_point(point, 'HEAD'), point)
+                with mock.patch.object(st_test, 'CHECKS', []):
+                    self.assertEqual(st_test.branch_point(point, 'HEAD'), 'HEAD')
+                lanes['lanes']['demo']['argv'] = ['run', 'more']
+                preferred.write_text(json.dumps(lanes))
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'selected lane changes')
+                with mock.patch.object(st_test, 'CHECKS', ['demo']):
+                    self.assertEqual(st_test.branch_point(point, 'HEAD'), 'HEAD')
+
+    def test_subdirectory_runner_cannot_bootstrap_candidate_over_base_rust_policy(self):
+        for layout in ('.st', '.fractal'):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                repo = root / 'repo'
+                repo.mkdir()
+                git(repo, 'init', '-q')
+                (repo / layout).mkdir()
+                (repo / layout / 'evidence-skip-policy.json').write_text('{"checks":{"rust-tests":{}}}')
+                (repo / layout / 'rust-test-inputs.json').write_text('{"version":1,"no_tests":["accepted"]}')
+                (repo / layout / 'required-lanes.json').write_text('{"lanes":{"rust-tests":{}}}')
+                (repo / 'scripts').mkdir()
+                (repo / 'scripts/rust-test-keys').write_text('print(\'{"accepted":"base"}\')\n')
+                (repo / 'scripts/evidence-verify').write_text('# accepted verifier\n')
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'accepted rust policy and tools')
+                base = git(repo, 'rev-parse', 'HEAD')
+                marker = root / 'candidate-ran'
+                (repo / 'scripts/rust-test-keys').write_text(
+                    f'from pathlib import Path\nPath({str(marker)!r}).touch()\nprint(\'{{"malicious":"candidate"}}\')\n')
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'candidate malicious key producer')
+                tree = git(repo, 'rev-parse', 'HEAD')
+                nested = repo / 'nested/deeper'
+                nested.mkdir(parents=True)
+                copied = root / 'st-test'
+                shutil.copyfile(ROOT / 'scripts/st-test', copied)
+                outputs = root / 'tools'
+                outputs.mkdir()
+                with contextlib.chdir(nested), mock.patch.dict(os.environ, GIT_ENV, clear=True):
+                    self.assertTrue(st_test.judged_by_policy(base))
+                    self.assertEqual(st_test.lane_names(base), {'rust-tests'})
+                    self.assertEqual(st_test.listed_no_tests(base), ['accepted'])
+                    self.assertEqual(st_test.crate_keys(base, repo, tree, outputs), ({'accepted': 'base'}, None))
+                executed = subprocess.run(
+                    [sys.executable, '-I', '-c',
+                     'import json,runpy,sys; m=runpy.run_path(sys.argv[1]); '
+                     'print(json.dumps(m["crate_keys"](sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5])))',
+                     str(copied), base, str(repo), tree, str(outputs)],
+                    cwd=nested, env=GIT_ENV, capture_output=True, text=True)
+                self.assertEqual(executed.returncode, 0, executed.stderr)
+                self.assertEqual(json.loads(executed.stdout), [{'accepted': 'base'}, None])
+                self.assertFalse(marker.exists(), 'candidate producer must never execute under accepted rust-tests policy')
 
 
 class PoolTreeTest(unittest.TestCase):
@@ -179,6 +368,133 @@ class PoolTreeTest(unittest.TestCase):
                 self.assertIn('removed a stale', said.getvalue())
 
 
+class GovernedTest(unittest.TestCase):
+    """A building check runs in builds.slice unless its caller's own cgroup is already under a memory and a CPU limit."""
+
+    LANE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/app-lanes-seat_1_0a1b2c3d4e5f.slice/st3-seat-1-0.scope'
+    BUILDS = 'user.slice/user-1000.slice/user@1000.service/builds.slice/run-p1-i1.scope'
+    SEAT = 'user.slice/user-1000.slice/user@1000.service/app.slice/st3-seat-1-0.scope'
+    LANE_SLICE = 'app-lanes-seat_1_0a1b2c3d4e5f.slice'
+
+    def tree(self, tmp, leaf, limits):
+        """A cgroup v2 tree under TMP whose every level is unlimited but the ones LIMITS names ({level: (memory.max, cpu.max)})."""
+        parts = leaf.split('/')
+        for depth in range(1, len(parts) + 1):
+            cgroup = Path(tmp, 'sys', *parts[:depth])
+            cgroup.mkdir(parents=True, exist_ok=True)
+            memory, cpu = limits.get(parts[depth - 1], ('max', 'max 100000'))
+            if memory is not None:
+                cgroup.joinpath('memory.max').write_text(memory + '\n')
+            if cpu is not None:
+                cgroup.joinpath('cpu.max').write_text(cpu + '\n')
+        Path(tmp, 'cgroup').write_text(f'0::/{leaf}\n')
+
+    def governed_in(self, leaf, limits, environment=None, lane=None, named=None):
+        """governed() for a caller in LEAF; LANE is (slice, limits) of a seat's lane beside it, and NAMED what a fake `st agents
+        lane` answers ((exit code, stdout)); its arguments are kept in self.asked, None when it was not run."""
+        self.asked = None
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'bus').touch()
+            if lane:
+                self.tree(tmp, f'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/{lane[0]}', lane[1])
+            self.tree(tmp, leaf, limits)
+            environment = dict(environment or {}, XDG_RUNTIME_DIR=tmp)
+            if named:
+                st = Path(tmp, 'st')
+                st.write_text(f'#!/bin/sh\necho "$@" > {tmp}/asked\nprintf %s {shlex.quote(named[1])}\nexit {named[0]}\n')
+                st.chmod(0o755)
+                environment['ST3_BIN'] = str(st)
+            real, real_lane = st_test.own_cap, st_test.seat_lane
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(st_test, 'own_cap', lambda: real(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
+                    mock.patch.object(st_test, 'seat_lane', lambda: real_lane(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
+                    mock.patch.object(st_test.shutil, 'which', lambda program: f'/usr/bin/{program}'), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                governed = st_test.governed(['check'], 'linux-gate')
+            if Path(tmp, 'asked').exists():
+                self.asked = Path(tmp, 'asked').read_text().split()
+            self.said = err.getvalue()
+            return governed
+
+    def assert_scoped(self, governed, why):
+        self.assertIn('--slice=builds.slice', governed, why)
+        self.assertEqual(governed[-1], 'check')
+
+    def assert_in_place(self, governed, why):
+        # In place, and marked as in a build cap for a cargo front door that would otherwise move cargo into builds.slice.
+        self.assertEqual(governed[1:], ['BUILDS_SLICE_ACTIVE=1', 'check'], why)
+        self.assertEqual(Path(governed[0]).name, 'env', why)
+
+    def test_a_capped_lane_or_build_scope_runs_in_place(self):
+        self.assert_in_place(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), 'lane')
+        self.assert_in_place(self.governed_in(self.BUILDS, {'builds.slice': ('34359738368', '1000000 100000')}), 'builds.slice')
+
+    def test_an_uncapped_caller_is_scoped_whatever_its_name_or_environment_says(self):
+        self.assert_scoped(self.governed_in(self.SEAT, {}, {'BUILDS_SLICE_ACTIVE': '1'}), 'environment')
+        # A seat's lane slice without its limits is not capped.
+        self.assert_scoped(self.governed_in(self.LANE, {}), 'name')
+        # Both limits are needed: memory alone, or CPU alone, is not a cap.
+        self.assert_scoped(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', 'max 100000')}), 'memory only')
+        self.assert_scoped(self.governed_in(self.LANE, {self.LANE_SLICE: ('max', '100000 100000')}), 'cpu only')
+        # A cpu controller that is not enabled (no cpu.max) is no CPU limit.
+        self.assert_scoped(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', None)}), 'no cpu controller')
+
+    def test_only_a_build_or_lane_cap_counts_never_an_unrelated_one(self):
+        # Limits on a cgroup above the cap, or on any other cgroup, are not the build cap.
+        self.assert_scoped(self.governed_in(self.SEAT, {'st3-seat-1-0.scope': ('268435456', '100000 100000')}), 'any capped scope')
+        self.assert_scoped(self.governed_in(self.SEAT, {'app.slice': ('68719476736', '1600000 100000')}), 'an ancestor')
+        self.assert_scoped(self.governed_in(self.LANE, {'app-lanes.slice': ('68719476736', '1600000 100000')}), 'above the lane')
+        unrelated = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes-seat_1_0a1b2c3d4e5f.slice/x.scope'
+        self.assert_scoped(self.governed_in(unrelated, {'app-lanes-seat_1_0a1b2c3d4e5f.slice': ('268435456', '100000 100000')}),
+                           'a lane-named slice outside app-lanes.slice')
+
+    def test_limits_on_different_levels_inside_the_cap_together_are_a_cap(self):
+        limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': ('max', '200000 100000')}
+        self.assert_in_place(self.governed_in(self.LANE, limits), 'memory and CPU on two levels')
+        # A level without a memory controller still caps CPU: each file is read on its own.
+        limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': (None, '200000 100000')}
+        self.assert_in_place(self.governed_in(self.LANE, limits), 'no memory controller on the CPU level')
+
+    UNIT = 'user.slice/user-1000.slice/user@1000.service/app.slice/st-test-seat-1.service'
+    CAPPED = {LANE_SLICE: ('268435456', '100000 100000')}
+
+    def named(self, slice_name=LANE_SLICE):
+        return 0, json.dumps({'agent': 'agent/seat-1', 'slice': slice_name})
+
+    def test_a_seat_unit_outside_its_lane_runs_the_check_in_its_capped_lane(self):
+        governed = self.governed_in(self.UNIT, {}, {'ST_AGENT': 'agent/seat-1'}, (self.LANE_SLICE, self.CAPPED), self.named())
+        self.assertEqual(self.asked[:4], ['agents', 'lane', 'agent/seat-1', '--json'])
+        self.assertIn(f'--slice={self.LANE_SLICE}', governed)
+        self.assertNotIn('--slice=builds.slice', governed)
+        self.assertIn('--property=OOMPolicy=continue', governed)
+        rest = governed[governed.index('--') + 1:]
+        self.assertEqual(rest[1:], ['BUILDS_SLICE_ACTIVE=1', f'FRACTAL_LANE_SLICE={self.LANE_SLICE}', 'check'])
+        self.assertEqual(Path(rest[0]).name, 'env')
+
+    def test_without_a_capped_lane_the_seat_unit_takes_builds_slice_and_says_why(self):
+        seat = {'ST_AGENT': 'agent/seat-1'}
+        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, None, self.named()), 'no such slice on this host')
+        self.assertIn('not on this host', self.said)
+        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, {}), self.named()), 'an uncapped slice')
+        self.assertIn('no memory and CPU limit', self.said)
+        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, self.CAPPED), (2, '')), 'st cannot name it')
+        self.assertIn('did not name its lane', self.said)
+        # The daemon's name decides, never one that only looks like a lane.
+        other = 'app-lanes-seat_2_ffffffffffff.slice'
+        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, self.CAPPED), self.named(other)), 'another name')
+
+    def test_a_caller_that_is_no_seat_never_asks_for_a_lane(self):
+        self.assert_scoped(self.governed_in(self.UNIT, {}, {}, (self.LANE_SLICE, self.CAPPED), self.named()), 'no ST_AGENT')
+        self.assertIsNone(self.asked)
+        self.assertEqual(self.said, '')
+
+    def test_an_unreadable_cgroup_is_no_cap(self):
+        self.assertIsNone(st_test.own_cap(Path('/nonexistent/cgroup')))
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'cgroup').write_text('0::/\n')
+            self.assertIsNone(st_test.own_cap(Path(tmp, 'cgroup'), Path(tmp, 'sys')))
+
+
 class StTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -188,6 +504,7 @@ class StTest(unittest.TestCase):
         subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'host/box-1', '-f', str(key)], check=True)
         pub = key.with_suffix('.pub').read_text().split()
         self.home = tmp / 'home'
+        self.run_tmp = tmp / 'run-tmp'  # where runs make their TMPDIR (ST_TEST_TMP), not the host's /var/tmp
         (self.home / '.config/st').mkdir(parents=True)
         (self.home / '.config/st/evidence-sign.json').write_text(json.dumps(
             {'signer': 'host/box-1', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'scratch.git'),
@@ -217,6 +534,17 @@ class StTest(unittest.TestCase):
         trees.start()
         self.addCleanup(trees.stop)
 
+    def test_fixture_push_does_not_start_remote_maintenance(self):
+        self.commit('b.txt', 'two')
+        trace = Path(self.tmp.name) / 'git-trace.json'
+        pushed = subprocess.run(['git', '-C', str(self.work), 'push', '-q', 'origin', 'HEAD'],
+                                env=dict(GIT_ENV, GIT_TRACE2_EVENT=str(trace)), capture_output=True, text=True)
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        children = [event['argv'] for line in trace.read_text().splitlines()
+                    if (event := json.loads(line)).get('event') == 'child_start']
+        self.assertTrue(any('receive-pack' in ' '.join(argv) for argv in children), children)
+        self.assertFalse(any('maintenance' in argv or 'gc' in argv for argv in children), children)
+
     def commit(self, name, content, branch=None):
         if branch:
             git(self.work, 'checkout', '-q', branch)
@@ -228,7 +556,7 @@ class StTest(unittest.TestCase):
         if command is not None:
             st_test.LOCAL['demo'] = command
         out, err = io.StringIO(), io.StringIO()
-        env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE, **(extra_env or {}))
+        env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE, ST_TEST_TMP=str(self.run_tmp), **(extra_env or {}))
         cwd = os.getcwd()
         os.chdir(self.work)
         try:
@@ -418,7 +746,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         statement, = self.statements()
         digest = statement['predicate']['observed']['inputs']['lane_definition_sha256']
-        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         rules = verifier.lane_rules(git(self.work, 'show', 'origin/main:.st/required-lanes.json'), 'demo')
         base_tree = git(self.work, 'rev-parse', 'origin/main^{tree}')
         self.assertEqual(digest, verifier.lane_definition(str(self.work), base_tree, git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)['sha256'])
@@ -430,7 +761,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertNotIn('not signed', out)
         statement, = self.statements()
-        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         rules = verifier.lane_rules(git(self.work, 'show', 'origin/main:.st/required-lanes.json'), 'demo')
         definition = verifier.lane_definition(str(self.work), git(self.work, 'rev-parse', 'origin/main^{tree}'),
                                               git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)
@@ -476,7 +810,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertIn('covered by wrapper', out)
         statement, = self.statements()
-        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         rules = verifier.lane_rules(git(self.work, 'show', f'{point}:.st/required-lanes.json'), 'demo')
         at_point = verifier.lane_definition(str(self.work), git(self.work, 'rev-parse', f'{point}^{{tree}}'),
                                             git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)['sha256']
@@ -832,12 +1169,15 @@ class StTest(unittest.TestCase):
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
             target = self.pool() / 'target-0'
+            self.assertTrue((target / 'CACHEDIR.TAG').is_file())  # st-test made it before cargo ran, so it tags it as cargo would
             (target / 'junk').write_bytes(b'x' * 4096)
             with mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
-                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
-                self.assertTrue((target / 'junk').exists())  # not a directory cargo made: never emptied
-                (target / 'CACHEDIR.TAG').write_text('Signature: 8a477f597d28d172789f06886806bc55\n')
-                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # cargo's, past the cap: emptied
+                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # past the cap: emptied
+                self.assertFalse((target / 'junk').exists())
+                self.assertTrue((target / 'CACHEDIR.TAG').is_file())  # and tagged again, so the next run can empty it too
+                (target / 'CACHEDIR.TAG').unlink()  # a pool target from before st-test tagged its targets
+                (target / 'junk').write_bytes(b'x' * 4096)
+                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # the pool's own: emptied, tag or none
             self.assertFalse((target / 'junk').exists())
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': 'off'})[0], 0)
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'CARGO_TARGET_DIR': '/elsewhere'})[0], 0)
@@ -845,6 +1185,133 @@ class StTest(unittest.TestCase):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': str(shared)})[0], 0)
         self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # builds nothing: no kept target
         self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', str(shared), 'none'])
+
+    def test_a_tagless_target_the_caller_made_is_never_emptied(self):
+        """ST_EVIDENCE_TARGET naming a directory st-test did not make, without cargo's tag, is left alone however big it is."""
+        self.commit('b.txt', 'two')
+        mine = self.home / 'mine'
+        mine.mkdir()
+        (mine / 'junk').write_bytes(b'x' * 4096)
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
+            self.assertEqual(self.run_st_test('--check', 'demo', command=['true'], extra_env={'ST_EVIDENCE_TARGET': str(mine)})[0], 0)
+        self.assertTrue((mine / 'junk').exists())
+        self.assertFalse((mine / 'CACHEDIR.TAG').exists())  # nor tagged: st-test tags only a directory it creates
+
+    def test_only_a_path_inside_the_pool_directory_is_the_pools_own(self):
+        """The pool's own targets are known by resolved path, not by a name prefix: the default shared target ~/.cache/st-test-target
+        starts like the pool directory ~/.cache/st-test, and a symlink or .. can point out of it. None of those is emptied untagged."""
+        pool = self.home / '.cache/st-test'
+        own = pool / 'pools/o-1/target-0'
+        own.mkdir(parents=True)
+        outside = self.home / '.cache/st-test-target'
+        outside.mkdir()
+        (outside / 'junk').write_bytes(b'x' * 4096)
+        link = pool / 'pools/o-1/target-9'
+        link.symlink_to(outside)
+        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), mock.patch.dict(os.environ, {'HOME': str(self.home)}):
+            self.assertTrue(st_test.in_pool(own))
+            for path in (outside, pool / '..' / 'st-test-target', link, self.home):
+                self.assertFalse(st_test.in_pool(path), path)
+            with mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
+                for path in (outside, link):
+                    st_test.trim(path, owned=st_test.in_pool(path))
+        self.assertTrue((outside / 'junk').exists())
+
+    def test_the_checks_get_a_tmpdir_of_the_runs_own_that_is_removed_at_the_end(self):
+        """TMPDIR, TMP and TEMP name one short directory of the run's own, and nothing in it outlives the run."""
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "$TMPDIR $TMP $TEMP" > {seen}; mkdir "$TMPDIR/nix-shell.abcdef"; touch "$TMPDIR/nix-shell.abcdef/left"']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        tmpdir, tmp, temp = seen.read_text().split()
+        self.assertEqual(tmpdir, tmp)
+        self.assertEqual(tmpdir, temp)
+        self.assertEqual(Path(tmpdir).parent, self.run_tmp)
+        self.assertRegex(Path(tmpdir).name, r'^st-test\.[a-z0-9_]{8}$')
+        self.assertFalse(Path(tmpdir).exists())
+        self.assertEqual(list(self.run_tmp.iterdir()), [])
+        self.assertNotEqual(os.environ.get('TMPDIR'), tmpdir)  # the caller's own TMPDIR is back
+        self.assertNotEqual(tempfile.gettempdir(), tmpdir)
+
+    def test_keep_keeps_the_runs_tmpdir_and_later_runs_leave_it(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        code, _, err = self.run_st_test('--check', 'demo', '--keep', command=['sh', '-c', f'echo "$TMPDIR" > {seen}; touch "$TMPDIR/left"'])
+        self.assertEqual(code, 0)
+        kept = Path(seen.read_text().strip())
+        self.assertIn(f'kept this run\'s TMPDIR {kept}', err)
+        os.utime(kept, (time.time() - 7200, time.time() - 7200))
+        self.commit('c.txt', 'three')
+        self.assertEqual(self.run_st_test('--check', 'demo', command=['true'])[0], 0)
+        self.assertTrue((kept / 'left').exists())
+
+    def test_a_run_removes_the_tmpdir_a_gone_run_left_and_no_live_ones(self):
+        """A killed run's TMPDIR is removed by the next run; one whose run holds its lock, or that is too new to have been locked yet, is not."""
+        root = self.run_tmp
+        gone, live, new, other = root / 'st-test.gone0000', root / 'st-test.live0000', root / 'st-test.new00000', root / 'nix-shell.abcdef'
+        for path in (gone, live, new, other):
+            (path / 'nix-shell.abcdef').mkdir(parents=True)
+        readonly = gone / 'nix-shell.abcdef/store-copy'
+        readonly.mkdir()
+        (readonly / 'file').touch()
+        readonly.chmod(0o500)
+        old = time.time() - 7200
+        for path in (gone, live, other):
+            os.utime(path, (old, old))
+        held = os.open(live, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test('--check', 'demo', command=['true'])[0], 0)
+        self.assertFalse(gone.exists())
+        self.assertTrue(live.exists())
+        self.assertTrue(new.exists())
+        self.assertTrue(other.exists())  # not a run's: only st-test.* directories are judged
+
+    def test_a_waiting_run_continues_in_the_bases_newer_st_test_with_its_ticket(self):
+        """main's st-test changed while the run waited for a tree: the run unwinds (its TMPDIR is gone), keeps its ticket, and the newer copy,
+        given the ticket, takes it over and runs to the end with the queue empty after."""
+        newer = '# main\'s newer copy\n# takes over ST_TEST_HANDOVER_TICKET\n'
+        self.main_moves('scripts/st-test', newer)
+        self.commit('b.txt', 'two')
+        with mock.patch.object(st_test, 'QUEUE_FOLLOW_SECONDS', 0), self.assertRaises(st_test.Handover) as caught:
+            self.run_st_test('--check', 'demo')
+        handover = caught.exception
+        self.assertEqual(handover.source.decode(), newer)
+        self.assertEqual(handover.commit, git(self.work, 'rev-parse', 'origin/main'))
+        self.assertTrue(handover.keeps_ticket)
+        self.assertEqual(handover.ticket.parent, self.pool() / 'queue')
+        self.assertEqual(handover.ticket.read_text(), f'rules {st_test.QUEUE_RULES}\n')
+        self.assertEqual(list(self.run_tmp.iterdir()), [])  # the run unwound before the handover
+        started = time.time() - 300
+        code, _, _ = self.run_st_test('--check', 'demo', extra_env={st_test.HANDOVER_TICKET: str(handover.ticket),
+                                                                    st_test.HANDOVER_STARTED: repr(started)})
+        self.assertEqual(code, 0)
+        self.assertEqual(os.listdir(self.pool() / 'queue'), [])
+        self.assertEqual(st_test.RUN_STARTED, [started])  # the run's times count from the first copy's start
+
+    def test_a_bases_copy_that_cannot_take_a_ticket_over_is_handed_none(self):
+        self.main_moves('scripts/st-test', '# an older copy, from before handovers\n')
+        self.commit('b.txt', 'two')
+        with mock.patch.object(st_test, 'QUEUE_FOLLOW_SECONDS', 0), self.assertRaises(st_test.Handover) as caught:
+            self.run_st_test('--check', 'demo')
+        self.assertFalse(caught.exception.keeps_ticket)
+        self.assertEqual(os.listdir(self.pool() / 'queue'), [])  # no ticket outlives its place
+
+    def test_the_follower_names_only_a_changed_copy_of_the_bases_own(self):
+        self.main_moves('scripts/st-test', 'one\n')
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            with mock.patch.dict(os.environ, GIT_ENV), contextlib.redirect_stderr(io.StringIO()):
+                with mock.patch.object(st_test, 'QUEUE_FOLLOW_SECONDS', 0):
+                    self.assertIsNone(st_test.base_copy_follower('origin/main', own=b'one\n')())  # the copy running here
+                    self.assertEqual(st_test.base_copy_follower('origin/main', own=b'other\n')(),
+                                     (b'one\n', git(self.work, 'rev-parse', 'origin/main')))
+                    self.assertIsNone(st_test.base_copy_follower('nowhere/main', own=b'other\n')())  # a fetch that fails: keep waiting
+                self.assertIsNone(st_test.base_copy_follower('origin/main', own=b'other\n')())  # not before QUEUE_FOLLOW_SECONDS
+        finally:
+            os.chdir(cwd)
 
     def test_every_run_reuses_the_same_tree_path_and_finds_it_clean(self):
         self.commit('b.txt', 'two')
@@ -1247,7 +1714,9 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)
         self.assertNotIn('merged origin/main', out)
-        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')  # st-test pushes a branch only when it merged
+        # Not merged, but green and covered: the branch is pushed at its own head at once, before main can move a protected file (the top-up).
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+        self.assertIn(f'pushed feature at its head {head[:12]} to origin', out)
 
     def test_main_moving_a_protected_file_outside_the_check_s_ci_inputs_does_not_merge_main_in(self):
         def lanes(ci_inputs):
@@ -1314,6 +1783,134 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertIn('is not pushed (a detached HEAD); push it yourself', out)
         self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
+
+    def main_moves_during_the_run(self, *moves):
+        """record_run, called once per round just before the top-up looks at the base, with main moving first: each of `moves` is the list
+        of (name, content) commits main gets in one round, until they run out."""
+        real, left = st_test.record_run, list(moves)
+        def record_run(record):
+            if left:
+                for name, content in left.pop(0):
+                    self.main_commits(name, content)
+            return real(record)
+        return mock.patch.object(st_test, 'record_run', side_effect=record_run)
+
+    def test_a_green_push_run_whose_base_did_not_move_pushes_its_head_once_and_merges_nothing(self):
+        head = self.branch_behind(0)
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('top-up', out)
+        self.assertNotIn('merged origin/main', out)
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+        self.assertEqual(len(self.statements()), 1)
+
+    def test_main_moving_without_uncovering_anything_merges_nothing_signs_nothing_more_and_pushes_the_head(self):
+        head = self.branch_behind(0)
+        with self.main_moves_during_the_run([('later.txt', 'not a protected file')]):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('top-up round', out)
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)  # within the bound and nothing protected: the head tree is still judged
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+        self.assertEqual(len(self.statements()), 1)
+
+    def test_main_moving_a_protected_file_during_a_green_run_is_merged_signed_and_pushed_not_lost(self):
+        head = self.branch_behind(0)
+        with self.main_moves_during_the_run([('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))]):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        merge = git(self.work, 'rev-parse', 'HEAD')
+        self.assertEqual(git(self.work, 'rev-list', '--parents', '-n1', 'HEAD').split(), [merge, head, git(self.work, 'rev-parse', 'origin/main')])
+        self.assertIn(f'top-up round 1 of 3: origin/main is at {git(self.work, "rev-parse", "origin/main")[:12]}, merged into the branch as {merge[:12]}; '
+                      f'signing what {merge[:12]} lacks: demo', out)
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], merge)
+        self.assertIn(f'pushed feature at the merge {merge[:12]} to origin', out)
+        signed = [json.dumps(statement) for statement in self.statements()]
+        self.assertEqual(len(signed), 2)
+        for tree in (git(self.work, 'rev-parse', f'{head}^{{tree}}'), git(self.work, 'rev-parse', 'HEAD^{tree}')):  # the run, then its top-up
+            self.assertTrue(any(tree in statement for statement in signed), tree)
+        self.assertEqual(self.run_st_test('--status')[0], 0, 'the tree CI judges now is covered')
+
+    def test_a_top_up_merge_that_conflicts_stops_says_so_and_pushes_no_branch(self):
+        head = self.branch_behind(0)
+        with self.main_moves_during_the_run([('b.txt', 'main wrote it too'), ('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))]):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertIn('failure: protected files differ from the branch point, so fractal-test merges origin/main into the branch to bring the green '
+                      'run up to the base, and it does not merge cleanly (b.txt): merge origin/main into the branch yourself, then run again; '
+                      'the branch is not pushed', str(code))
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)
+        self.assertFalse((self.work / '.git/MERGE_HEAD').exists())
+        self.assertEqual(git(self.work, 'status', '--porcelain', '--untracked-files=no'), '')
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
+
+    def test_a_main_that_moves_a_protected_file_every_round_fails_after_three_top_ups_without_pushing_the_branch(self):
+        self.branch_behind(0)
+        moves = [[('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=i + 1))] for i in range(4)]
+        with self.main_moves_during_the_run(*moves):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertIn('failure: main is moving too fast; run again: after 3 top-up rounds origin/main', str(code))
+        self.assertIn('still lacks demo; the signed notes are pushed, the branch is not', str(code))
+        self.assertEqual([line.split(':')[1].strip() for line in out.splitlines() if line.startswith('fractal-test: top-up round')],
+                         ['top-up round 1 of 3', 'top-up round 2 of 3', 'top-up round 3 of 3'])
+        self.assertEqual(len(self.statements()), 4)
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
+
+    def test_a_push_run_without_a_git_identity_fails_before_it_waits_for_a_tree(self):
+        self.branch_behind(0)
+        git(self.work, 'config', '--unset', 'user.name')
+        git(self.work, 'config', '--unset', 'user.email')
+        git(self.work, 'config', 'user.useConfigOnly', 'true')  # git may otherwise make one up from the host name
+        with mock.patch.object(st_test, 'acquire_tree', side_effect=AssertionError('waited for a tree')):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertIn('failure: git has no identity for the merge a run may make (GIT_AUTHOR_IDENT', str(code))
+        self.assertIn('set user.name and user.email', str(code))
+
+    def test_a_run_that_needs_nix_and_finds_none_fails_before_it_waits_and_one_off_path_is_used(self):
+        self.commit('b.txt', 'two')
+        bin_dir = Path(self.tmp.name) / 'only-git'
+        bin_dir.mkdir()
+        # The git binary itself (git's own exec path), not whatever wraps it on this PATH, and nothing else: no nix.
+        exec_path = subprocess.run(['git', '--exec-path'], capture_output=True, text=True, env=GIT_ENV, check=True).stdout.strip()
+        (bin_dir / 'git').symlink_to(Path(exec_path) / 'git')
+        with mock.patch.object(st_test, 'NIX_CANDIDATES', (str(Path(self.tmp.name) / 'no-nix'),)), \
+                mock.patch.object(st_test, 'acquire_tree', side_effect=AssertionError('waited for a tree')):
+            code, out, err = self.run_st_test('--check', 'demo', command=['nix', 'develop', '-c', 'true'], extra_env={'PATH': str(bin_dir)})
+        self.assertIn('failure: nix is not on PATH nor at', str(code))
+        self.assertIn('--setenv=PATH="$PATH"', str(code))
+        nix = Path(self.tmp.name) / 'profile-nix'
+        nix.write_text('#!/bin/sh\n')
+        nix.chmod(0o755)
+        with mock.patch.object(st_test, 'NIX_CANDIDATES', (str(Path(self.tmp.name) / 'no-nix'), str(nix))), \
+                mock.patch.dict(os.environ, {'PATH': str(bin_dir)}):
+            self.assertEqual(st_test.resolve_nix(), str(nix))
+            directory = Path(self.tmp.name) / 'pin'
+            directory.mkdir()
+            (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': 'a' * 40}}}}))
+            self.assertEqual(st_test.members_command(directory)[0], str(nix))
+            self.assertIn(str(Path(self.tmp.name)), st_test.check_path().split(':'))
+
+    def test_a_base_given_as_a_commit_without_repository_reads_the_policy_through_origin(self):
+        self.commit('b.txt', 'two')
+        base = git(self.work, 'rev-parse', 'origin/main')
+        asked = []
+        def repository_of(remote):
+            asked.append(remote)
+            return 'org/repo'
+        out, err = io.StringIO(), io.StringIO()
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            with mock.patch.object(st_test, 'repository_of', side_effect=repository_of), \
+                    mock.patch.dict(os.environ, dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE), clear=True), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = st_test.main(['--base', base, '--check', 'demo', '--toolchain-sha256', hashlib.sha256(b'drv').hexdigest()])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertEqual(set(asked), {'origin'})
+        self.assertEqual(st_test.base_remote(base), 'origin')
+        self.assertEqual(st_test.base_remote('origin/main'), 'origin')
 
     def test_a_branch_runs_the_self_contained_base_copy_once(self):
         stub = ('import json, os, sys\n'
@@ -1433,8 +2030,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_TEST_TREES': 'off'})[0], 0)
         path = Path(seen.read_text().strip())
         self.assertTrue(path.parent.name.startswith('st-test-'))
+        self.assertEqual(path.parent.parent.parent, self.run_tmp)  # in the run's TMPDIR
         self.assertFalse(path.exists())
         self.assertFalse((self.home / '.cache/st-test').exists())
+        self.assertEqual(list(self.run_tmp.iterdir()), [])
 
     def test_a_check_already_signed_for_this_tree_is_not_run_again(self):
         self.commit('b.txt', 'two')
@@ -1523,6 +2122,28 @@ class StTest(unittest.TestCase):
         code, out, _ = self.run_st_test('--check', 'demo', '--push', 'broken')
         self.assertEqual(code, 1)
         self.assertRegex(out, r'demo +push failed')
+
+    def test_a_covering_record_gone_from_the_remote_after_its_push_is_pushed_again_and_one_that_stays_gone_fails(self):
+        self.commit('b.txt', 'two')
+        origin = Path(self.tmp.name) / 'origin.git'
+        marker = Path(self.tmp.name) / 'dropped'
+        hook = origin / 'hooks/post-receive'
+        hook.write_text(f'#!/usr/bin/env bash\n[ -e {marker} ] && exit 0\nwhile read -r old new ref; do case $ref in refs/tags/evidence/*) '
+                        f'git update-ref -d "$ref"; touch {marker};; esac; done\n')
+        hook.chmod(0o755)
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue(marker.exists())
+        self.assertRegex(out, r'on-remote +pushed again .*1 of 2 refs this run pushed were not on origin')
+        tags = git(origin, 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/').split()
+        self.assertEqual(len(tags), 1, tags)
+        # A remote that drops the tag every time: the summary must not call it covered and pushed.
+        hook.write_text('#!/usr/bin/env bash\nwhile read -r old new ref; do case $ref in refs/tags/evidence/*) git update-ref -d "$ref";; esac; done\n')
+        git(origin, 'update-ref', '-d', tags[0])
+        with mock.patch.object(st_test.time, 'sleep'):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'on-remote +FAILED .*1 of 2 refs this run pushed were not on origin.*1 still missing')
 
     def test_nothing_is_fetched_or_materialized_when_every_check_is_already_signed(self):
         self.commit('.gitignore', '/repos/\n')
@@ -1778,9 +2399,12 @@ class StTest(unittest.TestCase):
         self.assertEqual(len(self.statements()), 1)
 
     def test_the_real_table_lists_only_checks_with_a_command_and_prints_them(self):
-        done = subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--list'], capture_output=True, text=True)
+        # REEXEC: the tree's own table, not the base's copy run_base_copy would run (as under a signing run, which sets it).
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--list'], capture_output=True, text=True,
+                              env=dict(os.environ, **{st_test.REEXEC: 'test'}))
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'fractal-web', 'rust-tests'])
+        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()],
+                         ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'linux-clippy', 'fractal-web', 'rust-tests'])
 
     def test_a_check_that_builds_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
@@ -1797,7 +2421,8 @@ class StTest(unittest.TestCase):
             path.write_text(recorder.format(calls=calls))
             path.chmod(0o755)
         env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime), 'ST_EVIDENCE_GOVERN': 'on'}
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+        # An uncapped caller, whatever cgroup the test itself runs in: inside a seat's lane the check would run in place.
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'own_cap', return_value=None):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
             # The scope alone: no stage ticket, whose holder the test guardian's cargo commands would queue behind (they detach).
@@ -1902,7 +2527,7 @@ class StTest(unittest.TestCase):
         loader = importlib.machinery.SourceFileLoader('evidence_verify_for_web', str(ROOT / 'scripts/evidence-verify'))
         verify = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(verify)
-        rules = verify.policy_rules((ROOT / '.st/evidence-skip-policy.json').read_text(), 'fractal-web', 'org/repo')
+        rules = verify.policy_rules(checkout_config('evidence-skip-policy.json').read_text(), 'fractal-web', 'org/repo')
         wrapper = rules['kinds']['wrapper']
         for detected in ('true', 'false'):  # covers a run whatever its own change detection said about the kit
             verify.value_checks(wrapper, st_test.WEB_INPUTS, {'kit_inputs': detected}, None)
@@ -1914,9 +2539,11 @@ class StTest(unittest.TestCase):
     def test_every_check_of_the_per_pr_suite_runs_by_default_and_all_means_the_same(self):
         # No subset for signing: with no flag fractal-test runs the whole per-PR suite; --all is an accepted alias; --check selects.
         # The VM tests and the mail redelivery canaries run daily, not here.
-        suite = ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'fractal-web', 'rust-tests']
+        suite = ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'linux-clippy', 'fractal-web', 'rust-tests']
         for args, names in (([], suite), (['--all'], suite), (['--check', 'linux-gate'], ['linux-gate'])):
-            done = subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--list', *args], capture_output=True, text=True)
+            # REEXEC: the tree's own table, not the base's copy run_base_copy would run (as under a signing run, which sets it).
+            done = subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--list', *args], capture_output=True, text=True,
+                                  env=dict(os.environ, **{st_test.REEXEC: 'test'}))
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], names, args)
 
@@ -1929,7 +2556,7 @@ class StTest(unittest.TestCase):
         code, out, err = self.run_st_test()
         self.assertEqual(code, 0, out + err)
         record, = self.runs()
-        self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'checks',
+        self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'top_up', 'checks',
                                                  'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages', 'tree_wait_s', 'tree_slot_wait_s',
                                                  'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s']))
         # Its tree: free at once, and nothing that waited in it (no check here runs scripts/ci-local).
@@ -2077,7 +2704,8 @@ if os.environ.get('FAKE_NO_REPORT') != '1':
         if package == os.environ.get('FAKE_EMPTY'):
             continue  # the selection matched no test of this crate
         out.append('<testsuite name=%s>' % quoteattr(package))
-        out.append('<testcase name="unit_one" classname=%s></testcase>' % quoteattr(package))
+        retried = '<flakyFailure message="x"/>' if package == os.environ.get('FAKE_FLAKY') else ''  # passed on a retry
+        out.append('<testcase name="unit_one" classname=%s>%s</testcase>' % (quoteattr(package), retried))
         failing = package == os.environ.get('FAKE_FAIL')
         out.append('<testcase name="unit_two" classname=%s>%s</testcase>' % (quoteattr(package), '<failure message="x"/>' if failing else ''))
         out.append('</testsuite>')
@@ -2105,6 +2733,44 @@ if os.environ.get('CI_TEST_FLAKY'):
     # As scripts/ci-nextest-flaky after the tests stage: the tests that passed only on a retry, one per line.
     open(os.environ['CI_TEST_FLAKY'], 'w').write(os.environ['FAKE_GATE_FLAKY'] + ' unit_one\\n' if os.environ.get('FAKE_GATE_FLAKY') else '')
 """
+
+
+class HandOver(unittest.TestCase):
+    def test_hand_over_executes_the_new_copy_in_this_process_with_the_ticket_the_start_and_the_settings(self):
+        """hand_over replaces the process (the same pid, so the ticket stays this waiter's), passes the ticket, the run's start, the base commit and
+        the ST_TEST_* settings the seat scrub dropped, and removes the base copy it ran from, which nothing would remove after the exec."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        old = tmp / 'st-test-base-old'
+        old.mkdir()
+        shutil.copy(ROOT / 'scripts/st-test', old / 'st-test')
+        report = tmp / 'report.json'
+        newer = (f'import json, os, sys\njson.dump({{"pid": os.getpid(), "argv": sys.argv[1:], "env": dict(os.environ)}}, open({str(report)!r}, "w"))\n'
+                 '# ST_TEST_HANDOVER_TICKET\n')
+        driver = textwrap.dedent(f"""
+            import importlib.machinery, importlib.util, os, sys
+            from pathlib import Path
+            loader = importlib.machinery.SourceFileLoader('st_test', {str(old / 'st-test')!r})
+            st_test = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(st_test)
+            st_test.POOL_SETTINGS['ST_TEST_POOL_MAX_GB'] = '170'
+            st_test.RUN_STARTED[:] = [1234.5]
+            os.environ[st_test.REEXEC] = 'oldbase'
+            print(os.getpid(), flush=True)
+            st_test.hand_over(st_test.Handover({newer.encode()!r}, 'c' * 40, Path('/q/050.1.' + str(os.getpid())), True), ['--check', 'demo'])
+        """)
+        done = subprocess.run([sys.executable, '-c', driver], capture_output=True, text=True, env=dict(os.environ, TMPDIR=str(tmp)), timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        seen = json.loads(report.read_text())
+        pid = int(done.stdout.split()[0])
+        self.assertEqual(seen['pid'], pid)
+        self.assertEqual(seen['argv'], ['--check', 'demo'])
+        self.assertEqual(seen['env']['ST_TEST_HANDOVER_TICKET'], f'/q/050.1.{pid}')
+        self.assertEqual(seen['env']['ST_TEST_HANDOVER_STARTED'], '1234.5')
+        self.assertEqual(seen['env']['ST_TEST_REEXEC'], 'c' * 40)
+        self.assertEqual(seen['env']['ST_TEST_POOL_MAX_GB'], '170')
+        self.assertFalse(old.exists())
+        self.assertIn("continuing in cccccccccccc's copy, with its place in the tree queue", done.stderr)
 
 
 class PoolQueue(unittest.TestCase):
@@ -2147,7 +2813,7 @@ class PoolQueue(unittest.TestCase):
         queue = self.root / 'queue'
         queue.mkdir(parents=True)
         better = queue / f'003.{time.time_ns():019d}.{os.getpid()}'          # a rank-3 waiter between two of its looks at the trees
-        better.touch()
+        st_test.write_ticket(better)  # a waiter of this copy's rules
         got = []
         with contextlib.redirect_stderr(io.StringIO()):
             worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)))
@@ -2157,6 +2823,118 @@ class PoolQueue(unittest.TestCase):
             better.unlink()
             worse.join(5)
         self.assertEqual(got[0][0], 0)
+        got[0][1].close()
+
+    def test_an_older_copys_ticket_gets_no_deference(self):
+        """A ticket written by a copy of st-test older than versioned tickets (an empty file) is not waited for, however good its rank: it may be
+        a waiter that defers back to this one forever (2026-10-30, 13.2 h). The tree's flock decides between them, at once, not after the fallback."""
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        older = queue / f'003.{time.time_ns():019d}.{os.getpid()}'
+        older.touch()
+        got = []
+        began = time.monotonic()
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 30), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)))
+            worse.start()
+            worse.join(5)
+        self.assertEqual(got[0][0], 0)
+        self.assertLess(time.monotonic() - began, 5)
+        self.assertTrue(older.exists())  # not this waiter's to remove: its own waiter is alive
+        got[0][1].close()
+
+    def test_a_newer_copys_ticket_is_still_deferred_to(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        newer = queue / f'003.{time.time_ns():019d}.{os.getpid()}'
+        newer.write_text(f'rules {st_test.QUEUE_RULES + 1}\n')
+        got = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)))
+            worse.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])
+            newer.unlink()
+            worse.join(5)
+        self.assertEqual(got[0][0], 0)
+        got[0][1].close()
+
+    def test_a_handed_over_ticket_keeps_its_place_and_its_wait(self):
+        """The copy a waiting run handed over to takes the ticket over (its name holds this pid): no new ticket, and the wait counts from the first."""
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        ticket = queue / f'050.{time.time_ns() - 100 * 10**9:019d}.{os.getpid()}'
+        ticket.touch()  # as the copy before wrote it
+        waits = {}
+        with mock.patch.dict(st_test.HANDOVER, {'ticket': str(ticket)}, clear=True), contextlib.redirect_stderr(io.StringIO()):
+            n, lock = st_test.acquire_tree(self.root, 1, rank=50, waits=waits)
+            self.assertNotIn('ticket', st_test.HANDOVER)
+        lock.close()
+        self.assertEqual(n, 0)
+        self.assertGreaterEqual(waits['tree_wait_s'], 100)
+        self.assertEqual(os.listdir(queue), [])
+
+    def test_a_handed_ticket_that_is_not_this_processs_is_not_taken_over(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        other = queue / f'050.{time.time_ns():019d}.{os.getppid()}'  # alive, another process's, of older rules
+        other.touch()
+        with mock.patch.dict(st_test.HANDOVER, {'ticket': str(other)}, clear=True), contextlib.redirect_stderr(io.StringIO()):
+            n, lock = st_test.acquire_tree(self.root, 1, rank=50)
+        lock.close()
+        self.assertEqual(os.listdir(queue), [other.name])  # taken over, it would have been removed with this waiter's own ticket
+        self.assertEqual(other.read_text(), '')  # nor rewritten with this copy's rules
+
+    def test_a_best_ticket_that_never_takes_the_free_tree_does_not_stop_the_next_waiter(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        stuck = queue / f'003.{time.time_ns():019d}.{os.getpid()}'            # alive, best in this waiter's order, of this copy's rules, and never going to try a tree
+        st_test.write_ticket(stuck)  # a waiter of this copy's rules
+        got = []
+        began = time.monotonic()
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 1.5), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)))
+            worse.start()
+            time.sleep(0.8)
+            self.assertEqual(got, [])                                           # the tree is free but not yet for the fallback time
+            worse.join(8)
+        self.assertEqual(len(got), 1)                                           # within the fallback time plus a poll or two the next waiter has it
+        self.assertLess(time.monotonic() - began, 6)
+        self.assertGreaterEqual(time.monotonic() - began, 1.5)
+        got[0][1].close()
+
+    def test_the_fallback_never_takes_a_tree_that_is_in_use(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')  # a waiter of this copy's rules
+        holder = open(self.root / 'tree-0.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        self.addCleanup(holder.close)
+        got = []
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)), daemon=True)
+            worse.start()
+            time.sleep(2.5)
+            self.assertEqual(got, [])                                           # tree-0 is held, so the flock refuses however long the wait
+            holder.close()
+            worse.join(8)
+        self.assertEqual(len(got), 1)
+        got[0][1].close()
+
+    def test_the_fallback_waits_for_a_build_slot_like_the_head_does(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')  # a waiter of this copy's rules
+        ready = [False]
+        got = []
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, slot_ready=lambda: (ready[0], 'no slot'))), daemon=True)
+            worse.start()
+            time.sleep(2.5)
+            self.assertEqual(got, [])                                           # free for longer than the fallback time, but a build would wait for a slot
+            ready[0] = True
+            worse.join(8)
+        self.assertEqual(len(got), 1)
         got[0][1].close()
 
     def test_a_waiter_sees_a_tree_the_pool_gains_while_it_waits(self):
@@ -2180,7 +2958,7 @@ class PoolQueue(unittest.TestCase):
         queue.mkdir()
         now = 10_000 * 10**9
         live = os.getpid()
-        names = {'old-50': f'050.{now - 200 * 60 * 10**9:019d}.{live}',   # 200 minutes: aged to the floor, 5
+        names = {'old-50': f'050.{now - 100 * 60 * 10**9:019d}.{live}',   # 100 minutes (inside the 2 hour maximum wait): aged to the floor, 5
                  'p0': f'003.{now - 10**9:019d}.{live}',                  # under the floor: never aged, always first
                  'new-12': f'012.{now - 10**9:019d}.{live}',
                  'young-50': f'050.{now - 5 * 60 * 10**9:019d}.{live}',  # 5 minutes: 48
@@ -2191,6 +2969,46 @@ class PoolQueue(unittest.TestCase):
             order = [name for _, _, name in st_test.tree_queue(queue, now)]
         self.assertEqual(order, [names['p0'], names['old-50'], names['new-12'], names['young-50']])
         self.assertFalse((queue / names['dead']).exists())
+
+    def test_a_stream_of_rank_3_tickets_cannot_hold_a_rank_50_ticket_past_the_maximum_wait(self):
+        queue = Path(self.tmp.name) / 'queue-max-wait'
+        queue.mkdir()
+        live = os.getpid()
+        limit = st_test.PRIORITY_MAX_WAIT_SECONDS * 10**9
+        start = 10_000_000 * 10**9
+        starved = f'050.{start - 1:019d}.{live}'                                  # one nanosecond older than the first rank-3 ticket: no tie
+        (queue / starved).touch()
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):
+            for minute in range(0, 200):                                         # a new rank-3 ticket every minute for more than three hours
+                now = start + minute * 60 * 10**9
+                fresh = f'003.{now:019d}.{live}'
+                (queue / fresh).touch()
+                order = [name for _, _, name in st_test.tree_queue(queue, now)]
+                if now - (start - 1) < limit:
+                    self.assertNotEqual(order[0], starved, minute)                # inside the limit the ranks decide
+                else:
+                    self.assertEqual(order[0], starved, minute)                   # at the limit the old ticket is first, ahead of every younger rank-3 ticket
+                    break
+            else:
+                self.fail('the rank-50 ticket never reached the front')
+        self.assertGreaterEqual(minute * 60, st_test.PRIORITY_MAX_WAIT_SECONDS)
+
+    def test_tickets_past_the_maximum_wait_go_first_and_oldest_first_among_themselves(self):
+        queue = Path(self.tmp.name) / 'queue-overdue'
+        queue.mkdir()
+        live = os.getpid()
+        now = 10_000_000 * 10**9
+        limit = st_test.PRIORITY_MAX_WAIT_SECONDS * 10**9
+        names = {'overdue-3-older': f'003.{now - limit - 5 * 10**9:019d}.{live}',
+                 'overdue-50': f'050.{now - limit - 2 * 10**9:019d}.{live}',
+                 'overdue-12-newest': f'012.{now - limit:019d}.{live}',
+                 'p0-young': f'003.{now - 10**9:019d}.{live}',
+                 'young-50': f'050.{now - 60 * 10**9:019d}.{live}'}
+        for name in names.values():
+            (queue / name).touch()
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):
+            order = [name for _, _, name in st_test.tree_queue(queue, now)]
+        self.assertEqual(order, [names['overdue-3-older'], names['overdue-50'], names['overdue-12-newest'], names['p0-young'], names['young-50']])
 
     def test_a_ticket_whose_pid_was_reused_by_a_younger_process_is_dropped(self):
         queue = self.root / 'queue'
@@ -2391,7 +3209,7 @@ class PerCrate(StTest):
             shutil.copy(ROOT / 'scripts' / script, self.work / 'scripts' / script)
         # The real rust-tests policy entry and a lane for it: the verifier then judges every note by the repository's rules.
         policy = json.loads(json.dumps(POLICY))
-        policy['checks']['rust-tests'] = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['rust-tests']
+        policy['checks']['rust-tests'] = json.loads(checkout_config('evidence-skip-policy.json').read_text())['checks']['rust-tests']
         (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
         (self.work / '.st/required-lanes.json').write_text(json.dumps({'version': 1, 'lanes': {'rust-tests': {
             'argv': ['python3', 'scripts/ci-rust-test-result'], 'definition_paths': ['.st', 'scripts'], 'tree_inputs': ['.']}}}))
@@ -2480,6 +3298,36 @@ class PerCrate(StTest):
         self.run_crates()
         self.assertEqual(self.ran()[-1], 'base,top')
 
+    def test_main_re_keying_one_crate_during_a_green_run_signs_that_crate_alone_and_pushes_the_head(self):
+        self.commit('b.txt', 'two')
+        head = git(self.work, 'rev-parse', 'HEAD')
+        inputs = {'global': ['Cargo.toml', 'Cargo.lock'], 'crates': {'base': {'extra': []}, 'top': {'extra': ['a.txt']}}}
+        env = {'FAKE_CALLS': str(self.calls), 'ST_EVIDENCE_GOVERN': 'off', 'ST_EVIDENCE_TARGET': 'off'}
+        with self.main_moves_during_the_run([('.st/rust-test-inputs.json', json.dumps(inputs))]):  # main's inputs move top's key, not base's
+            code, out, err = self.run_st_test('--push', 'origin', extra_env=env)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['base,top', 'top'])
+        self.assertIn(f'top-up round 1 of 3: origin/main is at {git(self.work, "rev-parse", "origin/main")[:12]}; signing what {head[:12]} lacks: '
+                      'rust-tests (1 crates: top)', out)
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)  # nothing protected moved: no merge
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+        self.assertEqual(self.crate_records(), [('base', 0), ('top', 0), ('top', 0)])
+
+    def test_a_narrowed_run_that_merges_main_signs_the_whole_tree_checks_of_the_merge_before_it_pushes(self):
+        self.branch_from_a_base_with_the_gate()
+        for i in range(30):
+            self.main_commits(f'main-{i}.txt', str(i))  # past the head-tree bound: the run merges main in
+        code, out, err = self.run_crates('--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        merge = git(self.work, 'rev-parse', 'HEAD')
+        self.assertIn('merged origin/main', out)
+        self.assertIn(f'signing what {merge[:12]} lacks: demo', out)  # the whole-tree check the narrowed run did not select
+        demo = [s for s in self.statements() if 'demo' in s['predicate']['observed']['checks']]
+        self.assertEqual(len(demo), 1)
+        self.assertIn(git(self.work, 'rev-parse', 'HEAD^{tree}'), json.dumps(demo[0]))
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], merge)
+        self.assertEqual(self.run_st_test('--status')[0], 0, 'every check of the pushed merge is covered')
+
     def test_a_change_outside_every_crate_runs_nothing(self):
         self.run_crates()
         self.commit('notes.md', 'x')
@@ -2559,6 +3407,7 @@ class PerCrate(StTest):
         self.assertEqual(len(refs) - before, 8, 'four refs for each of the two records: tag, note and both input index refs')
         self.assertEqual(sum('evidence/input/rust-tests/' in ref for ref in refs), 2)
         self.assertEqual(sum('evidence-input/rust-tests/' in ref for ref in refs), 2)
+        self.assertRegex(out, r'on-remote +confirmed .*all 8 refs this run pushed are on origin')
 
     def test_a_push_that_fails_is_a_failed_row_not_a_silent_success(self):
         git(self.work, 'remote', 'set-url', '--push', 'origin', '/nonexistent/origin.git')
@@ -2646,7 +3495,8 @@ class PerCrate(StTest):
         self.assertNotIn('ran no test', out, 'base is listed: nothing to review')
         with contextlib.chdir(self.work):
             self.assertEqual(st_test.listed_no_tests('origin/main'), ['base'])
-            self.assertEqual(st_test.listed_no_tests('origin/nope'), [])
+            with self.assertRaises(st_test.Failure):
+                st_test.listed_no_tests('origin/nope')
 
     def test_a_note_that_ran_no_test_covers_a_crate_only_when_the_base_lists_it_as_having_none(self):
         code, out, err = self.run_crates(FAKE_EMPTY='base')
@@ -2790,6 +3640,58 @@ class PerCrate(StTest):
         self.assertEqual(slept.call_count, 2)
         self.assertEqual(self.remote_refs(), [])
 
+    def update_hook(self, body):
+        """A per-ref hook on origin: it gets each ref's name as $1, and a ref it refuses fails alone."""
+        path = Path(self.tmp.name) / 'origin.git/hooks/update'
+        path.write_text('#!/usr/bin/env bash\n' + body)
+        path.chmod(0o755)
+
+    def test_a_push_where_one_ref_fails_names_that_ref_and_lands_the_others(self):
+        refs = self.push_refs(5)
+        self.update_hook('[ "$1" != refs/notes/pushtest/r2 ] || { echo "refused r2" >&2; exit 1; }\n')
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True), mock.patch.object(st_test.time, 'sleep'), contextlib.chdir(self.work):
+            error = st_test.push_records(self.work, 'origin', refs)
+        self.assertIn('push of 1 of 5 refs failed after 3 tries', error)
+        self.assertIn('refs/notes/pushtest/r2', error)
+        self.assertEqual(sorted(self.remote_refs()), sorted(set(refs) - {'refs/notes/pushtest/r2'}))
+
+    def test_a_pushed_ref_gone_from_the_remote_is_pushed_again_and_one_that_cannot_be_is_a_failure(self):
+        # #4186: git said the push was done, and it was; then the remote's GC deleted the records before the summary said covered.
+        origin = Path(self.tmp.name) / 'origin.git'
+        refs = self.push_refs(3)
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True), mock.patch.object(st_test.time, 'sleep'), contextlib.chdir(self.work):
+            self.assertIsNone(st_test.push_records(self.work, 'origin', refs))
+            self.assertEqual(st_test.confirm_pushed(self.work, 'origin', refs)[0], 'confirmed')
+            git(origin, 'update-ref', '-d', 'refs/notes/pushtest/r1')
+            result, why = st_test.confirm_pushed(self.work, 'origin', refs)
+            self.assertEqual(result, 'pushed again', why)
+            self.assertIn('1 of 3 refs this run pushed were not on origin (r1)', why)
+            self.assertEqual(sorted(self.remote_refs()), sorted(refs))
+            git(origin, 'update-ref', '-d', 'refs/notes/pushtest/r0')
+            self.update_hook('[ "$1" != refs/notes/pushtest/r0 ] || exit 1\n')
+            result, why = st_test.confirm_pushed(self.work, 'origin', refs)
+        self.assertEqual(result, 'FAILED', why)
+        self.assertIn('1 of 3 refs this run pushed were not on origin (r0)', why)
+        self.assertIn('refs/notes/pushtest/r0', why)
+
+    def test_a_run_whose_records_vanish_from_the_remote_after_their_push_pushes_them_again_before_its_summary(self):
+        origin = Path(self.tmp.name) / 'origin.git'
+        marker = Path(self.tmp.name) / 'dropped'
+        # The first push of this tree's notes lands, and then they are gone, as the nightly GC deleted a running run's first records.
+        hook = origin / 'hooks/post-receive'
+        hook.write_text(f'#!/usr/bin/env bash\n[ -e {marker} ] && exit 0\nwhile read -r old new ref; do case $ref in refs/notes/evidence/*) '
+                        f'git update-ref -d "$ref"; touch {marker};; esac; done\n')
+        hook.chmod(0o755)
+        code, out, err = self.run_crates('--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue(marker.exists())
+        self.assertRegex(out, r'on-remote +pushed again .*2 of 8 refs this run pushed were not on origin')
+        notes = subprocess.run(['git', '-C', str(origin), 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/'],
+                               capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(len(notes), 2, notes)
+        code, out, err = self.run_crates('--push', 'origin')  # nothing new pushed, nothing to confirm
+        self.assertEqual(code, 0, out + err)
+
     def test_coverage_is_asked_of_the_verifier_once_for_all_the_crates(self):
         self.run_crates()
         with mock.patch.object(st_test, 'covered', side_effect=AssertionError('asked crate by crate')):
@@ -2830,12 +3732,16 @@ class PerCrate(StTest):
         self.assertIn('to run: base, top', out)
 
     def test_rust_tests_is_in_the_default_suite_after_linux_gate(self):
-        self.assertEqual(st_test.OPT_IN, frozenset())
+        # Only linux-fleet-compat is opt-in: linux-gate's own run still includes its stage, so a default run never runs it twice.
+        # linux-clippy runs by default, right after linux-gate, and signs from its clippy stage (KeyedClippy).
+        self.assertEqual(st_test.OPT_IN, frozenset({'linux-fleet-compat'}))
+        self.assertEqual(list(LOCAL).index('linux-clippy'), list(LOCAL).index('linux-gate') + 1)
         self.assertIn('rust-tests', st_test.BUILDS)
         for flags in ((), ('--all',)):
             code, out, err = self.run_st_test('--list', *flags)
             names = [line.split(':')[0] for line in out.splitlines()]
             self.assertIn('rust-tests', names, flags)
+            self.assertNotIn('linux-fleet-compat', names, flags)
             self.assertLess(names.index('linux-gate') if 'linux-gate' in names else -1, names.index('rust-tests'), flags)
         code, out, err = self.run_st_test('--list', '--check', 'rust-tests')
         self.assertIn('rust-tests: python3 scripts/ci-rust-test-result', out)
@@ -2888,6 +3794,15 @@ class PerCrate(StTest):
         gate = next(s for s in self.statements() if 'linux-gate' in s['predicate']['observed']['checks'])['predicate']['observed']
         self.assertEqual((gate['checks']['linux-gate']['exit_code'], gate['inputs']['flaky_tests']), (0, 'top unit_one'))
 
+    def test_a_crate_with_a_test_that_failed_every_try_fails_even_when_another_passed_only_on_a_retry(self):
+        # nextest: '2 tests run: 1 passed (1 flaky), 1 failed', ci-local's tests exit 100. The retried pass must not hide the failure.
+        code, out, err = self.run_crates(FAKE_FAIL='top', FAKE_FLAKY='top')
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.crate_records(), [('base', 0), ('top', 1)], 'top is recorded as a failure, as any failing crate')
+        self.assertRegex(out, r'rust-tests\s+FAILED')
+        self.assertRegex(out, r'rust-tests:top\s+FAILED .*unit_two')
+        self.assertNotIn('left for CI', out)
+
     def test_without_a_report_from_linux_gate_rust_tests_runs_the_crates_it_lacks_itself(self):
         code, out, err = self.run_with_gate(FAKE_GATE_NO_REPORT='1')
         self.assertEqual(code, 0, out + err)
@@ -2895,9 +3810,134 @@ class PerCrate(StTest):
         self.assertIn('2 of 2 crates run and signed', out)
 
 
-# PerCrate reuses StTest's repository, signer and helpers, not its tests.
-for _name in [name for name in dir(StTest) if name.startswith('test_') and name not in PerCrate.__dict__]:
-    setattr(PerCrate, _name, None)
+FAKE_CLIPPY = """import json, os, sys
+from pathlib import Path
+open(os.environ['FAKE_CALLS'], 'a').write(sys.argv[1] + '\\n')
+if os.environ.get('FAKE_CLIPPY_FAIL'):
+    sys.exit(1)
+report = os.environ.get('CI_CLIPPY_REPORT')
+if report:
+    # As scripts/ci-linux's clippy stage: one compiled unit, its dep-info naming what it read, the cargo messages and metadata, then passed.
+    target = Path(os.environ['FAKE_TARGET'])  # outside the tree, as the pool's target is: the checkout stays clean
+    deps = target / 'debug/deps'
+    deps.mkdir(parents=True, exist_ok=True)
+    (deps / 'libalpha-0123abcd.rmeta').write_text('')
+    (deps / 'alpha-0123abcd.d').write_text('%s: %s\\n' % (deps / 'libalpha-0123abcd.rmeta', os.environ.get('FAKE_CLIPPY_READS', 'a.txt')))
+    Path(report).mkdir(parents=True, exist_ok=True)
+    message = {'reason': 'compiler-artifact', 'filenames': [str(deps / 'libalpha-0123abcd.rmeta')]}
+    (Path(report) / 'clippy-workspace.jsonl').write_text(json.dumps(message) + '\\n')
+    (Path(report) / 'clippy-metadata.json').write_text(json.dumps({'target_directory': str(target), 'packages': []}))
+    (Path(report) / 'passed').write_text('')
+"""
+
+
+class KeyedClippy(StTest):
+    """linux-clippy in the default suite (docs/keyed-clippy.md): signed from linux-gate's clippy stage when linux-gate runs here, so clippy
+    runs once, else from the stage run alone; either way the note records scripts/ci-clippy-result and which run made its report."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = Path(self.tmp.name) / 'fake-calls'
+        fake = Path(self.tmp.name) / 'fake-clippy.py'
+        fake.write_text(FAKE_CLIPPY)
+        st_test.LOCAL['linux-gate'] = [sys.executable, str(fake), 'gate', 'clippy']  # StTest's patcher restores the table
+        st_test.LOCAL['linux-clippy'] = LOCAL['linux-clippy']
+        patcher = mock.patch.object(st_test, 'RUN_CLIPPY', [sys.executable, str(fake), 'clippy'])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        git(self.work, 'checkout', '-q', 'main')
+        for script in ('ci-clippy-result', 'dep-info-check'):
+            shutil.copy(ROOT / 'scripts' / script, self.work / 'scripts' / script)
+        # The real linux-clippy entry, keyed by this repository's files, and its lane: the verifier judges every note by the real rules.
+        inputs = ['a.txt', 'flake.lock', 'scripts']
+        policy = json.loads(json.dumps(POLICY))
+        policy['checks']['linux-clippy'] = dict(json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['linux-clippy'],
+                                                inputs=inputs)
+        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
+        (self.work / '.st/required-lanes.json').write_text(json.dumps({'version': 1, 'lanes': {'linux-clippy': {
+            'argv': LOCAL['linux-clippy'], 'definition_paths': ['.st', 'scripts'], 'tree_inputs': inputs}}}))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'keyed clippy')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        git(self.work, 'merge', '-q', '--ff-only', 'main')
+
+    def run_clippy(self, *checks, **env):
+        args = [argument for name in checks for argument in ('--check', name)]
+        return self.run_st_test(*args, extra_env=dict({'FAKE_CALLS': str(self.calls), 'FAKE_TARGET': str(Path(self.tmp.name) / 'target'),
+                                                        'ST_EVIDENCE_GOVERN': 'off', 'ST_EVIDENCE_TARGET': 'off'}, **env))
+
+    def ran(self):
+        return self.calls.read_text().split() if self.calls.exists() else []
+
+    def clippy_notes(self):
+        return [s['predicate']['observed'] for s in self.statements() if 'linux-clippy' in s['predicate']['observed']['checks']]
+
+    def test_unsigned_linux_clippy_is_signed_from_linux_gates_clippy_stage_which_runs_once(self):
+        code, out, err = self.run_clippy('linux-gate', 'linux-clippy')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['gate'], 'clippy ran once, inside linux-gate; linux-clippy ran no stage of its own')
+        [note] = self.clippy_notes()
+        self.assertEqual(note['checks']['linux-clippy']['exit_code'], 0)
+        self.assertEqual(note['inputs']['run_command_sha256'], hashlib.sha256(json.dumps([st_test.LOCAL['linux-gate']]).encode()).hexdigest())
+        self.assertRegex(note['inputs']['source_inputs'], r'^[0-9a-f]{40}$', 'keyed: another tree with the same key finds it')
+        self.assertEqual(note['inputs']['clippy_base_baseline_sha256'], 'absent', 'the base has no clippy baseline')
+        self.assertTrue(any('linux-gate' in s['predicate']['observed']['checks'] for s in self.statements()), 'linux-gate is signed too')
+        self.assertRegex(out, r'linux-clippy\s+passed')
+        code, out, err = self.run_clippy('linux-gate', 'linux-clippy')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'linux-clippy\s+already signed')
+
+    def test_without_linux_gate_in_the_run_linux_clippy_runs_the_clippy_stage_alone(self):
+        code, out, err = self.run_clippy('linux-clippy')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['clippy'])
+        [note] = self.clippy_notes()
+        self.assertEqual(note['inputs']['run_command_sha256'], hashlib.sha256(json.dumps([st_test.RUN_CLIPPY]).encode()).hexdigest())
+
+    def test_a_tree_with_the_same_key_reuses_the_note_and_one_that_moves_it_does_not(self):
+        self.assertEqual(self.run_clippy('linux-clippy')[0], 0)
+        self.commit('notes.md', 'outside the key\n')
+        code, out, err = self.run_clippy('linux-clippy')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'linux-clippy\s+already signed')
+        self.assertEqual(self.ran(), ['clippy'], 'a tree that changed no input reused the note')
+        self.commit('a.txt', 'two\n')
+        self.assertEqual(self.run_clippy('linux-clippy')[0], 0)
+        self.assertEqual(self.ran(), ['clippy', 'clippy'], 'a tree that changed an input ran clippy again')
+
+    def test_a_file_read_outside_linux_clippys_key_fails_its_note(self):
+        (self.work / 'b.txt').write_text('undeclared\n')
+        git(self.work, 'add', 'b.txt')
+        git(self.work, 'commit', '-q', '-m', 'b')
+        code, out, err = self.run_clippy('linux-clippy', FAKE_CLIPPY_READS='b.txt')
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'linux-clippy\s+FAILED')  # dep-info-check named b.txt (dep-info-check-test checks its words)
+        self.assertEqual([n['checks']['linux-clippy']['exit_code'] for n in self.clippy_notes()], [1], 'a failing note, never a passing one')
+
+    def test_when_linux_gates_clippy_stage_did_not_pass_linux_clippy_is_not_signed_and_runs_nothing_more(self):
+        code, out, err = self.run_clippy('linux-gate', 'linux-clippy', FAKE_CLIPPY_FAIL='1')
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.ran(), ['gate'])
+        self.assertRegex(out, r"linux-clippy\s+NOT SIGNED .*linux-gate's clippy stage did not pass")
+        self.assertEqual([n for n in self.clippy_notes() if n['checks']['linux-clippy']['exit_code'] == 0], [])
+
+    def test_while_linux_clippy_is_in_shadow_linux_gate_keeps_its_clippy_stage_and_only_that_command_skips_the_aggregate(self):
+        # The linux-gate shrink (dropping the clippy stage once linux-clippy is signed) must wait for the flip: a shadow linux-clippy
+        # note skips nothing, so a linux-gate note from a run without the stage would leave CI to run clippy. The verifier holds each
+        # signer level to its exact command, so a run without the stage signs no note that skips linux-gate's aggregate.
+        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']
+        if policy['linux-clippy'].get('enforce') is not True:
+            self.assertIn('clippy', LOCAL['linux-gate'])
+            for level, rule in policy['linux-gate']['kinds']['wrapper']['by_level'].items():
+                self.assertEqual(rule['command'], LOCAL['linux-gate'], level)
+                self.assertIn('clippy', rule['command'], level)
+
+
+# PerCrate and KeyedClippy reuse StTest's repository, signer and helpers, not its tests.
+for _class in (PerCrate, KeyedClippy):
+    for _name in [name for name in dir(StTest) if name.startswith('test_') and name not in _class.__dict__]:
+        setattr(_class, _name, None)
 
 if __name__ == '__main__':
     unittest.main()

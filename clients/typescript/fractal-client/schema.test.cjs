@@ -3,6 +3,143 @@ const assert = require('node:assert/strict');
 
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
+
+test('harness questions retain canonical private metadata and open response enums', async () => {
+    const [{ DateTime, Option, Schema }, Rich] = await modules;
+    const wire = {
+        kind: 'harness-question', id: 'harness-question/00ca25ee5d0da6af852c81a5ee4949df', revision: 'claim/ada-observed',
+        updated_at: '2026-10-26T10:00:00.000Z', agent: 'agent/ada', session: 'ada-session',
+        native_id: 'sha256:' + 'a'.repeat(64), runtime_incarnation: 'ada-incarnation', observed_at: 1793008800000,
+        questions: [{ id: 'q0', options: 64, multi: true, required: true }],
+        resolution: { status: 'answered_elsewhere', revision: 'claim/ada-observed',
+            answers: { q0: { positions: [0, 63], timed_out: false } }, resolved_at: 1793008801000 },
+        answer: { state: 'unavailable', reason: 'resolved' },
+    };
+    const decode = Rich.decodeUnknownSync(Rich.HarnessQuestion, 'strict');
+    for (const value of [wire, { ...wire, resolution: null, answer: { state: 'available' } }]) {
+        const decoded = decode(value);
+        assert.equal(DateTime.toEpochMillis(decoded.observed_at), value.observed_at);
+        assert.equal(Option.isSome(decoded.resolution), value.resolution !== null);
+        assert.deepEqual(Schema.encodeSync(Rich.HarnessQuestion)(decoded), value);
+    }
+    const future = { ...wire, resolution: { ...wire.resolution, status: 'future_status' },
+        answer: { state: 'future_state', reason: 'future_reason' } };
+    const decodedFuture = Rich.decodeUnknownSync(Rich.HarnessQuestion)(future);
+    assert.deepEqual(decodedFuture.answer.state, { _tag: 'Unknown', raw: 'future_state' });
+    assert.deepEqual(Schema.encodeSync(Rich.HarnessQuestion)(decodedFuture), future);
+    assert.throws(() => decode(future));
+    for (const value of [
+        { ...wire, id: 'harness-question/native' }, { ...wire, native_id: 'raw-native-id' },
+        { ...wire, session: 'has whitespace' }, { ...wire, session: '' },
+        { ...wire, observed_at: Number.MAX_SAFE_INTEGER + 1 },
+        { ...wire, resolution: { ...wire.resolution, resolved_at: Number.MAX_SAFE_INTEGER + 1 } },
+        { ...wire, questions: [] }, { ...wire, questions: [{ ...wire.questions[0], id: 'q16' }] },
+        { ...wire, questions: [{ ...wire.questions[0], options: 65 }] },
+        { ...wire, answer: { state: 'unavailable' } },
+        { ...wire, questions: [{ ...wire.questions[0], text: 'not public' }] },
+    ]) assert.throws(() => decode(value));
+    assert.deepEqual(Schema.encodeSync(Rich.Capability)(Rich.decodeUnknownSync(Rich.Capability, 'strict')(
+        { id: 'harness.answer', version: 0, state: 'unavailable' })), { id: 'harness.answer', version: 0, state: 'unavailable' });
+    assert.throws(() => Rich.decodeUnknownSync(Rich.Capability, 'strict')({ id: 'harness.answer', version: 0, state: 'unavailable', reason: 'adapter_missing' }));
+});
+
+test('harness answer requests constrain canonical data keys, positions, fences, and action ids', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const question = 'harness-question/00ca25ee5d0da6af852c81a5ee4949df';
+    const wire = { api_version: 'st3.client.v0', id: 'action/answer', type: 'harness.answer',
+        idempotency_key: 'alex-harness-answer-0001', fence: { snapshot_id: 'snapshot/fixture',
+            subject_revisions: { [question]: 'claim/ada-observed' }, runtime_incarnation: 'ada-incarnation' },
+        parameters: { question, answers: { q0: { positions: [0, 63] }, ['sha256:' + 'b'.repeat(64)]: { positions: [] } } } };
+    const decode = Rich.decodeUnknownSync(Rich.ActionRequest, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.ActionRequest)(decode(wire)), wire);
+    const input = Rich.decodeUnknownSync(Rich.HarnessAnswerInput, 'strict');
+    for (const positions of [[64], [-1], [0.5], [0, 0], Array.from({ length: 65 }, (_, i) => i)])
+        assert.throws(() => input({ positions }));
+    for (const extra of ['note', 'other', 'timed_out', 'actor', 'credential'])
+        assert.throws(() => input({ positions: [0], [extra]: false }));
+    for (const answers of [{ actor: { positions: [0] } }, { credential: { positions: [0] } },
+        { q16: { positions: [0] } }, Object.fromEntries(Array.from({ length: 17 }, (_, i) => ['sha256:' + i.toString(16).padStart(64, '0'), { positions: [] }]))])
+        assert.throws(() => decode({ ...wire, parameters: { question, answers } }));
+    assert.throws(() => decode({ ...wire, id: 'action/' + 'a'.repeat(250) }));
+    assert.throws(() => decode({ ...wire, actor: 'person/other' }));
+    const { runtime_incarnation, ...withoutRuntime } = wire.fence;
+    assert.throws(() => decode({ ...wire, fence: withoutRuntime }));
+    // Schema maxLength is a character bound; the runtime separately enforces UTF-8 bytes (R1).
+    const bounded = { ...wire, id: 'action/' + 'a'.repeat(249) };
+    assert.deepEqual(Schema.encodeSync(Rich.ActionRequest)(decode(bounded)), bounded);
+});
+
+test('harness refusal details stay closed while result statuses remain lossless', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.ErrorEnvelope, 'strict');
+    const base = { api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/answer', message: '', retryable: false };
+    for (const [code, reasons] of [
+        ['invalid-answer', ['unknown_option', 'too_many', 'required_missing', 'empty_single', 'too_long', 'unknown_question', 'other_not_allowed', 'note_not_allowed']],
+        ['not-answerable', ['adapter_missing', 'adapter_unavailable']],
+    ]) {
+        for (const reason of reasons) {
+            const value = { ...base, code, details: { reason } };
+            assert.deepEqual(Schema.encodeSync(Rich.ErrorEnvelope)(decode(value)), value);
+        }
+        for (const details of [{}, { reason: 'future_reason' }, { reason: 'resolved' }])
+            assert.throws(() => decode({ ...base, code, details }));
+    }
+    const future = { ...base, code: 'future-error', details: { future: 1 } };
+    assert.deepEqual(Schema.encodeSync(Rich.ErrorEnvelope)(Rich.decodeUnknownSync(Rich.ErrorEnvelope)(future)), future);
+    assert.throws(() => decode(future));
+    for (const status of ['accepted', 'already_resolved', 'future_status']) {
+        const value = { status, resolution: { status: 'future_resolution', revision: 'claim/observed', answers: {}, resolved_at: 1793008801000 } };
+        assert.deepEqual(Schema.encodeSync(Rich.HarnessAnswerResult)(Rich.decodeUnknownSync(Rich.HarnessAnswerResult)(value)), value);
+        assert.throws(() => Rich.decodeUnknownSync(Rich.HarnessAnswerResult, 'strict')(value));
+    }
+    const known = { status: 'accepted', resolution: { status: 'answered', revision: 'claim/observed', answers: {}, resolved_at: 1793008801000 } };
+    assert.deepEqual(Schema.encodeSync(Rich.HarnessAnswerResult)(Rich.decodeUnknownSync(Rich.HarnessAnswerResult, 'strict')(known)), known);
+});
+test('revisioned agents opt-in and frames are strict disjoint branches with lossless provenance', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const command = require('../../../docs/st3/client-v0/fixtures/agents-publication-subscribe.json');
+    const chunk = require('../../../docs/st3/client-v0/fixtures/agents-publication-chunk.json');
+    const delta = require('../../../docs/st3/client-v0/fixtures/agents-publication-changes.json');
+    const error = require('../../../docs/st3/client-v0/fixtures/agents-publication-row-too-large.json');
+    const decodeCommand = Rich.decodeUnknownSync(Rich.CollectionCommand, 'strict');
+    const decodeFrame = Rich.decodeUnknownSync(Rich.CollectionFrame, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.CollectionCommand)(decodeCommand(command)), command);
+    for (const field of ['limit', 'window', 'person', 'actor', 'agent', 'status', 'filters']) {
+        assert.throws(() => decodeCommand({ ...command, [field]: field === 'limit' ? 100 : null }));
+    }
+    assert.throws(() => decodeCommand({ ...command, agents_publication_version: 2 }));
+    assert.throws(() => decodeCommand({ ...command, collection: 'work' }));
+    const legacyCommand = { kind: 'subscribe', id: 'legacy', collection: 'agents', limit: 100 };
+    assert.deepEqual(Schema.encodeSync(Rich.CollectionCommand)(decodeCommand(legacyCommand)),
+        { ...legacyCommand, actor: null, person: null, agent: null, status: null });
+    // Existing nullable Agent fields encode omitted values as null; frame provenance stays exact.
+    const normalizedRows = Schema.encodeSync(Schema.Array(Rich.Agent))(
+        Rich.decodeUnknownSync(Schema.Array(Rich.Agent), 'strict')(chunk.items));
+    const normalizedChunk = { ...chunk, items: normalizedRows };
+    for (const wire of [normalizedChunk, delta, error]) {
+        assert.deepEqual(Schema.encodeSync(Rich.CollectionFrame)(decodeFrame(wire)), wire);
+    }
+    assert.equal(Rich.decodeUnknownSync(Rich.ErrorCode, 'strict')(error.code), error.code);
+    const { publication, chunk_index, chunk_count, ...legacy } = normalizedChunk;
+    assert.deepEqual(Schema.encodeSync(Rich.CollectionFrame)(decodeFrame(legacy)), legacy);
+    for (const field of ['publication', 'chunk_index', 'chunk_count']) {
+        const invalid = { ...chunk };
+        delete invalid[field];
+        assert.throws(() => decodeFrame(invalid));
+    }
+    assert.throws(() => decodeFrame({ ...chunk, chunk_count: 0 }));
+    assert.throws(() => decodeFrame({ ...chunk, base_revision: 42 }));
+    assert.throws(() => decodeFrame({ ...chunk, has_more: true }));
+    assert.throws(() => decodeFrame({ ...chunk, collection: 'missions' }));
+    assert.throws(() => decodeFrame({ ...delta, chunk_index: 0 }));
+    assert.throws(() => decodeFrame({ ...delta, base_revision: 0 }));
+    const unpublished = structuredClone(chunk);
+    delete unpublished.snapshot.published_at;
+    assert.throws(() => decodeFrame(unpublished));
+    for (const field of ['chunk_index', 'chunk_count', 'base_revision']) {
+        assert.throws(() => decodeFrame({ ...legacy, [field]: 1 }));
+    }
+});
 test('push registration schema bounds secret input and exposes only safe device status', async () => {
     const [{ Schema }, Rich] = await modules;
     const decode = Rich.decodeUnknownSync(Rich.PushRegistration, 'strict');
@@ -52,21 +189,25 @@ test('every wire version receiver accepts exactly the deployed and fractal names
     const [{ Schema }, Rich] = await modules;
     const contract = require('../../../docs/st3/client-v0/schemas/client-v0.schema.json');
     let receivers = 0;
+    const branches = schema => schema.members ? schema.members.flatMap(branches) : [schema];
     for (const [name, definition] of Object.entries(contract.$defs)) {
         for (const [field, specification] of Object.entries(definition.properties ?? {})) {
             if (!specification.enum?.some(value => typeof value === 'string' && value.startsWith('st3.'))) continue;
             receivers++;
             const [oldName, newName] = specification.enum;
             assert.deepEqual(specification.enum, [oldName, oldName.replace(/^st3\./, 'fractal.')]);
-            const receiver = Rich[name].fields[field];
-            for (const mode of ['strict', 'tolerant']) {
-                const decode = Rich.decodeUnknownSync(receiver, mode);
-                for (const value of [oldName, newName]) {
-                    assert.equal(Schema.encodeSync(receiver)(decode(value)), value, `${name}.${field}`);
-                }
-                for (const value of [oldName.replace(/^st3\./, 'smalltalk.'), `${newName}.unknown`,
-                    `${oldName},${newName}`, [oldName, newName]]) {
-                    assert.throws(() => decode(value), `${name}.${field} must reject ${JSON.stringify(value)}`);
+            for (const branch of branches(Rich[name])) {
+                const receiver = branch.fields[field];
+                assert(receiver, `${name}.${field} must exist on every receiver branch`);
+                for (const mode of ['strict', 'tolerant']) {
+                    const decode = Rich.decodeUnknownSync(receiver, mode);
+                    for (const value of [oldName, newName]) {
+                        assert.equal(Schema.encodeSync(receiver)(decode(value)), value, `${name}.${field}`);
+                    }
+                    for (const value of [oldName.replace(/^st3\./, 'smalltalk.'), `${newName}.unknown`,
+                        `${oldName},${newName}`, [oldName, newName]]) {
+                        assert.throws(() => decode(value), `${name}.${field} must reject ${JSON.stringify(value)}`);
+                    }
                 }
             }
         }
@@ -652,6 +793,74 @@ test('normalized conversation fallbacks and open block payloads survive schema r
     assert.deepEqual(Schema.encodeSync(Rich.TimelineBlock)(decoded), block);
 });
 
+test('ordered membership root/place/remove/page and strict versioned bodies round trip', async () => {
+    const [{ Schema, Option }, Rich] = await modules;
+    const fixture = require('../../../fixtures/clients/ordered-memberships-v2.json');
+    const roundTrip = (schema, value) => Schema.encodeSync(schema)(Rich.decodeUnknownSync(schema, 'strict')(value));
+    const operation = Rich.decodeUnknownSync(Rich.OrderedMembershipOperation, 'strict')(fixture.edit.parameters.operations[0]);
+    assert(Option.isNone(operation.bucket));
+    assert.deepEqual(roundTrip(Rich.OrderedMembershipOperation, fixture.edit.parameters.operations[0]), fixture.edit.parameters.operations[0]);
+    assert.deepEqual(roundTrip(Rich.OrderedMembershipOperation, fixture.edit.parameters.operations[1]), fixture.edit.parameters.operations[1]);
+    assert.deepEqual(roundTrip(Rich.OrderedMembershipPage, fixture.page), {
+        ...fixture.page,
+        page: { ...fixture.page.page, next_cursor: null, cursor_expires_at: null, omitted_items: null },
+    });
+    assert.deepEqual(roundTrip(Rich.ActionRequest, fixture.edit), fixture.edit);
+    assert.deepEqual(roundTrip(Rich.CollectionCommand, fixture.subscribe), fixture.subscribe);
+    assert.throws(() => roundTrip(Rich.CollectionCommand, { ...fixture.subscribe, subject: undefined }));
+    assert.deepEqual(roundTrip(Rich.ArrangementBody, fixture.body), fixture.body);
+    const legacy = require('../../../fixtures/clients/arrangements-v1.json');
+    assert.deepEqual(roundTrip(Rich.ArrangementBody, legacy.resource.body), legacy.resource.body);
+    assert.throws(() => roundTrip(Rich.ArrangementBody, { ...fixture.body, version: 3 }));
+    assert.throws(() => roundTrip(Rich.ArrangementBody, { ...fixture.body, placements: {} }));
+    for (const code of ['unsupported-membership-container', 'membership-owner-forbidden', 'invalid-membership-member', 'invalid-membership-bucket', 'invalid-membership-key', 'invalid-membership-operations', 'membership-edit-too-large', 'invalid-arrangement-version', 'invalid-arrangement-body']) {
+        assert.equal(roundTrip(Rich.ErrorCode, code), code);
+    }
+});
+
+test('ordered membership frames and envelopes decode only as membership variants', async () => {
+    const [{ Schema, Option }, Rich] = await modules;
+    const fixture = require('../../../fixtures/clients/ordered-memberships-v2.json');
+    const decode = (schema, value) => Rich.decodeUnknownSync(schema, 'strict')(value);
+    const snapshot = decode(Rich.CollectionFrame, fixture.snapshot_frame);
+    assert.equal(snapshot.items[1].member, 'mission/m1');
+    assert(Option.isNone(snapshot.items[0].position.bucket));
+    assert.equal(Option.getOrThrow(snapshot.items[1].position.bucket), '019a0000-0000-7000-8000-000000000010');
+    assert.equal(Schema.encodeSync(Rich.CollectionFrame)(snapshot).items[0].position.bucket, null);
+    const changes = decode(Rich.CollectionFrame, fixture.changes_frame);
+    assert.deepEqual(changes.removes, ['agent/ada/worker']);
+    assert.equal(changes.upserts[0].position.key, 'Zz');
+    assert.deepEqual(snapshot.membership, fixture.snapshot_frame.membership);
+    assert.deepEqual(Schema.encodeSync(Rich.CollectionFrame)(snapshot).membership, fixture.snapshot_frame.membership);
+    assert.deepEqual(Schema.encodeSync(Rich.OrderedMembershipState)(decode(Rich.OrderedMembershipState, fixture.changes_frame.membership)), fixture.changes_frame.membership);
+    const outside = decode(Rich.CollectionFrame, fixture.outside_window_changes_frame);
+    assert.deepEqual([outside.upserts, outside.removes, outside.order, outside.has_more], [[], [], changes.order, changes.has_more]);
+    assert(outside.membership.changed_index > changes.membership.changed_index);
+    for (const frame of [fixture.snapshot_frame, fixture.changes_frame]) {
+        const { membership, ...missingState } = frame;
+        assert.throws(() => decode(Rich.CollectionFrame, missingState));
+        for (const field of ['container', 'live_count', 'changed_index']) {
+            const { [field]: _, ...partial } = membership;
+            assert.throws(() => decode(Rich.CollectionFrame, { ...frame, membership: partial }));
+        }
+        assert.throws(() => decode(Rich.CollectionFrame, { ...frame, membership: { ...membership, live_count: -1 } }));
+        assert.throws(() => decode(Rich.CollectionFrame, { ...frame, membership: { ...membership, extra: true } }));
+    }
+    const { membership: _state, ...resourceShape } = fixture.snapshot_frame;
+    const empty = { ...fixture.snapshot_frame, items: [], order: [] };
+    assert.equal(decode(Rich.CollectionFrame, empty).collection, 'ordered-memberships');
+    assert.equal(decode(Rich.CollectionFrame, { ...resourceShape, items: [], order: [], collection: 'agents' }).collection, 'agents');
+    assert.throws(() => decode(Rich.CollectionFrame, { ...empty, collection: 'agents' }));
+    assert.throws(() => decode(Rich.CollectionFrame, { ...fixture.snapshot_frame, collection: 'agents' }));
+    const missingBucket = structuredClone(fixture.changes_frame);
+    delete missingBucket.upserts[0].position.bucket;
+    assert.throws(() => decode(Rich.CollectionFrame, missingBucket));
+    assert.equal(decode(Rich.Envelope, fixture.envelope).value.collection, 'ordered-memberships');
+    assert.equal(decode(Rich.Envelope, { ...fixture.envelope, value: fixture.page }).value.items[0].member, 'agent/ada/worker');
+    assert.equal(decode(Rich.Envelope, { ...fixture.envelope, value: { ...fixture.envelope.value, collection: 'agents' } }).value.collection, 'agents');
+    assert.throws(() => decode(Rich.Page, fixture.envelope.value));
+});
+
 test('assistant error views preserve exact native diagnostics in both decoder modes', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = {
@@ -813,6 +1022,28 @@ test('schedule schema tolerates future state strings and retains raw declaration
     assert.deepEqual(Schema.encodeSync(Rich.SchedulesPage)(decoded), { ...wire, page: { omitted_items: null, ...wire.page } });
 });
 
+test('an attention presentation carries a launch preview, an unavailable launch or a prompt', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.AttentionPresentation, 'strict');
+    const base = { tier: 'today', kind: 'launch', agent: null, raised_by: null, waiting: null };
+    const roundTrips = presentation => assert.deepEqual(Schema.encodeSync(Rich.AttentionPresentation)(decode(presentation)), presentation);
+    roundTrips({ ...base, launch: {
+        variant: 'variant/default', goals: ['Audit the build.'], asks_you: 1,
+        steps: [{ path: 'approve', title: 'Approve', assignee: { kind: 'st', agent: null, label: 'st' }, after: ['prepare'], asks_you: true }],
+        agents: [{ id: 'agent/example/oak', label: 'Oak', harness: 'claude', host: null }],
+    } });
+    roundTrips({ ...base, launch: { unavailable: { reason: 'The planner has not proposed a mission yet.', diagnostics: [] } } });
+    const call = { call_id: 'call-1', tool: 'Bash', input: '{"command":"ls"}', input_complete: true };
+    const prompt = { ...base, tier: 'stopped', kind: 'prompt' };
+    roundTrips({ ...prompt, prompt: { calls: [call], answers: ['allow', 'deny'], allow: true } });
+    roundTrips({ ...prompt, prompt: { calls: null, answers: ['deny'], allow: false, unknown_reason: 'the timeline cannot be read' } });
+    // An input is cut at 4 KiB, and a prompt names at most five calls.
+    assert.throws(() => decode({ ...prompt, prompt: { calls: [{ ...call, input: 'x'.repeat(4097) }], answers: [], allow: false } }));
+    assert.throws(() => decode({ ...prompt, prompt: { calls: Array(6).fill(call), answers: [], allow: false } }));
+    // A row from a daemon that serves neither still decodes.
+    roundTrips(base);
+});
+
 test('optional author and recipients retain closed legacy scalar types', async () => {
     const [{Schema},Rich] = await modules;
     const items = require('../../../docs/st3/client-v0/fixtures/timeline-message-participants.json').value.items;
@@ -824,4 +1055,42 @@ test('optional author and recipients retain closed legacy scalar types', async (
         {recipients:['daemon/runtime']}, {author:null}, {recipients:null} ]) {
         assert.throws(()=>decode({...items[0],body:{...items[0].body,...patch}}));
     }
+});
+
+test('an ask resolved at its deadline decodes, and what the decoder from before deadlines refuses', async () => {
+    const [{ Schema }, Rich] = await modules;
+    // The answer record before deadlines: no resolved_by, and a respondent that is a sender only.
+    const { resolved_by, ...before } = Rich.PersonAnswerRecord.fields;
+    assert.ok(resolved_by);
+    const previous = Schema.Struct({ ...before, respondent: Rich.SenderRef });
+    const record = {
+        ask: 'step-run/run-generation-1/ask-1', status: 'completed', respondent: 'daemon/runtime',
+        answered_at_unix_ms: 1, resolved_by: 'deadline',
+    };
+    const withDefault = {
+        ...record, summary: 'Timed out without an answer; the default applied: Keep it open (keep-open)',
+        answer: { type: 'decision', outcome: 'decline', id: 'keep-open', label: 'Keep it open' },
+    };
+    const withoutAnswer = { ...record, summary: 'Timed out without an answer' };
+    for (const wire of [withDefault, withoutAnswer]) {
+        for (const mode of ['strict', 'tolerant']) {
+            const current = Rich.decodeUnknownSync(Rich.PersonAnswerRecord, mode)(wire);
+            assert.equal(current.respondent, 'daemon/runtime');
+            assert.equal(current.resolved_by, 'deadline');
+            assert.deepEqual(current.answer, wire.answer);
+        }
+        // An older client reads the answer itself as it always did: its outcome is one it knows
+        // and it ignores resolved_by. It refuses daemon/runtime as a respondent, as it already
+        // does for an ask its requester's end cancelled, so [asks] deadlines comes on only once
+        // the web clients run this build.
+        const old = Rich.decodeUnknownSync(previous, 'tolerant');
+        assert.throws(() => old(wire));
+        const read = old({ ...wire, respondent: 'person/avery' });
+        assert.deepEqual(read.answer, wire.answer);
+        assert.equal('resolved_by' in read, false);
+    }
+    // No outcome was added: the one a deadline would otherwise have needed is still refused.
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PersonAnswerRecord, 'strict')({
+        ...withDefault, answer: { ...withDefault.answer, outcome: 'timed_out' },
+    }));
 });

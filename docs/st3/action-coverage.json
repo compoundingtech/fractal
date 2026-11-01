@@ -1,11 +1,27 @@
 {
   "version": 1,
   "client_commands": [
+    {"command":"harness-questions.list","tests":["crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::metadata_routes_and_action_route_use_the_real_daemon_boundary"],"behavior":"Metadata-only paged question read; no text, labels or internal receipt."},
+    {"command":"harness-questions.get","tests":["crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::metadata_routes_and_action_route_use_the_real_daemon_boundary"],"behavior":"Canonical question detail with stable observation revision and runtime incarnation."},
     {"command":"collections.inventory","tests":["crates/fractal/tests/client_only.rs::an_older_member_reads_fleet_on_focus_without_attempting_inventory_subscriptions","crates/fractal-e2e/tests/feed/inventory.rs::inventories_follow_sources_switch_periods_leave_and_reconnect_over_a_real_socket","crates/fractal/tests/client_only.rs::the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute","crates/fractal/tests/client_only.rs::the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_follows_connect_disconnect_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::usage_inventory_open_period_uses_wall_time_on_an_empty_graph","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::usage_inventory_follows_rollups_limits_and_reconnect_for_selected_period","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::machines_inventory_follows_runtime_transport_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_follows_pairing_revocation_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::terminals_inventory_follows_runtime_changes_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::sessions_inventory_follows_files_process_exit_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::inventory_subscriptions_refuse_invalid_filters_limits_and_authority","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::idle_inventory_windows_do_not_reread_across_the_old_client_intervals","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::inventory_pairing_expiry_ends_held_windows_without_a_clock_poll","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_expires_a_hidden_row_and_updates_has_more_at_its_deadline","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_expires_recent_requests_at_their_deadline"],"behavior":"Optional authorized bounded screen inventories deliver v0 snapshots and changes; reconnect reads current sources, device and recent-client membership expires at actual deadlines, and native sessions follow files and process exits. Phone inventory hooks use these authorized reads through screen-scoped subscriptions; Node fake-feed tests verify shared slots, period selection, refresh, reconnect, grace cleanup and 72-second idle without requests; native adapter event tests verify protocol heartbeat delivery."},
     {"command":"resources.list","tests":["crates/fractal-tui/src/ui/observed_resources.rs::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix","crates/fractal-tui/src/ui/glass.rs::sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing","crates/fractal-api-client-v0/src/api/client_v0.rs::resources_list_filters_latest_observations_and_fences_pages","crates/fractal-api-client-v0/src/api/client_v0.rs::resources_list_requires_projection_read_scope"],"behavior":"Existing optional bounded observation read; typed PR/repository/other catalog windows, canonical subjects, filing over Unix, missing rows retained, clicks only navigate, Enter only previews."},
     {"command":"observations.report","tests":["crates/fractal-api-core/src/api/client_observations.rs::observation_paired_session_transport_reader_doctor_and_body_limits","crates/fractal-api-core/src/api/client_observations.rs::observation_dedup_conflict_overlap_and_history_failure_have_no_partial_acceptance","crates/fractal-api-core/src/api/client_observations.rs::observation_history_is_bounded_rotates_expires_and_survives_restart"],"behavior":"Paired-only local diagnostics; no graph mutation, snapshot fence, replicated ACK or durable receipt. Memory dedup/overlap survives identical retries only within bounded process retention; JSONL history persists independently."}
   ],
   "typed_actions": [
+    {
+      "action": "harness.answer",
+      "tests": [
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::accepted_receipts_survive_reopen_without_an_adapter_or_duplicate_writes",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::harness_answer_requires_its_explicit_scope_and_unknown_harness_actions_stay_unavailable",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::every_agent_is_refused_even_unix_free_mode",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::an_agent_with_terminal_control_cannot_answer_as_a_person",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::harness_answer_authority_fences_replays_and_resolution_order",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::retained_keys_conflict_across_generic_and_harness_receipts_in_both_orders",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::harness_and_private_notes_share_action_keys_in_both_orders",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::oversized_receipt_action_ids_refuse_before_settlement"
+      ],
+      "behavior": "Person-only terminal authority; unknown harness actions unavailable; observation/incarnation fences; exact replay and cross-action conflicts; no adapter by default."
+    },
     {
       "action": "private-notes.write",
       "tests": [
@@ -82,6 +98,13 @@
         "crates/fractal-missions/src/store/arrangements_tests.rs::heads_survive_reopen_and_an_upgrade_backfills_once"
       ],
       "behavior": "real API handler and store tests: stale layout fences merge; fenced retirement compares the current revision and refuses concurrent edits without writes; unfenced retirement remains unconditional; stale authority and launch fences refuse without edits; replay preserves receipts and rejects changed action identity; fenced retirement recovers receipt gaps; agent attribution preserves person ownership; projected heads survive reopen, upgrade backfill and replication"
+    },
+    {
+      "action": "arrangement.membership.edit",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::arrangement_membership_edits_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "real typed client over Unix transport: stale fence refused without writes; version-2 membership edit accepted after restart; exact replay after another restart adds no duplicate claim and preserves owner, actor, and projected root placement"
     },
     {
       "action": "attention.resolve",
@@ -427,6 +450,36 @@
   ],
   "cli": [
     {
+      "command": "st harness-questions list",
+      "description": "Read one explicit page of metadata-only native harness questions",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::harness_question_cli_list_forwards_limit_and_encoded_cursor",
+        "crates/fractal/src/main_tests.rs::harness_question_cli_reads_require_an_explicit_person"
+      ],
+      "verification": "CLI parser and handler over a private Unix socket; explicit person, limit and encoded cursor"
+    },
+    {
+      "command": "st harness-questions show",
+      "description": "Read canonical native harness question metadata and answer fences",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::harness_question_cli_reads_require_an_explicit_person",
+        "crates/fractal/src/main_tests.rs::harness_question_cli_show_reads_detail_without_answering"
+      ],
+      "verification": "explicit-person parser and generated detail read over a private Unix socket"
+    },
+    {
+      "command": "st harness-questions answer",
+      "description": "Submit positional answers with an explicit person, stable idempotency key and explicitly reviewed revision and incarnation",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::harness_answer_cli_uses_supplied_fences_without_fetching_detail",
+        "crates/fractal/src/main_tests.rs::harness_answer_action_identity_is_retryable_and_question_scoped",
+        "crates/fractal/src/main_tests.rs::harness_answer_cli_requires_positions_file_explicit_person_key_and_fences",
+        "crates/fractal/src/main_tests.rs::harness_answer_clap_orders_explicit_fences_before_retry_key",
+        "crates/fractal/src/actor_contract.rs::harness_question_contract_requires_an_explicit_person_for_every_command"
+      ],
+      "verification": "CLI parser refuses missing revision or incarnation; handler obtains only snapshot provenance from capabilities and posts the exact supplied fences without fetching question detail"
+    },
+    {
       "command": "st deploy verify-go",
       "description": "Verify an existing deployment GO against the local signed replica and immutable packaged policy without changing state",
       "tests": [
@@ -526,6 +579,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st agents lane",
+      "description": "Print the systemd slice of one agent's lane, as this daemon names it",
+      "tests": [
+        "crates/fractal/tests/client_v0_cli.rs::agent_lane_cli_prints_the_slice_the_runtime_gives_the_seat"
+      ],
+      "verification": "real CLI over a private Unix socket; plain and JSON output, and a refused unknown agent"
+    },
+    {
       "command": "st agents ls",
       "description": "List operational agents; use --all for stopped and historical agents",
       "tests": [
@@ -572,6 +633,22 @@
         "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened before idempotent replay"
+    },
+    {
+      "command": "st agents rename-id proof export",
+      "description": "Export exact signed agent identity evidence at the current or selected claim-ID revision",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
+      ],
+      "verification": "real CLI over a fleet Unix socket; alias and canonical exports match across file and stdout output"
+    },
+    {
+      "command": "st agents rename-id proof verify",
+      "description": "Verify portable agent rename evidence offline against a caller-supplied fleet anchor",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
+      ],
+      "verification": "real CLI after daemon shutdown with invalid config, instance and endpoint; successful verdict and stale-revision exit"
     },
     {
       "command": "st agents repos",
@@ -1115,6 +1192,14 @@
       "verification": "real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression"
     },
     {
+      "command": "st fleet anchor show",
+      "description": "Print the fleet public trust anchor for offline proof verification",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
+      ],
+      "verification": "real fleet CLI public API read; human and JSON anchor agree and anchor verifies portable exports"
+    },
+    {
       "command": "st fleet create",
       "description": "Found a new fleet with this machine as its first member (the anchor)",
       "tests": [
@@ -1256,6 +1341,14 @@
       "verification": "real CLI with private HTTP fixture covers pass/wait/broken and obsolete refs across daemon restarts"
     },
     {
+      "command": "st gh checks",
+      "description": "Show a pull request's required checks and every head it has had",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from_a_member"
+      ],
+      "verification": "real CLI/daemons with private HTTP fixture; poller mirror, relay from a member, graph answer with the poller down"
+    },
+    {
       "command": "st gh comment",
       "tests": [
         "crates/fractal/tests/fleet.rs::action_coverage_github_watch_cli_uses_private_http_and_survives_restart"
@@ -1276,6 +1369,24 @@
         "crates/fractal/tests/fleet.rs::action_coverage_github_watch_cli_uses_private_http_and_survives_restart"
       ],
       "verification": "real CLI/daemon with private HTTP fixture; ownership refusal, disk restart and idempotent registration"
+    },
+    {
+      "command": "st gh pr",
+      "description": "Show one pull request's facts from the poller's mirror",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from_a_member",
+        "crates/fractal/tests/fleet.rs::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade"
+      ],
+      "verification": "real CLI/daemons with private HTTP fixture; relay from a member and an older poller upgraded in place"
+    },
+    {
+      "command": "st gh prs",
+      "description": "List a repository's pull requests from the poller's mirror",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from_a_member",
+        "crates/fractal/tests/fleet.rs::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade"
+      ],
+      "verification": "real CLI/daemons with private HTTP fixture; mirror, relay, labelled graph answer beside an older poller and after its upgrade"
     },
     {
       "command": "st gh unwatch",
@@ -1533,6 +1644,16 @@
       "verification": "existing CLI integration"
     },
     {
+      "command": "st missions dismiss-fault",
+      "description": "Dismiss a fault whose run has ended, with a reason, when nothing at its source can close it",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart",
+        "crates/fractal-reconcile/src/reconcile/tests/fault_dismiss_tests.rs::a_person_or_the_fault_agent_dismisses_a_fault_on_an_ended_run_and_no_other_agent",
+        "crates/fractal-api-core/src/api/tests.rs::a_bound_harness_dismisses_a_fault_only_as_itself"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st missions ls",
       "description": "List current missions; use --all for historical terminal missions",
       "tests": [
@@ -1553,6 +1674,14 @@
       "description": "Publish exact authored mission KDL after preview and check mission and step exec gates; loop until scripts run after each round",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st missions blocked",
+      "description": "Every blocked run in the fleet, one line each, grouped by cause, from the published work and missions lists",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_waiting_on_and_blocked_runs_read_published_lists_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
@@ -1579,6 +1708,22 @@
         "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened before idempotent replay"
+    },
+    {
+      "command": "st missions rename-id proof export",
+      "description": "Export exact signed mission identity evidence at the current or selected claim-ID revision",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
+      ],
+      "verification": "real CLI over a fleet Unix socket; alias and canonical exports match across file and stdout output"
+    },
+    {
+      "command": "st missions rename-id proof verify",
+      "description": "Verify portable mission rename evidence offline against a caller-supplied fleet anchor",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
+      ],
+      "verification": "real CLI after daemon shutdown with invalid config, instance and endpoint; successful verdict and stale-revision exit"
     },
     {
       "command": "st missions report-to",
@@ -1633,7 +1778,7 @@
       "command": "st missions waiting-on",
       "description": "What one run waits on: each open step, whom it waits on and since when, open asks, steps not ready and finished, and whether it stalled",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_waiting_on_reads_published_lists_after_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_waiting_on_and_blocked_runs_read_published_lists_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
@@ -1769,6 +1914,16 @@
         "crates/fractal/tests/action_coverage.rs::cli_replication_inspection_and_repair_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st replication signatures resume",
+      "description": "Clear this member's persisted signature-state-corrupt fault and let the migration go on. If the defect it named is still there, the next page persists the same fault again",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::action_coverage_fleet_controls_and_checkpoint_administration_survive_restarts",
+        "crates/fractal-api-core/src/api/tests.rs::a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_other_agent",
+        "crates/fractal-e2e/tests/device_signing.rs::a_signed_send_waits_on_a_persisted_signature_fault_until_a_person_resumes"
+      ],
+      "verification": "existing CLI integration"
     },
     {
       "command": "st replication status",
@@ -2406,6 +2561,15 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st validate",
+      "description": "Validate KDL files offline using default host \"local\", without contacting a daemon",
+      "tests": [
+        "crates/fractal/tests/validate.rs::validate_reads_files_without_a_daemon_or_configuration",
+        "crates/fractal/tests/validate.rs::declaration_mission_revision_is_pinned"
+      ],
+      "verification": "real CLI with no daemon and an unreadable configuration; library parse pinned to a golden revision"
+    },
+    {
       "command": "st web",
       "description": "Open the web interface for this machine's local daemon",
       "tests": [
@@ -2722,7 +2886,7 @@
     {
       "effect": "OpenTerminal",
       "tests": [
-        "crates/fractal-tui/src/ui/mod.rs::ctrl_bracket_opens_an_agents_terminal_and_ctrl_backslash_returns",
+        "crates/fractal-tui/src/ui/mod.rs::attach_opens_an_agents_terminal_and_ctrl_backslash_returns",
         "crates/fractal/tests/action_coverage.rs::terminal_controls_survive_stale_screens_and_daemon_restarts"
       ],
       "verification": "UI reducer and corresponding real daemon action; local effects have no graph fence"
@@ -2738,7 +2902,7 @@
     {
       "effect": "CloseTerminal",
       "tests": [
-        "crates/fractal-tui/src/ui/mod.rs::ctrl_bracket_opens_an_agents_terminal_and_ctrl_backslash_returns",
+        "crates/fractal-tui/src/ui/mod.rs::attach_opens_an_agents_terminal_and_ctrl_backslash_returns",
         "crates/fractal/tests/action_coverage.rs::terminal_controls_survive_stale_screens_and_daemon_restarts"
       ],
       "verification": "UI reducer and corresponding real daemon action; local effects have no graph fence"

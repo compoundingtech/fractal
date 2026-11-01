@@ -159,15 +159,18 @@ pub(crate) fn sanitize(value: &str) -> String {
 }
 
 pub fn wrap(unit: &str, program: &OsStr, arguments: &[&OsStr]) -> Command {
-    wrap_in(unit, program, arguments, None)
+    wrap_in(unit, program, arguments, None, None, None)
 }
 
 /// Construct the launcher with its final environment before selecting the host systemd session.
+/// A `lane` ([`crate::lane::prepare`]) places the scope in the seat's capped slice.
 pub(crate) fn wrap_in(
     unit: &str,
     program: &OsStr,
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
+    lane: Option<&crate::lane::Lane>,
+    unlaned_seat: Option<&crate::UnlanedSeatPlacement>,
 ) -> Command {
     wrap_for_mode(
         mode(),
@@ -176,7 +179,20 @@ pub(crate) fn wrap_in(
         program,
         arguments,
         environment,
+        ScopePlacement { lane, unlaned_seat },
     )
+}
+
+/// Whether the user manager is systemd 254 or newer, which also supports OOMPolicy on a scope.
+pub(crate) fn systemd_254() -> bool {
+    // Detection sets the flag, so it runs first.
+    mode() == Isolation::Scope && *SCOPE_EXPANSION_FLAG.get().unwrap_or(&false)
+}
+
+#[derive(Default)]
+struct ScopePlacement<'a> {
+    lane: Option<&'a crate::lane::Lane>,
+    unlaned_seat: Option<&'a crate::UnlanedSeatPlacement>,
 }
 
 fn wrap_for_mode(
@@ -186,6 +202,7 @@ fn wrap_for_mode(
     program: &OsStr,
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
+    placement: ScopePlacement<'_>,
 ) -> Command {
     match isolation {
         Isolation::Scope => {
@@ -205,6 +222,13 @@ fn wrap_for_mode(
             }
             if let Some(environment) = environment {
                 command.env_clear().envs(environment);
+            }
+            if let Some(lane) = placement.lane {
+                command.args(lane.scope_arguments());
+                let seat = |key: &str| environment?.get(key).cloned();
+                command.envs(crate::lane::environment(lane, seat, |key| std::env::var(key).ok()));
+            } else if let Some(policy) = placement.unlaned_seat {
+                policy.apply(&mut command);
             }
             instance_scope_environment(&mut command, environment);
             command.arg("--").arg(program).args(arguments);
@@ -313,23 +337,44 @@ fn mark_ended(unit: &str) {
 ///
 /// Returns whether the scope is now empty. It is false, and nothing is signalled, on a host
 /// without systemd user scopes or for a unit that is not a work scope.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        caller = "end_scope",
+        recorded_scope = unit,
+        grace_ms = grace.as_millis() as u64,
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit_code = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable"
+    )
+)]
 pub fn end_scope(unit: &str, grace: Duration) -> Result<bool> {
     if mode() != Isolation::Scope || !is_work_scope(unit) {
+        tracing::debug!(guard_decision = "skip", reason = "scope_mode_or_work_scope_guard", "scope teardown skipped");
         return Ok(false);
     }
     if has_ended(unit) {
+        tracing::debug!(guard_decision = "skip", reason = "already_ended", "scope teardown skipped");
         return Ok(true);
     }
     let Some(cgroup) = control_group(unit)? else {
+        tracing::debug!(guard_decision = "skip", reason = "scope_not_loaded", "scope teardown needs no signal");
         mark_ended(unit);
         return Ok(true);
     };
     if !grace.is_zero() && populated(&cgroup) {
-        kill_unit(unit, libc::SIGTERM)?;
+        kill_unit(unit, libc::SIGTERM, ScopeSignalCaller::EndScope)?;
         wait_until_empty(&cgroup, grace);
     }
     if populated(&cgroup) {
-        kill_unit(unit, libc::SIGKILL)?;
+        kill_unit(unit, libc::SIGKILL, ScopeSignalCaller::EndScope)?;
         anyhow::ensure!(
             wait_until_empty(&cgroup, SCOPE_KILL_WAIT),
             "processes in {unit} survived SIGKILL for {}s",
@@ -361,6 +406,7 @@ static LATER: Mutex<Later> = Mutex::new(Later {
 pub(crate) fn end_later(key: String, job: impl FnOnce() -> Result<()> + Send + 'static) {
     let mut later = LATER.lock().unwrap_or_else(PoisonError::into_inner);
     if !later.keys.insert(key.clone()) {
+        tracing::debug!(recorded_scope = %key, guard_decision = "skip", reason = "already_queued", "scope teardown queue skipped");
         return;
     }
     later.queue.push_back((key, Box::new(job)));
@@ -393,11 +439,30 @@ pub(crate) fn end_later(key: String, job: impl FnOnce() -> Result<()> + Send + '
 
 /// Sends `signal` to every process in the work scope `unit`. Returns whether it was sent: it is
 /// not where [`end_scope`] would do nothing, or once the scope has ended.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        caller = "signal_scope",
+        recorded_scope = unit,
+        signal,
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit_code = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable"
+    )
+)]
 pub fn signal_scope(unit: &str, signal: i32) -> Result<bool> {
     if mode() != Isolation::Scope || !is_work_scope(unit) || has_ended(unit) {
+        tracing::debug!(recorded_scope = unit, signal, caller = "signal_scope", guard_decision = "skip", reason = "scope_mode_work_scope_or_ended_guard", "scope signal skipped");
         return Ok(false);
     }
-    kill_unit(unit, signal)
+    kill_unit(unit, signal, ScopeSignalCaller::SignalScope)
 }
 
 /// The cgroup directory of `unit`, or none once the unit is not loaded.
@@ -455,9 +520,16 @@ fn wait_until_empty(cgroup: &Path, within: Duration) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ScopeSignalCaller {
+    EndScope,
+    SignalScope,
+    Retirement,
+}
+
 /// `systemctl kill` signals every process in the unit's cgroup. Returns false when the unit was
 /// no longer loaded.
-fn kill_unit(unit: &str, signal: i32) -> Result<bool> {
+fn kill_unit(unit: &str, signal: i32, caller: ScopeSignalCaller) -> Result<bool> {
     let name = match signal {
         libc::SIGTERM => "SIGTERM".to_owned(),
         libc::SIGKILL => "SIGKILL".to_owned(),
@@ -468,6 +540,24 @@ fn kill_unit(unit: &str, signal: i32) -> Result<bool> {
         .args(["--user", "kill"])
         .arg(format!("--signal={name}"))
         .arg(unit);
+    tracing::info!(
+        ?caller,
+        reason = "signal_work_scope",
+        recorded_scope = unit,
+        signal,
+        guard_decision = "allow",
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit_code = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable",
+        "signalling work scope"
+    );
     let output = crate::pty::output_within(command, SYSTEMCTL_TIMEOUT)
         .with_context(|| format!("ask the systemd user manager to signal {unit}"))?;
     if output.status.success() {
@@ -475,6 +565,7 @@ fn kill_unit(unit: &str, signal: i32) -> Result<bool> {
     }
     let error = String::from_utf8_lossy(&output.stderr);
     if error.contains("not loaded") {
+        tracing::debug!(?caller, recorded_scope = unit, signal, guard_decision = "skip", reason = "scope_not_loaded", "scope signal found no loaded unit");
         mark_ended(unit);
         return Ok(false);
     }
@@ -509,6 +600,7 @@ mod tests {
             OsStr::new("provider"),
             &arguments,
             None,
+            ScopePlacement::default(),
         );
         let actual = command.get_args().collect::<Vec<_>>();
         let separator = actual
@@ -532,6 +624,7 @@ mod tests {
             program,
             &arguments,
             None,
+            ScopePlacement::default(),
         );
         let actual = command.get_args().collect::<Vec<_>>();
         let separator = actual
@@ -593,6 +686,7 @@ mod tests {
             OsStr::new("provider"),
             &[OsStr::new("%n:$HOME")],
             Some(&environment),
+            ScopePlacement::default(),
         );
         assert_eq!(
             command
@@ -679,6 +773,77 @@ mod tests {
             parse_control_group("LoadState=loaded\nControlGroup=\n"),
             None
         );
+    }
+
+    #[test]
+    fn unlaned_daemon_seat_placement_is_explicit_and_never_overrides_a_lane() {
+        let policy = crate::seat_placement::tests::policy();
+        let lane = crate::lane::Lane { slice: crate::lane::seat_slice("work") };
+        let arguments = |lane: Option<&crate::lane::Lane>, policy: Option<&crate::UnlanedSeatPlacement>| {
+            wrap_for_mode(Isolation::Scope, true, "st3-work.scope",
+                OsStr::new("provider"), &[], None, ScopePlacement { lane, unlaned_seat: policy })
+                .get_args().map(std::ffi::OsString::from).collect::<Vec<_>>()
+        };
+        assert_eq!(arguments(None, None), [
+            "--user", "--scope", "--collect", "--quiet", "--no-ask-password",
+            "--unit=st3-work.scope", "--description=Fractal seat", "--expand-environment=no",
+            "--", "provider",
+        ].map(std::ffi::OsString::from));
+        assert_eq!(arguments(Some(&lane), Some(&policy)), arguments(Some(&lane), None));
+        let placed = arguments(None, Some(&policy));
+        assert_eq!(placed[8..], [
+            "--slice=app-seats.slice", "-p", "MemoryMax=1073741824", "-p",
+            "MemorySwapMax=0", "-p", "OOMPolicy=kill", "--", "provider",
+        ].map(std::ffi::OsString::from));
+        let detached = wrap_for_mode(Isolation::Detached, false, "unused.scope",
+            OsStr::new("provider"), &[], None, ScopePlacement { lane: None, unlaned_seat: Some(&policy) });
+        assert!(detached.get_args().next().is_none());
+    }
+
+    #[test]
+    fn a_lane_caps_the_scope_and_keeps_its_builds_inside() {
+        let environment = std::collections::BTreeMap::from([
+            ("PATH".to_owned(), "/bin".to_owned()),
+            ("XDG_RUNTIME_DIR".to_owned(), "/run/user/1000".to_owned()),
+        ]);
+        let lane = crate::lane::Lane { slice: crate::lane::seat_slice("work") };
+        let command = wrap_for_mode(
+            Isolation::Scope,
+            true,
+            "st3-work.scope",
+            OsStr::new("provider"),
+            &[OsStr::new("--flag")],
+            Some(&environment),
+            ScopePlacement { lane: Some(&lane), unlaned_seat: None },
+        );
+        let arguments = command.get_args().collect::<Vec<_>>();
+        let separator = arguments.iter().position(|arg| *arg == OsStr::new("--")).unwrap();
+        for property in lane.scope_arguments() {
+            assert!(arguments[..separator].contains(&OsStr::new(&property)), "{property}");
+        }
+        assert_eq!(&arguments[separator + 1..], [OsStr::new("provider"), OsStr::new("--flag")]);
+        let set = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        assert_eq!(set("BUILDS_SLICE_ACTIVE").as_deref(), Some("1"));
+        assert_eq!(set("FRACTAL_LANE_SLICE"), Some(lane.slice.clone()));
+        assert!(set("SCCACHE_SERVER_UDS").unwrap().starts_with("/run/user/1000/sccache-lane-"));
+
+        let detached = wrap_for_mode(
+            Isolation::Detached,
+            false,
+            "unused.scope",
+            OsStr::new("provider"),
+            &[],
+            Some(&environment),
+            ScopePlacement { lane: Some(&lane), unlaned_seat: None },
+        );
+        assert!(detached.get_args().next().is_none());
+        assert!(detached.get_envs().all(|(key, _)| key != "BUILDS_SLICE_ACTIVE"));
     }
 
     #[test]

@@ -9,15 +9,19 @@
 //! what a checkpoint may drop. Members sync by exchanging envelopes ([`replication`]); fleet
 //! membership decides whose envelopes a member admits ([`fleet`]).
 
+pub mod answers;
 pub mod claim;
 pub mod error;
 pub mod fleet;
 pub mod hash;
 pub mod ivm;
+pub mod naming;
+pub mod operation_metadata;
 pub mod performance;
 pub mod prepared_cut;
 pub mod fifo;
 pub mod principal;
+pub mod proof;
 /// Opt-in accounting of where the daemon's time goes, turned on by `ST3_PROFILE_DIR`.
 pub mod profile;
 pub mod task_cpu;
@@ -28,6 +32,7 @@ pub mod shards;
 pub mod sqlite;
 pub mod store;
 pub mod sync;
+pub mod writer_chain;
 pub mod touched;
 /// Rolling latency windows for the daemon's targets: routes, statements, transactions, holds.
 pub mod windows;

@@ -393,6 +393,8 @@ impl Store {
                     Some(&review.mission_run),
                 )?;
                 items.push(AttentionItemView {
+                    deadline_unix_ms: None,
+                    default_answer: None,
                     conversation,
                     ..attention_item_from_review(review)
                 });
@@ -567,6 +569,14 @@ impl Store {
         at_index: Option<u64>,
     ) -> Result<Option<UsageSummary>> {
         let connection = self.readers.get();
+        // A current read on the seat's host also folds the rollups and occupancy not yet
+        // replicated, at the time each was observed. Callers pass the request's index, the
+        // latest one, for a current read.
+        let pending = if at_index.is_none_or(|at| at >= self.index().unwrap_or(u64::MAX)) {
+            crate::store::pending_usage(&connection, Some(subject), false)?
+        } else {
+            Vec::new()
+        };
         let at_index = at_index.unwrap_or(i64::MAX as u64);
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8c6ff8af9665 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT store_index, body, accepted_at_unix_ms FROM claims
@@ -580,7 +590,8 @@ impl Store {
                 row.get::<_, String>(2)?,
             ))
         })?;
-        Self::usage_summary_from_rows(rows, incarnation)
+        let pending = pending.into_iter().map(|(_, body, at)| Ok((at_index, body, at.to_string())));
+        Self::usage_summary_from_rows(rows.chain(pending), incarnation)
     }
 
     /// Fetch usage for the selected subjects, preserving the detail reduction and one
@@ -692,9 +703,36 @@ impl Store {
             }
             folded.insert(subject.clone(), CachedUsageFold { through, last_accepted, fold });
         }
-        let summaries = folded.iter()
-            .filter_map(|(subject, cached)| cached.fold.summary().map(|summary| (subject.clone(), summary)))
-            .collect();
+        // A current read on the seat's host also folds the rollups and occupancy not yet
+        // replicated (both are held); the kept fold stays the replicated claims' alone.
+        // Card reads pass the request's snapshot index: a read at the snapshot is current.
+        // One statement reads every subject's held readings, in order: a statement per subject
+        // made a cold roster cost a statement per card. A read of one subject reads only its own.
+        let mut held = BTreeMap::<String, Vec<(String, u128)>>::new();
+        if at_index.is_none_or(|at| at >= snapshot) && !folded.is_empty() {
+            let only = folded.keys().next().filter(|_| folded.len() == 1).map(String::as_str);
+            for (subject, body, at) in crate::store::pending_usage(&connection, only, false)? {
+                if folded.contains_key(&subject) {
+                    held.entry(subject).or_default().push((body, at));
+                }
+            }
+        }
+        let mut summaries = BTreeMap::new();
+        for (subject, cached) in &folded {
+            let pending = held.remove(subject).unwrap_or_default();
+            let summary = if pending.is_empty() {
+                cached.fold.summary()
+            } else {
+                let mut fold = cached.fold.clone();
+                for (body, at) in &pending {
+                    fold.apply(through, body, &at.to_string(), None)?;
+                }
+                fold.summary()
+            };
+            if let Some(summary) = summary {
+                summaries.insert(subject.clone(), summary);
+            }
+        }
         let mut folds = self.fractal.usage_folds.lock().expect("usage folds poisoned");
         for (subject, cached) in folded {
             folds.keep(subject, cached);
@@ -800,12 +838,21 @@ impl Store {
             let (title, detail) = if let [seat] = names.as_slice() {
                 (
                     format!("{seat} on {host} needs you to log in"),
-                    format!("{seat} on {host} needs you to log in: attach (Ctrl+] in Fractal TUI) and {how}. A successful authenticated turn clears this alert automatically."),
+                    format!(
+                        "{seat} on {host} needs you to log in: attach (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane) and {how}. A successful authenticated turn clears this alert automatically."
+                    ),
                 )
             } else {
                 (
-                    format!("{} seats on {host} need you to log in to {login}", names.len()),
-                    format!("{} on {host} share the login {login}, which needs you to sign in again: attach to {} (Ctrl+] in Fractal TUI) and {how}. One sign-in fixes every seat; each clears when its next authenticated turn succeeds.", names.join(", "), first.subject),
+                    format!(
+                        "{} seats on {host} need you to log in to {login}",
+                        names.len()
+                    ),
+                    format!(
+                        "{} on {host} share the login {login}, which needs you to sign in again: attach to {} (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane) and {how}. One sign-in fixes every seat; each clears when its next authenticated turn succeeds.",
+                        names.join(", "),
+                        first.subject
+                    ),
                 )
             };
             items.push(AttentionItemView {
@@ -813,7 +860,7 @@ impl Store {
                 subject: first.subject.clone(), person: owner, requester_id: None, launch_id: None,
                 variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: Some(first.subject.clone()),
                 title, detail,
-                request: None, mission: None, mission_run: None, step: None,
+                request: None, deadline_unix_ms: None, default_answer: None, mission: None, mission_run: None, step: None,
                 targets: names.iter().map(|name| (*name).to_owned()).collect(),
                 requested_at_unix_ms: first.requested_at,
                 actions: vec![crate::model::AttentionActionView { label: "Attach to log in".into(),
@@ -1029,6 +1076,8 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
 
 fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: review.request.clone(),
         priority: "normal".into(),
         kind: "human-gate".into(),
@@ -1092,6 +1141,8 @@ fn attention_item_from_planning(
     preview: &PlanningPreviewView,
 ) -> AttentionItemView {
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: preview.hash.clone(),
         priority: "normal".into(),
         kind: "launch-approval".into(),
@@ -1154,6 +1205,8 @@ fn attention_item_from_revision(
 ) -> AttentionItemView {
     let preview_hash = proposal.preview_hash.as_deref().unwrap_or_default();
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: format!("{}:{}", proposal.source_generation, preview_hash),
         priority: "normal".into(),
         kind: "revision-approval".into(),
@@ -1372,6 +1425,18 @@ fn pull_request_state_tx(connection: &Connection, target: &str) -> Result<Option
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?;
+    // A newer compact item state, from a poller of step 3b of the plugin store, is the
+    // pull request's current state.
+    let item_state = super::resources::newest_item_state(connection, subject)?.filter(|(_, state, at)| {
+        state.get("item_kind").and_then(Value::as_str) == Some("vcs.pull-request")
+            && observed.as_ref().is_none_or(|(_, observed_at)| {
+                at.parse::<u128>().unwrap_or_default() >= observed_at.parse::<u128>().unwrap_or_default()
+            })
+    });
+    if let Some((_, state, accepted_at)) = item_state {
+        let facts = Value::Object(state);
+        return Ok(Some((pull_request_state(&facts).into(), accepted_at.parse().unwrap_or_default())));
+    }
     let Some((Some(fields), accepted_at)) = observed else {
         return Ok(None);
     };
@@ -1382,8 +1447,16 @@ fn pull_request_state_tx(connection: &Connection, target: &str) -> Result<Option
     let Some(facts) = fields.get("facts") else {
         return Ok(None);
     };
+    Ok(Some((
+        pull_request_state(facts).into(),
+        accepted_at.parse().unwrap_or_default(),
+    )))
+}
+
+/// `open`, `closed` or `merged`, from a pull request's facts.
+fn pull_request_state(facts: &Value) -> &'static str {
     let merged = |value: &Value| value.get("merged").and_then(Value::as_bool) == Some(true);
-    let state = match facts.get("state") {
+    match facts.get("state") {
         _ if merged(facts) => "merged",
         Some(Value::String(state)) if state == "open" => "open",
         Some(Value::String(_)) => "closed",
@@ -1394,9 +1467,45 @@ fn pull_request_state_tx(connection: &Connection, target: &str) -> Result<Option
             "closed"
         }
         _ => "open",
-    };
-    Ok(Some((
-        state.into(),
-        accepted_at.parse().unwrap_or_default(),
-    )))
+    }
+}
+
+#[cfg(test)]
+mod pull_request_state_tests {
+    use super::*;
+
+    fn append(store: &Store, kind: &str, fields: Value) {
+        store.append_claim(&ClaimInput {
+            subject: "resource/github/acme/garden/pull-request/7".into(),
+            kind: kind.into(),
+            actor: None,
+            fields: fields.as_object().unwrap().clone().into_iter().collect(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+    }
+
+    fn state(store: &Store) -> Option<String> {
+        attention_target_state_tx(&store.readers.get(), "resource/github/acme/garden/pull-request/7")
+            .unwrap()
+            .map(|(state, _)| state)
+    }
+
+    /// Attention on a pull request reads its newest state, a compact item state included.
+    #[test]
+    fn a_pull_request_target_reads_a_newer_compact_state() {
+        let store = Store::open_memory("attention-item-state").unwrap();
+        append(&store, "resource.observed", json!({"kind": "vcs.pull-request", "facts": {"state": "open"}}));
+        assert_eq!(state(&store).as_deref(), Some("open"));
+        let compact = fractal_schema::github_plugin::compact_item_state(
+            "vcs.pull-request", "observer/github/acme/garden",
+            json!({"state": "closed", "merged": true}).as_object().unwrap(),
+        ).unwrap();
+        append(&store, fractal_schema::github_plugin::ITEM_STATE, Value::Object(compact));
+        assert_eq!(state(&store).as_deref(), Some("merged"));
+        append(&store, "resource.observed", json!({"kind": "vcs.pull-request", "facts": {"state": "open"}}));
+        assert_eq!(state(&store).as_deref(), Some("open"), "a newer observation is newer still");
+    }
 }

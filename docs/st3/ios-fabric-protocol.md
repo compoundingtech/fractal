@@ -1,23 +1,23 @@
-# iOS fabric transport proof: client protocol
+# iOS Fabric carrier protocol
 
-This is a source-derived contract for a development-only transport proof. The phone
+This is the wire and member-side grant contract for the opt-in iOS Fabric carrier. The phone
 owns an iroh identity and reaches one member’s paired client gateway through an
 app-owned loopback listener. The existing TypeScript client continues to speak
-HTTP and WebSocket. Tailscale remains available, and fabric never becomes the
-default as part of this proof.
+HTTP and WebSocket. Tailscale remains available; Fabric requires both a build that
+links the native bridge and the person's runtime opt-in.
 
-This document specifies the adapter; it does **not** claim an iOS build, a device
-connection, or a working embedded dialer. No member configuration was changed for
-this protocol step. All example names and IDs below are invented.
+The [native module](../../apps/ios/modules/fractal-fabric/README.md) documents the bridge,
+build flags and executable checks. This protocol reference does not establish device
+connectivity, background behavior or production readiness. All example names and IDs are invented.
 
 ## Version and evidence
 
-Read fabric at commit
+The bridge targets Fabric at commit
 [`84c3208b3d1c82e4a036640aed330473a74cf105`](https://github.com/compoundingtech/fabric/tree/84c3208b3d1c82e4a036640aed330473a74cf105),
-tag/release `v0.2.41`, built as `0.2.41+84c3208` for the bridge’s checks. Its
+tag/release `v0.2.41`, identified as `0.2.41+84c3208` by the bridge’s pinned-daemon checks. Its
 [Cargo manifest and lock](https://github.com/compoundingtech/fabric/blob/84c3208b3d1c82e4a036640aed330473a74cf105/Cargo.lock)
 select **iroh 1.0.2**, as v0.2.30 did. Pin `=1.0.2`, the fabric source revision, and the adapter’s
-own lockfile for the executable proof. The adapter’s lock resolves newer
+own lockfile for the executable checks. The adapter’s lock resolves newer
 semver-compatible iroh dependencies than fabric’s (for example `noq` 1.3.0
 against 1.0.1); the pinned-daemon and real-member checks run with them. Since
 v0.2.41 fabric documents this wire itself, in
@@ -28,9 +28,10 @@ as a compatibility surface frozen by its test
 The frame bytes are those of v0.2.30. A version banner alone is not an artifact
 checksum; record the built adapter and tested member binary hashes when testing.
 
-Fractal references were inspected at commit
-`0c6b10d044f6a8a3b051639b55f53522cc9a9b11`. Relative links describe that checkout;
-recheck them when implementing against a newer main.
+The in-tree adapter's [wire codec](../../apps/ios/modules/fractal-fabric/rust/src/wire.rs),
+[connection bridge](../../apps/ios/modules/fractal-fabric/rust/src/bridge.rs) and
+[dependency manifest](../../apps/ios/modules/fractal-fabric/rust/Cargo.toml) define its current
+implementation. Recheck the pinned wire contract when changing these sources.
 
 | Contract | Source at the fabric pin |
 | --- | --- |
@@ -414,18 +415,17 @@ an open HTTP connection across fabric failure. Do not automatically resubmit
 mutating HTTP requests when a response is lost. Full tunnel resumption is a
 separate addition with replay/half-close/expiry tests.
 
-## Smallest Rust surface to embed
+## Embedded Rust surface
 
-Embed **iroh + an outbound fabric dialer + a loopback TCP byte bridge**, driven by
-one app-owned Tokio runtime. The native Swift/Expo boundary needs operations like
-`start(member_node_id, service) -> { loopback_url, phone_node_id }`, `stop()`, and
-connection/error state. These are proposed adapter operations, not APIs currently
-exported by fabric.
+The [native module](../../apps/ios/modules/fractal-fabric/README.md) embeds
+iroh, an outbound Fabric dialer and a loopback TCP byte bridge, driven by one app-owned
+Tokio runtime. Its Swift/Expo boundary exposes identity, dial, stop and connection
+statistics. These are app adapter operations, not a public Fabric SDK.
 
 The dialer owns a stable-key endpoint, direct service-ALPN connections,
 identity/grant failure reporting, and the tunnel codec/session state. It presents
 each admitted tunnel as `AsyncRead + AsyncWrite` (or copies it to a local `TcpStream`) so the bridge
-can preserve bidirectional bytes and half-closes. With the first adapter’s
+can preserve bidirectional bytes and half-closes. With the adapter’s
 no-resume limitation it needs no daemon recovery loop or persistent replay
 session beyond that connection.
 
@@ -437,16 +437,14 @@ Depending on the whole fabric package also pulls daemon, Unix/process/service,
 PTY, updater, and configuration code; it is not evidence of a supported iOS
 library surface.
 
-The fabric owner recommends building the small direct-ALPN wire dialer on an
-app-owned iroh Endpoint. A proof-specific codec can be written against this pin
-with explicit provenance and compatibility fixtures. Since v0.2.41 fabric treats
+The adapter implements the direct-ALPN wire dialer on an app-owned iroh endpoint,
+with a [codec and compatibility fixtures](../../apps/ios/modules/fractal-fabric/rust/src/wire.rs).
+Since v0.2.41 fabric treats
 the direct wire as a compatibility surface: its `docs/tunnel-wire.md` describes
 it, a frozen-wire test guards it, and a change to it is recorded in fabric’s
-CHANGELOG. Do not label such a
-codec a stable fabric SDK. The iroh 1.0.2 target,
-TLS provider, getrandom support, and final static library/XCFramework must be
-built and linked for both simulator and device by the existing iOS builders.
-The source-only step establishes neither cross-compilation nor signing support.
+CHANGELOG. This codec is not a stable Fabric SDK. Follow the module's build instructions
+for the static library and device/simulator XCFramework; codec tests alone do not establish
+iOS linkage, signing support or device behavior.
 
 ## Using the existing TypeScript client
 
@@ -459,9 +457,9 @@ concurrent connections (ordinary requests, uploads, the collections socket) and
 keep bounded buffers. Do not bind a LAN address or let request URLs choose an
 arbitrary fabric service.
 
-[`store.tsx`](../../apps/ios/store.tsx) already constructs `FractalClient` with a
+[`store.tsx`](../../apps/ios/store.tsx) constructs `FractalClient` with a
 `baseUrl`, a secure-store credential callback, and `gatewayFetch()`. It also has
-an upload client using Expo fetch. When the development fabric setting is enabled,
+an upload client using Expo fetch. When the Fabric carrier is enabled,
 wait for native start and give **both** clients the returned loopback URL. Keep
 the saved paired member route and its credential association separate from the
 ephemeral port. Disabling the setting restores the saved Tailscale/HTTPS route;
@@ -475,18 +473,18 @@ capability subprotocols. [`feed.ts`](../../apps/ios/feed.ts) holds the single
 collections WebSocket for attention/missions/agents and the open conversation
 and terminal; it reconnects and resubscribes in the foreground.
 
-Two existing policies need narrow, development-only integration:
+The carrier preserves the gateway's transport policies:
 
-- [`gatewayUrl.ts`](../../apps/ios/gatewayUrl.ts) currently accepts HTTPS or HTTP
+- [`gatewayUrl.ts`](../../apps/ios/gatewayUrl.ts) accepts HTTPS or HTTP
   for Tailscale/private-LAN hosts and rejects `http://127.0.0.1`. Select the native
-  adapter’s returned URL through a separate development transport path. Accept
+  adapter’s returned URL through the native carrier path. Accept
   only the exact address of the currently running native bridge; a user-typed
   loopback URL or a stale saved port must never select or pair with another local
   listener. Keep the ordinary gateway input’s existing HTTP policy.
 - [`app.json`](../../apps/ios/app.json) declares ATS exceptions for tailnet/LAN
-  ranges and `.local`, with no explicit loopback exception. Have the iOS builder
-  verify actual loopback HTTP **and** WebSocket behavior in the development build
-  and add the narrow build-specific configuration if required. Do not assume
+  ranges and `.local`, with no explicit loopback exception. Verify actual loopback
+  HTTP and WebSocket behavior on the target iOS build; a source check does not prove it.
+  Do not assume
   arbitrary HTTP or release-wide ATS relaxation is necessary.
 
 On background/disable, stop accepting local connections and close carrier state
@@ -544,19 +542,13 @@ wire format has no separate negotiated tunnel version. Re-read the affected
 source and run independent fixture and interoperability checks against the exact
 member artifact before advancing the pin.
 
-Owner review: the fabric owner confirmed the pin, direct-ALPN path, exact grant
-checks, Hello-first ordering, and 15-minute default TTL. Its subsequent review of
-the document confirmed the framing/Hello/admission bytes and supplied corrections
-for teardown/reaping, Ack cadence/backpressure, Close ordering, peer creation,
-ongoing probes, and existing-session revocation. Those corrections are included
-here. The terminal UI owner also required bridge-owned loopback selection and an
-isolated-daemon proof before member provisioning.
-
-The executable proof should establish: unknown NodeID refusal; trusted phone
+The [module checks](../../apps/ios/modules/fractal-fabric/README.md#checks) cover codec and
+pinned-daemon interoperability; physical-device behavior requires a separate executable proof.
+That proof must establish: unknown NodeID refusal; trusted phone
 refusal for an ungranted exposure; exact gateway admission; Fractal refusal without a
 paired credential; pairing/capabilities and collections over the carrier; uploads
 and WebSocket/terminal capability forwarding; half-close and concurrent requests;
 network loss/foreground recovery without replaying actions; abandoned session
 limits/reaping and final-Ack teardown; no member probes of an inbound-only phone; a recorded
-relay/direct path; and Tailscale working after disabling the development setting.
-Keep these results separate from this source-derived protocol document.
+relay/direct path; and Tailscale working after disabling the carrier.
+Record the exact binaries, target device and observed results with that proof.

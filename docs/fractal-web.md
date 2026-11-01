@@ -540,6 +540,20 @@ headless Chromium, checks with Fractal that each step finished with that answer,
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `st3`, `pty`, a Playwright module and Chromium).
 
+## Sidebar migration
+
+Importing `custom.fractal.sidebar` history into arrangements is client-owned. The legacy
+HLC register representation lives in `apps/fractal-web/src/folders/core.mts`; the daemon
+provides no Fractal web-specific importer.
+Discover capability, pause legacy writers, fold the HLC history once, and durably stage
+the snapshot, target ID, exact typed operations and idempotency key. Preserve stable IDs,
+import order, tombstones and placements. Sort legacy siblings by `(key, ID)` and derive
+canonical fractional keys for each folder and placement list.
+Retry that exact staged request until acknowledged and readable, then switch exclusively
+to arrangements. Old stamps remain provenance, not live ordering. Keep staged state on
+failure, leave immutable custom history, and never dual-write. See the
+[arrangements contract](st3/client-v0/README.md#person-arrangements).
+
 ## Fractal web arrangement edits
 
 The Sidebar first adopts the live reserved subject

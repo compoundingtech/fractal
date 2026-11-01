@@ -274,6 +274,23 @@ class EvidenceLog(unittest.TestCase):
         done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
         self.assertEqual(done.returncode, 1, done.stdout)
         self.assertIn('not signed by a key in --log-keys', done.stderr)
+        # The extracted timer and log reader prefer the new layout even while old files remain.
+        (self.f.repo / '.fractal').mkdir()
+        (self.f.repo / '.fractal/evidence-log-key').write_text(self.log_keys.read_text())
+        (self.f.repo / '.fractal/evidence-keys').write_text(self.f.keys.read_text())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'new layout wins over old pinned key')
+        self.f.git('push', '-q', 'origin', 'main:main')
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        # A selected new key that cannot authorize the signer must not restore local or old keys.
+        (self.f.repo / '.st/evidence-log-key').write_text(self.log_keys.read_text())
+        (self.f.repo / '.fractal/evidence-log-key').write_text('malformed key\n')
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'malformed new log key with valid fallbacks')
+        self.f.git('push', '-q', 'origin', 'main:main')
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
 
 if __name__ == '__main__':
     unittest.main()

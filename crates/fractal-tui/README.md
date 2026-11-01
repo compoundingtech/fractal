@@ -40,11 +40,13 @@ mission and fleet details without blocking keys. A private, actor-and-endpoint-s
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
-Install the repo's `.#fractal` Nix package and run `ST3_PERSON=person/<your-id> fractal` in a terminal
+Install the repo's `.#fractal` Nix package and run `FRACTAL_PERSON=person/<your-id> fractal` in a terminal
 with a running Fractal daemon. For source development, use
-`ST3_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
+`FRACTAL_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `FRACTAL_ENDPOINT` can override the discovered Unix socket. When neither person environment variable is set,
 the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
 A concrete person identity is required so Inbox and devices show the right data.
+`ST3_PERSON` and `ST3_ENDPOINT` remain accepted. The Fractal spelling is preferred;
+empty values are ignored. Setting both spellings to unequal non-empty values is an error.
 
 For a laptop without a daemon, run `fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256` and enter the member's
 single-use code, then run `fractal`. The paired member supplies the person identity. See
@@ -60,24 +62,57 @@ close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens or focuses the Inbox 
 Middle-click a tab to close it: press and release over the same tab. This uses the same
 close action as `Ctrl+W` and the tab's right-click menu.
 
-Tab prefixes identify **A**gent (including its terminal), **M**ission, and **I**nbox/alert
-cards. Agent activity follows the type: `>` working/compacting, `-` idle, `x`
-down/stopped/retired, `◆` waiting on a person or a login, `!` fault, `~` starting/unknown.
-`◆N` counts open alerts for the subject (zero is quiet; `◆?` means not loaded).
-The existing standalone `◆` stays immediately before the agent or mission name when
-its reported state needs a person; the alert count is separate and does not replace it.
-A separate `?` marks a current question prompt from live attention, including questions
-that can only be answered in the terminal or whose client-answer window expired.
-Question identity comes from the native question kind or the exact named question
+Documents are read-only. `Ctrl+K` opens one by name (`doc/NAME` or `doc/NAME@HASH`) and the
+**Documents** list (`doc/PREFIX/` for one prefix); a `doc/…` link in a message, a mission card
+(which lists the documents the mission and its steps name) or a document opens it too. On a
+document page `b` or `Backspace` goes back along the links followed in that split, `n` and `p`
+choose a link and `Enter` opens it, and `r` reads it again; in the list `m` reads the next page.
+A document that cannot be shown says why (not found, not synced yet, the host did not answer, not
+text). Reads go through `document.get`, `documents.list` and `document-references.get`, and the
+page is `fractal_ui_model::documents`, the model the phone and web read.
+
+Agent tabs show activity directly before the title: `●` working/compacting, `○` idle
+or waiting on a person or on login, `×` down/stopped/retired, `!` fault, `~` starting/unknown.
+Mission, Inbox and other tabs have no prefix. One attention suffix follows the title:
+`?` for a live open question, otherwise `◆` for open alerts or a needs-person state.
+Only counts above one are shown (`?2`, `◆3`); loading attention has no placeholder.
+Questions include those answerable only in the terminal or whose client-answer window
+expired. Question identity comes from the native question kind or exact named question
 tool call; cached calls without an open live prompt cannot set it. Mission tabs
 aggregate their agents' current question prompts; Inbox aggregates all of them.
-Counts drop first in a narrow strip; type, activity and question markers precede the
-truncated name. Overflow markers still reach hidden tabs.
+Titles retain 26 cells. A narrow strip drops counts first, then the attention suffix,
+while keeping activity at the left, even if padding and the title no longer fit.
+Overflow markers reach hidden tabs.
+Wheel right/down over a strip browses one whole tab right; wheel left/up browses left.
+This does not select a tab. Each split keeps its own temporary view; selecting another
+tab reveals it again if necessary. `‹N` / `N›` count the tabs outside that view.
+Every nonempty strip keeps activity on its visible agent tabs, down to one cell.
+If necessary, markers, the add button and other tabs yield first. Following a
+selection keeps that tab visible; manual scrolling may still hide the active tab.
 
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
-`Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
-attaches the agent's terminal. `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
+`Ctrl+E` expands tool output, `Ctrl+P` simplifies, and `Ctrl+D` shows the agent's details.
+`Ctrl+A` then `t` opens the agent's terminal from its conversation; Enter attaches a detached terminal pane.
+`Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `[`/`]` history back/forward, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
 it on release.
+
+Managed agents show their details beside the terminal by default
+when the **pane** is at least 120 columns wide (not the whole window). The details use
+36 columns plus two columns of separation; shells and unmanaged agents are unchanged.
+The PTY is fitted to the remaining program pane, not hidden under the details. PTY's
+pinned daemon negotiates the per-axis minimum over writable attached clients, so this
+can narrow the harness for everyone attached to that session; read-only viewers do not
+constrain it. Below the breakpoint the details auto-hide and the program regains the width.
+`Ctrl+\` then `i` and conversation `Ctrl+D` toggle the same global visibility for every
+agent and both views. The choice is saved in this device's existing `stui/prefs.json`
+as `agent_details`; an older file defaults to visible. Conversations auto-hide details
+below their existing 90-column threshold instead of replacing the conversation.
+`Ctrl+\` then `d`, or clicking the details, gives them the keys: arrows/PageUp/PageDown
+scroll; `Esc` or `Tab` returns to terminal passthrough. Details links remain clickable.
+The details heading names the focus; no new raw terminal key is intercepted.
+Details focus also blocks program mouse motion and wheel input, and cancels a pending held
+terminal key. If resizing hides the details, focus returns to the program and stays there
+when the pane widens again.
 
 Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
 conversation. An agent without a terminal (a session Fractal did not start, a harness without one) opens
@@ -87,8 +122,8 @@ device that saved the older `terminal_first` keeps attaching. An alert for the a
 of its attached terminal: click it to show it, click an answer to send it, or click
 "open in Inbox". A request's recommended answer comes first among its at most three answer buttons,
 green and starred (`★`), under a single `★ recommended: <reason>` line. Long reasons end in `…`;
-the full reason and answers needing your words stay in Inbox. Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
-answers an alert. When the link to the
+answers needing your words stay in Inbox. Keys go to the terminal (`Ctrl+K` and `Ctrl+\` aside)
+unless details explicitly have focus, so typing never answers an alert. When the link to the
 terminal drops, its status line says `reconnecting`, why, the next try and `Ctrl+\ c conversation`;
 it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. Scrolling to the top of a conversation loads the page before it. Inbox cards show
 their own keys; `y` confirms what a card asks, and Enter never does. Inbox keeps its list and
@@ -114,7 +149,7 @@ cargo test -p fractal-tui --locked --lib
 cargo test -p fractal --locked --test integration typed_keys
 cargo test -p fractal --locked --test integration client_only
 cargo build -p fractal --locked
-ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/st3 --ui
+ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/fractal --ui
 ```
 
 After an intended mission-rendering change, regenerate its text, style and target golden with
@@ -142,8 +177,8 @@ never appended to or overwritten; a new file is mode 0600 on Unix.
 
 Start the installed `fractal` once, using the person's ordinary pairing/configuration and
 space. Either restore a space with that conversation in front, or open it normally with
-Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use Ctrl+] (terminal
-attachment), `--demo`, or a headless test client as a conversation-render measurement.
+Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use terminal attachment,
+`--demo`, or a headless test client as a conversation-render measurement.
 
 The file has at most seven content-free JSON lines (at most 2 KiB), with monotonic `at_ms`
 from entry to `main`: `process_started`, `conversation_intent`, `converse_enqueued`,
@@ -182,8 +217,9 @@ An image is read, decoded and scaled to at most 1600 pixels on a worker; its ter
 encoding is built off the draw path, an image the edge of the pane cuts draws the rows still
 on screen, and its pixels leave memory once it is more than a screen away. An owner that
 cannot be reached says so on the image's line, with the way to try again. `open` shows the
-image in this machine's viewer, or saves it under its name to `ST3_DOWNLOADS`, else the XDG
-download directory, else `~/Downloads`.
+image in this machine's viewer, or saves it under its name to `FRACTAL_DOWNLOADS` (or
+`ST3_DOWNLOADS`), else the XDG download directory, else `~/Downloads`. The same
+non-empty alias conflict rule applies to the download directory.
 
 ## Resource sidebar
 

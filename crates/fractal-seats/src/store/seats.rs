@@ -374,6 +374,23 @@ pub trait SeatsStore {
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
         ) -> Result<(ResourceObservationOutcome, bool), St3Error>;
+    /// [`Self::record_resource_observation_outcome`] for a GitHub repository whose poller has a
+    /// filled plugin mirror: each item is compared and merged with the mirror's facts, and in
+    /// compact mode its change is recorded as `vcs.item.state` alone.
+    #[allow(clippy::too_many_arguments)]
+    fn record_resource_observation_mirrored(
+            &self,
+            observer: &str,
+            desired_revision: &str,
+            attempt: Option<&str>,
+            resource: &str,
+            cursor: Option<&str>,
+            facts: &Value,
+            next_check_unix_ms: u128,
+            subscriptions: &[(String, SubscriptionSpec)],
+            current: Option<&(dyn Fn() -> bool + Sync)>,
+            mirrored: Option<&crate::model::MirroredPrior>,
+        ) -> Result<(ResourceObservationOutcome, bool), St3Error>;
     /// Period spend from replicated cumulative snapshots. The snapshot immediately before the
     /// start is the baseline, so a long-lived incarnation only contributes spend in the period.
     /// Each row is one agent incarnation's spend on one model and account for one mission run
@@ -1741,6 +1758,7 @@ impl SeatsStore for Store {
                 .query_map([run_id], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
+        fractal_store::store::ordered_membership::flush(&transaction)?;
         transaction.commit()?;
         Ok(residue)
     }
@@ -1868,6 +1886,26 @@ impl SeatsStore for Store {
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
         ) -> Result<(ResourceObservationOutcome, bool), St3Error> {
+        self.record_resource_observation_mirrored(
+            observer, desired_revision, attempt, resource, cursor, facts,
+            next_check_unix_ms, subscriptions, current, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_resource_observation_mirrored(
+            &self,
+            observer: &str,
+            desired_revision: &str,
+            attempt: Option<&str>,
+            resource: &str,
+            cursor: Option<&str>,
+            facts: &Value,
+            next_check_unix_ms: u128,
+            subscriptions: &[(String, SubscriptionSpec)],
+            current: Option<&(dyn Fn() -> bool + Sync)>,
+            mirrored: Option<&crate::model::MirroredPrior>,
+        ) -> Result<(ResourceObservationOutcome, bool), St3Error> {
         let fence = resource_preparation::Fence::new(self);
         for pass in 0..2 {
             let prepared = fence.prepare_with_actuals(self, |connection, _| {
@@ -1880,6 +1918,7 @@ impl SeatsStore for Store {
                         resource,
                         facts: &canonical_json_value(facts),
                         subscriptions,
+                        mirrored,
                     },
                 )
             });
@@ -1898,6 +1937,7 @@ impl SeatsStore for Store {
                 subscriptions,
                 current,
                 Some((&fence, prepared)),
+                mirrored,
             )?;
             if let Some(outcome) = outcome {
                 return Ok(outcome);
@@ -1920,6 +1960,7 @@ impl SeatsStore for Store {
             subscriptions,
             current,
             None,
+            mirrored,
         )?
         .ok_or_else(|| St3Error::new("internal", "canonical observation returned no outcome"))
     }

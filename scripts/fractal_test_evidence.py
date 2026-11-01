@@ -27,7 +27,8 @@ def capture(root, evidence, final=False):
     """Independent files must survive an unreadable spool or a failed API trace."""
     evidence.mkdir(parents=True, exist_ok=True)
     errors = []
-    logs = [root / "daemon.log", root / "ws/native-starts.jsonl", *sorted(root.rglob("driver.log")),
+    logs = [root / "daemon.log", root / "omp-channel-stderr.log", root / "omp-channel-exit.txt",
+            root / "ws/native-starts.jsonl", *sorted(root.rglob("driver.log")),
             *sorted(root.rglob("driver-api-warnings.log")),
             *sorted((root / "ws").glob("receipts-*.jsonl"))]
     driver = 0

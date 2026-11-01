@@ -243,6 +243,8 @@ const PERSON_READS: &[(&str, u64)] = &[
     ("/v1/client/work", 250),
     ("/v1/client/terminals", 250),
     ("/v1/mission-runs?mission=bench/fleet", 250),
+    // Why is this stuck: every blocked run in the fleet, by cause.
+    ("/v1/blocked-runs", 250),
     ("/v1/replication/status", 250),
 ];
 
@@ -1856,19 +1858,24 @@ fn run(
     let pty = stub_pty(root);
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: notify.clone(),
-    event_notify: event_notify.clone(),
-    node: NODE.into(),
-    state_dir: root.join("state"),
-    pty_root: root.join("pty"),
-    pty_binary: pty.clone(),
-    fleet_id: Some(FLEET.into()),
-    configured_peers: vec![PEER.into()],
-    client_relay: None,
-    native_session_home: Some(root.join("home")),
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: notify.clone(),
+        event_notify: event_notify.clone(),
+        node: NODE.into(),
+        state_dir: root.join("state"),
+        pty_root: root.join("pty"),
+        pty_binary: pty.clone(),
+        fleet_id: Some(FLEET.into()),
+        configured_peers: vec![PEER.into()],
+        client_relay: None,
+        native_session_home: Some(root.join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let subjects = {
         let _entered = daemon.enter();
         fractal_daemon::api::start_operation_report(&state);
@@ -1911,6 +1918,7 @@ fn run(
             socket.display().to_string(),
             notify,
             event_notify,
+            None,
             None,
         )
         .unwrap(),

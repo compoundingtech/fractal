@@ -1,4 +1,4 @@
-import type { CollectionFrame, Resource, Snapshot } from '@fractal/client'
+import type { CollectionFrame, Resource, ResourceCollectionName, Snapshot } from '@fractal/client'
 import type { Undecodable } from './resourceDecode.ts'
 
 /** A decoded window and its exact wire rows (the roster snapshot boundary needs both). */
@@ -11,7 +11,8 @@ export interface ProcessedWindow<A> {
   readonly decodeStale: boolean
 }
 
-type WindowFrame = Extract<CollectionFrame, { kind: 'snapshot' | 'changes' }>
+/** Resource windows only: an ordered-membership window carries members and container state. */
+type WindowFrame = Extract<CollectionFrame, { kind: 'snapshot' | 'changes'; collection: ResourceCollectionName }>
 
 /** Wire rows are JSON values. Revision alone is insufficient: projections can change at the
  * same resource revision, and unknown fields must still reach the snapshot boundary.
@@ -188,6 +189,8 @@ export const makeWindowIngest = <A>({
     get rejectedRowCount(): number { return rejected.size },
     accept: (frame: CollectionFrame): void => {
       if (frame.kind !== 'snapshot' && frame.kind !== 'changes') return
+      // An ordered-membership window is not a resource window; this ingest never holds one.
+      if (frame.collection === 'ordered-memberships') return
       frames.push(frame)
       if (cancel === undefined && !running) cancel = schedule(run)
     },

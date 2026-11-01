@@ -76,19 +76,27 @@ impl Ui {
             Hit::Actions(_) => "agent actions".into(),
             Hit::Field(_) => "focus field [Tab]".into(),
             Hit::Revoke(_) => "ask to revoke; y confirms".into(),
-            Hit::Attach => "attach terminal [Ctrl+]]".into(),
+            Hit::Attach => "attach terminal [Enter on a detached terminal pane]".into(),
             Hit::Detach => "leave terminal [Ctrl+\\ c or Ctrl+T twice]".into(),
             Hit::GlassMenu => "spaces [Ctrl+G]".into(),
             Hit::PaletteSection(1) => "agents [Ctrl+2]".into(),
             Hit::PaletteSection(2) => "missions [Ctrl+3]".into(),
-            Hit::PaletteSection(3) => "fleet [Ctrl+4]".into(),
+            Hit::PaletteSection(3) => "fleet [palette: fleet]".into(),
             Hit::PaletteSection(_) => format!("open {label}"),
             Hit::Home => "open Inbox [Ctrl+H]".into(),
+            Hit::Link(url) if super::documents::openable(url).is_some() => "open document".into(),
             Hit::Link(_) => "copy link".into(),
+            Hit::Document(super::documents::Tap::Back) => "back one document [b]".into(),
+            Hit::Document(super::documents::Tap::Retry) => "read it again [r]".into(),
+            Hit::Document(super::documents::Tap::More) => "more documents [m]".into(),
             Hit::Split(true) => "split right [Ctrl+V]".into(),
             Hit::Split(false) => "split below [Ctrl+X]".into(),
-            Hit::GlassTab(..) => "show tab; drag to move/split; middle-click closes".into(),
-            Hit::GlassTabMore(..) => "more tabs: show the next hidden tab [Tab]".into(),
+            Hit::GlassTab(..) => {
+                "show tab; wheel scrolls tabs; drag to move/split; middle-click closes".into()
+            }
+            Hit::GlassTabMore(..) => {
+                "more tabs: show the next hidden tab [Tab]; wheel scrolls without selecting".into()
+            }
             Hit::GlassAdd(_) => "new tab [Ctrl+T]".into(),
             Hit::PaletteChoice(_) => format!("open {label}"),
         };
@@ -270,7 +278,7 @@ mod tests {
             ui.open_in_glass(Pane::Terminal(id.clone()), glass::Open::Tab);
             let before = draw(&ui);
             assert!(ui.terminal.is_none());
-            assert!((0..48).any(|row| line(&before, row).contains("Not attached. Ctrl+] attaches")));
+            assert!((0..48).any(|row| line(&before, row).contains("Not attached. Enter attaches")));
             let button = target(&ui, |hit| matches!(hit, Hit::Attach));
             assert!(line(&before, button.y).contains("Attach"));
             pointer(&mut ui, MouseEventKind::Moved, button.x, button.y);
@@ -281,7 +289,7 @@ mod tests {
             );
             assert!(line(&hovered, 47).contains("Click: attach terminal"));
             ui.live = true;
-            ui.key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+            ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             let keyboard = ui.effects.drain(..).collect::<Vec<_>>();
             pointer(&mut ui, MouseEventKind::Down(MouseButton::Left), button.x, button.y);
             assert!(matches!(keyboard.as_slice(), [Effect::OpenTerminal { agent }] if agent == &id));

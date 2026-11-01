@@ -822,6 +822,88 @@ proptest! {
     }
 }
 
+/// A seat's current harness view, from one incarnation's observations (state, credential report,
+/// whether it is a transition), before and after deleting what the harness rule drops.
+fn harness_view_full_and_kept(observations: &[(&str, Option<bool>, bool)]) -> (String, String) {
+    let store = Store::open_memory("alder").unwrap();
+    store
+        .append_claim(&input(AGENT, "runtime.observed", None, json!({"status": "running", "incarnation_id": "inc-1"}), "runtime"))
+        .unwrap();
+    for (n, (state, provider_auth, transition)) in observations.iter().enumerate() {
+        let mut fields = json!({"state": state, "driver": "codex", "incarnation_id": "inc-1",
+            "observed_at_ms": n + 1, "status_transition": transition});
+        if let Some(provider_auth) = provider_auth {
+            fields["provider_auth"] = json!(provider_auth);
+        }
+        store.append_claim(&input(AGENT, "harness.observed", Some(AGENT), fields, &format!("harness-{n}"))).unwrap();
+    }
+    // The current harness, the newest turn or end, and the newest `working` (when the last turn
+    // began, and whether the seat worked after a given time).
+    let view = |store: &Store| {
+        let connection = store.readers.get();
+        let worked: Option<(String, Option<i64>)> = connection
+            .query_row(
+                "SELECT accepted_at_unix_ms, json_extract(body, '$.fields.observed_since_ms') FROM claims
+                 WHERE subject=?1 AND kind='harness.observed' AND json_extract(body, '$.fields.state')='working'
+                 ORDER BY store_index DESC LIMIT 1",
+                [AGENT],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        format!(
+            "{:?} {:?} {worked:?}",
+            current_harness_at(&connection, AGENT, None).unwrap(),
+            super::attention_snapshot::last_turn_or_end(&connection, AGENT).unwrap(),
+        )
+    };
+    let full = view(&store);
+    let claims = claims_of_kind_in_order(&store.readers.get(), AGENT, "harness.observed").unwrap();
+    let keep = checkpoint_rules::harness_keep(&claims.iter().collect::<Vec<_>>());
+    for (_, claim) in claims.iter().enumerate().filter(|(position, _)| !keep.contains(position)) {
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h7a6efe0439c2 owner=fractal_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id]).unwrap();
+    }
+    (full, view(&store))
+}
+
+/// A turn, then the seat at rest: the newest `working` stays, so readers of the last turn
+/// (when it began, whether the seat worked after a nudge) answer as from every observation.
+#[test]
+fn harness_rule_keeps_the_last_turn_after_the_seat_comes_to_rest() {
+    let (full, kept) = harness_view_full_and_kept(&[("ready", None, true), ("working", None, true), ("idle", None, true), ("ready", None, true)]);
+    assert!(full.contains("\"working\""), "{full}");
+    assert_eq!(full, kept);
+}
+
+/// A credential refusal, a report that restored it, and the refusal again: the seat needs a
+/// login since the second refusal, and the rule keeps the restoring report that says so (#4237).
+#[test]
+fn harness_rule_keeps_where_the_current_needs_login_began() {
+    let (full, kept) = harness_view_full_and_kept(&[("ready", Some(false), true), ("starting", Some(true), true), ("ready", Some(false), true)]);
+    assert!(full.contains("needs-login") && full.contains("since_unix_ms: 3"), "{full}");
+    assert_eq!(full, kept);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// Whatever an incarnation reports, its current harness view (state, since, reason and the
+    /// claim it shows), its newest turn or end and its newest `working` are the same from the
+    /// kept observations as from all of them.
+    #[test]
+    fn the_current_harness_view_is_the_same_from_the_kept_observations(
+        observations in proptest::collection::vec(
+            (prop_oneof![Just("starting"), Just("ready"), Just("idle"), Just("working"), Just("blocked"), Just("ended")],
+             prop_oneof![2 => Just(None), 1 => Just(Some(true)), 1 => Just(Some(false))],
+             any::<bool>()),
+            1..14,
+        ),
+    ) {
+        let (full, kept) = harness_view_full_and_kept(&observations);
+        prop_assert_eq!(full, kept);
+    }
+}
+
 #[test]
 fn loop_rule_keeps_the_ends_of_each_round_and_the_first_items() {
     let mut sealed = Sealed::default();
@@ -1418,7 +1500,7 @@ fn write_history(store: &Store) {
     }
     for n in 0..4 {
         store
-            .append_claim(&input(
+            .append_as_older_build_for_test(&input(
                 "daemon/alder",
                 "daemon.diagnostic",
                 None,
@@ -1921,17 +2003,17 @@ fn plan_a_copy_of_a_real_store() {
 #[test]
 fn an_observed_item_keeps_its_latest_state_and_every_version_still_read_by_id() {
     let mut sealed = Sealed::default();
-    let item = "resource/github/acme/garden/pull-request/7";
+    let item = "resource/github/acme/garden/issue/7";
     let observed = |head: &str| {
         draft(
             "resource.observed",
             item,
             json!({
-                "kind": "vcs.pull-request",
-                "facts": {"number": 7, "head_sha": head, "state": "open"},
+                "kind": "vcs.issue",
+                "facts": {"number": 7, "title": head, "state": "open"},
                 "observer": "observer/run/garden/repository",
                 "baseline": false,
-                "changed_fields": ["head_sha"],
+                "changed_fields": ["title"],
             }),
         )
     };
@@ -1978,6 +2060,131 @@ fn an_observed_item_keeps_its_latest_state_and_every_version_still_read_by_id() 
     let plan = plan_drops(&sealed.build());
     assert_eq!(dropped(&plan), ids([&replaced]));
     let _ = (requested, latest, authored);
+}
+
+/// A mission request names the observation that discovered it in `discovery`, and the reconciler
+/// reads that observation by its ID, even when the request cites other evidence or none. A later
+/// observation of the item does not replace it.
+#[test]
+fn an_observation_a_mission_request_names_as_its_discovery_stays() {
+    let mut sealed = Sealed::default();
+    let item = "resource/github/acme/garden/issue/7";
+    let observed = |head: &str| {
+        draft(
+            "resource.observed",
+            item,
+            json!({
+                "kind": "vcs.issue",
+                "facts": {"number": 7, "title": head, "state": "open"},
+                "observer": "observer/run/garden/repository",
+                "baseline": false,
+                "changed_fields": ["title"],
+            }),
+        )
+    };
+    let replaced = sealed.add("alder", T + 1, observed("aaaa"));
+    let discovery = sealed.add("alder", T + 2, observed("bbbb"));
+    sealed.add(
+        "birch",
+        T + 3,
+        draft(
+            "subscription.mission-requested",
+            "subscription/run/garden/reviews",
+            json!({"mission": "mission/review", "resource": item, "resource_input": "source",
+                "workspace": ".", "discovery": discovery}),
+        ),
+    );
+    let latest = sealed.add("alder", T + 4, observed("cccc"));
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), ids([&replaced]), "the discovery stays while its request names it");
+    let _ = latest;
+}
+
+/// An observer's observation of `subject` with `facts`, and more fields.
+fn observation<'a>(subject: &'a str, facts: Value, more: Value) -> Draft<'a> {
+    let mut fields = json!({"kind": "vcs.pull-request", "facts": facts, "observer": "observer/run/garden/repository"});
+    fields.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+    draft("resource.observed", subject, fields)
+}
+
+/// A pull request's observations stay from the newest back to the newest one a merge-queue
+/// check stops at: here the one that saw it queued. The open observations before it go.
+#[test]
+fn a_pull_request_keeps_its_observations_back_to_the_merge_queue() {
+    let mut sealed = Sealed::default();
+    let item = "resource/github/acme/garden/pull-request/7";
+    let open = |head: &str| json!({"number": 7, "state": "open", "head_sha": head, "merge_queue": null});
+    let before = sealed.add("alder", T + 1, observation(item, open("a"), json!({})));
+    let queued = sealed.add("alder", T + 2, observation(item, json!({"number": 7, "state": "open", "head_sha": "b",
+        "merge_queue": {"state": "QUEUED", "position": 1}}), json!({})));
+    // Accepted with the queued observation, so a check could read either first, though it comes
+    // first in canonical order. Its writer's newest envelope is a later one.
+    let tied = sealed.add("abel", T + 2, observation(item, open("b"), json!({})));
+    sealed.add("abel", T + 5, draft("harness.todo.observed", "agent/sample.seat", json!({"items": []})));
+    let after = [
+        sealed.add("alder", T + 3, observation(item, open("b"), json!({}))),
+        sealed.add("alder", T + 4, observation(item, open("c"), json!({}))),
+    ];
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), ids([&before]));
+    let _ = (queued, tied, after);
+
+    // A merged pull request is not open: the check stops at its newest observation.
+    let mut sealed = Sealed::default();
+    let older = [
+        sealed.add("alder", T + 1, observation(item, open("a"), json!({}))),
+        sealed.add("alder", T + 2, observation(item, json!({"number": 7, "state": "open", "head_sha": "b",
+            "merge_queue": {"state": "QUEUED", "position": 1}}), json!({}))),
+    ];
+    let merged = sealed.add("alder", T + 3, observation(item, json!({"number": 7, "state": "closed", "merged": true,
+        "head_sha": "b", "merge_queue": null}), json!({})));
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), ids([&older[0], &older[1]]));
+    let _ = merged;
+}
+
+/// A pull request that was never seen outside "open and out of the queue" keeps the newest
+/// observations a check reads, and no more.
+#[test]
+fn a_pull_request_always_open_outside_the_queue_keeps_what_a_check_reads() {
+    let mut sealed = Sealed::default();
+    let item = "resource/github/acme/garden/pull-request/7";
+    let scan = fractal_github_base::github_watch::THREAD_SCAN as usize;
+    let observed = (0..scan + 3)
+        .map(|index| sealed.add("alder", T + 1 + index as u128,
+            observation(item, json!({"number": 7, "state": "open", "head_sha": format!("h{index}")}), json!({}))))
+        .collect::<Vec<_>>();
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), observed[..3].iter().cloned().collect::<BTreeSet<_>>());
+}
+
+/// The projection reads the newest full observation over a newer receipt, and the earliest that
+/// names an opener; a resource described in flat facts keeps every observation.
+#[test]
+fn an_observed_resource_keeps_its_newest_full_observation_its_opener_and_flat_history() {
+    let mut sealed = Sealed::default();
+    let item = "resource/github/acme/garden/issue/8";
+    let issue = |title: &str| json!({"number": 8, "state": "open", "title": title});
+    let opener = sealed.add("alder", T + 1, observation(item, json!({"number": 8, "state": "open", "title": "a",
+        "opened_by": "agent/sample.seat"}), json!({"kind": "vcs.issue"})));
+    let replaced = sealed.add("alder", T + 2, observation(item, issue("b"), json!({"kind": "vcs.issue"})));
+    let full = sealed.add("alder", T + 3, observation(item, issue("c"), json!({"kind": "vcs.issue"})));
+    let receipt = sealed.add("alder", T + 4, observation(item, issue("c"),
+        json!({"kind": "vcs.issue", "attribution_only": true})));
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), ids([&replaced]));
+    let _ = (opener, full, receipt);
+
+    let mut sealed = Sealed::default();
+    let flat = [
+        sealed.add("alder", T + 1, draft("resource.observed", item,
+            json!({"kind": "vcs.issue", "observer": "observer/run/garden/repository", "state": "open", "title": "a"}))),
+        sealed.add("alder", T + 2, observation(item, issue("b"), json!({"kind": "vcs.issue"}))),
+        sealed.add("alder", T + 3, observation(item, issue("c"), json!({"kind": "vcs.issue"}))),
+    ];
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), BTreeSet::new(), "a fold merges flat facts field by field");
+    let _ = flat;
 }
 
 #[test]
@@ -2086,7 +2293,7 @@ fn status_history_checkpoint_keeps_last_200_recent_transitions_across_incarnatio
 fn status_history_checkpoint_drops_old_transitions_but_keeps_current_state_start() {
     let mut sealed = Sealed::default();
     let mut ids = Vec::new();
-    for index in 0..5 {
+    for index in 0..7 {
         ids.push(sealed.add(
             "cedar",
             T + index,
@@ -2094,20 +2301,21 @@ fn status_history_checkpoint_drops_old_transitions_but_keeps_current_state_start
                 "harness.observed",
                 "agent/cedar",
                 json!({
-                    "incarnation_id":"one", "state":if index == 1 { "working" } else { "idle" },
-                    "status_transition": index <= 2
+                    "incarnation_id":"one", "state":if index == 1 || index == 3 { "working" } else { "idle" },
+                    "status_transition": index <= 4
                 }),
             ),
         ));
     }
     let set = sealed.build();
     let gone = dropped(&plan_drops(&set));
-    assert!(!gone.contains(&ids[2]), "current idle state began here");
+    assert!(!gone.contains(&ids[4]), "current idle state began here");
     assert!(
-        gone.contains(&ids[1]),
-        "older transition is outside the history window"
+        gone.contains(&ids[1]) && gone.contains(&ids[2]),
+        "older transitions are outside the history window"
     );
-    assert!(gone.contains(&ids[3]), "repeated idle adds no history");
+    assert!(!gone.contains(&ids[3]), "the last turn stays");
+    assert!(gone.contains(&ids[5]), "repeated idle adds no history");
 }
 
 #[test]
@@ -2334,15 +2542,15 @@ sekret.refused slot=subject keep=newest min-age-before-cut=5d
 sekret.changed slot=subject keep=newest min-age-before-cut=5d
 sealed=every-admitted-claim-of-an-envelope-before-the-cut-but-repaired-originals
 proof=the-sealed-claims-and-the-blobs-they-reference
-graph=shared-projection-tables-including-arrangements-and-arrangement_registers-even-when-empty
-replay=clear-arrangements-and-arrangement_registers,rebuild-from-sealed-arrangement-claims
+graph=shared-projection-tables-including-arrangements,arrangement_registers,ordered-membership-raw/live/counts/lifecycle-and-shared-reverse-edges-even-when-empty
+replay=clear-arrangements,arrangement_registers-and-ordered-membership-projections,rebuild-from-retained-claims
 guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
 carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 20);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 25);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2359,6 +2567,12 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
                      slo.breach-transition slot=subject keep=episode-event-fences-and-conflicts-after-recovery-7d\n\
                      harness-question.observed slot=subject {questions}\n"
                 ),
+            )
+            .replace("mission-run-input,", "mission-run-input,request-discovery,")
+            .replace("current-native-auth-run-start", "current-native-auth-run-start-and-the-report-ending-the-run-before,newest-working,newest-ended")
+            .replace(
+                "resource.observed actor=null observer=set slot=subject keep=newest",
+                "resource.observed actor=null observer=set slot=subject keep=newest,newest-of-each-attribution_only,earliest-opener,pull-request-back-to-newest-not-open-outside-merge-queue-else-thread-scan,all-if-flat-facts",
             )
             .replace(
                 "\nguards=",
@@ -2588,7 +2802,7 @@ fn legacy_slot_of(claim: &ClaimRecord) -> Option<(&'static str, Vec<String>)> {
             if claim.actor.is_none()
                 && fields(claim).is_some_and(|fields| fields.contains_key("observer")) =>
         {
-            Some(("newest", slot(&[])))
+            Some(("resource", slot(&[])))
         }
         "harness.usage" => match field_str(claim, "semantics")? {
             "response_rollup" => Some((
@@ -2620,6 +2834,7 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
         Rule::AccountLimits => "limits",
         Rule::QuestionLifecycle => "question",
         Rule::SloEventFences => "slo",
+        Rule::ResourceObserved => "resource",
     };
     let field_sets = [
         json!({}),
@@ -2746,7 +2961,7 @@ fn reconcile_decisions_keep_the_newest_of_each_key() {
     let crash = decision(Some("runtime-crash-loop:token"), "raise", "three exits", 202);
     let restart = decision(None, "wait", "restart in 9s", 203);
     store.set_write_clock_at(300).unwrap();
-    store.append_claim(&input("daemon/alder", "daemon.diagnostic", None,
+    store.append_as_older_build_for_test(&input("daemon/alder", "daemon.diagnostic", None,
         json!({"severity": "warning", "code": "slow-request", "reason": "last"}), "decision-last")).unwrap();
     store.seal_local_batches().unwrap();
     let fault_before = store.member_reconcile_fault(AGENT, None).unwrap();

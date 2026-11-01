@@ -1346,6 +1346,8 @@ agent "worker.one" { workspace "/tmp"; command "true"; restart always; }
             .unwrap();
         controller
             .ask_person(&crate::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/test".into(),
                 title: "Choose a date".into(),
@@ -1918,6 +1920,8 @@ fn response_usage_stays_local_while_attributed_totals_replicate() {
         65
     );
 
+    // The second rollup waits for its hour on the host; the seat ending replicates it.
+    observed("ended", "usage-ended");
     let peer = Store::open_memory("host-two").unwrap();
     let exchange = exchange_from(&local, &ReplicationInventory::default());
     receive_and_project(&peer, "host-one", &exchange);
@@ -2095,6 +2099,72 @@ fn usage_provenance_survives_resume_replay_periods_and_reopen() {
     );
 }
 
+/// Rollups replicate hourly. On the seat's host a period also counts the readings since each
+/// series' last replication, so a boundary inside the hour still waiting finds the reading it ended
+/// on. Once the hour replicates, the host reads what every member reads: periods exact to the hour.
+#[test]
+fn a_host_period_ending_inside_the_hour_reads_the_rollup_it_ended_on() {
+    let local = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.hourly";
+    let hour = 3_600_000_u64;
+    let start = (now_ms() as u64 / hour + 1) * hour;
+    let minute = 60_000_u64;
+    local
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("state".into(), json!("working")),
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-one")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("hourly-working".into()),
+        })
+        .unwrap();
+    for (at, total) in [(start, 1), (start + 15 * minute, 10), (start + 30 * minute, 20)] {
+        local
+            .append_client_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.usage".into(),
+                actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({
+                    "semantics":"response_rollup","driver":"codex","incarnation_id":"inc-one",
+                    "model":"example-model","observed_at_unix_ms":at,"total_tokens":total,
+                }))
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    assert_eq!(local.claims_for(subject, Some("harness.usage")).unwrap().len(), 1, "the later two wait for the hour");
+    let total = |until: u64| local.usage_period_rows(start - 1, until).unwrap()[0]["total_tokens"].as_u64();
+    assert_eq!(total(start + 20 * minute), Some(10), "the reading the period ended on");
+    assert_eq!(total(start + 40 * minute), Some(20));
+    local
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("state".into(), json!("ended")),
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-one")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("hourly-ended".into()),
+        })
+        .unwrap();
+    assert_eq!(local.claims_for(subject, Some("harness.usage")).unwrap().len(), 2, "the end replicates the last");
+    assert_eq!(total(start + 40 * minute), Some(20));
+    assert_eq!(total(start + 20 * minute), Some(1), "replicated, the hour's snapshots are what every member reads");
+}
+
 #[test]
 fn usage_period_keeps_price_versions_separate_without_repricing_the_baseline() {
     let local = Store::open_memory("host-one").unwrap();
@@ -2266,15 +2336,15 @@ fn response_spend_is_priced_and_kept_apart_by_account_and_step() {
     // leave the previous step's last totals pending behind the next step's.
     let replicated = local.claims_for(subject, Some("harness.usage")).unwrap();
     assert_eq!(replicated.len(), 3, "{replicated:#?}");
-    // The local model's second response waits for the next interval, or for the harness
-    // to stop working.
+    // The local model's second response waits for its hour to be over, or for the seat to
+    // end; a turn end no longer replicates it. The host's reads below still count it.
     observed("ready", "spend-idle");
     assert_eq!(
         local
             .claims_for(subject, Some("harness.usage"))
             .unwrap()
             .len(),
-        4
+        3
     );
 
     let rows = local

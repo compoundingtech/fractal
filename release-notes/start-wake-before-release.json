@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A finished runtime start marks what it changed and wakes the reconciler before it stops counting as running, so nothing that waited for the start goes on without that wake",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "The start's result is persisted first, as before. Only the order of its last three steps changes: mark the subject, wake the reconciler, then leave the set of running starts. The waiter is the test-support single-pass path. The real loop does not wait, so in production the only effect is that a pass woken by the completion may still see the start in that set briefly, and a finished start is never treated as orphaned."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "An older build leaves the set first."}
+}

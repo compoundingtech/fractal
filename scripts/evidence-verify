@@ -80,6 +80,19 @@ def git(repo, *args, stdin=None, config=(), env=None):
     return done.stdout
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for extracted base tools.
+def config_path(repo, revision, legacy):
+    preferred = legacy.replace('.st/', '.fractal/', 1)
+    listing = git(repo, 'ls-tree', '-z', '--full-tree', revision, '--', preferred, legacy)
+    names = {entry.partition(b'\t')[2].decode() for entry in listing.split(b'\0') if entry}
+    return preferred if preferred in names else legacy if legacy in names else None
+
+
+def config_blob(repo, revision, legacy):
+    path = config_path(repo, revision, legacy)
+    return git(repo, 'show', '--end-of-options', f'{revision}:{path or legacy}')
+
+
 POLICY_KEYS = {'version', 'checks'}
 CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s', 'enforce', 'inputs', 'sample_one_in', 'require', 'events'}
 REQUIRE_MODES = ('off', 'shadow', 'reject')
@@ -87,7 +100,8 @@ CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 PATH_PART = re.compile(r'[A-Za-z0-9._@+=,~#-]+')
 SELECTOR = re.compile(r'jobs\.[A-Za-z0-9_-]+|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*')
 MAX_INPUTS = 300
-KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels', 'by_level', 'input_order', 'shard_inputs'}
+KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels', 'by_level', 'input_order', 'shard_inputs',
+             'base_inputs'}
 SHARD_KEYS = {'count', 'results', 'pull_request_count', 'index'}
 LEVEL_KEYS = {'command', 'required_inputs', 'bind_inputs', 'events', 'lane'}
 EVENTS = ('pull_request', 'merge_group')
@@ -126,6 +140,26 @@ def checked_value_rules(rule, where):
             raise Failure('error', f'skip policy for {where}: shard_inputs needs count and results input names, an optional '
                           'pull_request_count from 1 to 16 and an optional index input name')
     return {key: list(values) for key, values in order.items()}, (dict(shards) if shards is not None else None)
+
+
+def checked_base_inputs(rule, where):
+    """`base_inputs` maps an input name to a file whose content at the accepted base the verdict depends on, though it is not in the tree
+    (linux-clippy's ratchet reads the base's .github/clippy-baseline.json). A note covers a run only when its value is the sha256 of that
+    file at this run's base, or `absent` when the base has none; the verifier computes the run's value itself (base_input_values)."""
+    base = rule.get('base_inputs', {})
+    if not (isinstance(base, dict) and all(isinstance(k, str) and k and isinstance(v, str) and v for k, v in base.items())):
+        raise Failure('error', f'skip policy for {where}: base_inputs maps an input name to a path')
+    return {key: declared_paths([path], f'skip policy for {where}: base_inputs')[0] for key, path in base.items()}
+
+
+def base_input_values(repo, base, rules):
+    """{input: sha256 of its file at `base`, or 'absent'} for every base_inputs entry of the check's kinds."""
+    values = {}
+    for rule in (rules or {}).get('kinds', {}).values():
+        for key, path in rule.get('base_inputs', {}).items():
+            code, data = no_lazy(repo, 'show', '--end-of-options', f'{base}:{path}')
+            values[key] = hashlib.sha256(data).hexdigest() if code == 0 else 'absent'
+    return values
 
 
 def policy_rules(text, check, repository):
@@ -182,6 +216,7 @@ def policy_rules(text, check, repository):
             raise Failure('error', f'skip policy for {check}: kind {kind!r} is not valid')
         command, required, bind = checked_command_inputs(rule, f'{check}/{kind}')
         order, shards = checked_value_rules(rule, f'{check}/{kind}')
+        base_inputs = checked_base_inputs(rule, f'{check}/{kind}')
         prefix = rule.get('runner_prefix')
         kind_levels = rule.get('trust_levels')
         if kind_levels is not None and not (isinstance(kind_levels, list) and kind_levels
@@ -222,7 +257,7 @@ def policy_rules(text, check, repository):
                        'by_level': by_level,
                        # Values, not just presence: the note's value must cover the run's (input_order), and a sharded job's
                        # inputs must name every shard as a success (shard_inputs). Whatever the signer level.
-                       'input_order': order, 'shard_inputs': shards}
+                       'input_order': order, 'shard_inputs': shards, 'base_inputs': base_inputs}
     return {'kinds': kinds, 'trust_levels': tuple(levels), 'max_age_s': max_age, 'enforce': enforce,
             'inputs': inputs, 'sample_one_in': sample, 'require': require,
             'events': list(check_events) if check_events is not None else None}
@@ -239,6 +274,13 @@ def value_checks(rule, inputs, run_inputs, attempts):
             raise Failure('wrong_input', f'record input {key} is {note_value!r}, not one of {", ".join(order)}', attempts=attempts)
         if order.index(note_value) > order.index(run_value):
             raise Failure('wrong_input', f'record input {key}={note_value} does not cover this run\'s {key}={run_value}',
+                          attempts=attempts)
+    for key in rule.get('base_inputs', {}):
+        run_value, note_value = run_inputs.get(key), inputs.get(key)
+        if not run_value:
+            raise Failure('no_run_input', f'the accepted base\'s {key} is not known, so no record can cover it', attempts=attempts)
+        if note_value != run_value:
+            raise Failure('wrong_input', f'record input {key}={note_value} is not the accepted base\'s {key}={run_value}',
                           attempts=attempts)
     shards = rule.get('shard_inputs')
     if shards:
@@ -478,8 +520,24 @@ def job_needs(lines):
     return []
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — selectors read the selected layout at this exact tree.
+def selector_item(repo, tree, item):
+    path, separator, selector = item.partition('::')
+    if separator and path.startswith(('.st/', '.fractal/')):
+        legacy = path.replace('.fractal/', '.st/', 1)
+        path = config_path(repo, tree, legacy)
+        return f'{path}::{selector}' if path is not None else None
+    return item
+
+
 def selected(repo, tree, item):
-    """The canonical bytes `item` (PATH::SELECTOR) selects in `tree`, or None when the file or the entry is not there."""
+    """Canonical selected bytes, using the same tree's configuration layout; None for an absent file or entry."""
+    resolved = selector_item(repo, tree, item)
+    return selected_content(repo, tree, resolved) if resolved is not None else None
+
+
+def selected_content(repo, tree, item):
+    """Read an already resolved PATH::SELECTOR without changing its identity."""
     path, _, selector = item.partition('::')
     if not git(repo, 'ls-tree', '--full-tree', tree, '--', path).strip():
         return None
@@ -515,7 +573,8 @@ def project(repo, tree, paths):
     newline or any other byte in a name cannot turn one entry into two; symlinks and gitlinks keep their mode."""
     plain = [p for p in paths if not p.startswith('!') and '::' not in p]
     excluded = [p[1:].encode() for p in paths if p.startswith('!')]
-    chosen = sorted(p for p in paths if '::' in p)
+    chosen = sorted({resolved for p in paths if '::' in p
+                     for resolved in [selector_item(repo, tree, p)] if resolved is not None})
     if '.' in plain and not excluded and not chosen:
         return tree
     listing = git(repo, 'ls-tree', '-r', '-z', '--full-tree', tree, *(['--', *plain] if '.' not in plain else [])) if plain else b''
@@ -533,7 +592,7 @@ def project(repo, tree, paths):
     for item in chosen:
         # One selected part of a shared CI file is an entry of its own, named PATH::SELECTOR, whose blob is the canonical bytes of that
         # part: the key stays a git tree id, and a change elsewhere in the file leaves it alone.
-        content = selected(repo, tree, item)
+        content = selected_content(repo, tree, item)
         if content is not None:
             blob = git(repo, 'hash-object', '--stdin', stdin=content).decode().strip()
             entries.append(f'100644 {blob} 0\t'.encode() + item.encode() + b'\0')
@@ -869,9 +928,10 @@ def signed_for_crate(statement, crate, key, needs_tests=False):
 def zero_test_crates(repo, policy_base):
     """The crates the accepted base lists under `no_tests` (reviewed: they have no test to run). Empty when the base has no such list;
     a list that is not an array of crate names is a verifier error, never an empty allowance by accident."""
-    code, data = no_lazy(repo, 'show', '--end-of-options', f'{policy_base}:.st/rust-test-inputs.json')
-    if code != 0:
+    path = config_path(repo, policy_base, '.st/rust-test-inputs.json')
+    if path is None:
         return set()
+    data = git(repo, 'show', '--end-of-options', f'{policy_base}:{path}')
     try:
         listed = json.loads(data.decode()).get('no_tests', [])
     except (ValueError, AttributeError, UnicodeDecodeError):
@@ -963,114 +1023,176 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
         with_check = [c for c in with_check if c not in parts]
         if not with_check:
             raise Failure('no_record', f'check {check} has only passing shard parts, no record for the whole run', attempts=len(parts))
+    # Which record decides (#4241). A crate's (or a check's) input key is shared by every tree with the same inputs, so the records found
+    # for it come from many trees and signers. The newest used to decide and only then be validated, so a newer pass that could never
+    # cover THIS tree hid an older one that does: CI's per-crate notes at `fleet`, a level no kind of rust-tests accepts, and host notes
+    # signed for another tree's lane definition. Now the newest pass that validates decides. What can cover a tree is unchanged: every rule
+    # in `judge` applies to that record. Failures stay conservative: a failing record of any level dated after the deciding pass (within
+    # FUTURE_SKEW) refuses, whatever tree's lane it was signed for. A newer pass refused for any other reason still decides, and is refused,
+    # as before (a signer cannot hide a newer claim of another kind behind its own older grant). With no pass that validates, the newest
+    # record decides as before. `decided_by` and `skipped_newer` (one entry per newer pass passed over, and why) say how the choice was made.
+    if rules is not None:
+        kind_levels = [rule['trust_levels'] if rule['trust_levels'] else rules['trust_levels'] for rule in rules['kinds'].values()]
+        accepted = None if any(levels is None for levels in kind_levels) else {level for levels in kind_levels for level in levels}
+    else:
+        accepted = None if trust_levels is None else set(trust_levels)
+    attempts = len(with_check)
+    lanes = []
+
+    def lane_once():
+        if not lanes:
+            lanes.append(level_lane())
+        return lanes[0]
+
+    def level_of(entry):
+        return entry[2].split('/', 1)[0]
+
+    def judge(chosen, command=command, kinds=kinds, bind=bind, max_age=max_age, runner_prefix=runner_prefix, trust_levels=trust_levels,
+              lane=lane):
+        commit, statement, principal = chosen
+        predicate = statement['predicate']
+        observed = predicate['observed']
+        result = observed['checks'][check]
+        if failed(chosen) and shard_part(rules, statement):
+            raise Failure('check_failed', f'a shard of the latest run of check {check} exited {result["exit_code"]}', attempts=attempts)
+        if predicate['tier'] != 'full':
+            raise Failure('untrusted_tier', f'latest record has tier {predicate["tier"]}, not full', attempts=attempts)
+        kind = kind_of(observed['runner'])
+        required_inputs = ()
+        rule, events = None, None
+        if rules is not None:
+            # The repository's skip policy decides everything about this record, by its kind.
+            rule = rules['kinds'].get(kind) if kind else None
+            kinds = (kind,) if rule else ()
+            if rule:
+                command, runner_prefix, bind = rule['command'], rule['runner_prefix'], list(rule['bind_inputs'].items())
+                required_inputs = rule['required_inputs']
+            trust_levels = (rule['trust_levels'] if rule and rule['trust_levels'] else rules['trust_levels'])
+            max_age = rules['max_age_s']
+        if kind is None or kind not in kinds:
+            raise Failure('unsupported_kind', f'runner {observed["runner"]!r} is not one of {", ".join(kinds)}',
+                          attempts=attempts)
+        level = principal.split('/', 1)[0]
+        if trust_levels is not None and level not in trust_levels:
+            raise Failure('untrusted_level', f'signer trust level {level!r} is not accepted for this check',
+                          attempts=attempts)
+        # A signer level may be held to its own command, required inputs and events (by_level in the kind's rule).
+        override = rule['by_level'].get(level) if rule else None
+        lane_mode = override.get('lane') if override else None
+        if override:
+            command, bind, required_inputs, events = override['command'], list(override['bind_inputs'].items()), override['required_inputs'], override['events']
+            if override.get('lane') and lane is None:
+                if level_lane is None:
+                    raise Failure('no_lane', f'signer level {level!r} must be held to a lane definition, and none was given', attempts=attempts)
+                lane = lane_once()
+                if lane is None:
+                    raise Failure('no_lane', f'no lane definition for check {check} at the accepted base', attempts=attempts)
+        if runner_prefix is not None and not observed['runner'].startswith(runner_prefix):
+            raise Failure('wrong_runner', 'record is for a different repository or producer', attempts=attempts)
+        # A future-dated record is refused whether or not an age limit is set: otherwise a trusted
+        # signer's future-dated pass would stay the latest record and hide every later real failure.
+        moment = parse_time(predicate['observed_at'])
+        current = now or datetime.now(timezone.utc)
+        if moment > current + FUTURE_SKEW:
+            raise Failure('future_dated', 'record claims to be observed in the future', attempts=attempts)
+        if max_age is not None and current - moment > timedelta(seconds=max_age):
+            raise Failure('too_old', f'record is older than {max_age} seconds', attempts=attempts)
+        inputs = observed.get('inputs', {})
+        for key in required_inputs:
+            value = inputs.get(key)
+            if not isinstance(value, str) or not value:
+                raise Failure('missing_input', f'record lacks required input {key}', attempts=attempts)
+        if result['exit_code'] != 0:
+            raise Failure('check_failed', f'latest record for check {check} exited {result["exit_code"]}',
+                          attempts=attempts)
+        if command is not None and result['command'] != command:
+            raise Failure('wrong_command', f'latest record for check {check} ran a different command',
+                          attempts=attempts)
+        if rule:
+            value_checks(rule, observed.get('inputs', {}), run_inputs or {}, attempts)
+        if lane is not None:
+            # The scripts that decide what the lane runs must be the accepted base's, byte for byte, in the tree that was signed; and the
+            # note must carry the digest of that definition, so a note made against other scripts or another argv is not this lane's.
+            # A level held to the tree's own definition (lane "tree") may edit the lane: its note must then carry the edited definition's digest.
+            expected = lane['sha256']
+            if lane['changed'] and lane_mode == 'tree':
+                expected = lane['tree_sha256']
+            elif lane['changed']:
+                raise Failure('definition_changed', 'the lane definition differs between the signed tree and the accepted base: '
+                              + ', '.join(lane['changed'][:5]) + (' ...' if len(lane['changed']) > 5 else ''), attempts=attempts)
+            recorded_definition = observed.get('inputs', {}).get('lane_definition_sha256')
+            if recorded_definition != expected:
+                raise Failure('wrong_definition', 'the record does not carry the digest of the lane definition '
+                              + ('this tree defines' if expected != lane['sha256'] else 'at the accepted base'), attempts=attempts)
+        inputs = observed.get('inputs', {})
+        for key, path in bind:
+            actual = blob_sha256(repo, tree, path)
+            recorded = inputs.get(key)
+            # Both must exist: a missing file and a missing key must never count as equal.
+            if actual is None or not isinstance(recorded, str) or not recorded or recorded != actual:
+                raise Failure('wrong_input', f'record input {key} does not match {path} in this tree',
+                              attempts=attempts)
+        return {
+            'satisfied': True, 'tree': tree, 'check': check, 'record': commit,
+            'kind': kind, 'signer': principal, 'trust_level': level,
+            'tier': predicate['tier'], 'observed_at': predicate['observed_at'],
+            'command': result['command'], 'inputs': inputs, 'attempts': attempts, 'policy': rules is not None,
+            'max_age_s': rules['max_age_s'] if rules is not None else max_age,
+            'enforce': rules['enforce'] if rules is not None else False,
+            'match': 'tree' if statement['subject'][0]['digest']['gitTree'] == tree else 'inputs',
+            'matched_tree': statement['subject'][0]['digest']['gitTree'], 'source_inputs': input_key,
+            'sample_one_in': rules['sample_one_in'] if rules is not None else 1,
+            'events': narrowed_events(rules.get('events') if rules is not None else None, events),
+        }
+
+
+    skipped = []
+
+    def first_valid(candidates):
+        """(record, result) of the newest candidate pass that validates, or None; a pass refused for a reason other than being made
+        for something else decides, and is raised."""
+        for candidate in candidates:
+            if accepted is not None and level_of(candidate) not in accepted:
+                note = f'{candidate[0]} {level_of(candidate)} level_not_accepted'
+            else:
+                try:
+                    return candidate, judge(candidate)
+                except Failure as failure:
+                    if failure.reason != 'wrong_definition':  # only a pass signed for another tree's lane definition is passed over
+                        failure.extra.update(decided_by=candidate[0], skipped_newer=skipped)
+                        raise
+                    note = f'{candidate[0]} {level_of(candidate)} {failure.reason}'
+            if note not in skipped:
+                skipped.append(note)
+        return None
+
+    def failed_after(candidate):
+        return [c for c in with_check if failed(c) and dated(c) >= dated(candidate) - FUTURE_SKEW]
+
+    order = sorted((c for c in with_check if not failed(c)), key=dated, reverse=True)
+    # Preferred levels (the gate's --prefer-levels): their newest valid pass decides, unless a failure is dated after it.
+    found = first_valid([c for c in order if level_of(c) in prefer_levels]) if prefer_levels else None
+    if found is None or failed_after(found[0]):
+        found = first_valid(order)
+    if found is not None:
+        candidate, result = found
+        later = failed_after(candidate)
+        if later:
+            failure = max(later, key=dated)
+            raise Failure('check_failed', f'record {failure[0]} ({level_of(failure)}) for check {check} failed, dated after the pass that '
+                          f'would decide ({candidate[0]})', attempts=attempts, decided_by=failure[0], skipped_newer=skipped)
+        result.update(decided_by=candidate[0], skipped_newer=skipped)
+        return result
     chosen = max(with_check, key=lambda c: (dated(c), failed(c)))
     if not failed(chosen):
         shadowing = [c for c in with_check if failed(c) and dated(c) >= dated(chosen) - FUTURE_SKEW]
         if shadowing:
             chosen = max(shadowing, key=dated)
-    if prefer_levels and not failed(chosen):
-        preferred = [c for c in with_check if not failed(c) and c[2].split('/', 1)[0] in prefer_levels]
-        if preferred:
-            best = max(preferred, key=dated)
-            if not any(failed(c) and dated(c) >= dated(best) - FUTURE_SKEW for c in with_check):
-                chosen = best
-    commit, statement, principal = chosen
-    predicate = statement['predicate']
-    observed = predicate['observed']
-    result = observed['checks'][check]
-    attempts = len(with_check)
-    if failed(chosen) and shard_part(rules, statement):
-        raise Failure('check_failed', f'a shard of the latest run of check {check} exited {result["exit_code"]}', attempts=attempts)
-    if predicate['tier'] != 'full':
-        raise Failure('untrusted_tier', f'latest record has tier {predicate["tier"]}, not full', attempts=attempts)
-    kind = kind_of(observed['runner'])
-    required_inputs = ()
-    rule, events = None, None
-    if rules is not None:
-        # The repository's skip policy decides everything about this record, by its kind.
-        rule = rules['kinds'].get(kind) if kind else None
-        kinds = (kind,) if rule else ()
-        if rule:
-            command, runner_prefix, bind = rule['command'], rule['runner_prefix'], list(rule['bind_inputs'].items())
-            required_inputs = rule['required_inputs']
-        trust_levels = (rule['trust_levels'] if rule and rule['trust_levels'] else rules['trust_levels'])
-        max_age = rules['max_age_s']
-    if kind is None or kind not in kinds:
-        raise Failure('unsupported_kind', f'runner {observed["runner"]!r} is not one of {", ".join(kinds)}',
-                      attempts=attempts)
-    level = principal.split('/', 1)[0]
-    if trust_levels is not None and level not in trust_levels:
-        raise Failure('untrusted_level', f'signer trust level {level!r} is not accepted for this check',
-                      attempts=attempts)
-    # A signer level may be held to its own command, required inputs and events (by_level in the kind's rule).
-    override = rule['by_level'].get(level) if rule else None
-    lane_mode = override.get('lane') if override else None
-    if override:
-        command, bind, required_inputs, events = override['command'], list(override['bind_inputs'].items()), override['required_inputs'], override['events']
-        if override.get('lane') and lane is None:
-            if level_lane is None:
-                raise Failure('no_lane', f'signer level {level!r} must be held to a lane definition, and none was given', attempts=attempts)
-            lane = level_lane()
-            if lane is None:
-                raise Failure('no_lane', f'no lane definition for check {check} at the accepted base', attempts=attempts)
-    if runner_prefix is not None and not observed['runner'].startswith(runner_prefix):
-        raise Failure('wrong_runner', 'record is for a different repository or producer', attempts=attempts)
-    # A future-dated record is refused whether or not an age limit is set: otherwise a trusted
-    # signer's future-dated pass would stay the latest record and hide every later real failure.
-    moment = parse_time(predicate['observed_at'])
-    current = now or datetime.now(timezone.utc)
-    if moment > current + FUTURE_SKEW:
-        raise Failure('future_dated', 'record claims to be observed in the future', attempts=attempts)
-    if max_age is not None and current - moment > timedelta(seconds=max_age):
-        raise Failure('too_old', f'record is older than {max_age} seconds', attempts=attempts)
-    inputs = observed.get('inputs', {})
-    for key in required_inputs:
-        value = inputs.get(key)
-        if not isinstance(value, str) or not value:
-            raise Failure('missing_input', f'record lacks required input {key}', attempts=attempts)
-    if result['exit_code'] != 0:
-        raise Failure('check_failed', f'latest record for check {check} exited {result["exit_code"]}',
-                      attempts=attempts)
-    if command is not None and result['command'] != command:
-        raise Failure('wrong_command', f'latest record for check {check} ran a different command',
-                      attempts=attempts)
-    if rule:
-        value_checks(rule, observed.get('inputs', {}), run_inputs or {}, attempts)
-    if lane is not None:
-        # The scripts that decide what the lane runs must be the accepted base's, byte for byte, in the tree that was signed; and the
-        # note must carry the digest of that definition, so a note made against other scripts or another argv is not this lane's.
-        # A level held to the tree's own definition (lane "tree") may edit the lane: its note must then carry the edited definition's digest.
-        expected = lane['sha256']
-        if lane['changed'] and lane_mode == 'tree':
-            expected = lane['tree_sha256']
-        elif lane['changed']:
-            raise Failure('definition_changed', 'the lane definition differs between the signed tree and the accepted base: '
-                          + ', '.join(lane['changed'][:5]) + (' ...' if len(lane['changed']) > 5 else ''), attempts=attempts)
-        recorded_definition = observed.get('inputs', {}).get('lane_definition_sha256')
-        if recorded_definition != expected:
-            raise Failure('wrong_definition', 'the record does not carry the digest of the lane definition '
-                          + ('this tree defines' if expected != lane['sha256'] else 'at the accepted base'), attempts=attempts)
-    inputs = observed.get('inputs', {})
-    for key, path in bind:
-        actual = blob_sha256(repo, tree, path)
-        recorded = inputs.get(key)
-        # Both must exist: a missing file and a missing key must never count as equal.
-        if actual is None or not isinstance(recorded, str) or not recorded or recorded != actual:
-            raise Failure('wrong_input', f'record input {key} does not match {path} in this tree',
-                          attempts=attempts)
-    return {
-        'satisfied': True, 'tree': tree, 'check': check, 'record': commit,
-        'kind': kind, 'signer': principal, 'trust_level': level,
-        'tier': predicate['tier'], 'observed_at': predicate['observed_at'],
-        'command': result['command'], 'inputs': inputs, 'attempts': attempts, 'policy': rules is not None,
-        'max_age_s': rules['max_age_s'] if rules is not None else max_age,
-        'enforce': rules['enforce'] if rules is not None else False,
-        'match': 'tree' if statement['subject'][0]['digest']['gitTree'] == tree else 'inputs',
-        'matched_tree': statement['subject'][0]['digest']['gitTree'], 'source_inputs': input_key,
-        'sample_one_in': rules['sample_one_in'] if rules is not None else 1,
-        'events': narrowed_events(rules.get('events') if rules is not None else None, events),
-    }
-
+    try:
+        return judge(chosen)
+    except Failure as failure:
+        failure.extra.update(decided_by=chosen[0], skipped_newer=skipped)
+        raise
 
 def sibling(name):
     """A script that sits next to this one (the gate copies the accepted base's both)."""
@@ -1176,14 +1298,14 @@ def verify_members(repo, tree, check, keys, command, kinds, bind, max_age, runne
 
 def read_policy(repo, commit):
     try:
-        return git(repo, 'show', '--end-of-options', f'{commit}:{POLICY_PATH}').decode()
+        return config_blob(repo, commit, POLICY_PATH).decode()
     except (Failure, UnicodeDecodeError):
         raise Failure('no_policy', f'no readable skip policy at {commit}:{POLICY_PATH}')
 
 
 def read_lanes(repo, commit):
     try:
-        return git(repo, 'show', '--end-of-options', f'{commit}:{LANES_PATH}').decode()
+        return config_blob(repo, commit, LANES_PATH).decode()
     except (Failure, UnicodeDecodeError):
         raise Failure('error', f'no readable lane file at {commit}:{LANES_PATH}')
 
@@ -1205,7 +1327,11 @@ def lane_for(repo, tree, lanes, check, lane_base=None):
         code, _ = no_lazy(repo, 'merge-base', '--is-ancestor', lane_base, base)
         if code != 0:
             raise Failure('error', f'the lane base {lane_base[:12]} is not an ancestor of the accepted base')
-        code, shown = no_lazy(repo, 'show', f'{lane_base}:{LANES_PATH}')
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — resolve at the branch point, not the checkout.
+        path = config_path(repo, lane_base, LANES_PATH)
+        code, shown = no_lazy(repo, 'show', f'{lane_base}:{path or LANES_PATH}')
+        if path is not None and code != 0:
+            raise Failure('error', f'could not read lane file at {lane_base}:{path}')
         here = lane_entry(shown.decode(errors='replace'), check) if code == 0 else None
         if here is None or here != lane_entry(text, check):
             raise Failure('definition_changed', f'lane {check} in {LANES_PATH} differs between the branch point and the accepted base')
@@ -1441,7 +1567,7 @@ def main(argv):
             rules = None
             if args.policy_from:
                 try:
-                    text = git(args.repo, 'show', '--end-of-options', f'{args.policy_from}:{POLICY_PATH}').decode()
+                    text = config_blob(args.repo, args.policy_from, POLICY_PATH).decode()
                 except (Failure, UnicodeDecodeError):
                     raise Failure('no_policy', f'no readable skip policy at {args.policy_from}:{POLICY_PATH}')
                 rules = policy_rules(text, args.check, args.repository)
@@ -1449,12 +1575,14 @@ def main(argv):
                 paths = declared_paths([p for p in args.paths.split(',') if p], '--paths')
             else:
                 paths = rules['inputs'] if rules is not None else None
+            # base_inputs: the values a signer records for the policy's base_inputs (the same ones this verifier will compare).
             print(json.dumps({'source_inputs': project(args.repo, tree, paths) if paths else None,
-                              'paths': list(paths) if paths else None, 'tree': tree, 'check': args.check}, indent=2))
+                              'paths': list(paths) if paths else None, 'tree': tree, 'check': args.check,
+                              'base_inputs': base_input_values(args.repo, args.policy_from, rules) if rules is not None else {}}, indent=2))
             return 0
         if args.keys_from:
             keyfile = tempfile.NamedTemporaryFile(suffix='.keys')
-            keyfile.write(git(args.repo, 'show', '--end-of-options', f'{args.keys_from}:{KEYS_PATH}'))
+            keyfile.write(config_blob(args.repo, args.keys_from, KEYS_PATH))
             keyfile.flush()
             keys = keyfile.name
         else:
@@ -1470,7 +1598,7 @@ def main(argv):
         rules = None
         if args.policy_from:
             try:
-                text = git(args.repo, 'show', '--end-of-options', f'{args.policy_from}:{POLICY_PATH}').decode()
+                text = config_blob(args.repo, args.policy_from, POLICY_PATH).decode()
             except (Failure, UnicodeDecodeError):
                 raise Failure('no_policy', f'no readable skip policy at {args.policy_from}:{POLICY_PATH}')
             rules = policy_rules(text, args.check, args.repository)
@@ -1481,10 +1609,13 @@ def main(argv):
             if not sep or not key:
                 raise Failure('error', f'--run-input must be KEY=VALUE, not {pair!r}')
             run_inputs[key] = value
+        if rules is not None:  # computed here from the accepted base, never taken from the caller
+            run_inputs.update(base_input_values(args.repo, args.policy_from, rules))
         log_keys = os.path.abspath(args.log_keys) if args.log_keys else None
         if args.log_keys_from:
-            code, text = no_lazy(args.repo, 'show', '--end-of-options', f'{args.log_keys_from}:{LOG_KEY_PATH}')
-            if code == 0:
+            log_path = config_path(args.repo, args.log_keys_from, LOG_KEY_PATH)
+            if log_path is not None:
+                text = git(args.repo, 'show', '--end-of-options', f'{args.log_keys_from}:{log_path}')
                 logfile = tempfile.NamedTemporaryFile(suffix='.log-keys')
                 logfile.write(text)
                 logfile.flush()

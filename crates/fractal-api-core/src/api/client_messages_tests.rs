@@ -378,6 +378,8 @@ async fn collect_sql_pages(
     query: ClientListQuery,
     request_time: u128,
 ) -> Vec<Value> {
+    // Otherwise a pending message cuts the first page below the snapshot it was asked for.
+    publish_selectors(state);
     let snapshot = new_client_snapshot(state);
     let mut continuation = query.clone();
     let mut items = Vec::new();
@@ -545,6 +547,7 @@ async fn sql_message_pages_bound_complete_wire_bytes_and_traverse_maximum_conten
         for index in 0..201 {
             append_byte_budget_message(&state.store, index, &content, Some("image \"λ\"\\\n.png"));
         }
+        publish_selectors(&state);
         let now = client_now_ms();
         let expected = client_message_resources_at(&state.store, None, true, None, now).unwrap();
         let snapshot = new_client_snapshot(&state);
@@ -660,6 +663,7 @@ async fn sql_message_pages_preserve_snapshot_fields_and_delivery_age_after_write
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
     generated_fixture(&state.store, 29, 0);
+    publish_selectors(&state);
     let query = ClientListQuery { history: true, limit: Some(3), ..Default::default() };
     let now = client_now_ms();
     let expected = client_message_resources_at(&state.store, None, true, None, now).unwrap();
@@ -707,6 +711,7 @@ async fn sql_message_cursors_reject_changed_filters_and_limits() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
     generated_fixture(&state.store, 23, 0);
+    publish_selectors(&state);
     let query = ClientListQuery { history: true, limit: Some(1), ..Default::default() };
     let snapshot = new_client_snapshot(&state);
     let (_, Json(first)) = client_messages_sql_page(&state, snapshot.clone(), &query).await.unwrap();
@@ -756,6 +761,7 @@ async fn sql_message_cursor_refreshes_presence_but_keeps_first_delivery_age() {
             ]),
         );
     }
+    publish_selectors(&state);
     let now = client_now_ms();
     let query = ClientListQuery { limit: Some(1), ..Default::default() };
     let (Extension(snapshot), Json(first)) = client_messages_sql_page_at(

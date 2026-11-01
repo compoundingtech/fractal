@@ -252,6 +252,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': return [options];
             case 'arrangements.list': return ['person/example', {}, options];
             case 'arrangements.get': return ['example', 'arrangement-id', options];
+            case 'arrangements.memberships': return ['example', 'arrangement-id', 'person/example', {}, options];
             case 'conversation.search': return ['needle', {}, options];
             case 'resources.list': return [{}, {}, options];
             case 'agent-declaration.get': return ['agent/example', undefined, false, options];
@@ -270,8 +271,13 @@ test('every HTTP API keeps cancellation in transport options, including all mani
                 return [{}, options];
         }
     };
+    const readMethods = {
+        'capabilities.get': 'capabilities',
+        'harness-questions.list': 'harnessQuestions',
+        'harness-questions.get': 'harnessQuestion',
+    };
     const cases = manifest.reads.map(read => [
-        read.id === 'capabilities.get' ? 'capabilities' : methodName(read.id),
+        readMethods[read.id] ?? methodName(read.id),
         options => readArguments(read.id, options),
     ]);
     cases.push(...Object.keys(manifest.actions).map(id => [methodName(id), options => [{}, options]]));
@@ -634,6 +640,23 @@ test('conversation stream opens at a cursor and delivers bounded changes', async
 function collectionSocket() {
     return { onopen: null, onmessage: null, onclose: null, onerror: null, sent: [], closed: [], send(text) { this.sent.push(JSON.parse(text)); }, close(code) { this.closed.push(code); } };
 }
+
+test('agents publication subscription serializes exact opt-in and keeps golden frames intact', async () => {
+    const socket = collectionSocket();
+    const frames = [];
+    const client = new FractalClient({ baseUrl: 'https://example.test' });
+    const stream = await client.collectionStream({ onFrame: frame => frames.push(frame), socket: () => socket });
+    stream.subscribeAgentsPublication('roster');
+    socket.onopen();
+    assert.deepEqual(socket.sent, [require('../../../docs/st3/client-v0/fixtures/agents-publication-subscribe.json')]);
+    for (const name of ['chunk', 'changes', 'row-too-large']) {
+        const wire = require(`../../../docs/st3/client-v0/fixtures/agents-publication-${name}.json`);
+        socket.onmessage({ data: JSON.stringify(wire) });
+        assert.deepEqual(frames.at(-1), wire);
+        if (wire.kind !== 'error') assert.throws(() => applyWindow(undefined, wire), /atomic/);
+    }
+    stream.close();
+});
 const mission = (id, title) => ({ kind: 'mission', id, revision: `${id}@1`, updated_at: snapshot.created_at, title, state: 'running', runs: [], run_generations: {}, mission_revision: 'r' });
 
 test('collection stream holds commands until the socket opens and passes frames through', async () => {
@@ -885,6 +908,23 @@ test('applyWindow keeps a window in the order each frame names', () => {
     assert.equal(window.hasMore, false);
     assert.equal(window.snapshot.id, 'snapshot/later');
     assert.equal(applyWindow(window, { kind: 'resync', id: 'm' }), window);
+    assert.equal('membership' in window, false);
+});
+
+test('applyWindow keeps the newest membership state even when the window is unchanged', () => {
+    const fixture = require('../../../fixtures/clients/ordered-memberships-v2.json');
+    let window = applyWindow(undefined, fixture.snapshot_frame);
+    assert.deepEqual(window.membership, fixture.snapshot_frame.membership);
+    window = applyWindow(window, fixture.changes_frame);
+    assert.deepEqual(window.items.map(item => item.id), ['mission/m1']);
+    assert.deepEqual(window.membership, fixture.changes_frame.membership);
+    const before = window;
+    window = applyWindow(window, fixture.outside_window_changes_frame);
+    assert.deepEqual(window.items, before.items);
+    assert.equal(window.hasMore, before.hasMore);
+    assert.deepEqual(window.membership, fixture.outside_window_changes_frame.membership);
+    assert(window.membership.changed_index > before.membership.changed_index);
+    assert.equal(applyWindow(window, { kind: 'resync', id: 'sidebar' }), window);
 });
 
 test('glass methods preserve structure, null creation base, and idempotency headers', async () => {

@@ -143,7 +143,8 @@ scripts/review --author-family anthropic   # refuse a reviewer of the same model
 - It runs the agent CLI you have in a detached checkout of the head, read-only and confined to that checkout: the diff is untrusted
   input, and a prompt injected through it must not be able to read your signing key or a token and print it into a verdict that is
   posted on a pull request. claude runs with `Read`, `Grep` and `Glob` scoped to the checkout, no shell and no MCP servers; codex runs
-  in a permissions profile that can read only the checkout and its own install; omp can't scope its reads yet, so it is refused. A
+  in a permissions profile that can read only the checkout and its own install (it reads files through a shell in that profile, which cannot
+  write, reach the network or see anything outside the checkout, and its prompt says so: `"reads": "shell"` in `.st/review-harness.json`); omp can't scope its reads yet, so it is refused. A
   harness whose command does not carry this is refused, and a verdict that holds a private key, a token or the content of one of your
   credential files is not written. The deterministic risk score
   (`scripts/review-risk`) and the per-file patch-ids are computed by script from the diff; the model adds its own score, and the final

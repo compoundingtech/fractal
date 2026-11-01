@@ -1,6 +1,6 @@
-//! A person's glasses on this device, until the graph keeps them. The file holds what the graph
-//! does: each glass's name and its splits of tab groups, and nothing about focus or scroll
-//! beyond which glass was used last here.
+//! A person's glasses on this device, until the graph keeps them. Alongside each glass's name
+//! and splits of tab groups, this file keeps device-local identities, navigation history and
+//! the last view; those are not part of the graph's structure.
 
 use super::layout::{Group, Layout, Tab};
 use serde::{Deserialize, Serialize};
@@ -11,8 +11,8 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// 2: splits whose leaves are groups of tabs. 1 (tabs of splits) is read once and converted.
-const VERSION: u32 = 2;
+/// 3 adds device-local navigation history; versions 1 and 2 still load.
+const VERSION: u32 = 3;
 const MAX_BYTES: u64 = 1 << 20;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -24,6 +24,10 @@ pub struct Stored {
     /// Whether the Ctrl+S sidebar is shown here; unset, it is, as the old Fractal TUI's list was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar: Option<bool>,
+    #[serde(default)]
+    pub history: Vec<StoredPlace>,
+    #[serde(default)]
+    pub history_cursor: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -48,6 +52,28 @@ pub struct StoredView {
     pub focus: usize,
     /// Each group's shown tab as its strip counts them: in the first group, 0 is Home.
     pub current: Vec<usize>,
+}
+
+/// A content destination and the workspace location where it was shown.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPlace {
+    pub space: String,
+    /// Device-local destination identity; empty only in old history awaiting migration.
+    #[serde(default)]
+    pub group_id: String,
+    /// None for an empty group's Home, or in old history awaiting migration.
+    #[serde(default)]
+    pub tab_id: Option<String>,
+    /// Legacy positions retained to migrate version 3 history on open.
+    pub group: usize,
+    pub tab: usize,
+    pub pane: String,
+    /// The Inbox list keeps its selected card without changing the tab's pane kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
+    /// Monotonic device-local visit order, including back/forward visits.
+    #[serde(default)]
+    pub visited: u64,
 }
 
 /// Version 1: a glass was tabs, and each tab a tree of split panes.
@@ -95,6 +121,8 @@ fn from_v1(old: StoredV1) -> Stored {
     Stored {
         version: VERSION,
         sidebar: None,
+        history: Vec::new(),
+        history_cursor: 0,
         last: old.last,
         glasses: old
             .glasses
@@ -112,11 +140,11 @@ fn from_v1(old: StoredV1) -> Stored {
                             let mut title = tab.title;
                             tab.layout.panes().into_iter().map(move |pane| Tab {
                                 title: title.take(),
-                                pane,
+                                ..Tab::pane(pane)
                             })
                         })
                         .collect(),
-                    current: 0,
+                    ..Group::default()
                 }),
                 view: None,
             })
@@ -166,9 +194,7 @@ pub fn load(path: &Path) -> Stored {
         Some(1) => serde_json::from_slice::<StoredV1>(&bytes)
             .map(from_v1)
             .unwrap_or_default(),
-        Some(v) if v == u64::from(VERSION) => {
-            serde_json::from_slice::<Stored>(&bytes).unwrap_or_default()
-        }
+        Some(2 | 3) => serde_json::from_slice::<Stored>(&bytes).unwrap_or_default(),
         _ => Stored::default(),
     }
 }
@@ -214,19 +240,43 @@ mod tests {
             Side::Right,
             Group::of(Tab {
                 title: Some("the audit".into()),
-                pane: "mission:mission/example/audit".into(),
+                ..Tab::pane("mission:mission/example/audit")
             }),
         );
+        let empty = Group::default();
         let stored = Stored {
             version: VERSION,
             sidebar: None,
+            history: vec![
+                StoredPlace {
+                    space: "0190a1b2-0000-7000-8000-000000000002".into(),
+                    group_id: layout.groups()[1].id.clone(),
+                    tab_id: Some(layout.groups()[1].tabs[0].id.clone()),
+                    group: 1,
+                    tab: 0,
+                    pane: "mission:mission/example/audit".into(),
+                    selection: None,
+                    visited: 1,
+                },
+                StoredPlace {
+                    space: "0190a1b2-0000-7000-8000-000000000001".into(),
+                    group_id: empty.id.clone(),
+                    tab_id: None,
+                    group: 0,
+                    tab: 0,
+                    pane: "home:inbox".into(),
+                    selection: None,
+                    visited: 2,
+                },
+            ],
+            history_cursor: 0,
             last: Some("review".into()),
             glasses: vec![
                 StoredGlass {
                     id: "0190a1b2-0000-7000-8000-000000000001".into(),
                     revision: None,
                     name: "main".into(),
-                    layout: Layout::default(),
+                    layout: Layout::Group(empty),
                     view: None,
                 },
                 StoredGlass {
@@ -242,7 +292,26 @@ mod tests {
             ],
         };
         save(&path, &stored).unwrap();
-        assert_eq!(load(&path), stored);
+        let loaded = load(&path);
+        assert_eq!(loaded, stored);
+        // Structural equality deliberately ignores IDs, so check persistence explicitly.
+        for (before, after) in stored.glasses.iter().zip(&loaded.glasses) {
+            for (before, after) in before.layout.groups().iter().zip(after.layout.groups()) {
+                assert_eq!(after.id, before.id);
+                for (before, after) in before.tabs.iter().zip(&after.tabs) {
+                    assert_eq!(after.id, before.id);
+                }
+            }
+        }
+        assert_eq!(
+            loaded.history[0].group_id,
+            loaded.glasses[1].layout.groups()[1].id
+        );
+        assert_eq!(
+            loaded.history[0].tab_id.as_deref(),
+            Some(loaded.glasses[1].layout.groups()[1].tabs[0].id.as_str())
+        );
+        assert_eq!(loaded.history[1].tab_id, None);
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         // A file others can read is not trusted.
@@ -279,5 +348,55 @@ mod tests {
                 (None, "agent:agent/example/keeper"),
             ]
         );
+    }
+
+    #[test]
+    fn old_layouts_and_positional_history_load_before_identity_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("glasses.json");
+        for version in [2, 3] {
+            let mut old = serde_json::json!({
+                "version": version, "last": "main",
+                "glasses": [{
+                    "id": "glass-main", "name": "main",
+                    "layout": {"tabs": [{"pane": "agent:a"}]}
+                }]
+            });
+            if version == 3 {
+                old["history"] = serde_json::json!([{
+                    "space": "glass-main", "group": 0, "tab": 0, "pane": "agent:a"
+                }]);
+                old["history_cursor"] = serde_json::json!(0);
+            }
+            fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let loaded = load(&path);
+            assert_eq!(loaded.glasses.len(), 1);
+            let group = loaded.glasses[0].layout.groups()[0];
+            assert_eq!(
+                uuid::Uuid::parse_str(&group.id).unwrap().get_version_num(),
+                7
+            );
+            assert_eq!(
+                uuid::Uuid::parse_str(&group.tabs[0].id)
+                    .unwrap()
+                    .get_version_num(),
+                7
+            );
+            if version == 3 {
+                let place = &loaded.history[0];
+                assert!(place.group_id.is_empty());
+                assert_eq!(place.tab_id, None);
+                assert_eq!((place.group, place.tab), (0, 0));
+                assert_eq!(place.pane, "agent:a");
+            } else {
+                assert!(loaded.history.is_empty());
+            }
+            save(&path, &loaded).unwrap();
+            let reloaded = load(&path);
+            let restored = reloaded.glasses[0].layout.groups()[0];
+            assert_eq!(restored.id, group.id);
+            assert_eq!(restored.tabs[0].id, group.tabs[0].id);
+        }
     }
 }

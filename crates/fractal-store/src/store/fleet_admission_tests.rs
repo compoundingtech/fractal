@@ -788,6 +788,76 @@ fn a_rejoined_incarnation_starts_above_its_floor_and_the_old_key_stays_fenced() 
     ));
 }
 
+#[test]
+fn a_fresh_member_admits_a_migrated_writers_history_once_its_signatures_travel() {
+    // a admits m's history while m is a legacy writer. m then migrates without a floor, so its
+    // whole history is keyed, and signs it; a admitted it unsigned and holds no signature.
+    let (anchor, a, _) = fleet(&[]);
+    let m = node("m", None, Some(&anchor));
+    let history = note(&m, "before the migration");
+    sync(&m, &a);
+    assert!(admitted(&a, &history));
+    let m_key = key();
+    admit(&a, "m", &m_key, "migration", None);
+    m.set_member_key(Some(m_key.clone())).unwrap();
+    sync(&a, &m);
+
+    // f joins and receives a's membership claims before m's history, so it holds the history
+    // as unsigned, and a has no signature to answer f with.
+    let f_key = key();
+    admit(&a, "f", &f_key, "invite", None);
+    let f = node("f", Some(&f_key), Some(&anchor));
+    sync(&a, &f);
+    assert!(!admitted(&f, &history));
+    let status = f.replication_status(true, Some(FLEET), &[]).unwrap();
+    assert_eq!(status.unsigned_envelopes, 1);
+    assert_eq!(status.pending_envelopes, 1);
+    assert_eq!(status.pending_records, 0, "records alone do not show the held envelope");
+
+    // Exports ask for nothing the scan has not found, and the scan runs off the request path.
+    assert!(a.replication_signature_requests().unwrap().is_empty());
+    // a's scan finds the signature its admitted copy lacks, and an exchange takes it once. An
+    // old build ignores the request and nothing breaks; a's next scan asks again.
+    assert!(a.advance_signature_backfill().unwrap());
+    let wanted = a.replication_signature_requests().unwrap();
+    assert!(wanted.iter().any(|id| id.writer == "m"), "{wanted:?}");
+    assert!(a.replication_signature_requests().unwrap().is_empty());
+    let old = m
+        .export_replication_exchange_answering(FLEET, &a.replication_inventory().unwrap(), &[])
+        .unwrap();
+    a.receive_replication_exchange("m", FLEET, &old).unwrap();
+    a.validate_replication_backlog().unwrap();
+    assert!(a.advance_signature_backfill().unwrap());
+    assert!(
+        a.replication_signature_requests().unwrap().iter().any(|id| id.writer == "m"),
+        "a must keep asking after a peer that cannot answer"
+    );
+
+    // m answers, a stores and serves the signature, and f admits the history.
+    assert!(a.advance_signature_backfill().unwrap());
+    sync(&m, &a);
+    sync(&a, &f);
+    assert!(admitted(&f, &history));
+    let status = f.replication_status(true, Some(FLEET), &[]).unwrap();
+    assert_eq!(status.unsigned_envelopes, 0);
+    assert_eq!(status.pending_envelopes, 0);
+    assert!(
+        !a.advance_signature_backfill().unwrap(),
+        "the scan stops once nothing is missing"
+    );
+    assert!(a.replication_signature_requests().unwrap().is_empty());
+}
+
+#[test]
+fn an_unsigned_legacy_writer_is_never_asked_for_signatures() {
+    let (_, a, _) = fleet(&[]);
+    let legacy = node("legacy", None, None);
+    note(&legacy, "legacy history");
+    sync(&legacy, &a);
+    assert!(!a.advance_signature_backfill().unwrap());
+    assert!(a.replication_signature_requests().unwrap().is_empty());
+}
+
 fn a_anchor(a: &Store) -> Arc<MemberKey> {
     a.member_key.read().unwrap().clone().unwrap()
 }

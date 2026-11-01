@@ -44,6 +44,8 @@ use crate::store::{
     CheckpointManifestRequest,
 };
 mod raw_lease;
+mod seat_freshness;
+pub use seat_freshness::*;
 
 /// The peer listener's shared state, with this node's daemon as the store.
 type PeerState = smallclaims::sync::PeerState<MainBackend>;
@@ -188,6 +190,24 @@ pub enum ClientReadOperation {
         sha256: String,
         message: String,
         offset: u64,
+    },
+    /// A read of the GitHub plugin's mirror on the member that polls the repository: `path` is
+    /// a `/v1/plugins/github/repos/...` path and query, answered from the owner's mirror alone.
+    GithubPlugin {
+        path: String,
+    },
+    /// The same read named by its parts, so the poller builds its path itself: `read` is
+    /// `pulls`, `pull`, `checks` or `events`. Capability `github-plugin` version 2.
+    GithubPluginRead {
+        owner: String,
+        repository: String,
+        read: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
     },
     /// The messages to and from one agent, as the host that owns the agent lists them.
     Messages {
@@ -792,6 +812,8 @@ impl ClientRelay {
                 Some(("session-detail-child-id", 1))
             }
             ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
+            ClientReadOperation::GithubPlugin { .. } => Some(("github-plugin", 1)),
+            ClientReadOperation::GithubPluginRead { .. } => Some(("github-plugin", 2)),
             _ => None,
         };
         if let Some((id, version)) = required {
@@ -954,7 +976,8 @@ impl ClientRelay {
             relay_trace::result(Phase::Decode, || -> Result<_> {
                 let envelope: ApiResponse<serde_json::Value> = serde_json::from_slice(&bytes)?;
                 anyhow::ensure!(
-                    envelope.api_version == "st3.v1",
+                    smallclaims::sync::ACCEPTED_PEER_API_VERSIONS
+                        .contains(&envelope.api_version.as_str()),
                     "the peer client read protocol differs"
                 );
                 Ok(envelope)
@@ -1270,6 +1293,17 @@ fn client_read_unsupported(operation: &ClientReadOperation) -> ClientReadRejecte
     if matches!(operation, ClientReadOperation::Messages { .. }) {
         return messages_paging_unsupported();
     }
+    if matches!(operation, ClientReadOperation::GithubPlugin { .. } | ClientReadOperation::GithubPluginRead { .. }) {
+        let mut rejected = ClientReadRejected::new(
+            "peer-too-old",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "This host runs an older Fractal version without the GitHub plugin's read API; update it to read its mirror.",
+        );
+        rejected.details.insert("capability".into(), "github-plugin".into());
+        let version = if matches!(operation, ClientReadOperation::GithubPluginRead { .. }) { 2 } else { 1 };
+        rejected.details.insert("version".into(), version.into());
+        return rejected;
+    }
     let mut rejected = ClientReadRejected::new(
         "peer-too-old",
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1302,7 +1336,9 @@ async fn client_read_capabilities(
         &state, CLIENT_READ_PATH, &FleetAuth::body_digest(&[]), 0,
         serde_json::json!({"capabilities":[
             {"id":"messages-paging","version":2,"state":"granted"},
-            {"id":"session-detail-child-id","version":1,"state":"granted"}
+            {"id":"session-detail-child-id","version":1,"state":"granted"},
+            {"id":"github-plugin","version":1,"state":"granted"},
+            {"id":"github-plugin","version":2,"state":"granted"}
         ]}),
     ).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -1532,6 +1568,14 @@ async fn receive_client_read(
                     crate::client::api_error_code(&error).unwrap_or("remote-unavailable"),
                     StatusCode::CONFLICT, format!("{error:#}")
                 ).into())
+            }
+            ClientReadOperation::GithubPlugin { path } => {
+                Ok(client.github_plugin_read(&path).await?)
+            }
+            ClientReadOperation::GithubPluginRead { owner, repository, read, number, state, limit } => {
+                let path = github_plugin_path(&owner, &repository, &read, number, state.as_deref(), limit)
+                    .map_err(|message| ClientReadRejected::new("validation-failed", StatusCode::UNPROCESSABLE_ENTITY, message))?;
+                Ok(client.github_plugin_read(&path).await?)
             }
             ClientReadOperation::HarnessInventory { agent_id, query } => {
                 let value = client.harness_inventory_get(&agent_id, &query).await?.value;
@@ -1862,6 +1906,21 @@ impl Backend for MainBackend {
             .await
     }
 
+    async fn answers(
+        &self,
+        request: &smallclaims::answers::AnswersRequest,
+    ) -> Result<Option<smallclaims::answers::AnswersReply>> {
+        self.client.post("/v1/internal/replication/answers", request).await
+    }
+
+    async fn record_answers_check(&self, check: &smallclaims::answers::AnswersCheck) -> Result<()> {
+        let _: Value = self
+            .client
+            .post("/v1/internal/replication/answers-check", check)
+            .await?;
+        Ok(())
+    }
+
     async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
         self.client
             .post(
@@ -1962,6 +2021,8 @@ pub fn fractal_routes(splice: RawSplice) -> Router<PeerState> {
             post(receive_client_read).get(client_read_capabilities).layer(DefaultBodyLimit::max(16_384)),
         )
         .route(RAW_TERMINAL_PATH, get(receive_raw_terminal).layer(axum::Extension(splice)))
+        .route(SEAT_FRESHNESS_PATH,
+            post(seat_freshness::receive_seat_freshness).layer(DefaultBodyLimit::max(MAX_SEAT_FRESHNESS_BYTES)))
 }
 
 /// Serve a conversation owner's peer listener for tests, and return the client relay of a
@@ -2047,6 +2108,90 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn peer_envelope_versions_are_accepted_by_the_client_relay() {
+        assert_signed_peer_envelope_versions(CLIENT_READ_PATH).await;
+    }
+
+    #[tokio::test]
+    async fn peer_envelope_versions_are_accepted_by_seat_freshness() {
+        assert_signed_peer_envelope_versions(SEAT_FRESHNESS_PATH).await;
+    }
+
+    async fn assert_signed_peer_envelope_versions(path: &'static str) {
+        use std::future::IntoFuture as _;
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join("fleet-secret");
+        fs::write(&secret, [7_u8; 32]).unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        for version in ["st3.v1", "fractal.v1", "future.v9"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new().route(
+                path,
+                post(move |request: Bytes| async move {
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "api_version": version, "request_id": "test", "snapshot_host": "owner-node",
+                        "store_index": 0, "value": {"recorded": []}
+                    }))
+                    .unwrap();
+                    let headers = FleetAuth::test("fleet-test", &[7; 32])
+                        .response_headers_for(
+                            path,
+                            "owner-node",
+                            &body,
+                            &FleetAuth::body_digest(&request),
+                        )
+                        .unwrap();
+                    let mut response = (StatusCode::OK, body).into_response();
+                    response.headers_mut().extend(headers);
+                    response
+                }),
+            );
+            let server = tokio::spawn(axum::serve(listener, app).into_future());
+            let relay = ClientRelay::from_config(&Config {
+                node: "gateway-node".into(),
+                fleet_id: Some("fleet-test".into()),
+                shared_secret_file: Some(secret.clone()),
+                peers: vec![PeerConfig {
+                    name: "owner-node".into(),
+                    url: format!("http://{address}"),
+                }],
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap();
+            let request = ClientReadRequest {
+                authority_actor: "person/example".into(),
+                relay: None,
+                request: ClientReadOperation::Timeline {
+                    session_id: "session/example".into(),
+                    limit: 1,
+                    cursor: None,
+                },
+            };
+            let result = if path == SEAT_FRESHNESS_PATH {
+                relay
+                    .push_seat_freshness(
+                        "owner-node",
+                        &SeatFreshnessPush::default(),
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    .map(|ack| serde_json::to_value(ack.unwrap()).unwrap())
+            } else {
+                relay.read("host/owner-node", &request).await
+            };
+            server.abort();
+            let _ = server.await;
+            if version == "future.v9" {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), serde_json::json!({"recorded": []}));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn daemon_export_failures_preserve_machine_code_without_private_messages() {
@@ -2493,7 +2638,7 @@ mod tests {
         for (store, count) in [(&alder, 6), (&birch, 4)] {
             for index in 0..count {
                 store
-                    .append_claim(&ClaimInput {
+                    .append_as_older_build_for_test(&ClaimInput {
                         subject: format!("daemon/{}", store.origin()),
                         kind: "daemon.diagnostic".into(),
                         actor: None,
@@ -2689,3 +2834,73 @@ mod timeline_relay_tests;
 
 #[cfg(test)]
 mod messages_paging_relay_tests;
+
+/// The poller's own path for a typed GitHub plugin read, or why its parts name none.
+pub fn github_plugin_path(
+    owner: &str,
+    repository: &str,
+    read: &str,
+    number: Option<u64>,
+    state: Option<&str>,
+    limit: Option<usize>,
+) -> std::result::Result<String, String> {
+    let name = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 100
+            && !part.chars().all(|c| c == '.')
+            && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    };
+    if !name(owner) || !name(repository) {
+        return Err("a repository is OWNER/REPO".into());
+    }
+    if let Some(state) = state.filter(|state| !matches!(*state, "open" | "closed" | "all")) {
+        return Err(format!("state is open, closed or all, not {state}"));
+    }
+    let base = format!("/v1/plugins/github/repos/{owner}/{repository}");
+    let mut query = Vec::new();
+    if let Some(limit) = limit {
+        query.push(format!("limit={limit}"));
+    }
+    let path = match (read, number) {
+        ("pulls", None) => {
+            if let Some(state) = state {
+                query.push(format!("state={state}"));
+            }
+            format!("{base}/pulls")
+        }
+        ("pull", Some(number)) => format!("{base}/pulls/{number}"),
+        ("checks", Some(number)) => format!("{base}/pulls/{number}/checks"),
+        ("events", number) => {
+            if let Some(number) = number {
+                query.push(format!("number={number}"));
+            }
+            format!("{base}/events")
+        }
+        _ => return Err(format!("no GitHub plugin read `{read}` with that number")),
+    };
+    Ok(if query.is_empty() { path } else { format!("{path}?{}", query.join("&")) })
+}
+
+#[cfg(test)]
+mod github_plugin_path_tests {
+    use super::github_plugin_path;
+
+    #[test]
+    fn a_typed_read_names_only_the_plugins_routes() {
+        assert_eq!(
+            github_plugin_path("acme", "garden", "pulls", None, Some("all"), Some(20)).unwrap(),
+            "/v1/plugins/github/repos/acme/garden/pulls?limit=20&state=all"
+        );
+        assert_eq!(github_plugin_path("acme", "garden", "checks", Some(7), None, None).unwrap(), "/v1/plugins/github/repos/acme/garden/pulls/7/checks");
+        assert_eq!(github_plugin_path("acme", "garden", "events", Some(7), None, Some(5)).unwrap(), "/v1/plugins/github/repos/acme/garden/events?limit=5&number=7");
+        for (owner, repository, read, number, state) in [
+            ("acme", "..", "pulls", None, None),
+            ("acme/x", "garden", "pulls", None, None),
+            ("acme", "garden", "pull", None, None),
+            ("acme", "garden", "tree", None, None),
+            ("acme", "garden", "pulls", None, Some("merged")),
+        ] {
+            assert!(github_plugin_path(owner, repository, read, number, state, None).is_err(), "{owner}/{repository} {read}");
+        }
+    }
+}

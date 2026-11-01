@@ -6,7 +6,7 @@ non-test code that starts `crate::B` or `fractal_daemon::B`, or a name in a `cra
 `#[cfg(test)]` items, `*_tests.rs`, `tests/` and `test_support.rs` are left out. Re-exported items
 that the library names at its root count toward the module that defines them (REEXPORTS).
 
-The rule: the graph minus the allowlisted pairs in .st/module-layers.json is acyclic. A new edge
+The rule: the graph minus the allowlisted pairs in .fractal/module-layers.json (.st only if absent) is acyclic. A new edge
 that closes a cycle fails the check; an allowlisted pair that no longer exists must be removed, so
 the list only shrinks. Layers are computed (longest path above the leaves), not assigned by hand.
 """
@@ -188,7 +188,13 @@ def production_graph(root):
 
 
 def load_layers(root):
-    with open(os.path.join(root, LAYERS_FILE)) as handle:
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — lstat preserves dangling-link failures.
+    path = os.path.join(root, ".fractal/module-layers.json")
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        path = os.path.join(root, LAYERS_FILE)
+    with open(path) as handle:
         data = json.load(handle)
     if data.get("version") != 1:
         raise ValueError(f"{LAYERS_FILE}: unsupported version")

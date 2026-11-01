@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn command(home: &std::path::Path) -> Command {
-    let mut command = Command::new(test_env!("CARGO_BIN_EXE_st3"));
+    let mut command = Command::new(test_env!("CARGO_BIN_EXE_fractal"));
     command
         .env_remove("ST_INSTANCE")
         .env_remove("ST_AGENT")

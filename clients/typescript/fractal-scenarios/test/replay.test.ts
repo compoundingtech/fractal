@@ -264,6 +264,7 @@ describe('collection windows', () => {
       h.clock.advance(at)
       await h.replay.flush()
       for (const frame of h.frames.slice(read)) {
+        if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') throw new Error('Expected a resource collection window')
         const next = applyWindow(windows.get(frame.id ?? ''), frame)
         if (next !== undefined) windows.set(frame.id ?? '', next)
       }
@@ -288,6 +289,7 @@ describe('collection windows', () => {
     let read = 0
     const check = () => {
       for (const frame of h.frames.slice(read)) {
+        if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') throw new Error('Expected a resource collection window')
         const next = applyWindow(windows.get(frame.id ?? ''), frame)
         if (next !== undefined) windows.set(frame.id ?? '', next)
       }
@@ -344,7 +346,7 @@ describe('collection windows', () => {
     await h.replay.flush()
     stream.subscribe('third', 'missions', 20)
     await h.replay.flush()
-    const stores = h.frames.flatMap((frame) => 'snapshot' in frame ? [frame.snapshot.store_index] : [])
+    const stores = h.frames.flatMap((frame) => frame.snapshot !== undefined ? [frame.snapshot.store_index] : [])
     expect(stores).toEqual([...stores].sort((a, b) => a - b))
     expect(stores.at(-1)).toBeGreaterThan(stores[0]!)
   })

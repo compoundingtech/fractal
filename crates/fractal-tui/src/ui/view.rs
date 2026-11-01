@@ -41,13 +41,17 @@ pub enum Link {
     Offline(String),
 }
 
-/// A tool call a seat's harness recorded and has no result for yet: its tool and its whole input.
+/// A tool call a seat's harness recorded and has no result for yet, as st serves it beside a
+/// prompt (`presentation.prompt.calls`): its tool and its input.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingCall {
     /// Its tool use (or Codex item) id, which a prompt names as the call it asks about.
     pub id: String,
     pub tool: String,
+    /// Its arguments, read back from the JSON text st serves; the text itself when st cut it.
     pub input: serde_json::Value,
+    /// False when st cut the input to its bound: no one allows what they cannot read whole.
+    pub complete: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -87,10 +91,6 @@ pub struct World {
     /// The person's paired devices.
     pub devices: Load<Vec<Device>>,
     pub conversations: BTreeMap<String, Load<Vec<Entry>>>,
-    /// Each loaded conversation's tool calls with no result yet, in full, oldest first: a native
-    /// prompt asks about one of them, and a person answers only what they can read.
-    #[serde(skip)]
-    pub pending_calls: BTreeMap<String, Vec<PendingCall>>,
     /// Missions nobody needs the person for, counted so Home can say what it is not showing.
     pub quiet_missions: usize,
     /// Token spend over the Usage tab's period: one row per agent, mission run, step, model,
@@ -113,6 +113,10 @@ pub struct World {
     /// What was left of each objective or budget across the chart period, by its id.
     #[serde(skip)]
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
+    /// Why the last refresh of the objectives and budgets failed, while the rows shown are
+    /// from an earlier read.
+    #[serde(skip)]
+    pub slo_stale: Option<String>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
     #[serde(skip)]
@@ -175,6 +179,12 @@ pub struct Attention {
     /// Who is waiting, e.g. "Atlas Builder on harbor".
     pub waiting: Option<String>,
     pub age: String,
+    /// Exact opening time for chronological navigation, absent on an invalid server timestamp.
+    #[serde(skip)]
+    pub requested_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    /// When an ask resolves by itself and what then applies, e.g. `answer within 3h, or “Hold”
+    /// applies`. None on an item with no deadline.
+    pub deadline: Option<String>,
     pub mission: Option<String>,
     /// The agent that did the work or raised the item: who to talk to about it.
     pub agent: Option<String>,
@@ -275,10 +285,17 @@ pub enum AttentionKind {
         answers: Vec<String>,
         /// The harness observation that opened it, which an answer names.
         episode: String,
-        /// The exact call it asks about, as st names it: `Some(None)` when its harness named
-        /// none, `None` from a daemon that predates naming it. Allow is offered only beside it.
+        /// The exact call it asks about, as st names it; none when it names none. Allow is
+        /// offered only beside it.
         #[serde(skip)]
-        call: Option<Option<String>>,
+        call: Option<String>,
+        /// The calls without a result st serves beside it, oldest first, or why it serves none:
+        /// it cannot read the seat's conversation, or it is too old to serve them.
+        #[serde(skip)]
+        calls: Result<Vec<PendingCall>, String>,
+        /// st's word that a client may allow or answer the one call it serves.
+        #[serde(skip)]
+        allow: bool,
     },
     /// A harness not signed in to its provider; one sign-in answers every seat that shares it.
     Login {
@@ -370,7 +387,7 @@ pub struct PreviewAgent {
 
 // --------------------------------------------------------------------- agents
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Harness {
     Claude,

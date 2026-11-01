@@ -142,6 +142,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
         Config {
             access_mode: Some(fractal_drivers::access::AccessMode::Auto),
             seat_priority: None,
+            lanes: None,
             ..Config::default()
         }
     };
@@ -150,7 +151,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     let first_run = config.person.is_none();
     let previous_node = config.node.clone();
     let existing_store = config.state_dir.join("node-identity.json").exists()
-        || config.state_dir.join("claims.sqlite3").exists()
+        || config.store_path().exists()
         || config.fleet.is_some();
 
     let default_person = config
@@ -687,19 +688,81 @@ fn find_pty(executable: &Path) -> Result<PathBuf> {
     }
     let environment = fractal_daemon::environment::snapshot()?;
     fractal_runtime::resolve_executable("pty", &environment)
-        .context("pty is missing; unpack the complete Fractal archive (st3, st and pty) before setup")
+        .context("pty is missing; unpack the complete Fractal archive (fractal and pty) before setup")
+}
+
+/// Match the installers' positive alias-layout policy without executing inspected commands.
+fn guard_canonical_install(bin: &Path, path: Option<&std::ffi::OsStr>, named_instance: bool) -> Result<()> {
+    let absolute = std::path::absolute(bin)?;
+    let bin = fs::canonicalize(&absolute).unwrap_or(absolute);
+    let canonical = bin.join("fractal");
+    let legacy = bin.join("st3");
+    let links_to = |link: &Path, relative: &Path, absolute: &Path| {
+        fs::read_link(link).is_ok_and(|target| target == relative || target == absolute)
+    };
+    match fs::symlink_metadata(&canonical) {
+        Ok(metadata) => {
+            let owned = if metadata.file_type().is_symlink() {
+                links_to(&canonical, Path::new("st3"), &legacy)
+            } else {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                    && ["st", "st3"].into_iter().all(|name|
+                        links_to(&bin.join(name), Path::new("fractal"), &canonical))
+            };
+            anyhow::ensure!(owned,
+                "setup: refusing to replace foreign fractal command: {}", canonical.display());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect canonical Fractal destination"),
+    }
+    // Named instances deliberately coexist with the login command on inherited PATH.
+    if named_instance {
+        return Ok(());
+    }
+    if let Some(path) = path {
+        for directory in std::env::split_paths(path) {
+            let directory = if directory.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                directory.as_path()
+            };
+            let Ok(directory) = fs::canonicalize(directory) else { continue };
+            if directory == bin {
+                continue;
+            }
+            let candidate = directory.join("fractal");
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) => anyhow::ensure!(
+                    links_to(&candidate, &canonical, &legacy),
+                    "setup: refusing to install: PATH contains a foreign fractal command: {}",
+                    candidate.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("inspect Fractal command on PATH"),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn install_binaries(executable: &Path) -> Result<PathBuf> {
     // An instance always gets its own copies, below its own directory, so removing the
     // directory removes them and the default install is never the one that runs.
     let instance = fractal_daemon::instance::current();
+    // A login shell may omit this command even when its canonical link runs this image.
+    if instance.is_none()
+        && std::env::var_os("HOME").is_some_and(|home| {
+            let canonical = PathBuf::from(home).join(".local/bin/fractal");
+            canonical.is_symlink() && same_file(&canonical, executable)
+        })
+    {
+        return Ok(executable.into());
+    }
     // Keep managed installations (including the signed macOS app bundle) in place.
     if instance.is_none()
         && let Ok(environment) = fractal_daemon::environment::snapshot()
-        && fractal_runtime::resolve_executable("st", &environment)
-            .ok()
-            .is_some_and(|st| same_file(&st, executable))
+        && ["fractal", "st"].into_iter().any(|name|
+            fractal_runtime::resolve_executable(name, &environment)
+                .ok().is_some_and(|installed| same_file(&installed, executable)))
     {
         return Ok(executable.into());
     }
@@ -708,42 +771,54 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
         Some(instance) => instance.bin_dir(),
         None => home.join(".local/bin"),
     };
+    // Refuse collisions before any executable or alias can change. Signed-app
+    // upgrades belong to install-macos.py; managed setup above preserves them.
+    guard_canonical_install(&bin, std::env::var_os("PATH").as_deref(), instance.is_some())?;
     // Locate pty before changing any installed file.
     let pty = find_pty(executable)?;
     fs::create_dir_all(&bin)?;
-    let target = bin.join("st3");
+    let target = bin.join("fractal");
     let replacing = [
-        ("st3", fs::symlink_metadata(&target).is_ok() && !same_file(executable, &target)),
+        ("fractal", fs::symlink_metadata(&target).is_ok() && !same_file(executable, &target)),
         ("pty", fs::symlink_metadata(bin.join("pty")).is_ok() && !same_file(&pty, &bin.join("pty"))),
         (
             "st",
             fs::symlink_metadata(bin.join("st")).is_ok()
-                && fs::read_link(bin.join("st")).ok().as_deref() != Some(Path::new("st3")),
+                && fs::read_link(bin.join("st")).ok().as_deref() != Some(Path::new("fractal")),
+        ),
+        (
+            "st3",
+            fs::symlink_metadata(bin.join("st3")).is_ok()
+                && fs::read_link(bin.join("st3")).ok().as_deref() != Some(Path::new("fractal")),
         ),
     ]
     .into_iter()
     .filter_map(|(name, exists)| exists.then_some(name))
     .collect::<Vec<_>>();
     if replacing.is_empty() {
-        println!("Installing Fractal (st3, st and pty) in {}", bin.display());
+        println!("Installing Fractal (fractal, pty and temporary st/st3 aliases) in {}", bin.display());
     } else {
         println!(
-            "Installing Fractal (st3, st and pty) in {}, replacing the existing {}",
+            "Installing Fractal (fractal, pty and temporary st/st3 aliases) in {}, replacing the existing {}",
             bin.display(),
             replacing.join(", ")
         );
     }
     copy_executable(executable, &target)?;
     copy_executable(&pty, &bin.join("pty"))?;
-    let link = bin.join("st");
-    if fs::read_link(&link).ok().as_deref() != Some(Path::new("st3")) {
-        let pending = tempfile::tempdir_in(&bin)?;
-        symlink("st3", pending.path().join("st"))?;
-        fs::rename(pending.path().join("st"), &link)?;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    for name in ["st", "st3"] {
+        let link = bin.join(name);
+        if fs::read_link(&link).ok().as_deref() != Some(Path::new("fractal")) {
+            let pending = tempfile::tempdir_in(&bin)?;
+            symlink("fractal", pending.path().join(name))?;
+            fs::rename(pending.path().join(name), &link)?;
+        }
     }
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
     File::open(&bin)?.sync_all()?;
     record_installed_binaries(&bin)?;
-    say!("Installed Fractal (st3, st and pty) in {}", bin.display());
+    say!("Installed Fractal (fractal, pty and temporary st/st3 aliases) in {}", bin.display());
     Ok(target)
 }
 
@@ -758,9 +833,9 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
     let manifest = serde_json::json!({
         "version": 1,
         "source": "setup",
-        "files": crate::fractal::installed_binaries(vec![
-            bin.join("st3"), bin.join("st"), bin.join("pty"),
-        ]),
+        "files": [
+            bin.join("fractal"), bin.join("st3"), bin.join("st"), bin.join("pty"),
+        ],
     });
     let mut pending = tempfile::NamedTempFile::new_in(&data)?;
     pending.write_all(&serde_json::to_vec_pretty(&manifest)?)?;

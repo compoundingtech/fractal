@@ -447,6 +447,10 @@ impl Capabilities {
 }
 
 impl CollectionStream {
+    /// Follow the complete unfiltered roster as version-1 publications, not a held window.
+    pub async fn subscribe_agents_publication(&mut self, id: &str) -> Result<(), ClientError> {
+        self.send(&agents_publication_command(id)).await
+    }
     pub async fn subscribe_glasses(&mut self, id: &str) -> Result<(), ClientError> {
         self.subscribe(id, "glasses", 100, None, None).await
     }
@@ -463,6 +467,16 @@ impl CollectionStream {
             command["subject"] = serde_json::json!(subject);
         }
         self.send(&command).await
+    }
+
+    pub async fn subscribe_ordered_memberships(
+        &mut self,
+        id: &str,
+        person: &str,
+        subject: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"ordered-memberships", "person":person, "subject":subject, "limit":limit})).await
     }
     pub async fn subscribe(
         &mut self,
@@ -653,12 +667,17 @@ impl ConversationStream {
     }
 }
 
+fn agents_publication_command(id: &str) -> serde_json::Value {
+    serde_json::json!({"kind":"subscribe", "id":id, "collection":"agents", "agents_publication_version":1})
+}
+
 /// One frame from a collection socket.
 #[derive(Debug)]
 pub enum CollectionEvent {
     /// A subscription's first window, and the window again after a resubscribe.
     Snapshot {
         id: String,
+        collection: String,
         snapshot: Snapshot,
         items: Vec<Resource>,
         order: Vec<String>,
@@ -670,6 +689,7 @@ pub enum CollectionEvent {
     /// What changed in the window since the last frame, with its complete new order.
     Changes {
         id: String,
+        collection: String,
         snapshot: Snapshot,
         upserts: Vec<Resource>,
         removes: Vec<String>,
@@ -678,15 +698,63 @@ pub enum CollectionEvent {
         /// This host's replication, only when it changed since the subscription's last frame.
         sync: Option<StreamSync>,
     },
+    /// An `ordered-memberships` subscription's first window, and again after a resubscribe.
+    /// `membership` describes the whole container, including members outside the window.
+    MembershipSnapshot {
+        id: String,
+        snapshot: Snapshot,
+        membership: OrderedMembershipState,
+        items: Vec<OrderedMembership>,
+        order: Vec<String>,
+        has_more: bool,
+    },
+    /// What changed in an `ordered-memberships` window, with its complete new order. A frame
+    /// whose rows, order, and `has_more` repeat the window still reports a new `membership`:
+    /// the container changed outside the window.
+    MembershipChanges {
+        id: String,
+        snapshot: Snapshot,
+        membership: OrderedMembershipState,
+        upserts: Vec<OrderedMembership>,
+        removes: Vec<String>,
+        order: Vec<String>,
+        has_more: bool,
+    },
+    /// Stage contiguous chunks privately; install only after the final chunk.
+    AgentsSnapshotChunk {
+        id: String,
+        collection: String,
+        snapshot: Snapshot,
+        publication: AgentsPublicationMetadata,
+        chunk_index: u64,
+        chunk_count: u64,
+        items: Vec<Agent>,
+        order: Vec<String>,
+        has_more: bool,
+    },
+    /// Apply atomically only when epoch and the applied base revision match.
+    AgentsChanges {
+        id: String,
+        collection: String,
+        snapshot: Snapshot,
+        publication: AgentsPublicationMetadata,
+        base_revision: u64,
+        upserts: Vec<Agent>,
+        removes: Vec<String>,
+        order: Vec<String>,
+        has_more: bool,
+    },
     /// A terminal subscription's whole current screen; it replaces every earlier one.
     Screen {
         id: String,
+        collection: String,
         screen: Box<Envelope<TerminalScreen>>,
     },
     /// A conversation's entries. `replace` means these are its newest page and every earlier
     /// entry is gone; otherwise they are new or revised entries, matched by ID.
     Conversation {
         id: String,
+        collection: String,
         session_id: String,
         replace: bool,
         items: Vec<TimelineEntry>,
@@ -703,15 +771,26 @@ pub enum CollectionEvent {
     /// whose owner cannot be reached; the server keeps retrying.
     Resync {
         id: String,
+        collection: Option<String>,
+        retryable: Option<bool>,
         code: Option<ErrorCode>,
         message: Option<String>,
     },
     /// The subscription failed or ended; the socket and other subscriptions continue.
     Error {
         id: String,
+        collection: Option<String>,
+        retryable: Option<bool>,
         code: Option<ErrorCode>,
         message: String,
     },
+}
+
+impl<'de> serde::Deserialize<'de> for CollectionEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::from_frame(serde_json::Value::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// A frame's `sync`, when it has one this client can read. A malformed one is no reason to drop
@@ -731,9 +810,101 @@ impl CollectionEvent {
                     ClientError::Protocol(format!("collection frame `{name}`: {error}"))
                 })
         }
-        let id = field::<String>(&frame, "id")?;
+        let kind = frame.get("kind").and_then(serde_json::Value::as_str);
+        // Reserved publication fields select that grammar; unknown extension keys do not.
+        let publication_frame = ["publication", "chunk_index", "chunk_count", "base_revision"]
+            .iter()
+            .any(|key| frame.get(key).is_some());
+        let id = if kind == Some("error") {
+            field::<Option<String>>(&frame, "id")?.unwrap_or_default()
+        } else {
+            field::<String>(&frame, "id")?
+        };
+        if publication_frame {
+            if (kind == Some("snapshot") && frame.get("base_revision").is_some())
+                || (kind == Some("changes")
+                    && ["chunk_index", "chunk_count"]
+                        .iter()
+                        .any(|key| frame.get(key).is_some()))
+            {
+                return Err(ClientError::Protocol(
+                    "mixed agents publication frame grammar".into(),
+                ));
+            }
+            let collection: String = field(&frame, "collection")?;
+            let snapshot: Snapshot = field(&frame, "snapshot")?;
+            let has_more: bool = field(&frame, "has_more")?;
+            if collection != "agents" || has_more || snapshot.published_at.is_none() {
+                return Err(ClientError::Protocol(
+                    "invalid agents publication envelope".into(),
+                ));
+            }
+            let publication = field(&frame, "publication")?;
+            return match kind {
+                Some("snapshot") => {
+                    let chunk_index = field::<u64>(&frame, "chunk_index")?;
+                    let chunk_count = field::<u64>(&frame, "chunk_count")?;
+                    if chunk_count == 0 || chunk_index >= chunk_count {
+                        return Err(ClientError::Protocol(
+                            "invalid agents snapshot chunk index/count".into(),
+                        ));
+                    }
+                    Ok(Self::AgentsSnapshotChunk {
+                        id,
+                        collection,
+                        snapshot,
+                        publication,
+                        chunk_index,
+                        chunk_count,
+                        items: field(&frame, "items")?,
+                        order: field(&frame, "order")?,
+                        has_more,
+                    })
+                }
+                Some("changes") => {
+                    let base_revision = field::<u64>(&frame, "base_revision")?;
+                    if !(1..=9_007_199_254_740_991).contains(&base_revision) {
+                        return Err(ClientError::Protocol("invalid agents base revision".into()));
+                    }
+                    Ok(Self::AgentsChanges {
+                        id,
+                        collection,
+                        snapshot,
+                        publication,
+                        base_revision,
+                        upserts: field(&frame, "upserts")?,
+                        removes: field(&frame, "removes")?,
+                        order: field(&frame, "order")?,
+                        has_more,
+                    })
+                }
+                _ => Err(ClientError::Protocol(format!(
+                    "unknown publication frame kind {kind:?}"
+                ))),
+            };
+        }
+        let memberships = frame.get("collection").and_then(serde_json::Value::as_str)
+            == Some("ordered-memberships");
         match frame.get("kind").and_then(serde_json::Value::as_str) {
+            Some("snapshot") if memberships => Ok(Self::MembershipSnapshot {
+                snapshot: field(&frame, "snapshot")?,
+                membership: field(&frame, "membership")?,
+                items: field(&frame, "items")?,
+                order: field(&frame, "order")?,
+                has_more: field(&frame, "has_more")?,
+                id,
+            }),
+            Some("changes") if memberships => Ok(Self::MembershipChanges {
+                snapshot: field(&frame, "snapshot")?,
+                membership: field(&frame, "membership")?,
+                upserts: field(&frame, "upserts")?,
+                removes: field(&frame, "removes")?,
+                order: field(&frame, "order")?,
+                has_more: field(&frame, "has_more")?,
+                id,
+            }),
             Some("snapshot") => Ok(Self::Snapshot {
+                collection: field(&frame, "collection")?,
                 snapshot: field(&frame, "snapshot")?,
                 items: field(&frame, "items")?,
                 order: field(&frame, "order")?,
@@ -742,6 +913,7 @@ impl CollectionEvent {
                 id,
             }),
             Some("changes") => Ok(Self::Changes {
+                collection: field(&frame, "collection")?,
                 snapshot: field(&frame, "snapshot")?,
                 upserts: field(&frame, "upserts")?,
                 removes: field(&frame, "removes")?,
@@ -751,6 +923,7 @@ impl CollectionEvent {
                 id,
             }),
             Some("screen") => Ok(Self::Screen {
+                collection: field(&frame, "collection")?,
                 screen: Box::new(Envelope {
                     api_version: API_VERSION.into(),
                     request_id: String::new(),
@@ -760,6 +933,7 @@ impl CollectionEvent {
                 id,
             }),
             Some("conversation") => Ok(Self::Conversation {
+                collection: field(&frame, "collection")?,
                 session_id: field(&frame, "session_id")?,
                 replace: field(&frame, "replace")?,
                 items: field(&frame, "items")?,
@@ -769,22 +943,17 @@ impl CollectionEvent {
                 id,
             }),
             Some("resync") => Ok(Self::Resync {
-                code: frame
-                    .get("code")
-                    .cloned()
-                    .and_then(|code| serde_json::from_value(code).ok()),
-                message: frame
-                    .get("message")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+                collection: field(&frame, "collection")?,
+                retryable: field(&frame, "retryable")?,
+                code: field(&frame, "code")?,
+                message: field(&frame, "message")?,
                 id,
             }),
             Some("error") => Ok(Self::Error {
-                code: frame
-                    .get("code")
-                    .cloned()
-                    .and_then(|code| serde_json::from_value(code).ok()),
-                message: field::<Option<String>>(&frame, "message")?.unwrap_or_default(),
+                collection: field(&frame, "collection")?,
+                retryable: field(&frame, "retryable")?,
+                code: field(&frame, "code")?,
+                message: field(&frame, "message")?,
                 id,
             }),
             other => Err(ClientError::Protocol(format!(
@@ -825,6 +994,9 @@ impl TerminalStream {
     }
 }
 
+/// The error a daemon's empty 404 decodes to: it has no such route.
+const MISSING_ROUTE: &str = "HTTP 404 with no body: the daemon has no such route";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("st client API error {0:?}: {1}")]
@@ -838,6 +1010,13 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// Whether the daemon has no such route: it answered 404 with no error body, as a daemon
+    /// from before the route does. A typed refusal, another status, or a malformed answer to a
+    /// route that exists is not this.
+    pub fn is_missing_route(&self) -> bool {
+        matches!(self, Self::Protocol(message) if message == MISSING_ROUTE)
+    }
+
     /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
     /// a fresh request is safe) or `"unknown"` (it may still complete; send the identical request,
     /// with the same key, again). Any other answer, or none, says nothing.
@@ -967,6 +1146,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::RuntimeListNotReady => {
             format!("{product} is still preparing the runtime list; try again shortly")
         }
+        ErrorCode::AgentRosterNotReady => {
+            format!("{product} is still preparing the agents roster; try again shortly")
+        }
         ErrorCode::RuntimeListEnded => {
             "the runtime list stopped updating; restart fractal".into()
         }
@@ -1020,12 +1202,16 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         }
         ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
+        | ErrorCode::InvalidAnswer
+        | ErrorCode::NotAnswerable
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
+        | ErrorCode::AgentsPublicationRowTooLarge
         | ErrorCode::ProjectionDetailInvalidSource
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
         | ErrorCode::SuspendAuthoredSessionSelection
+        | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal
         | ErrorCode::PrivateNotesCarrierConflict
         | ErrorCode::PrivateNotesUnreachable
@@ -1044,6 +1230,15 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::InvalidArrangementFolder
         | ErrorCode::InvalidArrangementName
         | ErrorCode::InvalidArrangementKey
+        | ErrorCode::InvalidArrangementVersion
+        | ErrorCode::InvalidArrangementBody
+        | ErrorCode::UnsupportedMembershipContainer
+        | ErrorCode::MembershipOwnerForbidden
+        | ErrorCode::InvalidMembershipMember
+        | ErrorCode::InvalidMembershipBucket
+        | ErrorCode::InvalidMembershipKey
+        | ErrorCode::InvalidMembershipOperations
+        | ErrorCode::MembershipEditTooLarge
         | ErrorCode::InvalidSubjectReference
         | ErrorCode::RecipientRetired
         | ErrorCode::IdentityCycle
@@ -1053,6 +1248,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
+        | ErrorCode::RetireRevisionMismatch
+        | ErrorCode::RetireIncarnationMismatch
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
         | ErrorCode::MessageSelectorsNotReady
@@ -1874,6 +2071,36 @@ impl Client {
         .await
     }
 
+    pub async fn harness_questions(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/client/harness-questions{suffix}"))
+            .await
+    }
+    pub async fn harness_question(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<HarnessQuestion>, ClientError> {
+        self.get(&format!(
+            "/v1/client/harness-questions/{}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
@@ -2275,6 +2502,26 @@ impl Client {
         ))
         .await
     }
+    /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
+    /// query, answered from that mirror alone, so a relayed read is never relayed again.
+    pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        // No segment may be only dots, so the path cannot step out of the plugin's routes.
+        let dot_segment = path
+            .split(['/', '?'])
+            .any(|part| !part.is_empty() && part.chars().all(|c| c == '.'));
+        if !path.starts_with("/v1/plugins/github/repos/") || dot_segment || path.contains('#') {
+            return Err(ClientError::Protocol(format!(
+                "not a GitHub plugin read: {path}"
+            )));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut body: serde_json::Value = self.get(&format!("{path}{separator}local=1")).await?;
+        // The daemon wraps the answer in its API envelope; the relay carries the answer alone.
+        Ok(body
+            .get_mut("value")
+            .map(serde_json::Value::take)
+            .unwrap_or(body))
+    }
     pub async fn runtimes_list(
         &self,
         cursor: Option<&str>,
@@ -2467,6 +2714,28 @@ impl Client {
         ))
         .await
     }
+    pub async fn arrangements_memberships(
+        &self,
+        person_name: &str,
+        uuid: &str,
+        person: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<OrderedMembershipPage>, ClientError> {
+        let mut path = format!(
+            "/v1/client/arrangements/{}/{}/memberships?person={}",
+            percent_encode(person_name),
+            percent_encode(uuid),
+            percent_encode(person)
+        );
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
+        }
+        self.get(&path).await
+    }
     pub async fn glasses_list(
         &self,
         cursor: Option<&str>,
@@ -2640,6 +2909,18 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn arrangement_membership_edit(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ArrangementMembershipEditParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request =
+            ActionRequest::arrangement_membership_edit(id, idempotency_key, fence, parameters)
+                .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn attention_resolve(
         &self,
         id: impl Into<String>,
@@ -2659,6 +2940,17 @@ impl Client {
         parameters: CustomReplyParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::custom_reply(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn harness_answer(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HarnessAnswerParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::harness_answer(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -3466,7 +3758,14 @@ impl Client {
     /// The fleet's membership as this host's daemon holds it, for finding a host's Fabric node.
     /// A read of the local store; only a Unix socket serves it.
     pub async fn fleet_membership(&self) -> Result<serde_json::Value, ClientError> {
-        self.get("/v1/internal/fleet/membership").await
+        // Internal routes refuse seat callers; a daemon from before the public route answers
+        // only the internal one.
+        match self.get("/v1/fleet/membership").await {
+            Err(error) if error.is_missing_route() => {
+                self.get("/v1/internal/fleet/membership").await
+            }
+            result => result,
+        }
     }
 
     /// Where `subject`'s running terminal lives, read from this host's daemon without any graph
@@ -4152,6 +4451,11 @@ impl Client {
                     Box::new(error),
                 ));
             }
+            // Any other route an older daemon does not have answers Axum's empty 404: say so
+            // distinctly, so a caller can fall back without mistaking a broken answer for it.
+            if status == 404 && bytes.is_empty() {
+                return Err(ClientError::Protocol(MISSING_ROUTE.into()));
+            }
             let error: ErrorEnvelope = serde_json::from_slice(&bytes)
                 .or_else(|decode| core_api_error(&bytes).ok_or(decode))
                 .map_err(|decode| ClientError::Protocol(format!("HTTP {status}: {decode}")))?;
@@ -4801,6 +5105,16 @@ fn percent_encode_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agents_publication_subscribe_has_only_the_opt_in_grammar() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/agents-publication-subscribe.json"
+        ))
+        .unwrap();
+        assert_eq!(agents_publication_command("roster"), expected);
+        assert_eq!(agents_publication_command("other")["id"], "other");
+    }
+
     /// The stream sync notice frames (`fixtures/clients/stream-sync/frames.json`) all decode: a
     /// frame without `sync`, and every malformed one, reads as unknown, never level, and a key
     /// this client does not know is ignored.
@@ -4930,6 +5244,112 @@ mod tests {
     }
 
     #[test]
+    fn membership_frames_decode_as_typed_membership_events_and_resource_frames_stay_resources() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/ordered-memberships-v2.json"
+        ))
+        .unwrap();
+        let super::CollectionEvent::MembershipSnapshot {
+            id,
+            membership,
+            items,
+            order,
+            has_more,
+            ..
+        } = super::CollectionEvent::from_frame(fixture["snapshot_frame"].clone()).unwrap()
+        else {
+            panic!("a membership snapshot must decode as MembershipSnapshot");
+        };
+        assert_eq!(id, "sidebar");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].member, "agent/ada/worker");
+        assert_eq!(items[0].position.bucket, None);
+        assert_eq!(
+            items[1].position.bucket.as_deref(),
+            Some("019a0000-0000-7000-8000-000000000010")
+        );
+        assert_eq!(order, ["agent/ada/worker", "mission/m1"]);
+        assert!(!has_more);
+        assert_eq!(
+            membership,
+            super::OrderedMembershipState {
+                container: "arrangement/person/ada/019a0000-0000-7000-8000-000000000001".into(),
+                live_count: 2,
+                changed_index: 1842,
+            }
+        );
+        let super::CollectionEvent::MembershipChanges {
+            membership,
+            upserts,
+            removes,
+            order,
+            ..
+        } = super::CollectionEvent::from_frame(fixture["changes_frame"].clone()).unwrap()
+        else {
+            panic!("membership changes must decode as MembershipChanges");
+        };
+        assert_eq!(upserts[0].member, "mission/m1");
+        assert_eq!(upserts[0].position.key, "Zz");
+        assert_eq!(removes, ["agent/ada/worker"]);
+        assert_eq!(order, ["mission/m1"]);
+        assert_eq!((membership.live_count, membership.changed_index), (1, 1843));
+        // An edit outside the window leaves rows, order, and `has_more` as they were; only the
+        // container's state says it changed.
+        let super::CollectionEvent::MembershipChanges {
+            membership: outside,
+            upserts,
+            removes,
+            order,
+            has_more,
+            ..
+        } = super::CollectionEvent::from_frame(fixture["outside_window_changes_frame"].clone())
+            .unwrap()
+        else {
+            panic!("an outside-window edit must decode as MembershipChanges");
+        };
+        assert!(upserts.is_empty() && removes.is_empty() && !has_more);
+        assert_eq!(order, ["mission/m1"]);
+        assert_eq!(outside.container, membership.container);
+        assert_eq!(outside.live_count, membership.live_count);
+        assert!(outside.changed_index > membership.changed_index);
+        for frame in ["snapshot_frame", "changes_frame"] {
+            let mut missing_state = fixture[frame].clone();
+            missing_state.as_object_mut().unwrap().remove("membership");
+            assert!(matches!(
+                super::CollectionEvent::from_frame(missing_state),
+                Err(super::ClientError::Protocol(message)) if message.contains("membership")
+            ));
+            let mut missing_count = fixture[frame].clone();
+            missing_count["membership"]
+                .as_object_mut()
+                .unwrap()
+                .remove("live_count");
+            assert!(matches!(
+                super::CollectionEvent::from_frame(missing_count),
+                Err(super::ClientError::Protocol(message)) if message.contains("live_count")
+            ));
+        }
+        let mut missing_bucket = fixture["snapshot_frame"].clone();
+        missing_bucket["items"][0]["position"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bucket");
+        assert!(matches!(
+            super::CollectionEvent::from_frame(missing_bucket),
+            Err(super::ClientError::Protocol(message)) if message.contains("bucket")
+        ));
+        let mut resources = fixture["snapshot_frame"].clone();
+        resources["collection"] = serde_json::json!("agents");
+        resources["items"] = serde_json::json!([]);
+        resources["order"] = serde_json::json!([]);
+        resources.as_object_mut().unwrap().remove("membership");
+        assert!(matches!(
+            super::CollectionEvent::from_frame(resources).unwrap(),
+            super::CollectionEvent::Snapshot { items, .. } if items.is_empty()
+        ));
+    }
+
+    #[test]
     fn errors_read_as_sentences_and_say_whether_trying_again_may_help() {
         let stale = api(
             ErrorCode::StaleFence,
@@ -4969,6 +5389,8 @@ mod tests {
         assert!(!gone.is_transient());
         assert!(!api(ErrorCode::Forbidden, "no").is_transient());
         for code in [
+            ErrorCode::InvalidAnswer,
+            ErrorCode::NotAnswerable,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {
@@ -5119,6 +5541,29 @@ mod tests {
             assert_ne!(code, ErrorCode::Unknown, "{raw}");
             assert_eq!(serde_json::to_value(code).unwrap(), *raw);
         }
+    }
+
+    #[test]
+    fn a_retryable_code_this_client_does_not_know_stays_retryable() {
+        // An older client meets a newer daemon's code (as clients before agent-roster-not-ready
+        // meet the agents roster's 503): it reads the code as unknown and still retries.
+        let envelope: ErrorEnvelope = serde_json::from_value(serde_json::json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/test",
+            "code": "a-code-from-a-newer-daemon",
+            "message": "the agents roster is still being prepared; retry shortly",
+            "retryable": true,
+            "details": {}
+        }))
+        .unwrap();
+        assert_eq!(envelope.code, ErrorCode::Unknown);
+        let error = ClientError::Api(
+            envelope.code.clone(),
+            envelope.message.clone(),
+            Box::new(envelope),
+        );
+        assert!(error.is_transient());
     }
 
     #[test]

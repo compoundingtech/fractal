@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The OpenTelemetry exporter sends daemon.diagnostic and harness.diagnostic log records at their own severity (warning as WARN, error as ERROR) with their code as the st3.code attribute",
+  "replay": {
+    "status": "none",
+    "detail": "No claim or local observation changes; only the exported log records."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "With [observations.otlp] configured, a daemon.diagnostic or harness.diagnostic log record carries severityText WARN (13) or ERROR (17) from its severity field, INFO (9) otherwise, and an st3.code attribute from its code field. Other records are unchanged. Diagnostics that stay in the local log (C4, and 2c's observability codes) reach a collector this way."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart beyond the normal upgrade."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step; a collector filter on severity or st3.code may now match diagnostics."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting exports diagnostics at INFO without st3.code again."
+  }
+}

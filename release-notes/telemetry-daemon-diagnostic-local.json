@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "daemon.diagnostic is written to the node's local observation log, which [observations.otlp] exports as OpenTelemetry logs, instead of as a replicated claim: no control logic reads it",
+  "replay": {
+    "status": "changed",
+    "detail": "New daemon.diagnostic writes (reconcile failures, panics, snapshot and fault-record failures, kill survivors, unavailable workspaces and checkpoint proof and trim diagnostics) no longer append replicated claims; each goes to the writing node's local observation log, deduplicated by its idempotency key as before. Claims written by older builds, and by older members after this upgrade, are still received, stored and kept under the existing checkpoint rule."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "retention.toml gives daemon.diagnostic log = \"local\"; /v1/schema and docs/st3/schema.md show its storage as local. No field or table changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The daemon.diagnostic checkpoint rule (slot by code, keep the newest) is unchanged, so every member's trim plan is unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Contract C4 of the claims-store breakup (approved). /v1/claims and st trace show no longer list new daemon diagnostics, and the summary collection no longer rereads for them; they are in the node's local observation log and its OTLP logs. An older member keeps replicating its own diagnostics, and a new member stores them as before. No wire or client shape changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart beyond the normal upgrade; no migration or backfill."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step. A node without [observations.otlp] keeps its diagnostics in its local observation log for that log's retention."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No data recovery is needed. Reverting writes new diagnostics as replicated claims again; nothing reads the local rows written meanwhile, and they age out with the local observation log."
+  }
+}

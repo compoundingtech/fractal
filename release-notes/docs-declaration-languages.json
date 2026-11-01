@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Declaration guides show grouped Effect and TypeScript preview APIs alongside runnable KDL, including the first-agent and first-mission tutorials",
+  "replay": {"status": "none", "detail": "Documentation only. No graph replay."},
+  "schema": {"status": "none", "detail": "No storage or graph schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint or rule change."},
+  "compatibility": {"status": "none", "detail": "KDL remains the runnable declaration format. Effect and TypeScript examples are explicitly labeled design-target previews, not an installed SDK. Grouped fences remain ordinary consecutive code blocks on GitHub."},
+  "downtime": {"status": "none", "detail": "No runtime change or downtime."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "No recovery step. Existing runnable commands remain KDL."}
+}

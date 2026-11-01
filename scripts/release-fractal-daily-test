@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 
@@ -63,7 +64,12 @@ STUB_NOTES += '\nFIELDS = ' + repr(FIELDS) + '\n'
 
 
 def sh(*cmd, cwd):
-    return subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True).stdout.strip()
+    print('fixture git stage: ' + json.dumps(cmd), file=sys.stderr, flush=True)
+    try:
+        return subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        error.add_note(f'fixture command stdout:\n{error.stdout}\nstderr:\n{error.stderr}')
+        raise
 
 
 def build_dist(dist, source):
@@ -83,9 +89,9 @@ def build_dist(dist, source):
                         info.size = len(data)
                         archive.addfile(info, io.BytesIO(data))
                 add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
-                add('bin/st3', b'st3'); add('bin/pty', b'pty')
+                add('bin/fractal', b'fractal'); add('bin/pty', b'pty')
                 add('share/fractal-web/index.html', b'web', 0o644)
-                add('bin/st', link='st3'); add('bin/fractal', link='st3')
+                add('bin/st', link='fractal'); add('bin/st3', link='fractal')
                 add('install.sh'); add('install-macos.py'); add('macos-installation.md', b'', 0o644)
             digest = hashlib.sha256((dist / f'{package}.tar.gz').read_bytes()).hexdigest()
             line = f'{digest}  {package}.tar.gz\n'
@@ -110,6 +116,9 @@ with tempfile.TemporaryDirectory() as temporary:
         (checkout / f'.github/{kind}-compat-baseline.json').write_text(json.dumps(pin))
     (checkout / 'scripts/release_notes.py').write_text(STUB_NOTES)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
+    # Fixture history must not depend on the account's interactive signing agent.
+    sh('git', 'config', '--local', 'commit.gpgsign', 'false', cwd=checkout)
+    sh('git', 'config', '--local', 'tag.gpgsign', 'false', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)
     sh('git', 'config', 'user.email', 'fixture@example.invalid', cwd=checkout)
     shas = []
@@ -223,7 +232,11 @@ with tempfile.TemporaryDirectory() as temporary:
 
 # run() still returns a successful command's output unchanged.
 from importlib.machinery import SourceFileLoader
-module = SourceFileLoader('daily', str(repo / 'scripts/release-fractal-daily')).load_module()
+from importlib.util import module_from_spec, spec_from_file_location
+loader = SourceFileLoader('daily', str(repo / 'scripts/release-fractal-daily'))
+spec = spec_from_file_location(loader.name, loader.path, loader=loader)
+module = module_from_spec(spec)
+spec.loader.exec_module(module)
 assert module.run('printf', 'ok\n') == 'ok'
 
 # Pure sizing never cuts a generated Markdown link and leaves small bodies unchanged.

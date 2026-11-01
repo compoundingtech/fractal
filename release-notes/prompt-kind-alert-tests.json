@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Tests cover each prompt kind's alert, its answers and its clear: Claude folder and MCP trust, plan approval, and a denied call allowed once, for its kind, or dismissed",
+  "replay": {"status": "none", "detail": "Tests only; no claims, projections or replay behavior changed."},
+  "schema": {"status": "none", "detail": "No persistent schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "Tests only; no client, wire or CLI change."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Reverting removes the tests; nothing else changes."}
+}

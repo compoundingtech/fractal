@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test gives each run its own TMPDIR, TMP and TEMP on disk (/var/tmp/st-test.XXXXXXXX, or in ST_TEST_TMP) and removes it when the run ends (--keep keeps it). Every `nix develop -c` a check ran left its nix-shell.* directory, and whatever its tests wrote, in the caller's TMPDIR, which on one build host is a RAM-backed /tmp; evidence-wrap's key file was left there too. A killed run's directory is removed by the next run (by flock)",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No schema or persistent data changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordinated upgrade changes. What a note covers and how the gate judges it are unchanged; TMPDIR is not an input of any check."},
+  "compatibility": {"status": "none", "detail": "Runs re-execute main's st-test, so this applies to every run once on main. scripts/ci-local and scripts/ci-local-web keep their own TMPDIR."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None. The nix-shell.* directories earlier runs left in /tmp stay until removed by hand."},
+  "recovery": {"status": "none", "detail": "No persistent state changes."}
+}

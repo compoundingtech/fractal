@@ -392,7 +392,7 @@ fn admit_report_with(
     let owner = state.store.mailbox_lease_authority(fence)?
         .ok_or_else(|| refused("the report has no canonical lease"))?;
     if owner.sequence == 0 {
-        return with_authority(state, fence, peer, |owner, validate| {
+        return with_authority(state, fence, peer, || {}, |owner, validate| {
             validate()?;
             check(Some(owner))
         });
@@ -427,7 +427,7 @@ fn admit_report_with(
     {
         // Preserve writer-side revalidation for exceptional bootstrap/re-exec,
         // even though it requires additional fence work beyond ordinary reports.
-        return with_authority(state, fence, peer, |owner, validate| {
+        return with_authority(state, fence, peer, || {}, |owner, validate| {
             validate()?;
             check(Some(owner))
         });
@@ -594,7 +594,7 @@ pub fn repair_proven(
             "the delivery report belongs to another native process",
         ));
     }
-    with_authority(state, fence, peer, |owner, validate| {
+    with_authority(state, fence, peer, || {}, |owner, validate| {
         validate()?;
         state.store.check_mailbox(fence)?;
         if !state.store.owns_mailbox_lease(fence, owner)? {
@@ -1059,6 +1059,7 @@ pub fn with_authority<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
+    authenticated: impl FnOnce(),
     action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
     if fence.epoch != 0 {
@@ -1130,6 +1131,10 @@ pub fn with_authority<T>(
             "the channel carries another runtime's observation paths",
         ));
     }
+    // Identity proof only, not mailbox custody: provider, physical runtime membership
+    // and daemon-selected source paths match. Pre-authority rejected callers cannot
+    // mutate shared delivery diagnostics. Session/fence refusals after this point can.
+    authenticated();
     let source = fractal_drivers::harness_events::read_bound_provider_state(&agent_dir)
         .map_err(|error| unavailable(error.to_string()))?;
     if let Some((_, raw)) = &source {
@@ -1667,19 +1672,24 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             .apply_internal(&intent, "raw-terminal-fixture")
             .unwrap();
         crate::store::mailbox_tests::ready(&store, "current");
-        let state = AppState { owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "node".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = AppState {
+            owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0).0,
+            node: "node".into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let request = Fence::new("agent/eval.worker", "current", "delivery");
         let agent_dir = source_agent_dir(&state, &request);
         harness_events::enable(&agent_dir, "current").unwrap();

@@ -155,6 +155,31 @@ pub(super) async fn upload_attachments(
     Ok(attachments)
 }
 
+pub(super) fn read_message_body(
+    body: Option<String>,
+    file: Option<PathBuf>,
+    stdin: impl std::io::Read,
+) -> Result<String> {
+    fn read(reader: impl std::io::Read) -> Result<String> {
+        use std::io::Read as _;
+        let limit = fractal_daemon::message_body::MAX_BYTES;
+        let mut bytes = Vec::new();
+        reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() <= limit, "message body exceeds {limit} UTF-8 bytes");
+        String::from_utf8(bytes).context("message body must be valid UTF-8")
+    }
+    let body = match (body, file) {
+        (Some(body), None) if body != "-" => body,
+        (Some(_), None) => read(stdin)?,
+        (None, Some(path)) => read(std::fs::File::open(&path)
+            .with_context(|| format!("reading body file {}", path.display()))?)?,
+        _ => anyhow::bail!("exactly one of --body or --body-file is required"),
+    };
+    let limit = fractal_daemon::message_body::MAX_BYTES;
+    anyhow::ensure!(body.len() <= limit, "message body exceeds {limit} UTF-8 bytes");
+    Ok(body)
+}
+
 pub(super) async fn run_message(
     client: &Client,
     endpoint: &Endpoint,
@@ -164,7 +189,11 @@ pub(super) async fn run_message(
 ) -> Result<()> {
     sync_message_projection(client).await?;
     match command {
-        MessageCommand::Send(args) => {
+        MessageCommand::Send(mut args) => {
+            args.body = Some(read_message_body(args.body.take(), args.body_file.take(), std::io::stdin().lock())?);
+            if !args.print_kdl {
+                preflight_message_recipient(client, &args.to, args.allow_undeclared_recipient).await?;
+            }
             let attachments = if args.attach.is_empty() {
                 Vec::new()
             } else {
@@ -362,6 +391,8 @@ pub(super) async fn run_message(
         MessageCommand::Reply(args) => {
             let original = read_message(client, &args.reference).await?;
             let recipient = message_reply_recipient(&original, &args.from)?;
+            fractal_daemon::model::refuse_person_recipient(&normalize_message_subject(&recipient))
+                .map_err(|error| anyhow::anyhow!(error.message))?;
             let attachments = if args.attach.is_empty() {
                 Vec::new()
             } else {
@@ -373,7 +404,8 @@ pub(super) async fn run_message(
                 MessageSendArgs {
                     to: recipient,
                     attach: Vec::new(),
-                    body: args.body,
+                    body: Some(args.body),
+                    body_file: None,
                     subject: args
                         .subject
                         .or(original.title.map(|title| format!("Re: {title}"))),
@@ -383,6 +415,8 @@ pub(super) async fn run_message(
                     wake: args.wake,
                     print_kdl: args.print_kdl,
                     idempotency_key: args.idempotency_key,
+                    // The original message, not a fresh roster lookup, resolves a reply.
+                    allow_undeclared_recipient: true,
                 },
                 attachments,
             )

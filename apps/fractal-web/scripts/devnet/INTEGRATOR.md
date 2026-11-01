@@ -79,6 +79,20 @@ when adopting the script to reuse the existing member key. The production build
 helper and generated launchers remain deployment-owned inputs, not replacements
 for the separate launcher scripts.
 
+Deployment overlays can import `edgeOrTailnetAdmission` from `server/host.mts` and
+pass their existing edge admission as `edge`. With `origin: undefined`, it returns
+that exact policy. With a published HTTPS origin and a nonempty login allowlist,
+the canonical Host uses `tailnetAdmission`; other requests retain the edge policy
+only if they have neither Tailscale identity headers nor equal Host and
+X-Forwarded-Host. The latter rejects anonymous/tagged Serve traffic too: the HTTP
+proxy overwrites X-Forwarded-Host with its incoming Host, whereas Devnet sends a
+loopback Host and a distinct external forwarded host. See
+[Tailscale v1.102.3 proxy implementation](https://github.com/tailscale/tailscale/blob/v1.102.3/ipn/ipnlocal/serve.go#L978-L987)
+and [forwarded/identity headers](https://github.com/tailscale/tailscale/blob/v1.102.3/ipn/ipnlocal/serve.go#L1074-L1112).
+Keep the listener loopback-only and preserve these headers between Serve and
+the app. Local processes can forge proxy headers, the same trust assumption as
+the Hub. The old edge URL retains its existing access policy.
+
 ## Trust boundary
 
 Only same-repository PR heads are eligible: `isCrossRepository` must be false
@@ -143,6 +157,21 @@ after an activation failure: the integrator reselects the artifact and retries
 publication without rebuilding. An unchanged candidate is not considered served
 until the published edge reports that exact revision. Reduced-stack cache entries
 record the SHA that actually built successfully, including the ejected PR result.
+
+Activation uses `devnet up --replace` so a serving generation stays published
+until its replacement is Ready and the edge cuts over. A previous registration
+is stopped first only when Devnet status positively reports it is not running
+or its lifecycle is starting/terminal. Missing or failed observations never
+authorize stopping a server; Devnet decides whether replacement can proceed.
+If replacement fails, Devnet owns server recovery. The integrator restores the
+previous build pointer only if the edge confirms that previous revision serves;
+if the candidate serves or the observation is inconclusive, the pointer stays
+unchanged. Neither generation is stopped or relaunched, and the original error
+is propagated. In particular, `ReplacementRecoveryRequired` needs operator
+recovery: the integrator never runs `--abandon-replace`. If replacement succeeds
+but subsequent publication verification fails, the integrator stops the new
+server and relaunches the previous build as before.
+
 After confirmed activation, the integrator keeps the current build and one previous
 rollback build and deletes older build directories. `integrator-activation.json`
 under the production root preserves the confirmed current/previous pair across

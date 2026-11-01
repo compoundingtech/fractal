@@ -4,6 +4,7 @@ use crate::WatchesStore;
 use crate::github_http::GithubAuth;
 use super::*;
 use crate::github_watch::ThreadRef;
+use crate::store::identities::resolve_reference_conn;
 
 /// Watch one thread as one seat, for fourteen days unless a deadline or `none` is named.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -151,6 +152,17 @@ fn watchable(thread: &ThreadRef, github: &Value) -> Result<(), ApiError> {
         format!("{thread} is already closed, so nothing would wake the seat"),
     ))
 }
+fn declare_seat_watch(store: &Store, thread: &ThreadRef, actor: &str, until: Option<u128>) -> Result<Value, St3Error> {
+    let actor = resolve_reference_conn(&store.readers.get(), actor)?;
+    if !store.seat_live(&actor)? {
+        return Err(St3Error::new(
+            "watch-needs-a-seat",
+            format!("`{actor}` is not a running seat"),
+        ));
+    }
+    store.declare_watch(thread, &actor, until)
+}
+
 
 pub async fn watch(
     State(state): State<AppState>,
@@ -168,16 +180,8 @@ pub async fn watch(
     watchable(&thread, &github)?;
     let thread = thread.followed(github.get("html_url").and_then(Value::as_str));
     let store = state.store.clone();
-    let actor = request.actor.clone();
-    let view = blocking_action(move || {
-        if !store.seat_live(&actor)? {
-            return Err(St3Error::new(
-                "watch-needs-a-seat",
-                format!("`{actor}` is not a running seat"),
-            ));
-        }
-        store.declare_watch(&thread, &actor, until)
-    })
+    let actor = request.actor;
+    let view = blocking_action(move || declare_seat_watch(&store, &thread, &actor, until))
     .await?;
     signal_changed(&state);
     let mut view = view;
@@ -377,8 +381,9 @@ pub async fn comment(
             error.to_string(),
         )
     })?;
+    let actor = resolve_reference_conn(&state.store.readers.get(), &request.actor).map_err(ApiError::bad)?;
     // The seat's wakes on this thread wait until st knows the new comment's ID.
-    let in_flight = crate::github_watch::PostInFlight::begin(&request.actor, &thread);
+    let in_flight = crate::github_watch::PostInFlight::begin(&actor, &thread);
     let posted = post_at(
         &crate::resource::github_api_base(),
         &token,
@@ -388,7 +393,6 @@ pub async fn comment(
     )
     .await?;
     let store = state.store.clone();
-    let actor = request.actor.clone();
     let watch = request.watch;
     let recorded_thread = thread.clone().followed(Some(&posted.url));
     let (record, view) = blocking_action(move || {
@@ -450,7 +454,7 @@ pub async fn own(
         ));
     }
     let store = state.store.clone();
-    let actor = request.actor.clone();
+    let actor = resolve_reference_conn(&store.readers.get(), &request.actor).map_err(ApiError::bad)?;
     let record = blocking_action(move || {
         store.record_github_post(&actor, &thread, kind, id, &object.url, &object.login)
     })
@@ -464,20 +468,20 @@ pub async fn unwatch(
     Json(request): Json<UnwatchRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let thread = ThreadRef::parse(&request.thread).map_err(ApiError::bad)?;
-    let agent = if request.actor.starts_with("agent/") {
-        if request
-            .agent
-            .as_deref()
-            .is_some_and(|agent| agent != request.actor)
-        {
+    let actor = resolve_reference_conn(&state.store.readers.get(), &request.actor).map_err(ApiError::bad)?;
+    let requested_agent = request.agent.as_deref().map(|agent| {
+        resolve_reference_conn(&state.store.readers.get(), agent).map_err(ApiError::bad)
+    }).transpose()?;
+    let agent = if actor.starts_with("agent/") {
+        if requested_agent.as_ref().is_some_and(|agent| agent != &actor) {
             return Err(bad(
                 "foreign-agent-actor",
                 "a seat ends only its own watches",
             ));
         }
-        request.actor.clone()
+        actor
     } else {
-        request.agent.clone().ok_or_else(|| {
+        requested_agent.ok_or_else(|| {
             bad(
                 "missing-watch-seat",
                 "name the seat whose watch to end with --agent",
@@ -501,7 +505,9 @@ pub async fn watches(
     Query(query): Query<WatchesQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let store = state.store.clone();
-    let agent = query.agent.filter(|agent| !agent.is_empty());
+    let agent = query.agent.filter(|agent| !agent.is_empty()).map(|agent| {
+        resolve_reference_conn(&store.readers.get(), &agent).map_err(ApiError::bad)
+    }).transpose()?;
     blocking_action(move || store.watches(agent.as_deref()))
         .await
         .map(Json)
@@ -815,6 +821,116 @@ mod tests {
             observers(),
             ["observer/github/acme/garden", "observer/github/acme/greenhouse"]
         );
+    }
+
+    #[tokio::test]
+    async fn renamed_watch_keeps_subject_cursor_deadline_and_delivers_once() {
+        for (actor_is_new, declare_after_rename) in [(true, false), (false, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let state = super::super::tests::state(root.path());
+            let store = state.store.clone();
+            store.bind_fleet("fleet/renamed-watch-test").unwrap();
+            let original = "agent/example-watch-original/worker";
+            let renamed = "agent/example-watch-renamed/worker";
+            let intent = crate::graph::parse_test_intent(
+                "version 2\nagent \"example-watch-original/worker\" { workspace \"/tmp\"; command \"true\" }\n",
+                store.origin(),
+            ).unwrap();
+            let expected = intent.subjects.keys().map(|subject| {
+                (subject.clone(), store.selected_desired_token(subject).unwrap().into_iter().collect())
+            }).collect();
+            store.apply(&intent, &expected, "watch-seat").unwrap();
+            let thread = ThreadRef::parse("acme/garden#12").unwrap();
+            let until = smallclaims::store::now_ms() + 86_400_000;
+            if !declare_after_rename {
+                declare_seat_watch(&store, &thread, original, Some(until)).unwrap();
+            }
+            let app = router(state);
+            let (status, receipt) = request(app.clone(), "POST", "/v1/agents/rename-id", json!({
+                "from":original, "to":renamed, "actor":"person/robin",
+                "reason":"Clarify seat", "idempotency_key":"watch-rename"
+            })).await;
+            assert_eq!(status, StatusCode::OK, "{receipt}");
+            let initial = if declare_after_rename {
+                declare_seat_watch(&store, &thread, renamed, Some(until)).unwrap()
+            } else {
+                store.watch_view(&thread.watch(original)).unwrap().unwrap()
+            };
+            let subscriptions = store.desired_subjects().unwrap().into_iter().filter_map(|item| {
+                crate::graph::subscription_spec(&item.desired).map(|spec| (item.subject, spec))
+            }).collect::<Vec<_>>();
+            let revision = store.selected_desired_revision(&thread.observer()).unwrap().unwrap();
+            let mut observation = json!({"repository_id":7, "pull_requests":[{
+                "number":12, "title":"Seed catalog", "url":"https://github.com/acme/garden/pull/12",
+                "head":"a".repeat(40), "state":"open", "draft":false,
+                "required_checks":{"state":"pending", "source":"rules", "checks":["build"], "failed":[]}
+            }]});
+            let baseline = store.record_resource_observation(
+                &thread.observer(), &revision, None, &thread.resource(), None,
+                &observation, smallclaims::store::now_ms(), &subscriptions, None,
+            ).unwrap();
+            assert!(baseline.message_subjects.is_empty());
+            let desired_before = store.desired_subjects_named(&[thread.watch(original)]).unwrap()[0].desired.clone();
+            let addressed_as = if actor_is_new { renamed } else { original };
+            let repeated = declare_seat_watch(&store, &thread, addressed_as, Some(until)).unwrap();
+            assert_eq!(repeated["subject"], initial["subject"]);
+            assert_eq!(store.desired_subjects_named(&[thread.watch(original)]).unwrap()[0].desired, desired_before);
+            observation["pull_requests"][0]["required_checks"]["state"] = json!("pass");
+            let mut delivered_events = 0;
+            for _ in 0..2 {
+                let outcome = store.record_resource_observation(
+                    &thread.observer(), &revision, None, &thread.resource(), None,
+                    &observation, smallclaims::store::now_ms(), &subscriptions, None,
+                ).unwrap();
+                delivered_events += outcome.message_subjects.len();
+            }
+            assert_eq!(delivered_events, 1);
+            let replica_root = tempfile::tempdir().unwrap();
+            let mut replica = super::super::tests::state(replica_root.path());
+            replica.store = Arc::new(Store::open_memory("watch-replica").unwrap());
+            replica.store.bind_fleet("fleet/renamed-watch-test").unwrap();
+            let exchange = store.export_replication_exchange_answering(
+                "fleet/renamed-watch-test", &replica.store.replication_inventory().unwrap(),
+                &replica.store.replication_signature_requests().unwrap(),
+            ).unwrap();
+            replica.store.receive_replication_exchange(store.origin(), "fleet/renamed-watch-test", &exchange).unwrap();
+            replica.store.validate_replication_backlog().unwrap();
+            replica.store.project_replication_backlog().unwrap();
+            assert_eq!(replica.store.messages(Some(original), false).unwrap().len(), 1);
+            for reader in [app.clone(), router(replica)] {
+                let mut listed_before = None;
+                for name in [renamed, original] {
+                    let (status, listed) = request(reader.clone(), "GET",
+                        &format!("/v1/github/watches?agent={name}"), Value::Null).await;
+                    assert_eq!(status, StatusCode::OK, "{listed}");
+                    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+                    assert_eq!(listed[0]["subject"], initial["subject"]);
+                    assert_eq!(listed[0]["until"], initial["until"]);
+                    if let Some(previous) = listed_before.replace(listed.clone()) {
+                        assert_eq!(listed, previous);
+                    }
+                }
+            }
+            let wakes = store.messages(Some(original), false).unwrap();
+            assert_eq!(wakes.len(), 1, "{wakes:?}");
+            assert_eq!(store.claims_for(&wakes[0].subject, Some("message.sent")).unwrap().len(), 1);
+            let actor = if actor_is_new { renamed } else { original };
+            let target = if actor_is_new { original } else { renamed };
+            let (_, denied) = request(app.clone(), "POST", "/v1/github/unwatch", json!({
+                "actor":"agent/example-unrelated/worker", "agent":target, "thread":"acme/garden#12"
+            })).await;
+            assert_eq!(denied["code"], "foreign-agent-actor");
+            let (status, ended) = request(app.clone(), "POST", "/v1/github/unwatch", json!({
+                "actor":actor, "agent":target, "thread":"acme/garden#12"
+            })).await;
+            assert_eq!(status, StatusCode::OK, "{ended}");
+            assert_eq!(ended["ended"], true);
+            let (_, again) = request(app, "POST", "/v1/github/unwatch", json!({
+                "actor":target, "agent":actor, "thread":"acme/garden#12"
+            })).await;
+            assert_eq!(again["ended"], false);
+            assert_eq!(store.messages(Some(original), false).unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]

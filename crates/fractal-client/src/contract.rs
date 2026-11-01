@@ -10,8 +10,10 @@ pub const ACTION_NAMES: &[&str] = &[
     "agent.stop",
     "agent.suspend",
     "arrangement.edit",
+    "arrangement.membership.edit",
     "attention.resolve",
     "custom.reply",
+    "harness.answer",
     "lane.approve",
     "lane.join",
     "lane.leave",
@@ -62,6 +64,8 @@ pub const ACTION_NAMES: &[&str] = &[
 ];
 #[rustfmt::skip]
 pub const READ_OPERATIONS: &[(&str, &str)] = &[
+    ("harness-questions.list", "/v1/client/harness-questions"),
+    ("harness-questions.get", "/v1/client/harness-questions/{id}"),
     ("notes.list", "/v1/client/notes"),
     ("custom-subjects.list", "/v1/client/custom-subjects"),
     ("custom-subjects.get", "/v1/client/custom-subjects/{id}"),
@@ -130,6 +134,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("terminal.screen", "/v1/client/terminals/{id}/screen"),
     ("arrangements.list", "/v1/client/arrangements"),
     ("arrangements.get", "/v1/client/arrangements/{person_name}/{uuid}"),
+    ("arrangements.memberships", "/v1/client/arrangements/{person_name}/{uuid}/memberships"),
     ("glasses.list", "/v1/client/glasses"),
     ("glasses.get", "/v1/client/glasses/{id}"),
     ("assistant.summary", "/v1/client/assistant/summary"),

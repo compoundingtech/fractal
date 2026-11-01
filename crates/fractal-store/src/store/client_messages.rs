@@ -1509,12 +1509,16 @@ mod tests {
         }
         assert_commit_budget(&store);
         assert!(store.client_message_selectors_pending().unwrap());
-        let saved: String = store.readers.get().query_row(
+        // The commit's fold checks its 10 ms budget before each subject, so on a slow host it can
+        // stop before scanning anything and save no work: it then scanned no claim rows at all.
+        let saved: Option<String> = store.readers.get().query_row(
             "SELECT value FROM meta WHERE key=?1", [FOLD_MARKER], |row| row.get(0),
-        ).unwrap();
-        let work: FoldWork = serde_json::from_str(&saved).unwrap();
-        assert!(work.after <= u64::try_from(FOLD_CLAIMS).unwrap(),
-            "the first transaction cannot scan more than its claim-row allowance");
+        ).optional().unwrap();
+        if let Some(saved) = saved {
+            let work: FoldWork = serde_json::from_str(&saved).unwrap();
+            assert!(work.after <= u64::try_from(FOLD_CLAIMS).unwrap(),
+                "the first transaction cannot scan more than its claim-row allowance");
+        }
         let mut loans = 1;
         while store.client_message_selectors_pending().unwrap() {
             store.maintain_client_message_selectors().unwrap();
@@ -1580,6 +1584,9 @@ mod tests {
                 ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
         }
+        // A commit folds for at most BACKFILL_WORK_BUDGET of wall time, so on a loaded host the
+        // last seeded subjects can still be pending. Every caller starts from a folded seed.
+        while store.maintain_client_message_selectors().unwrap() {}
     }
 
     fn paged_backfill_rows(store: &Store, person: Option<&str>, actor: Option<&str>, history: bool) -> Vec<Value> {
@@ -2546,9 +2553,6 @@ mod tests {
     fn retired_headers_outlive_cursors_issued_late_in_publication_lag() {
         let store = Store::open_memory("node").unwrap();
         seed_backfill(&store,2);
-        // A commit folds for at most BACKFILL_WORK_BUDGET of wall time, so on a loaded host a
-        // seeded subject can still be pending here. The cut below must cover both headers.
-        while store.maintain_client_message_selectors().unwrap() {}
         let through = store.client_messages_page_cut(store.index().unwrap()).unwrap();
         let baseline = paged_backfill_rows(&store,None,None,true);
         {

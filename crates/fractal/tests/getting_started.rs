@@ -8,6 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use fractal_daemon::SeatsStoreCore;
 
 struct Newcomer {
     root: tempfile::TempDir,
@@ -55,6 +56,16 @@ impl Newcomer {
             ),
         )
         .unwrap();
+        // The walkthrough sends to an existing seat; no harness or signing setup is needed.
+        let store = fractal_daemon::store::Store::open(
+            &root.path().join("state/claims.sqlite3"), "studio",
+        ).unwrap();
+        let intent = fractal_daemon::parse_intent(
+            "version 2\nagent \"garden/worker\" { workspace \"/tmp\"; command \"true\"; restart never }\n",
+            store.origin(),
+        ).unwrap();
+        store.apply_internal(&intent, "fixture-walkthrough-recipient").unwrap();
+        drop(store);
         let log = std::fs::File::create(root.path().join("daemon.log")).unwrap();
         let daemon = Self::command(root.path())
             .arg("up")

@@ -13,13 +13,10 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
-/// What the live loop has fetched beside the model: conversations and launch previews.
+/// What the live loop has fetched beside the model: conversations and message bodies.
 #[derive(Default)]
 pub struct Extras {
     pub conversations: BTreeMap<String, Load<Vec<Entry>>>,
-    /// Each conversation's tool calls with no result yet (see [`pending_calls`]).
-    pub pending_calls: BTreeMap<String, Vec<super::view::PendingCall>>,
-    pub previews: BTreeMap<String, Load<MissionPreview>>,
     /// Loaded messages behind unread-message items: sender, title, text.
     pub bodies: BTreeMap<String, (String, Option<String>, String)>,
     pub live: bool,
@@ -47,11 +44,24 @@ pub struct Extras {
     /// each one that was selected.
     pub slo: Load<Vec<fractal_client::SloRow>>,
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
+    /// Why the last refresh failed, while `slo` still holds the rows of an earlier read.
+    pub slo_stale: Option<String>,
 }
 
 fn age(then: &str, now: &str) -> String {
     let label = crate::age_label(then, now);
     label.trim_end_matches(" ago").to_owned()
+}
+
+/// When an ask resolves by itself and what then applies, as the web and phone word it.
+pub(crate) fn ask_deadline(deadline: &str, default: Option<&str>, now: &str) -> String {
+    // How long is left is the age of now seen from the deadline: `0s` once it has passed.
+    let left = crate::age_label(now, deadline);
+    let left = left.trim_end_matches(" ago");
+    match default {
+        Some(label) => format!("answer within {left}, or “{label}” applies"),
+        None => format!("answer within {left}, or it times out"),
+    }
 }
 
 fn loaded<T>(snapshot: bool, items: Vec<T>) -> Load<Vec<T>> {
@@ -259,7 +269,6 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
             extras.window_errors.get("devices"),
         ),
         conversations: extras.conversations.clone(),
-        pending_calls: extras.pending_calls.clone(),
         quiet_missions: quiet,
         usage: match &model.usage {
             Some(Ok(period)) => Load::Ready(period.rows.clone()),
@@ -280,6 +289,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         },
         slo: extras.slo.clone(),
         slo_history: extras.slo_history.clone(),
+        slo_stale: extras.slo_stale.clone(),
         clients: match &model.clients {
             Some(Ok(list)) => Load::Ready(
                 list.items
@@ -443,11 +453,13 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                                 .as_deref()
                                 .map(short)
                                 .unwrap_or_else(|| item.title.clone()),
-                            preview: extras
-                                .previews
-                                .get(&item.header.id)
-                                .cloned()
-                                .unwrap_or(Load::Loading),
+                            preview: launch_preview(
+                                presentation.launch.as_ref(),
+                                mission
+                                    .as_deref()
+                                    .unwrap_or(&item.title)
+                                    .trim_start_matches("mission/"),
+                            ),
                         },
                         "revision" => AttentionKind::Revision {
                             reason: item.detail.clone(),
@@ -522,7 +534,10 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                                 .action_parameters
                                 .get("prompt.respond")
                                 .and_then(|parameters| parameters.get("call_id"))
-                                .map(|call| call.as_str().map(str::to_owned)),
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            calls: prompt_calls(presentation.prompt.as_ref()),
+                            allow: presentation.prompt.as_ref().is_some_and(|prompt| prompt.allow),
                         },
                         "login" => AttentionKind::Login {
                             text: clean_message_text(&item.detail),
@@ -602,6 +617,14 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                     .unwrap_or_else(|| clean_message_text(&item.title)),
                 waiting: path.map(|path| format!("step {path}")),
                 age: age(&item.requested_at, now),
+                requested_at: chrono::DateTime::parse_from_rfc3339(&item.requested_at).ok(),
+                deadline: item.deadline_at.as_deref().map(|deadline| {
+                    ask_deadline(
+                        deadline,
+                        item.default_answer.as_ref().map(|answer| answer.label.as_str()),
+                        now,
+                    )
+                }),
                 mission,
                 kind,
                 actions: item.actions.clone(),
@@ -610,90 +633,72 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
         .collect()
 }
 
-/// Build a launch preview from a launch variant's normalized mission.
-pub fn preview(name: &str, normalized: &Value) -> MissionPreview {
-    let strings = |value: &Value| {
-        value
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item.as_str().map(clean_message_text))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    };
-    let order = normalized["display_order"]
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let steps_value = normalized["steps"].as_object().cloned().unwrap_or_default();
-    let mut keys = order
-        .into_iter()
-        .filter(|key| steps_value.contains_key(key))
-        .collect::<Vec<_>>();
-    for key in steps_value.keys() {
-        if !keys.contains(key) {
-            keys.push(key.clone());
+/// The launch card's preview as st serves it (`presentation.launch`): the newest variant's
+/// mission, named `name`, or why st has none to show.
+fn launch_preview(launch: Option<&fractal_client::AttentionLaunch>, name: &str) -> Load<MissionPreview> {
+    match launch {
+        None => Load::Failed(
+            "st does not preview this launch: this host's st is older. Read it with st launches.".into(),
+        ),
+        Some(fractal_client::AttentionLaunch::Unavailable { unavailable }) => {
+            let mut reason = clean_message_text(&unavailable.reason);
+            for diagnostic in &unavailable.diagnostics {
+                reason.push_str(&format!("\n• {}", clean_message_text(diagnostic)));
+            }
+            Load::Failed(reason)
         }
-    }
-    let mut agents = Vec::new();
-    let steps = keys
-        .iter()
-        .filter_map(|key| steps_value.get(key).map(|step| (key, step)))
-        .filter(|(_, step)| !step["finally"].as_bool().unwrap_or(false))
-        .map(|(key, step)| {
-            let selector = &step["work_selector"];
-            let assignee = match selector["kind"].as_str() {
-                Some("assigned") => selector["agent"].as_str().map(short).unwrap_or_default(),
-                Some("available") => "any of several".into(),
-                Some("agentless") => "Fractal".into(),
-                _ => "—".into(),
-            };
-            if let Some(agent) = selector["agent"].as_str()
-                && !agents
-                    .iter()
-                    .any(|known: &PreviewAgent| known.name == short(agent))
-            {
-                agents.push(PreviewAgent {
-                    name: short(agent),
-                    harness: Harness::Unknown,
-                    host: String::new(),
-                });
-            }
-            let after = step["dependencies"]
-                .as_array()
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|dependency| dependency["step"].as_str().map(str::to_owned))
-                        .collect()
+        Some(fractal_client::AttentionLaunch::Preview(preview)) => Load::Ready(MissionPreview {
+            name: name.to_owned(),
+            goals: preview.goals.iter().map(|goal| clean_message_text(goal)).collect(),
+            steps: preview
+                .steps
+                .iter()
+                .map(|step| PreviewStep {
+                    name: step.path.clone(),
+                    assignee: step.assignee.label.clone(),
+                    after: step.after.clone(),
+                    asks_you: step.asks_you,
                 })
-                .unwrap_or_default();
-            let asks_you = step["gates"]
-                .as_array()
-                .is_some_and(|gates| gates.iter().any(|gate| gate.get("reviewer").is_some()));
-            PreviewStep {
-                name: step["path"].as_str().unwrap_or(key).to_owned(),
-                assignee,
-                after,
-                asks_you,
-            }
-        })
-        .collect();
-    MissionPreview {
-        name: name.to_owned(),
-        goals: strings(&normalized["goals"]),
-        steps,
-        agents,
-        workspace: String::new(),
+                .collect(),
+            agents: preview
+                .agents
+                .iter()
+                .map(|agent| PreviewAgent {
+                    name: agent.label.clone(),
+                    harness: harness(agent.harness.as_deref()),
+                    host: agent.host.clone().unwrap_or_default(),
+                })
+                .collect(),
+            workspace: String::new(),
+        }),
     }
+}
+
+/// The calls st serves beside a prompt (`presentation.prompt.calls`), each input read back
+/// from its JSON text when st served it whole; or why st serves none.
+fn prompt_calls(prompt: Option<&fractal_client::AttentionPrompt>) -> Result<Vec<super::view::PendingCall>, String> {
+    let Some(prompt) = prompt else {
+        return Err("this host's st is older and does not say which call the prompt asks about".into());
+    };
+    let Some(calls) = &prompt.calls else {
+        return Err(prompt
+            .unknown_reason
+            .clone()
+            .unwrap_or_else(|| "st cannot read this seat's conversation".into()));
+    };
+    Ok(calls
+        .iter()
+        .map(|call| super::view::PendingCall {
+            id: call.call_id.clone(),
+            tool: call.tool.clone(),
+            input: call
+                .input_complete
+                .then(|| serde_json::from_str(&call.input).ok())
+                .flatten()
+                .unwrap_or_else(|| Value::String(call.input.clone())),
+            complete: call.input_complete,
+        })
+        .collect())
 }
 
 // --------------------------------------------------------------------- agents
@@ -975,35 +980,6 @@ pub fn names(model: &Model, person: &str) -> BTreeMap<String, String> {
 #[cfg(test)]
 use fractal_conversation_ui::adapt::from_harness;
 pub use fractal_conversation_ui::adapt::unreadable_transcript;
-
-/// The tool calls `timeline` records with no result yet, oldest first, each in full. A native
-/// prompt asks about one of them, though it names none: only when exactly one waits is it certain
-/// which one an answer is for.
-pub fn pending_calls(timeline: &[fractal_client::TimelineEntry]) -> Vec<super::view::PendingCall> {
-    let answered: std::collections::HashSet<&str> = timeline
-        .iter()
-        .filter_map(|entry| match &entry.body {
-            fractal_client::TimelineBody::ToolResult(result) => Some(result.call_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    let mut seen = std::collections::HashSet::new();
-    timeline
-        .iter()
-        .filter_map(|entry| match &entry.body {
-            fractal_client::TimelineBody::ToolCall(call)
-                if !answered.contains(call.call_id.as_str()) && seen.insert(call.call_id.as_str()) =>
-            {
-                Some(super::view::PendingCall {
-                    id: call.call_id.clone(),
-                    tool: call.name.clone(),
-                    input: call.arguments.clone(),
-                })
-            }
-            _ => None,
-        })
-        .collect()
-}
 
 /// Standalone native images need a focusable row even when the text adapter has no words.
 /// The images an ask carries, read from st by its person step (`source_id`), the way a
@@ -1852,34 +1828,79 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_preview_reads_steps_assignees_dependencies_and_person_gates() {
-        let normalized = json!({
+    fn a_launch_card_shows_the_mission_st_previews_or_why_it_has_none() {
+        let launch: fractal_client::AttentionLaunch = serde_json::from_value(json!({
+            "variant": "variant/a",
             "goals": ["Audit dependencies"],
-            "display_order": ["scan", "merge"],
-            "steps": {
-                "scan": {"path": "scan", "work_selector": {"kind": "assigned", "agent": "agent/example/auditor"}, "dependencies": [], "gates": []},
-                "merge": {"path": "merge", "work_selector": {"kind": "agentless"}, "dependencies": [{"dependency": "step", "step": "scan", "state": "completed"}], "gates": [{"reviewer": "person/robin"}]}
-            }
-        });
-        let preview = preview("harbor/audit", &normalized);
+            "steps": [
+                {"path": "scan", "title": "scan", "assignee": {"kind": "agent", "agent": "agent/example/auditor", "label": "Auditor"}, "after": [], "asks_you": false},
+                {"path": "merge", "title": "merge", "assignee": {"kind": "st", "agent": null, "label": "Fractal"}, "after": ["scan"], "asks_you": true}
+            ],
+            "agents": [{"id": "agent/example/auditor", "label": "Auditor", "harness": "codex", "host": "alder"}],
+            "asks_you": 1
+        }))
+        .unwrap();
+        let Load::Ready(preview) = launch_preview(Some(&launch), "harbor/audit") else {
+            panic!("st previews this launch");
+        };
+        assert_eq!(preview.name, "harbor/audit");
         assert_eq!(preview.goals, vec!["Audit dependencies"]);
-        assert_eq!(preview.steps[0].assignee, "example/auditor");
+        assert_eq!(preview.steps[0].assignee, "Auditor");
         assert_eq!(preview.steps[1].assignee, "Fractal");
         assert_eq!(preview.steps[1].after, vec!["scan"]);
         assert!(preview.steps[1].asks_you);
-        assert_eq!(preview.agents.len(), 1);
+        assert_eq!(preview.agents[0].harness, Harness::Codex);
+        assert_eq!(preview.agents[0].host, "alder");
+
+        let unavailable: fractal_client::AttentionLaunch = serde_json::from_value(json!({
+            "unavailable": {"reason": "The planner has not proposed a mission yet.", "diagnostics": ["a blocker"]}
+        }))
+        .unwrap();
+        let Load::Failed(why) = launch_preview(Some(&unavailable), "harbor/audit") else {
+            panic!("st says why it has no preview");
+        };
+        assert_eq!(why, "The planner has not proposed a mission yet.\n• a blocker");
+        // An older st previews nothing: the card says so instead of loading forever.
+        assert!(matches!(launch_preview(None, "harbor/audit"), Load::Failed(_)));
+    }
+
+    #[test]
+    fn a_prompt_card_reads_the_calls_st_serves() {
+        let prompt: fractal_client::AttentionPrompt = serde_json::from_value(json!({
+            "calls": [
+                {"call_id": "call-a", "tool": "Bash", "input": "{\"command\":\"make\"}", "input_complete": true},
+                {"call_id": "call-b", "tool": "Write", "input": "{\"text\":\"cut", "input_complete": false}
+            ],
+            "answers": ["allow", "deny"],
+            "allow": true
+        }))
+        .unwrap();
+        let calls = prompt_calls(Some(&prompt)).unwrap();
+        assert_eq!(calls[0].input, json!({"command": "make"}));
+        assert!(calls[0].complete);
+        // A cut input stays the text st served, and is never read as whole.
+        assert_eq!(calls[1].input, json!("{\"text\":\"cut"));
+        assert!(!calls[1].complete);
+
+        let unread: fractal_client::AttentionPrompt = serde_json::from_value(json!({
+            "calls": null, "answers": ["allow", "deny"], "allow": false, "unknown_reason": "the seat runs elsewhere"
+        }))
+        .unwrap();
+        assert_eq!(prompt_calls(Some(&unread)).unwrap_err(), "the seat runs elsewhere");
+        assert!(prompt_calls(None).is_err(), "an older st serves no calls");
     }
 
     #[test]
     fn an_agent_named_st_keeps_its_launch_assignment_label() {
-        let normalized = json!({
-            "goals": [],
-            "display_order": ["scan"],
-            "steps": {
-                "scan": {"path": "scan", "work_selector": {"kind": "assigned", "agent": "agent/st"}, "dependencies": [], "gates": []}
-            }
-        });
-        let preview = preview("audit", &normalized);
+        // The card shows the label Fractal serves, never one rewritten from the agent's id.
+        let launch: fractal_client::AttentionLaunch = serde_json::from_value(json!({
+            "variant": "default", "goals": [], "asks_you": 0, "agents": [],
+            "steps": [{"path": "scan", "title": "scan", "assignee": {"kind": "agent", "agent": "agent/st", "label": "st"}, "after": [], "asks_you": false}]
+        }))
+        .unwrap();
+        let Load::Ready(preview) = launch_preview(Some(&launch), "audit") else {
+            panic!("Fractal previews this launch");
+        };
         assert_eq!(preview.steps[0].assignee, "st");
     }
 
@@ -1978,6 +1999,7 @@ mod tests {
                 store_index: 1,
                 projection_version: "1".into(),
                 created_at: "2026-09-29T10:00:00Z".into(),
+                published_at: None,
             }),
             truncated: false,
             sync: None,
@@ -2231,6 +2253,28 @@ mod tests {
         assert_eq!(episode, "episode-1");
         assert_eq!(seat_id, "agent/example/atlas");
         assert_eq!(item.actions, ["prompt.respond"]);
+    }
+
+    /// The call a prompt asks about is the one st names. A null or missing `call_id` names none,
+    /// whichever daemon sent it.
+    #[test]
+    fn a_prompt_names_the_call_st_names_and_otherwise_none() {
+        for (call_id, named) in [
+            (Some(serde_json::json!("toolu_bash")), Some("toolu_bash")),
+            (Some(serde_json::Value::Null), None),
+            (None, None),
+        ] {
+            let mut card = prompt_card(true);
+            if let Some(call_id) = call_id {
+                card["action_parameters"]["prompt.respond"]["call_id"] = call_id;
+            }
+            let mut model = Model::default();
+            model.actor = "person/example".into();
+            model.now.items.push(served(card));
+            let items = attention(&model, &Extras::default());
+            let AttentionKind::Prompt { call, .. } = &items[0].kind else { panic!() };
+            assert_eq!(call.as_deref(), named);
+        }
     }
 
     #[test]

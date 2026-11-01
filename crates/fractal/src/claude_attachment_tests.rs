@@ -10,7 +10,7 @@ use axum::{
 };
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 
 struct Control {
@@ -26,6 +26,8 @@ struct Control {
     reports: Mutex<Vec<Value>>,
     report_changed: Notify,
     attachment: AtomicU8,  // 0: absent, 1: admitted, 2: failed check
+    /// How long the attachment endpoint takes to answer, as a loaded daemon does.
+    attachment_delay_ms: AtomicU64,
     publication: AtomicU8, // 0: acknowledged, 1: no commit, 2: commit without acknowledgement
     requests: Mutex<Vec<Value>>,
     /// The attachment the mailbox stream pushes once the driver offers `attachment_push`;
@@ -42,6 +44,10 @@ async fn attachment(
     Query(fence): Query<fractal_daemon::mailbox::Fence>,
 ) -> Response {
     control.attachment_checks.fetch_add(1, Ordering::SeqCst);
+    let delay = control.attachment_delay_ms.load(Ordering::SeqCst);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
     let mode = control.attachment.load(Ordering::SeqCst);
     if !control.binding_live.load(Ordering::SeqCst) {
         return (
@@ -203,6 +209,7 @@ impl Fixture {
             reports: Mutex::new(vec![]),
             report_changed: Notify::new(),
             attachment: AtomicU8::new(1),
+            attachment_delay_ms: AtomicU64::new(0),
             publication: AtomicU8::new(0),
             requests: Mutex::new(vec![]),
             push: tokio::sync::watch::channel(None).0,
@@ -234,6 +241,8 @@ impl Fixture {
         Self {
             state: NativeLoopState {
                 mailbox_fence: Some(owner.clone()),
+                // The daemon has answered for as long as `check`'s attach window has run.
+                claude_attachment_answered: Some(Instant::now() - Duration::from_secs(30)),
                 ..Default::default()
             },
             mailbox: NativeMailbox {
@@ -388,6 +397,16 @@ impl Fixture {
 
     fn reports(&self) -> usize {
         self.control.reports.lock().unwrap().len()
+    }
+
+    fn phases(&self) -> Vec<String> {
+        self.control
+            .store
+            .claims_for(&self.control.owner.subject, Some("harness.diagnostic"))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.body["fields"]["status"].as_str().unwrap().into())
+            .collect()
     }
 
     fn codes(&self) -> Vec<String> {
@@ -1543,4 +1562,54 @@ async fn attachment_frames_never_take_mail_queue_slots() {
         matches!(frame, Some(fractal_daemon::mailbox::Frame::Mailbox { .. })),
         "{frame:?}"
     );
+}
+
+/// A restarting daemon answers "API is not ready" until it serves, then answers before the
+/// driver's channel report reaches it. Neither is a lost channel: the attached seat publishes
+/// nothing while the checks fail, and its attach window counts from the daemon's first answer.
+#[tokio::test]
+async fn a_daemon_that_cannot_answer_yet_never_blocks_an_attached_channel() {
+    let mut f = Fixture::new().await;
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    f.control.attachment.store(2, Ordering::SeqCst);
+    for _ in 0..3 {
+        f.check().await.unwrap();
+    }
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    assert_eq!(f.phases(), ["recovered"]);
+
+    f.control.attachment.store(0, Ordering::SeqCst);
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    // Only a whole window of answers without the channel blocks it.
+    let answered = f.state.claude_attachment_answered.unwrap();
+    f.state.claude_attachment_answered = Some(answered - claude_attachment_window());
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    assert_eq!(f.phases(), ["recovered", "starting", "blocked"]);
+    f.unchanged_owner();
+}
+
+/// A loaded daemon that takes longer than the check's two seconds says nothing about the channel,
+/// however long the seat has run. The diagnostic waits, as any unadmitted publication does, and
+/// goes out once the daemon answers.
+#[tokio::test]
+async fn a_check_the_daemon_is_too_slow_to_answer_does_not_block_the_channel() {
+    let mut f = Fixture::new().await;
+    f.control.attachment_delay_ms.store(2_200, Ordering::SeqCst);
+    assert!(f.check().await.is_err(), "the publication's own check timed out too");
+    let pending = f.state.claude_attachment_pending.as_ref().unwrap();
+    assert_eq!(pending.phase, "starting");
+    let reason = pending.input.fields["reason"].as_str().unwrap();
+    assert!(reason.contains("exceeded two seconds"), "{reason}");
+    assert_eq!(f.posts(), 0);
+
+    f.control.attachment_delay_ms.store(0, Ordering::SeqCst);
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    assert_eq!(f.phases(), ["starting", "recovered"]);
+    f.unchanged_owner();
 }

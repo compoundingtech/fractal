@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A checkpoint, shared or local, now keeps the observation a mission request names as its discovery, as it already keeps claims cited as evidence or pinned as a run input. Many requests do not cite their discovery in evidence, so the newest-only rule for observer resource observations could have dropped one the reconciler still reads by its ID. Checkpoint rules move to version 22",
+  "replay": {"status": "none", "detail": "No claim is written or read differently; a checkpoint only keeps more."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "changed", "detail": "RULES_VERSION 22 adds the request-discovery guard. Members agree on a shared checkpoint only when they run the same rules, so a member on version 21 and one on 22 hold shared checkpoints until both run 22. A member that trims locally plans its own cut and is not held.", "transitions": [[21, 22]]},
+  "compatibility": {"status": "none", "detail": "The wire format is unchanged."},
+  "downtime": {"status": "none", "detail": "No restart beyond the normal upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting returns to version 21, under which a checkpoint may drop a superseded discovery that no request cites as evidence."}
+}

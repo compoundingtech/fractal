@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { homeRows, homeSections, keepClosed, onHome } from '@fractal/views/homeView';
+import { detailRow, homeRows, homeSections, keepClosed, onHome } from '@fractal/views/homeView';
 
 const now = Date.parse('2026-09-30T12:00:00Z');
 // What Fractal presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
@@ -117,4 +117,28 @@ assert.deepEqual(withUpdate.map(row => row.color), ['person', 'green']);
   ], 'person/alex', now);
   assert.deepEqual(rows.map(row => [row.item.id, row.tier, row.kind]), [['attention/gate', 'stopped', 'unplaced'], ['attention/old', 'stopped', 'unplaced'], ['attention/note', 'later', 'unplaced']]);
   assert.match(rows[0].waiting, /Fractal is older, or has not presented it yet/);
+}
+
+// intake-b's #3048 cases: a null card keeps an item off Home; a custom kind shows as the Today
+// request st presents; a presented item with no held step names none.
+{
+  const offNow = item('fault', 'fault', { alert: true, presentation: { tier: 'stopped', kind: null, agent: null, raised_by: null, waiting: null } });
+  assert.deepEqual(homeRows([offNow], 'person/alex', now), []);
+  const custom = item('deploy', 'custom.deploy-window', { alert: true, presentation: { tier: 'today', kind: 'request', agent: null, raised_by: null, waiting: null } });
+  const [row] = homeRows([custom], 'person/alex', now);
+  assert.deepEqual([row.tier, row.kind, row.waiting], ['today', 'request', null]);
+}
+
+// An item's own screen always has a row: the one Home lists, or an unplaced one for an item
+// Home does not list (a fault or message opened by a link), keeping Fractal's alert flag.
+{
+  const gate = item('gate', 'human-gate', { alert: true, step_run_id: 'step-run/abc/build' });
+  assert.deepEqual(detailRow(gate, now), homeRows([gate], 'person/alex', now)[0]);
+  const fault = item('fault', 'fault', { alert: true });
+  const message = item('note', 'unread-message', { alert: false });
+  for (const [off, tier] of [[fault, 'stopped'], [message, 'later']]) {
+    const row = detailRow(off, now);
+    assert.deepEqual([row.kind, row.tier, row.glyph, typeof row.color], ['unplaced', tier, '?', 'string']);
+    assert.match(row.waiting, /off Now/);
+  }
 }

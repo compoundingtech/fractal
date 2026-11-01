@@ -473,6 +473,16 @@ pub(super) async fn run_mission_view(
                 Ok(())
             }
         }
+        MissionViewCommand::Blocked { quiet } => {
+            let path = format!("/v1/blocked-runs{}", quiet_query(quiet.as_deref())?);
+            let view: fractal_daemon::waiting_on::BlockedRuns = client.get(&path).await?;
+            if json_output {
+                print_value(&serde_json::to_value(&view)?, true)
+            } else {
+                print!("{}", crate::waiting_on_cli::render_blocked_runs(&view));
+                Ok(())
+            }
+        }
         MissionViewCommand::Show(args) => {
             notice_ignored_read_actor(args.ignored_actor.as_deref());
             anyhow::ensure!((1..=50).contains(&args.limit), "mission tree limit must be 1 through 50");
@@ -555,6 +565,7 @@ pub(super) async fn run_mission_view(
         MissionViewCommand::Outcome(args) => {
             set_mission_run_outcome(client, args, json_output).await
         }
+        MissionViewCommand::DismissFault(args) => dismiss_fault(client, args, json_output).await,
         MissionViewCommand::ReportTo(args) => {
             set_mission_run_report(client, args, json_output).await
         }
@@ -688,6 +699,38 @@ async fn set_mission_run_outcome(
         print_value(&run, true)
     } else {
         println!("{} is now {}", run.subject, run.status);
+        Ok(())
+    }
+}
+
+async fn dismiss_fault(
+    client: &Client,
+    args: MissionDismissFaultArgs,
+    json_output: bool,
+) -> Result<()> {
+    let source = if args.source.contains('/') {
+        args.source
+    } else {
+        format!("mission-run/{}", args.source)
+    };
+    let dismissed: fractal_daemon::model::FaultDismissal = client
+        .post(
+            "/v1/faults/dismiss",
+            &fractal_daemon::model::FaultDismissRequest {
+                source,
+                episode: args.episode,
+                reason: args.reason,
+                actor: args.actor,
+            },
+        )
+        .await?;
+    if json_output {
+        print_value(&dismissed, true)
+    } else {
+        println!(
+            "dismissed the fault on {} (episode {}): {}",
+            dismissed.subject, dismissed.episode, dismissed.title
+        );
         Ok(())
     }
 }

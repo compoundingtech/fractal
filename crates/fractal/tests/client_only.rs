@@ -63,7 +63,7 @@ impl Tui {
                 pixel_height: 0,
             })
             .unwrap();
-        let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_st3"));
+        let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_fractal"));
         // This proves pairing and control, read off Now, which fills a space with nothing open.
         command.args(["ui"]);
         command.env_clear();
@@ -143,19 +143,24 @@ fn state(root: &Path, node: &str) -> AppState {
             smallclaims::fleet::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
-    AppState { owning_person: None,
-    store: Arc::new(store),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: node.into(),
-    state_dir: root.into(),
-    pty_root: root.join("pty"),
-    pty_binary: root.join("unused-pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    AppState {
+        owning_person: None,
+        store: Arc::new(store),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: node.into(),
+        state_dir: root.into(),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused-pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 fn person_ask(state: &AppState, name: &str, title: &str) -> String {
     let intent = fractal_daemon::graph::parse_intent(
@@ -170,6 +175,8 @@ fn person_ask(state: &AppState, name: &str, title: &str) -> String {
     let step = state
         .store
         .ask_person(&PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/avery".into(),
             title: title.into(),
@@ -246,7 +253,7 @@ async fn pair(root: &Path, local: &Client, url: &str) {
 }
 
 async fn complete_challenge(root: &Path, url: &str, challenge: &fractal_client::PairingChallenge) {
-    let mut child = Command::new(test_env!("CARGO_BIN_EXE_st3"))
+    let mut child = Command::new(test_env!("CARGO_BIN_EXE_fractal"))
         .args([
             "devices",
             "complete",
@@ -688,7 +695,7 @@ async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_
         .arg(repo.join("scripts/fractal-ui-test-client"))
         .args([
             "--binary",
-            test_env!("CARGO_BIN_EXE_st3"),
+            test_env!("CARGO_BIN_EXE_fractal"),
             "--seconds",
             "72",
             "--label",
@@ -850,7 +857,7 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
         .arg(repo.join("scripts/fractal-ui-test-client"))
         .args([
             "--binary",
-            test_env!("CARGO_BIN_EXE_st3"),
+            test_env!("CARGO_BIN_EXE_fractal"),
             "--seconds",
             "4",
             "--label",

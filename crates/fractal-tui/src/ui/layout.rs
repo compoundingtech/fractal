@@ -1,6 +1,6 @@
 //! A glass's arrangement: a tree of splits whose leaves are groups of tabs, each tab one pane
-//! key. This is the shape a glass is stored in, on this device and in the graph, so it holds
-//! structure only. Which tab each group shows, focus and sizes stay with each window.
+//! key. Device-local identities accompany its structure in storage, but not on the graph.
+//! Which tab each group shows, focus and sizes stay with each window.
 
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
@@ -15,11 +15,27 @@ pub enum Side {
 }
 
 /// One tab: a pane key, and a name the person gave it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tab {
+    /// Stable on this device, including when the tab moves to another group.
+    #[serde(default = "new_id")]
+    pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub pane: String,
+}
+
+/// Tab identities are device-local, not part of the glass's content.
+impl PartialEq for Tab {
+    fn eq(&self, other: &Self) -> bool {
+        self.title == other.title && self.pane == other.pane
+    }
+}
+
+impl Eq for Tab {}
+
+fn new_id() -> String {
+    uuid::Uuid::now_v7().to_string()
 }
 
 /// Presentation identity, derived from the existing pane key rather than persisted state.
@@ -34,6 +50,7 @@ pub(crate) enum TabKind {
 impl Tab {
     pub fn pane(key: impl Into<String>) -> Self {
         Self {
+            id: new_id(),
             title: None,
             pane: key.into(),
         }
@@ -50,14 +67,27 @@ impl Tab {
 }
 
 /// A split's tabs. Which one shows is this window's, never stored.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Group {
+    /// Stable on this device, independent of the group's position in the split tree.
+    #[serde(default = "new_id")]
+    pub id: String,
     pub tabs: Vec<Tab>,
     #[serde(skip)]
     pub current: usize,
 }
 
-/// Groups are equal by their tabs; which tab a window shows is not structure.
+impl Default for Group {
+    fn default() -> Self {
+        Self {
+            id: new_id(),
+            tabs: Vec::new(),
+            current: 0,
+        }
+    }
+}
+
+/// Groups are equal by their tabs; device identity and the shown tab are not structure.
 impl PartialEq for Group {
     fn eq(&self, other: &Self) -> bool {
         self.tabs == other.tabs
@@ -69,6 +99,7 @@ impl Eq for Group {}
 impl Group {
     pub fn of(tab: Tab) -> Self {
         Self {
+            id: new_id(),
             tabs: vec![tab],
             current: 0,
         }
@@ -507,26 +538,28 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_is_stored_as_the_wire_shape_without_which_tab_shows() {
+    fn a_layout_stores_device_ids_but_not_which_tab_shows() {
         let mut layout = Layout::Group(Group::of(Tab::pane("agent:agent/example/harbor")));
         layout.split(
             0,
             Side::Below,
-            Group {
-                tabs: vec![Tab {
-                    title: Some("audit".into()),
-                    pane: "mission:mission/example/audit".into(),
-                }],
-                current: 0,
-            },
+            Group::of(Tab {
+                title: Some("audit".into()),
+                ..Tab::pane("mission:mission/example/audit")
+            }),
         );
         layout.group_mut(0).unwrap().current = 3;
         let json = serde_json::to_value(&layout).unwrap();
         assert_eq!(
             json,
             serde_json::json!({"split": "below", "children": [
-                {"tabs": [{"pane": "agent:agent/example/harbor"}]},
-                {"tabs": [{"title": "audit", "pane": "mission:mission/example/audit"}]}
+                {"id": layout.groups()[0].id, "tabs": [{
+                    "id": layout.groups()[0].tabs[0].id, "pane": "agent:agent/example/harbor"
+                }]},
+                {"id": layout.groups()[1].id, "tabs": [{
+                    "id": layout.groups()[1].tabs[0].id,
+                    "title": "audit", "pane": "mission:mission/example/audit"
+                }]}
             ]})
         );
         assert_eq!(serde_json::from_value::<Layout>(json).unwrap(), layout);
@@ -534,5 +567,54 @@ mod tests {
             serde_json::from_value::<Layout>(serde_json::json!({"tabs": []})).unwrap(),
             Layout::default()
         );
+    }
+
+    #[test]
+    fn old_layouts_receive_fresh_device_ids_without_changing_structure() {
+        let json = serde_json::json!({"tabs": [{"pane": "agent:a"}, {"pane": "agent:a"}]});
+        let old = serde_json::from_value::<Layout>(json.clone()).unwrap();
+        let again = serde_json::from_value::<Layout>(json).unwrap();
+        let group = old.groups()[0];
+        let other = again.groups()[0];
+        for id in [&group.id, &group.tabs[0].id, &group.tabs[1].id] {
+            assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 7);
+        }
+        assert_ne!(group.id, other.id);
+        assert_ne!(group.tabs[0].id, group.tabs[1].id);
+        assert_ne!(group.tabs[0].id, other.tabs[0].id);
+        assert_eq!(old, again);
+        assert_eq!(group.tabs[0], group.tabs[1]);
+        let mut renamed = group.tabs[0].clone();
+        renamed.title = Some("renamed".into());
+        assert_ne!(renamed, group.tabs[0]);
+        let mut repointed = group.tabs[0].clone();
+        repointed.pane = "agent:b".into();
+        assert_ne!(repointed, group.tabs[0]);
+        assert_ne!(Group::default().id, Group::default().id);
+        assert_ne!(Group::of(Tab::pane("agent:a")).id, group.id);
+        assert_ne!(Tab::pane("agent:a").id, Tab::pane("agent:a").id);
+    }
+
+    #[test]
+    fn identities_survive_clone_tab_reorder_split_insertion_and_serialization() {
+        let mut original = Group::of(Tab::pane("agent:a"));
+        original.tabs.push(Tab::pane("agent:b"));
+        let mut layout = Layout::Group(original.clone());
+        let group = layout.group_mut(0).unwrap();
+        assert_eq!(group.id, original.id);
+        assert_eq!(group.tabs[0].id, original.tabs[0].id);
+        assert_eq!(group.tabs[1].id, original.tabs[1].id);
+        group.tabs.swap(0, 1);
+        group.current = 1;
+        layout.split_first(0, Side::Right, Group::default());
+        let saved = serde_json::to_vec(&layout).unwrap();
+        let restored: Layout = serde_json::from_slice(&saved).unwrap();
+        let group = restored.groups()[1];
+        assert_eq!(group.id, original.id);
+        assert_eq!(group.tabs[0].id, original.tabs[1].id);
+        assert_eq!(group.tabs[1].id, original.tabs[0].id);
+        assert_eq!(group.current, 0, "focus remains window-local");
+        assert_eq!(restored.groups()[0].id, layout.groups()[0].id);
+        assert_ne!(restored.groups()[0].id, original.id);
     }
 }

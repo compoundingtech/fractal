@@ -11,6 +11,7 @@ Use these documents for implementation details:
 - [Mission graph runtime](mission-graph-runtime.md) defines the KDL language and execution model.
 - [Configuration and KDL](../site/reference/configuration.md) defines day-to-day publication and revision workflows.
 - [Owned sets](owned-sets.md) defines complete membership publication, source ordering and retirement.
+- [Accountable fleet roots](accountable-roots.md) defines person-authored trace attribution and its upgrade and rollback requirements.
 - [Seat rollout](owned-seat-cutover.md) defines idle cutover, strict native-session continuity and source status.
 - [Free mode](../site/reference/configuration.md#free-mode): within a fleet, an agent may do anything the person who
   runs the fleet may do, as itself, until principals and grants land.
@@ -27,6 +28,7 @@ Use these documents for implementation details:
 - [Install/upgrade troubleshooting and support](../when-something-is-wrong.md) provides the diagnostic entry point and sanitized issue path.
 - [Claim backups](backups.md) explains live snapshots, offline restore, and recovered writer identities.
 - [Stable node identity](node-identity.md) explains computer renames, same-state recovery and local ownership diagnostics.
+- [Portable rename proofs](rename-proof.md) explains signed agent/mission naming history, offline verification and explicit fleet-anchor trust.
 - [Fleet replication](replication.md) defines convergence, inspection, and repair.
 - [Seat state truth](seat-state-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
 - [Agent seat queues](seat-queue.md) explains how each seat orders its mission runs and how moves
@@ -48,6 +50,9 @@ Use these documents for implementation details:
 - [Long messages](long-messages.md) explains document references for messages beyond the inline limit.
 - [Conversation search](conversation-search.md) describes searching normalized conversations and opening a match.
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
+- [Plugin stores and the GitHub mirror](plugins.md) defines a plugin's local database, its graph
+  allowlist, the GitHub mirror and events, `vcs.item.state` and `github.event`, and
+  `/v1/plugins/github/*` with `st gh prs|pr|checks`.
 - [Terminal agent retirement](agent-retirement.md) explains the owner-local writer fence, cross-peer policy and coordinated upgrade gate.
 - [Suspending a seat](suspend.md) explains `st agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
@@ -61,6 +66,8 @@ Use these documents for implementation details:
 - [Live-path priority](priority.md) explains how the daemon and each PTY server outrank the builds
   and tests their harnesses run, on Linux and macOS, and what needs root. It also explains how
   stopping a seat ends every process the seat started, and what a host without systemd misses.
+- [Seat lanes](seat-lanes.md) explains how a seat that declares `capacity` runs with its builds in a
+  CPU and memory cap of its own, behind a per-host switch, and what a host guard must not count.
 - [Subagents](subagents.md) explains how Fractal records the subagents a seat's harness runs as claims
   on the seat, with a lease, and ends them when their harness, session or seat goes away.
 - [Harness questions](harness-questions.md) explains how Fractal records the questions a seat's harness
@@ -82,18 +89,19 @@ Use these documents for implementation details:
 - [Gate evidence](gate-evidence.md) explains signed test and review records, local checks and CI verification.
 - [Profiling the daemon](profiling.md) explains how the daemon accounts for its own time: waits
   for the writer and read connections, SQLite statements, CPU, and callers.
-- [What a run waits on](waiting-on.md) explains `st missions waiting-on RUN`: each open step's
-  wait and a run's stalled verdict, read in milliseconds from published state.
+- [What a run waits on](waiting-on.md) explains `st missions waiting-on RUN` and `st missions blocked`:
+  each open step's wait, a run's stalled verdict, and the fleet's blocked runs by cause, read in
+  milliseconds from published state.
 - [Operational queries](operational-queries.md) explains bounded mission lists, outcome history,
   mission run summaries, and the five-minute performance report in `st doctor`.
-- [Agent migration](agent-migration.md) defines isolated rehearsal, cutover, and rollback.
-- [Eval audit](eval-audit.md) records the test intent and prompt boundary for each Fractal eval.
 - [Running Fractal with omp](omp.md) covers omp seat setup, behavior, and known limits.
 - [Product roadmap](roadmap.md) records accepted future work.
 - [CLI reference](../site/reference/cli.md) introduces the command surface and exact installed help.
 - [Client v0 contract](client-v0/README.md) defines the shared TUI and mobile JSON, event, action,
   pairing, and terminal protocols.
 - [Device signing](device-signing.md) defines paired-client keys and signed requests.
+- [ChatGPT app](chatgpt-app.md) is the design for the ChatGPT app: composition boundaries, the
+  adapter's place beside the iOS app, and how any person installs it against their own daemon.
 - [Operational-state contract](operational-state/README.md) separates immutable history, current
   projection, and actor-specific actionable views and defines screen/CLI parity.
 

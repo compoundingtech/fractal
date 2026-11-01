@@ -76,7 +76,8 @@ def run_case(binary: str, ending: str, endpoint: str | None = None) -> None:
     env = os.environ.copy()
     env["TERM"] = "xterm-256color"
     if endpoint:
-        env["ST3_ENDPOINT"] = endpoint
+        # Both spellings: the TUI refuses unequal ones, and the release run sets both.
+        env["FRACTAL_ENDPOINT"] = env["ST3_ENDPOINT"] = endpoint
     if ending == "panic":
         env["STUI_TEST_PANIC_AFTER_ENTER"] = "1"
     proc = subprocess.Popen(tui_command(binary), stdin=slave, stdout=slave, stderr=slave, env=env)
@@ -228,7 +229,7 @@ def tmux_hangup_case(binary: str) -> None:
     base = [tmux, "-L", socket_name]
     subprocess.run(
         base + ["new-session", "-d", "-s", target,
-                f"exec env ST3_PERSON=person/alex {shlex.join(tui_command(binary))}"],
+                f"exec env FRACTAL_PERSON=person/alex ST3_PERSON=person/alex {shlex.join(tui_command(binary))}"],
         check=True, capture_output=True,
     )
     pid = int(subprocess.check_output(
@@ -319,7 +320,7 @@ def shifted_keys_case(binary: str) -> None:
 
 
 if __name__ == "__main__":
-    binary = sys.argv[1] if len(sys.argv) > 1 else "target/debug/st3"
+    binary = sys.argv[1] if len(sys.argv) > 1 else "target/debug/fractal"
     if "--only-entrypoint" in sys.argv[2:]:
         entrypoint_case(binary)
         sys.exit(0)

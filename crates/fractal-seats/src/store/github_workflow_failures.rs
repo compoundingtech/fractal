@@ -45,6 +45,45 @@ mod tests {
             .unwrap()
     }
 
+    /// An observation that writes latest-state claims and a durable message seals them in
+    /// separate batches, so a trim can delete the observation's batch whole once it is
+    /// superseded while the message stays.
+    #[test]
+    fn an_observation_seals_latest_state_claims_apart_from_the_message_it_sends() {
+        use fractal_schema::retention::{Class, policy};
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("claims.sqlite3"), "node").unwrap();
+        publish(&store, SOURCE, "register");
+        observe(&store, json!([failure(1, 1, "a")]), "baseline");
+        let observed = observe(&store, json!([failure(1, 1, "a"), failure(2, 1, "b")]), "new");
+        let message = store
+            .claims_for(&observed.message_subjects[0], Some("message.sent"))
+            .unwrap()
+            .remove(0);
+        let observation = store
+            .claims_for("observer/repo", Some("observer.observed"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_ne!(message.batch_id, observation.batch_id);
+        let latest = |kind: &str| matches!(policy().kind(kind).class, Class::Current | Class::Otel);
+        let connection = store.readers.get();
+        let kinds = |batch: &str| {
+            connection
+                .prepare("SELECT kind FROM claims WHERE batch_id=?1")
+                .unwrap()
+                .query_map([batch], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let observation_kinds = kinds(&observation.batch_id);
+        assert!(observation_kinds.iter().any(|kind| kind == "resource.observed"), "{observation_kinds:?}");
+        assert!(observation_kinds.iter().all(|kind| latest(kind)), "{observation_kinds:?}");
+        let message_kinds = kinds(&message.batch_id);
+        assert!(message_kinds.iter().all(|kind| !latest(kind)), "{message_kinds:?}");
+    }
+
     #[test]
     fn main_performance_failures_baseline_and_dedupe_across_restart_and_registration() {
         let directory = tempfile::tempdir().unwrap();

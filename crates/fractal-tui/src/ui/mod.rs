@@ -21,6 +21,7 @@ pub mod demo;
 mod demo_test_fixture;
 mod direct;
 pub mod doc;
+mod documents;
 pub mod checklist;
 mod edit;
 mod glass;
@@ -46,6 +47,7 @@ pub mod pane;
 pub mod playback;
 mod drafts_store;
 mod prefs;
+mod recent;
 mod resource_sidebar;
 mod arrangement_keys;
 mod observed_resources;
@@ -55,6 +57,7 @@ pub mod screens;
 pub mod text;
 pub mod theme;
 mod objectives;
+mod triage;
 mod usage;
 mod voice;
 // The live client fills the variants and fields the demo does not use.
@@ -154,13 +157,13 @@ struct FrameInfo {
     glass_sidebar: Rect,
     /// Glasses: where each group's content was drawn, in group order.
     glass_leaves: Vec<Rect>,
+    /// Glasses: each group's tab strip as drawn, with its group, for the wheel.
+    glass_strips: Vec<(Rect, usize)>,
     /// The borders between a glass's splits, as drawn, to drag.
     glass_dividers: Vec<layout::Divider>,
     /// Glasses: where Home was drawn over the glass, while it is open.
     home: Option<Rect>,
     read_messages: HashSet<String>,
-    /// The focused agent's pane was too narrow for details beside its conversation.
-    agent_narrow: bool,
     /// The first palette row drawn.
     palette_top: usize,
     /// Glasses: where the right-click menu was drawn, while it is open.
@@ -388,6 +391,10 @@ const DRAFTS_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct Ui {
     world: World,
+    /// Negotiated by the terminal guard, never inferred from an ambiguous Escape byte.
+    pub(super) keyboard_enhanced: bool,
+    triage: triage::Cursor,
+    recent: recent::RecentState,
     /// Each list's selection, by the section it lists (Now, Agents, Missions, Fleet, Usage,
     /// Worktrees). Which list has the keys is never stored: `tab()` reads it off the screen.
     selected: [usize; 6],
@@ -408,8 +415,8 @@ pub struct Ui {
     tick: u64,
     help: bool,
     resource_sidebar: resource_sidebar::Sidebar,
-    /// The documents open in a pane, by name: their text once st has sent it.
-    pub(crate) documents: std::collections::BTreeMap<String, Load<String>>,
+    /// Documents read so far, the list, and the documents missions name.
+    documents: documents::Documents,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
@@ -460,9 +467,8 @@ pub struct Ui {
     pub(crate) voice: Option<voice::VoiceState>,
     /// Inputs whose text came from voice; their next message is tagged `dictated`.
     dictated: HashSet<String>,
-    /// The agent details pane beside the conversation.
-    /// Agents whose details pane is hidden beside their conversation; each agent its own.
-    details_hidden: HashSet<String>,
+    /// This device's global agent-details visibility, shared by both agent views.
+    agent_details: bool,
     /// The focused mission shows its whole declaration in place of its card.
     kdl: bool,
     /// The focus the message box was opened under: once another pane has the focus, typing
@@ -506,15 +512,20 @@ pub struct Ui {
     /// The options chosen so far on each harness question alert, by question, before sending: by
     /// the alert and its exact question call (`alerts::question_key`).
     question_choices: HashMap<String, std::collections::BTreeMap<usize, BTreeSet<usize>>>,
+    /// Where each prompt alert's form has its mark, once the person moved it.
+    prompt_marks: HashMap<String, usize>,
+    /// The prompt alert whose form has the keys (Ctrl+N in a conversation, `a` in Inbox).
+    prompt_keys: Option<String>,
+    /// The first digit typed on a form of ten or more rows, waiting for a second (or Enter).
+    prompt_digit: Option<(String, usize)>,
+    /// Each alert's band card from the last frame, with a hash of what it was drawn from.
+    band_cards: RefCell<HashMap<(String, usize, alerts::Place), alerts::KeptCard>>,
     /// The spaces: named layouts of tabs and split panes, the Ctrl+S sidebar, the palette, and
     /// Now and Usage floating over them. Fractal TUI has no other layout.
     pub(crate) glasses: glass::Glasses,
     /// The footer names this build (version, revision, age); off in tests, whose screens must
     /// not change with every commit.
     pub(crate) build: bool,
-    /// A pane too narrow for details beside the conversation shows them instead of it.
-    /// Agents whose narrow pane shows their details in place of the conversation.
-    details_here: HashSet<String>,
     /// Finding text in a conversation.
     find: Option<Find>,
     /// Images attached to each draft, by its key, until it is sent.
@@ -531,6 +542,8 @@ pub struct Ui {
     pub(crate) terminal_size: Cell<(u16, u16)>,
     /// Where the attached terminal's screen was last drawn, for its mouse.
     terminal_body: Cell<Option<Rect>>,
+    /// Leader+d gives the agent details the keys; Escape/Tab returns to passthrough.
+    terminal_details_focused: Cell<bool>,
     /// Where the attached terminal's cursor is on screen and its shape, when the terminal has
     /// the keys: the person's own cursor shows it.
     terminal_cursor: Cell<Option<pty::Cursor>>,
@@ -762,8 +775,10 @@ impl Ui {
         Self {
             tab_statuses: glass::TabStatuses::new(&world, &HashSet::new(), &HashSet::new()),
             world,
-            documents: std::collections::BTreeMap::new(),
             selected: [0; 6],
+            keyboard_enhanced: false,
+            triage: triage::Cursor::default(),
+            recent: recent::RecentState::default(),
             list_top: RefCell::new([0; 6]),
             list_follows: RefCell::new([None; 6]),
             conversation_state: fractal_conversation_ui::State::default(),
@@ -776,6 +791,7 @@ impl Ui {
             tick: 0,
             help: false,
             resource_sidebar,
+            documents: documents::Documents::default(),
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
@@ -805,7 +821,7 @@ impl Ui {
             answering: None,
             changes_answer: None,
             dictated: HashSet::new(),
-            details_hidden: HashSet::new(),
+            agent_details: true,
             kdl: false,
             focus_seen: (0, None),
             tree: false,
@@ -825,16 +841,20 @@ impl Ui {
             drafts_backoff: None,
             alerts_open: HashSet::new(),
             question_choices: HashMap::new(),
+            prompt_marks: HashMap::new(),
+            prompt_keys: None,
+            prompt_digit: None,
+            band_cards: RefCell::new(HashMap::new()),
             // A space kept in memory only; the live loop and the demo open the device's own.
             glasses: glass::Glasses::open(None, None),
             build: false,
-            details_here: HashSet::new(),
             find: None,
             attachments: HashMap::new(),
             message_limit: None,
             cursor: edit::Cursor::default(),
             terminal_size: Cell::new((24, 80)),
             terminal_body: Cell::new(None),
+            terminal_details_focused: Cell::new(false),
             terminal_cursor: Cell::new(None),
             terminal_selecting: false,
             terminal_selection_mode: false,
@@ -890,6 +910,10 @@ impl Ui {
                     None => "closed, x clears it".into(),
                 });
                 kept.actions.clear();
+                // A closed prompt waits for nothing: its form offers no answer.
+                if let AttentionKind::Prompt { answers, .. } = &mut kept.kind {
+                    answers.clear();
+                }
             }
             items.push(kept);
         }
@@ -960,6 +984,23 @@ impl Ui {
         {
             targets.push(id);
         }
+        // A prompt's card in Inbox shows the call it asks about, which is in its seat's
+        // conversation: follow that one too, or Inbox could offer only what needs no reading.
+        if self.inbox_in_view()
+            && let Some(seat) = self.attention_focus().and_then(|id| {
+                self.world.attention.items().iter().find_map(|item| match &item.kind {
+                    AttentionKind::Prompt { seat_id, answers, .. }
+                        if item.id == id && !answers.is_empty() =>
+                    {
+                        Some(seat_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            && !targets.contains(&seat)
+        {
+            targets.push(seat);
+        }
         for id in self.glasses.shown_agents() {
             if !targets.contains(&id) {
                 targets.push(id);
@@ -978,6 +1019,7 @@ impl Ui {
             self.simple = simplified(&loaded);
             self.conversation_first = prefs::conversation_first(&loaded);
             self.terminal_fallback = loaded.terminal_fallback != Some(false);
+            self.agent_details = loaded.agent_details != Some(false);
         }
     }
 
@@ -1065,6 +1107,7 @@ impl Ui {
                     terminal_first: self.conversation_first.map(|first| !first),
                     conversation_first: self.conversation_first,
                     terminal_fallback: Some(self.terminal_fallback),
+                    agent_details: Some(self.agent_details),
                 },
             );
         }
@@ -1086,11 +1129,15 @@ impl Ui {
     pub(crate) fn toggle_conversation_first(&mut self) {
         self.conversation_first = Some(!self.conversation_first());
         self.save_prefs();
-        self.flash(if self.conversation_first() {
-            "Conversation first: agents open on their conversation · Ctrl+] attaches the terminal"
+        let said = if self.conversation_first() {
+            format!(
+                "Conversation first: agents open on their conversation · {} opens the terminal",
+                screens::terminal_route()
+            )
         } else {
-            "Agents attach their terminal when opened · Ctrl+\\ c shows the conversation"
-        });
+            "Agents attach their terminal when opened · Ctrl+\\ c shows the conversation".to_owned()
+        };
+        self.flash(said);
     }
 
     /// Whether this device opens agents on their conversation instead of attaching.
@@ -1101,7 +1148,7 @@ impl Ui {
     /// Attach the terminal of an agent just opened whose tab has been in front for a moment,
     /// unless this device opens agents on their conversation. An agent without a terminal (a
     /// session st did not start, a harness with none) stays on its conversation, and nothing is
-    /// said; Ctrl+] decides the same way.
+    /// said; the Attach button decides the same way.
     pub(crate) fn step_default_view(&mut self) {
         let Some((id, at)) = &self.attach_when else {
             return;
@@ -1122,7 +1169,7 @@ impl Ui {
             .iter()
             .any(|agent| agent.id == id && agent.terminal);
         if still_here && !attached && !self.editing && !self.conversation_first() && has_terminal {
-            // The tab turns into the terminal, as Ctrl+] does; Ctrl+\ turns it back.
+            // The tab turns into the terminal; Ctrl+\ turns it back.
             self.open_terminal();
         }
     }
@@ -1198,20 +1245,11 @@ impl Ui {
         self.glasses.inventories_wanted(self.tab(), self.usage_hours)
     }
 
-    /// Details beside the conversation, or in its place when the pane is too narrow for both;
-    /// for the agent shown, not every agent (Nathan, 2026-10-03).
+    /// One device-local visibility choice for every agent and both views.
     fn toggle_details(&mut self) {
-        let Some(agent) = self.selected_id() else {
-            return;
-        };
-        let set = if self.frame.borrow().agent_narrow {
-            &mut self.details_here
-        } else {
-            &mut self.details_hidden
-        };
-        if !set.remove(&agent) {
-            set.insert(agent);
-        }
+        self.agent_details = !self.agent_details;
+        self.terminal_details_focused.set(false);
+        self.save_prefs();
     }
 
     pub(crate) fn conversation_updated(&mut self, target: &str) {
@@ -1345,6 +1383,29 @@ impl Ui {
                 }
                 from = start + token.len().max(1);
             }
+            // Document references written out, `doc/NAME` or `doc/NAME@HASH`: in a message, a
+            // mission or a document, each opens that document.
+            for link in fractal_ui_model::documents::document_links(&text) {
+                let mut from = 0;
+                while let Some(offset) = text[from..].find(&link.reference) {
+                    let start = from + offset;
+                    from = start + link.reference.len();
+                    if documents::inside_word(&text[..start], &text[from..]) {
+                        continue;
+                    }
+                    if let Some((x, _)) = cells.get(text[..start].chars().count()) {
+                        self.hit(
+                            Rect {
+                                x: *x,
+                                y,
+                                width: link.reference.chars().count() as u16,
+                                height: 1,
+                            },
+                            Hit::Link(link.reference.clone()),
+                        );
+                    }
+                }
+            }
             // Markdown links: underlined runs whose text names a link.
             let mut index = 0;
             while index < cells.len() {
@@ -1441,6 +1502,13 @@ impl Ui {
     /// included, so a paste never sends anything by itself. A pasted path to an image, such as a
     /// file dropped on the terminal, attaches that image to a message to an agent.
     pub fn paste(&mut self, text: String) {
+        // The recent popup is modal over an attached program: a paste filters it instead.
+        if self.recent_paste(&text) {
+            return;
+        }
+        if self.terminal_details_have_focus() && !self.palette_open() {
+            return;
+        }
         if self.terminal_focused()
             && let Some(native) = self.native_terminal()
         {
@@ -1768,6 +1836,7 @@ impl Ui {
     // ------------------------------------------------------------------ drawing
 
     pub fn render(&self, frame: &mut ratatui::Frame<'_>) {
+        let focused = self.input_terminal();
         let area = frame.area();
         let buf = frame.buffer_mut();
         *self.frame.borrow_mut() = FrameInfo {
@@ -1784,6 +1853,7 @@ impl Ui {
                 area.width as usize,
                 theme::text(),
             );
+            self.reconcile_terminal_details(focused);
             return;
         }
         self.render_glass(buf, area);
@@ -1794,9 +1864,11 @@ impl Ui {
         if self.help {
             self.draw_help(buf, area);
         }
+        self.draw_recent(buf, area);
         if self.leader {
             self.draw_leader(buf, area);
         }
+        self.reconcile_terminal_details(focused);
         self.draw_hover(buf);
         for view in self.terminal.iter().chain(self.parked.iter()) {
             if let Some(native) = &view.native
@@ -1852,11 +1924,13 @@ impl Ui {
 
     /// One pane alone, filling the frame: how a glass will draw each of its panes.
     fn render_pane(&self, frame: &mut ratatui::Frame<'_>, pane: &Pane) {
+        let focused = self.input_terminal();
         let area = frame.area();
         let buf = frame.buffer_mut();
         *self.frame.borrow_mut() = FrameInfo::default();
         buf.set_style(area, Style::default().bg(theme::BASE).fg(theme::TEXT));
         self.draw_pane(buf, area, pane);
+        self.reconcile_terminal_details(focused);
     }
 
     fn hit(&self, rect: Rect, hit: Hit) {
@@ -2367,6 +2441,8 @@ impl Ui {
                 })
             }),
             chat,
+            // In Inbox the draft's key is the alert's id: no listing is built for it per frame.
+            form: self.form_state(key),
         }
     }
 
@@ -2427,14 +2503,18 @@ impl Ui {
                             self.content.expand_requests(&mut doc, width);
                             doc
                         });
-                screens::mission_detail(
+                let mut doc = screens::mission_detail(
                     &self.world,
                     id.as_deref(),
                     width,
                     self.spinner(),
                     decision,
                     &self.conversation_state.expanded,
-                )
+                );
+                if let Some(id) = id.as_deref() {
+                    self.documents.mission_section(&mut doc, &self.document_subjects(id), width);
+                }
+                doc
             }
             Pane::Machine(id) => {
                 let name = id
@@ -2446,10 +2526,30 @@ impl Ui {
                 screens::worktree_detail(&self.world, id.as_deref(), width, self.spinner())
             }
             Pane::Resource(id) => observed_resources::detail(id, self.resource_sidebar.observations.iter().find(|row| &row.id == id), width),
-            Pane::Document(name) => document_detail(name, self.documents.get(name), width),
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
+            Pane::Document(reference) => self.documents.page(reference, None, width, documents::now_ms()),
+            Pane::Documents(prefix) => self.documents.list(prefix.as_deref(), width, documents::now_ms()),
         };
         self.pane(buf, &pane.key(), area, doc, false);
+    }
+
+    /// A document in a split of a glass, with the way back along what that split followed.
+    fn draw_document(&self, buf: &mut Buffer, area: Rect, reference: &str, split: &str) {
+        let width = area.width.saturating_sub(1) as usize;
+        let back = self.documents.previous(split, reference);
+        let doc = self.documents.page(reference, back, width, documents::now_ms());
+        self.pane(buf, &Pane::Document(reference.to_owned()).key(), area, doc, false);
+    }
+
+    /// The subjects whose documents a mission's card lists: the mission and its steps.
+    fn document_subjects(&self, mission: &str) -> Vec<(String, Option<String>)> {
+        let mut subjects = vec![(mission.to_owned(), None)];
+        if let Some(mission) = self.world.missions.items().iter().find(|candidate| candidate.id == mission) {
+            subjects.extend(
+                mission.steps.iter().filter(|step| step.id.starts_with("step-run/")).take(documents::STEPS).map(|step| (step.id.clone(), Some(step.name.clone()))),
+            );
+        }
+        subjects
     }
 
     fn conversation_failure(reason: &str, width: usize) -> Doc {
@@ -2496,74 +2596,7 @@ impl Ui {
             return;
         };
         let narrow = area.width < 90;
-        if self.composing(&agent.id) {
-            self.frame.borrow_mut().agent_narrow = narrow;
-        }
-        // Too narrow for details beside the conversation: `i` shows them in its place.
-        if narrow
-            && self.details_here.contains(&agent.id)
-            && !agent.unmanaged
-            && self.composing(&agent.id)
-        {
-            buf.set_stringn(
-                area.x,
-                area.y,
-                " i back to the conversation ",
-                area.width as usize,
-                theme::fg(theme::OVERLAY1),
-            );
-            self.hit(Rect { height: 1, ..area }, Hit::Key('i'));
-            let doc = screens::agent_details(
-                &self.world,
-                agent,
-                (area.width as usize).saturating_sub(3),
-                self.spinner(),
-            );
-            self.pane(
-                buf,
-                &format!("details:{}", agent.id),
-                Rect {
-                    y: area.y + 1,
-                    height: area.height.saturating_sub(1),
-                    ..area
-                },
-                doc,
-                false,
-            );
-            return;
-        }
-        let details = !self.details_hidden.contains(&agent.id);
-        let area = if details && !agent.unmanaged && area.width >= 90 {
-            let side = (area.width / 3).clamp(30, 44);
-            let pane = Rect {
-                x: area.x + area.width - side,
-                width: side,
-                ..area
-            };
-            for y in area.y..area.y + area.height {
-                buf[(pane.x - 1, y)]
-                    .set_symbol("│")
-                    .set_style(Style::default().fg(theme::SURFACE0).bg(theme::BASE));
-            }
-            let doc = screens::agent_details(&self.world, agent, side as usize - 3, self.spinner());
-            self.pane(
-                buf,
-                &format!("details:{}", agent.id),
-                Rect {
-                    x: pane.x + 1,
-                    width: side - 1,
-                    ..pane
-                },
-                doc,
-                false,
-            );
-            Rect {
-                width: area.width - side - 2,
-                ..area
-            }
-        } else {
-            area
-        };
+        let area = self.draw_agent_details(buf, area, agent, 90, None);
         let width = area.width.saturating_sub(1) as usize;
         let header = screens::agent_header(&self.world, agent, width, self.spinner());
         let header_height = header.lines.len() as u16 + 1;
@@ -2592,7 +2625,7 @@ impl Ui {
             let key = "ctrl+d";
             let label = if narrow {
                 format!(" {key} details ")
-            } else if !self.details_hidden.contains(&agent.id) {
+            } else if self.agent_details {
                 format!(" {key} hide details ▸ ")
             } else {
                 format!(" ◂ {key} details ")
@@ -2743,15 +2776,16 @@ impl Ui {
         // What waits on the person in this conversation is one line above the box, a card only
         // when asked for. The box keeps its place and its size either way: the band takes its
         // rows from the conversation and never more than three fifths of the pane.
+        let room = (area
+            .height
+            .saturating_sub(header_height + composer_height + 4) as usize)
+            .min((area.height as usize * 3 / 5).max(1));
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
-            self.alert_band(&agent.id, area.width as usize)
+            self.alert_band(&agent.id, area.width as usize, room, alerts::Place::Band)
         };
-        let room = area
-            .height
-            .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room.min((area.height as usize * 3 / 5).max(1)));
+        band.truncate(room);
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
@@ -2778,6 +2812,11 @@ impl Ui {
         for (offset, row) in band.iter().enumerate() {
             let y = body.y + body.height + offset as u16;
             buf.set_line(area.x, y, &row.line, area.width);
+            if let Some((column, edge)) = &row.edge
+                && *column < area.width
+            {
+                buf.set_span(area.x + column, y, edge, area.width - column);
+            }
             for (column, width, hit) in &row.hits {
                 self.hit(
                     Rect {
@@ -3202,18 +3241,58 @@ impl Ui {
         }
     }
 
+    /// The same details document beside either agent view. Terminal panes reserve at least
+    /// 82 columns for the program; conversation panes keep their existing responsive width.
+    fn draw_agent_details(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        agent: &view::Agent,
+        minimum: u16,
+        fixed_width: Option<u16>,
+    ) -> Rect {
+        if !self.agent_details || agent.unmanaged || area.width < minimum {
+            return area;
+        }
+        let side = fixed_width.unwrap_or_else(|| (area.width / 3).clamp(30, 44));
+        let pane = Rect { x: area.right() - side, width: side, ..area };
+        for y in area.y..area.bottom() {
+            buf[(pane.x - 1, y)]
+                .set_symbol("│")
+                .set_style(Style::default().fg(theme::SURFACE0).bg(theme::BASE));
+        }
+        let mut doc = screens::agent_details(&self.world, agent, side as usize - 3, self.spinner());
+        if fixed_width.is_some() {
+            let focused = self.terminal_details_focused.get()
+                && self.focused_pane() == Some(Pane::Terminal(agent.id.clone()));
+            doc.lines[0] = Line::styled(
+                if focused { "details · Esc → terminal" } else { "details · Ctrl+\\ d to focus" },
+                theme::strong(theme::ACCENT),
+            );
+            doc.targets.retain(|target| !matches!(target.hit, Hit::Key('i')));
+        }
+        self.pane(
+            buf,
+            &format!("details:{}", agent.id),
+            Rect { x: pane.x + 1, width: side - 1, ..pane },
+            doc,
+            false,
+        );
+        Rect { width: area.width - side - 2, ..area }
+    }
+
     fn draw_terminal(&self, buf: &mut Buffer, area: Rect, agent: &str) {
         let Some(view) = self.terminal_view(agent) else {
             buf.set_stringn(
                 area.x,
                 area.y + 1,
-                " Not attached. Ctrl+] attaches the terminal; Ctrl+\\ opens the leader list.",
+                " Not attached. Enter attaches the terminal; Ctrl+\\ opens the leader list.",
                 area.width as usize,
                 theme::dim(),
             );
             if area.height > 3 {
                 let mut doc = Doc::new();
-                doc.buttons(&[("Ctrl+]", "Attach", Hit::Attach, theme::ACCENT)]);
+                doc.buttons(&[("Enter", "Attach", Hit::Attach, theme::ACCENT)]);
                 let button = Rect::new(
                     area.x + 1,
                     area.y + 3,
@@ -3229,6 +3308,8 @@ impl Ui {
             }
             return;
         };
+        let area = self.world.agents.items().iter().find(|row| row.id == agent)
+            .map_or(area, |row| self.draw_agent_details(buf, area, row, 120, Some(36)));
         if let Some(native) = view.native.as_ref() {
             // One line for where this is and how to leave; the PTY gets the rest of the pane.
             let scrolled = native.scrolled();
@@ -3312,7 +3393,8 @@ impl Ui {
                 && !self.help
                 && self.popover.is_none()
                 && self.context.is_none()
-                && !self.palette_open();
+                && !self.palette_open()
+                && !self.terminal_details_have_focus();
             let cursor = native.draw(buf, body, real);
             if real {
                 self.terminal_cursor.set(cursor);
@@ -3387,8 +3469,9 @@ impl Ui {
         if !agent.starts_with("agent/") || area.height < 6 {
             return 0;
         }
-        let mut band = self.alert_band(agent, area.width as usize);
-        band.truncate((area.height as usize / 2).max(1));
+        let room = (area.height as usize / 2).max(1);
+        let mut band = self.alert_band(agent, area.width as usize, room, alerts::Place::Terminal);
+        band.truncate(room);
         for (offset, row) in band.iter().enumerate() {
             let y = area.y + 1 + offset as u16;
             buf.set_style(
@@ -3659,6 +3742,17 @@ impl Ui {
                 None,
             ));
         }
+        // Tab badges are a compact form: the activity before the title, then what waits on you.
+        marks.lines(text::wrap(
+            &[text::run(
+                "on a tab: ● working, ○ idle, × stopped, ! fault, ~ starting; after the title, ? a question or ◆ you, with how many alerts",
+                theme::soft(),
+            )],
+            column,
+            &[text::run("    ", theme::dim())],
+            &[text::run("    ", theme::dim())],
+            None,
+        ));
         marks.blank();
         let mut left = Doc::new();
         keys(
@@ -3673,6 +3767,25 @@ impl Ui {
                 (
                     "ctrl+h",
                     "open or focus Inbox (in a text box it is backspace)",
+                ),
+                ("ctrl+\\ [ ]", "back, forward across spaces"),
+                (
+                    "ctrl+[ ]",
+                    "back, forward (enhanced keyboard; not in terminals)",
+                ),
+                ("ctrl+l", "next Inbox item needing you (not in a terminal)"),
+                ("ctrl+\\ l", "previous triage item, including in terminals"),
+                (
+                    "ctrl+^",
+                    "recent places when detached; Enter opens, typing filters",
+                ),
+                (
+                    "ctrl+\\ r",
+                    "recent places, including over an attached program",
+                ),
+                (
+                    "ctrl+tab",
+                    "recent cycle (enhanced); release Ctrl if supported",
                 ),
                 ("q", "quit"),
             ],
@@ -3708,7 +3821,7 @@ impl Ui {
                 ),
                 ("t", "Agents, Missions: the path tree or the groups"),
                 ("x", "Missions: show Fractal's own missions"),
-                ("n", "Agents: a new agent; Missions: a new mission"),
+                ("n", "Missions: a new mission"),
                 ("y", "confirm what a card asks; Enter never does"),
                 ("x", "Inbox: dismiss a request, update or message"),
                 (
@@ -3716,6 +3829,12 @@ impl Ui {
                     "Usage: group by agent, mission, step...; change the period",
                 ),
             ],
+        );
+        let actions_keys = format!("ctrl+{}", screens::ACTIONS_CHORD);
+        let terminal_keys = format!("{actions_keys} {} · enter", screens::TERMINAL_ACTION);
+        let terminal_what = format!(
+            "{} attaches the agent's terminal; Enter (or the Attach button) attaches a detached terminal pane; Ctrl+T twice leaves it",
+            screens::terminal_route()
         );
         keys(
             &mut right,
@@ -3727,7 +3846,7 @@ impl Ui {
                 ("ctrl+f", "find in this conversation"),
                 ("ctrl+r", "retry opening a failed conversation (outside the message box)"),
                 (
-                    "ctrl+a",
+                    actions_keys.as_str(),
                     "the agent's actions: restart, suspend, retire, terminal…",
                 ),
                 (
@@ -3750,10 +3869,7 @@ impl Ui {
                     "ctrl+\\",
                     "the leader, in a terminal too: a list of what to press next; Ctrl+\\ again closes the tab, c shows the conversation",
                 ),
-                (
-                    "ctrl+]  ctrl+t ctrl+t",
-                    "attach the agent's terminal; Ctrl+T twice leaves it for the conversation",
-                ),
+                (terminal_keys.as_str(), terminal_what.as_str()),
                 (
                     "opening an agent",
                     "attaches its terminal; \"Conversation first\" in the palette (ctrl+k) opens the conversation instead, on this device",
@@ -3945,6 +4061,10 @@ impl Ui {
 
     /// A subject opens as its own tab in the focused split, or is focused where it already is.
     fn open(&mut self, id: &str) {
+        if documents::openable(id).is_some() {
+            self.open_document(id);
+            return;
+        }
         if let Some(pane) = glass::pane_for(id) {
             self.open_in_glass(pane, glass::Open::Tab);
         }
@@ -4009,7 +4129,8 @@ impl Ui {
         if let Event::Mouse(mouse) = event
             && mouse.kind == MouseEventKind::Moved
         {
-            return self.mouse_moved(mouse);
+            // Motion under the modal recent popup never reaches hover or an attached program.
+            return !self.recent_open() && self.mouse_moved(mouse);
         }
         if event == Event::FocusLost {
             self.hover.clear();
@@ -4035,23 +4156,53 @@ impl Ui {
             _ => {}
         }
         self.sync_terminal_slot();
+        self.notify_terminal_focus(focused);
+        true
+    }
+
+    fn reconcile_terminal_details(&self, focused: Option<String>) {
+        if !self.terminal_details_have_focus() {
+            self.terminal_details_focused.set(false);
+        }
+        self.notify_terminal_focus(focused);
+    }
+
+    fn notify_terminal_focus(&self, focused: Option<String>) {
         let now = self.input_terminal();
         if focused != now {
             for (agent, gained) in [(focused, false), (now, true)] {
-                if let Some(agent) = agent
-                    && let Some(native) = self
-                        .terminal_view(&agent)
-                        .and_then(|view| view.native.as_ref())
+                if let Some(native) = agent.as_deref()
+                    .and_then(|agent| self.terminal_view(agent))
+                    .and_then(|view| view.native.as_ref())
                 {
                     native.focus(gained);
                 }
             }
         }
-        true
+    }
+
+    fn focus_terminal_details(&mut self, focused: bool) {
+        self.terminal_details_focused.set(focused);
+        if focused {
+            self.terminal_hold = None;
+            self.terminal_selecting = false;
+        }
+    }
+
+    fn terminal_details_have_focus(&self) -> bool {
+        self.terminal_details_focused.get()
+            && self.focused_pane().is_some_and(|pane| match pane {
+                Pane::Terminal(agent) => self.frame.borrow().panes.iter().any(|pane| {
+                    pane.key.strip_prefix("details:") == Some(agent.as_str())
+                }),
+                _ => false,
+            })
     }
 
     fn input_terminal(&self) -> Option<String> {
         (self.terminal_focused()
+            && !self.terminal_details_have_focus()
+            && !self.recent_open()
             && !self.palette_open()
             && !self.help
             && self.popover.is_none()
@@ -4085,7 +4236,7 @@ impl Ui {
             && at.elapsed() >= LEAVE_TAP
         {
             self.terminal_hold = None;
-            if self.terminal_focused() {
+            if self.input_terminal().is_some() {
                 self.terminal_key(key);
             }
         }
@@ -4127,6 +4278,9 @@ impl Ui {
     }
 
     pub fn key(&mut self, key: KeyEvent) {
+        if self.observe_recent_key(key) {
+            return;
+        }
         let ctrl_t = key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL;
         if self.terminal_hold.is_some() {
             if ctrl_t && key.kind != KeyEventKind::Press {
@@ -4136,17 +4290,58 @@ impl Ui {
             if !ctrl_t {
                 // Anything else first lets the held key go, so the program sees them in order.
                 if let Some((held, _)) = self.terminal_hold.take()
-                    && self.terminal_focused()
+                    && self.input_terminal().is_some()
                 {
                     self.terminal_key(held);
                 }
             }
+        }
+        if !self.leader
+            && !matches!(key.code, KeyCode::Char('\\' | '4') if key.modifiers.contains(KeyModifiers::CONTROL))
+            && (self.recent_open() || !self.terminal_focused())
+            && self.recent_key(key)
+        {
+            return;
         }
         if self.leader {
             if key.kind == KeyEventKind::Press {
                 self.leader_key(key);
             }
             return;
+        }
+        if self.terminal_details_focused.get()
+            && !self.palette_open()
+            && !self.help
+            && self.popover.is_none()
+            && self.context.is_none()
+            && self.voice.is_none()
+            && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused)
+            && !terminal_space_key(key)
+            && !matches!(key.code, KeyCode::Char('\\' | '4') if key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            let pane = self.focused_pane().and_then(|pane| match pane {
+                Pane::Terminal(agent) => Some(format!("details:{agent}")),
+                _ => None,
+            });
+            let visible = pane.as_ref().is_some_and(|key| {
+                self.frame.borrow().panes.iter().any(|pane| &pane.key == key)
+            });
+            if visible {
+                if key.kind != KeyEventKind::Release {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {
+                            self.terminal_details_focused.set(false);
+                        }
+                        KeyCode::Up => self.scroll_pane(pane.as_ref().unwrap(), -1),
+                        KeyCode::Down => self.scroll_pane(pane.as_ref().unwrap(), 1),
+                        KeyCode::PageUp => self.scroll_pane(pane.as_ref().unwrap(), -10),
+                        KeyCode::PageDown => self.scroll_pane(pane.as_ref().unwrap(), 10),
+                        _ => {}
+                    }
+                }
+                return;
+            }
+            self.terminal_details_focused.set(false);
         }
         if key.kind != KeyEventKind::Press {
             // Repeats and releases belong to the child, never to Fractal TUI shortcuts or confirmations.
@@ -4179,10 +4374,28 @@ impl Ui {
             && matches!(key.code, KeyCode::Char('\\' | '4'))
         {
             self.terminal_hold = None;
+            if self.recent_open() {
+                self.recent_key(KeyCode::Esc.into());
+            }
             self.leader = true;
             return;
         }
         self.sync_terminal_slot();
+        if !self.terminal_focused() && self.navigation_key(key) {
+            return;
+        }
+        if !self.terminal_focused()
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+            && matches!(key.code, KeyCode::Char('l' | 'L'))
+        {
+            self.triage_next(
+                !(self.keyboard_enhanced && key.modifiers.contains(KeyModifiers::SHIFT)),
+            );
+            return;
+        }
         // Retrying a failed initial attach uses the same path as opening its terminal.
         if self.terminal_focused()
             && key.code == KeyCode::Char('r')
@@ -4227,6 +4440,33 @@ impl Ui {
             } else {
                 self.confirm = None;
             }
+            return;
+        }
+        // A prompt's form with the keys takes them, and Ctrl+N gives them to it or takes them
+        // back: in a conversation it expands the band in place, in Inbox it is the selected card.
+        if !self.terminal_focused() {
+            if self.form_key(key) {
+                return;
+            }
+            if key.code == KeyCode::Char('n')
+                && key.modifiers == KeyModifiers::CONTROL
+                && (self.inbox_in_view() || self.conversation_here().is_some())
+            {
+                self.toggle_form_keys();
+                return;
+            }
+        }
+        if key.code == KeyCode::Enter
+            && key.modifiers == KeyModifiers::NONE
+            && !self.terminal_focused()
+            && matches!(self.focused_pane(), Some(Pane::Terminal(_)))
+            && !self.palette_open()
+            && !self.help
+            && !self.home_open()
+            && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused)
+            && self.popover.is_none()
+        {
+            self.open_terminal();
             return;
         }
         if self.glass_key(key) {
@@ -4538,13 +4778,6 @@ impl Ui {
                     "Grouped view · t for the tree"
                 });
             }
-            // Ctrl+] attaches the agent's terminal, beside Ctrl+\ that leaves it; terminals send
-            // it as 0x1d, which crossterm reports as Ctrl+5. Enter was too easy to hit by mistake.
-            KeyCode::Char(']' | '5')
-                if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.open_terminal()
-            }
             KeyCode::Char('n') if self.tab() == 2 => self.open_new_mission(),
             KeyCode::Enter if self.tab() == 2 => {
                 if let Some(decision) = self.selected_id().and_then(|id| {
@@ -4847,6 +5080,7 @@ impl Ui {
                         }
                     }
                     ("request", 'y' | 'n') => self.confirm = Some(key),
+                    ("prompt", 'a') => self.toggle_form_keys(),
                     ("update", 'r') => self.read_update(),
                     ("message", 'm') => self.act('m'),
                     _ => {}
@@ -5519,7 +5753,7 @@ impl Ui {
                 self.open(&agent);
                 self.action_key('S');
             }
-            ('t', None) => {
+            (screens::TERMINAL_ACTION, None) => {
                 self.open(&agent);
                 self.open_terminal();
             }
@@ -5707,6 +5941,10 @@ impl Ui {
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent) {
+        // The recent popup is modal: nothing behind it, an attached program included, gets the mouse.
+        if self.recent_open() {
+            return;
+        }
         if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
             && self.frame.borrow().hits.iter().rev().any(|(rect, hit)| {
                 contains(*rect, mouse.column, mouse.row) && matches!(hit, Hit::ResourceRow(_) | Hit::ResourceFilter)
@@ -5790,6 +6028,15 @@ impl Ui {
                 _ => {}
             }
             return;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some(Pane::Terminal(agent)) = self.focused_pane()
+        {
+            let key = format!("details:{agent}");
+            let focused = self.frame.borrow().panes.iter().any(|pane| {
+                pane.key == key && contains(pane.rect, mouse.column, mouse.row)
+            });
+            self.focus_terminal_details(focused);
         }
         // Tabs own a middle press through release, even when released outside the strip.
         if mouse.kind == MouseEventKind::Drag(MouseButton::Middle) && self.middle_tab.is_some() {
@@ -5929,6 +6176,17 @@ impl Ui {
             | MouseEventKind::ScrollDown
             | MouseEventKind::ScrollLeft
             | MouseEventKind::ScrollRight => {
+                // Over a split's tab strip, the wheel moves the strip a whole tab, not the pane.
+                if let Some(group) = self.tab_strip_at(mouse.column, mouse.row) {
+                    self.scroll_tab_strip(
+                        group,
+                        matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollDown | MouseEventKind::ScrollRight
+                        ),
+                    );
+                    return;
+                }
                 let delta = if matches!(
                     mouse.kind,
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft
@@ -5977,7 +6235,7 @@ impl Ui {
                         .chain(self.parked.iter())
                         .find(|view| key == Pane::Terminal(view.agent.clone()).key());
                     match target.and_then(|view| view.native.as_ref()) {
-                        Some(native) => {
+                        Some(native) if !self.terminal_details_focused.get() => {
                             if let Some(body) = self
                                 .frame
                                 .borrow()
@@ -6001,6 +6259,7 @@ impl Ui {
                                 );
                             }
                         }
+                        Some(_) => {}
                         _ if !matches!(
                             mouse.kind,
                             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
@@ -6021,7 +6280,7 @@ impl Ui {
     /// while the program has the mouse; Alt/Option and selection mode work when kitty owns Shift.
     /// Whether the terminal took it.
     fn terminal_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if !self.terminal_focused() {
+        if !self.terminal_focused() || self.terminal_details_focused.get() {
             return false;
         }
         let (Some(native), Some(body)) = (self.native_terminal(), self.terminal_body.get()) else {
@@ -6120,6 +6379,10 @@ impl Ui {
     }
 
     fn click(&mut self, hit: Hit) {
+        // A click anywhere but on a prompt's own form takes the keys back from it.
+        if !matches!(hit, Hit::Alert(..)) {
+            self.prompt_keys = None;
+        }
         match hit {
             Hit::Message | Hit::Subject | Hit::Resize => {}
             Hit::GlassMenu => self.open_palette(Some(4), glass::Open::Here),
@@ -6128,6 +6391,8 @@ impl Ui {
             // The terminal may be on another machine than Fractal TUI (over SSH or fabric): the
             // clipboard is the person's, so the link lands where their browser is. Run locally,
             // the browser opens too.
+            Hit::Link(url) if documents::openable(&url).is_some() => self.open_document(&url),
+            Hit::Document(tap) => self.document_tap(tap),
             Hit::Link(url) => {
                 copy(&url);
                 let opened = open_in_browser(&url);
@@ -6619,6 +6884,7 @@ pub fn run_demo(args: &[String]) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.hide_cursor()?;
     let mut ui = Ui::new(demo::loading_from(generated.world.clone()));
+    ui.keyboard_enhanced = _guard.enhanced;
     ui.resource_sidebar.arrangements = generated.arrangements;
     ui.load_prefs();
     // The demo keeps its spaces in memory only, and shows the sidebar as a new device does.
@@ -6764,23 +7030,6 @@ fn dump(args: &[String]) -> Result<()> {
     let _ = terminal.backend_mut().flush();
     print!("{out}");
     Ok(())
-}
-
-/// A stored document: its name, then its text as Markdown.
-fn document_detail(name: &str, text: Option<&Load<String>>, width: usize) -> Doc {
-    let mut doc = Doc::new();
-    let (title, version) = name.rsplit_once('@').unwrap_or((name, ""));
-    doc.field("Document", title.trim_start_matches("doc/"), width, theme::fg(theme::TEXT));
-    if !version.is_empty() {
-        doc.field("Version", &version[..version.len().min(12)], width, theme::fg(theme::OVERLAY1));
-    }
-    doc.blank();
-    match text {
-        Some(Load::Ready(text)) => doc.lines(text::markdown(text, width, theme::fg(theme::TEXT))),
-        Some(Load::Failed(why)) => doc.field("Status", why, width, theme::fg(theme::RED)),
-        _ => doc.field("Status", "Loading…", width, theme::fg(theme::OVERLAY1)),
-    }
-    doc
 }
 
 #[cfg(test)]
@@ -7139,6 +7388,8 @@ mod tests {
     fn a_custom_request_sends_the_generic_reply_and_has_no_yes_no_shortcut() {
         let mut world = demo::test_world();
         world.attention = Load::Ready(vec![Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/garden".into(),
             tier: Tier::Today,
@@ -7320,6 +7571,7 @@ mod tests {
                 store_index: 1,
                 projection_version: "1".into(),
                 created_at: "2026-10-03T08:00:00Z".into(),
+                published_at: None,
             }),
             truncated: false,
             sync: None,
@@ -7389,6 +7641,7 @@ mod tests {
                 store_index: 1,
                 projection_version: "1".into(),
                 created_at: "2026-10-16T08:00:00Z".into(),
+                published_at: None,
             }),
             truncated: false,
             sync: None,
@@ -7423,6 +7676,8 @@ mod tests {
     fn answering_a_request_leaves_the_next_one_closed() {
         let mut world = demo::test_world();
         let asks = |id: &str| Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7472,6 +7727,8 @@ mod tests {
     #[test]
     fn a_reconnect_keeps_the_answer_box_open_after_earlier_asks_left() {
         let asks = |id: &str| Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7782,6 +8039,8 @@ mod tests {
             ..Default::default()
         };
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/pick".into(),
             tier: Tier::Stopped,
@@ -7861,6 +8120,8 @@ mod tests {
                 attachments: Vec::new(),
             };
             let item = Attention {
+                deadline: None,
+                requested_at: None,
                 conversations: vec![],
                 id: "attention/feedback".into(),
                 tier: Tier::Stopped,
@@ -7995,6 +8256,8 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/shipped".into(),
             tier: Tier::Stopped,
@@ -8079,6 +8342,8 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/choose".into(),
             tier: Tier::Stopped,
@@ -8171,6 +8436,8 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/decide".into(),
             tier: Tier::Stopped,
@@ -8250,6 +8517,8 @@ mod tests {
         let mut world = demo::test_world();
         let mission = "mission/release-proof";
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/capacity".into(),
             tier: Tier::Stopped,
@@ -8301,6 +8570,8 @@ mod tests {
     fn an_update_shows_what_was_asked_for_and_clears_once_read() {
         let mut world = demo::test_world();
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/update".into(),
             tier: Tier::Later,
@@ -8554,6 +8825,8 @@ mod tests {
             items.insert(
                 0,
                 Attention {
+                    deadline: None,
+                    requested_at: None,
                     conversations: vec![],
                     id: "attention/request".into(),
                     tier: Tier::Stopped,
@@ -9525,12 +9798,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_bracket_opens_an_agents_terminal_and_ctrl_backslash_returns() {
+    fn attach_opens_an_agents_terminal_and_ctrl_backslash_returns() {
         let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         press(&mut ui, KeyCode::Enter);
         assert!(ui.terminal.is_none(), "Enter alone never attaches");
-        ui.key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+        ui.click(Hit::Attach);
         assert!(ui.terminal.is_some());
         let screen = frame(&ui, 120, 30).join("\n");
         assert!(screen.contains("Return"), "{screen}");

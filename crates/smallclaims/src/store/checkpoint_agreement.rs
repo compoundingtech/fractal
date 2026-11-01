@@ -422,10 +422,35 @@ pub enum CheckpointAction {
     TrimGraphChanged {
         checkpoint: String,
     },
+    /// A local trim deleted the day's claims (`[trim] daily_claims`) and stopped; the cut stays
+    /// `trimming` and goes on the next day. The counts are this step's.
+    TrimDeferred {
+        checkpoint: String,
+        envelopes: usize,
+        claims: usize,
+    },
     /// Signature and verdict rows of claims an earlier build's trim dropped were deleted.
     SweptTrimmedClaimRows {
         rows: usize,
     },
+    /// This node holds envelopes from before the cut that it has not validated, so it neither
+    /// seals nor proves the checkpoint until they are. Every pass that holds back says so, with
+    /// the oldest such envelope, so a node whose envelopes never validate does not stall every
+    /// checkpoint silently.
+    HeldBack {
+        checkpoint: String,
+        pending: u64,
+        oldest_writer: String,
+        oldest_sequence: u64,
+    },
+}
+
+/// Envelopes from before a cut that this node holds but has not validated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldEnvelopes {
+    pub pending: u64,
+    pub oldest_writer: String,
+    pub oldest_sequence: u64,
 }
 
 /// `st replication checkpoint status`: the newest stable checkpoint and the one being agreed.
@@ -621,10 +646,28 @@ impl Store {
     ) -> Result<BTreeSet<String>> {
         let mut known = {
             let connection = self.readers.get();
+            // Both primary keys start with the writer, so step from one writer to the next with
+            // a seek each. A DISTINCT reads every envelope's index entry instead, which on a large
+            // node is hundreds of megabytes a call.
             connection
                 .prepare_cached(
-                    "SELECT DISTINCT writer FROM replica_envelopes
-                     UNION SELECT DISTINCT writer FROM checkpoint_envelopes",
+                    /* sqlite-large-value: allow-for-now lv-h0c33f43323e7 owner=smallclaims::store::checkpoint_agreement TODO=trace-statement-and-value-representation */ "WITH RECURSIVE
+                         replica(writer) AS (
+                             SELECT MIN(writer) FROM replica_envelopes
+                             UNION ALL
+                             SELECT (SELECT MIN(writer) FROM replica_envelopes
+                                     WHERE writer>replica.writer)
+                             FROM replica WHERE replica.writer IS NOT NULL
+                         ),
+                         checkpoint(writer) AS (
+                             SELECT MIN(writer) FROM checkpoint_envelopes
+                             UNION ALL
+                             SELECT (SELECT MIN(writer) FROM checkpoint_envelopes
+                                     WHERE writer>checkpoint.writer)
+                             FROM checkpoint WHERE checkpoint.writer IS NOT NULL
+                         )
+                     SELECT writer FROM replica WHERE writer IS NOT NULL
+                     UNION SELECT writer FROM checkpoint WHERE writer IS NOT NULL",
                 )?
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?
@@ -861,13 +904,20 @@ impl Store {
         if rows > 0 {
             actions.push(CheckpointAction::SweptTrimmedClaimRows { rows });
         }
+        // What a trim deferred and a crash left before its rebuild.
+        self.rebuild_deferred_paced()?;
         if self.replication_catching_up() {
             return Ok(actions);
         }
-        // A member that trims locally takes no part in checkpoints; it only finishes a trim it
-        // had already committed.
+        // A member that trims locally takes no part in checkpoints: it finishes a trim it had
+        // already committed, then trims its own due cut.
         if self.trims_locally() {
+            self.trim_day.store(
+                u64::try_from(context.now_unix_ms / super::checkpoint::DAY_MS)?,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             self.finish_interrupted_trims(&mut actions)?;
+            self.trim_local_cut(context, &mut actions)?;
             return Ok(actions);
         }
         let claims = self.checkpoint_claims()?;
@@ -902,6 +952,20 @@ impl Store {
         participants.insert(self.origin.clone());
         let verified = first_verifications(&claims, &checkpoint);
         let seals = newest_seals(&claims, &checkpoint);
+        // An envelope this node holds but has not validated is in its sealed identities without
+        // its claims, so its proof could not agree with a node that admitted them: sealing or
+        // proving now would only spend a proof on a checkpoint that cannot become stable.
+        if !verified.contains_key(&self.origin)
+            && let Some(held) = self.unvalidated_envelopes_before(cut)?
+        {
+            actions.push(CheckpointAction::HeldBack {
+                checkpoint,
+                pending: held.pending,
+                oldest_writer: held.oldest_writer,
+                oldest_sequence: held.oldest_sequence,
+            });
+            return Ok(actions);
+        }
         if !verified.contains_key(&self.origin) {
             // Register the cut and seal row with the capture guard, as a capture does, so its
             // triggers fence the history the seal reads and the next pass reuses the digest
@@ -947,6 +1011,33 @@ impl Store {
             }
         }
         Ok(actions)
+    }
+
+    /// The envelopes dated before `cut` that this node holds but has not validated, pending or
+    /// degraded, whose claims are therefore not admitted here: how many, and the oldest. None
+    /// when there are none.
+    pub fn unvalidated_envelopes_before(&self, cut: u128) -> Result<Option<HeldEnvelopes>> {
+        let cut = i64::try_from(cut)?;
+        // One statement, so it needs no snapshot of its own: a waiting seal pass runs it every
+        // few minutes, and the identity-reuse test bounds what such a pass costs.
+        Ok(self
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) OVER (), writer, sequence FROM replica_envelopes
+                 WHERE receipt_state IN ('pending','degraded')
+                   AND CAST(accepted_at_unix_ms AS INTEGER) < ?1
+                 ORDER BY CAST(accepted_at_unix_ms AS INTEGER), writer, sequence LIMIT 1",
+                [cut],
+                |row| {
+                    Ok(HeldEnvelopes {
+                        pending: row.get(0)?,
+                        oldest_writer: row.get(1)?,
+                        oldest_sequence: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn verify_checkpoint(
@@ -1060,12 +1151,25 @@ impl Store {
     /// A person looked at a trim that stopped because the graph would change. The rows stay
     /// as they are, and checkpoints go on from the next one.
     pub fn resume_checkpoints(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
+        self.resume_checkpoints_allowing(actor, reason, None)
+    }
+
+    /// As [`Self::resume_checkpoints`], and on a member that trims locally `agent` may resume
+    /// too: the agent its stop alerts (`[trim] notify`), which owns the fault. Resuming past a
+    /// stop is the safety decision, so no other agent may.
+    pub fn resume_checkpoints_allowing(
+        &self,
+        actor: &str,
+        reason: &str,
+        agent: Option<&str>,
+    ) -> Result<(), St3Error> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let actor = normalize_actor(actor, "person");
-        if !actor.starts_with("person/") || reason.trim().is_empty() {
+        let allowed = actor.starts_with("person/") || (self.trims_locally() && agent == Some(actor.as_str()));
+        if !allowed || reason.trim().is_empty() {
             return Err(St3Error::new(
                 "invalid-checkpoint-resume",
-                "a person resumes checkpoints, with a reason",
+                "a person resumes checkpoints, with a reason (or, where trim is local, the [trim] notify agent)",
             ));
         }
         let mut connection = self.connection.write();

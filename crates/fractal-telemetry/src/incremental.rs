@@ -83,10 +83,13 @@ struct State {
 }
 
 /// How often a pass evaluates every item even when nothing marked them, counting what it corrects.
-/// Every minute, a large node's full passes re-read every settled item and reached a third of
-/// the pass's disk reads, and in a day they corrected nothing; each one is noted in the profile
-/// with any correction it makes.
-pub const FULL_PASS_INTERVAL_MS: u128 = 30 * 60_000;
+/// Every five minutes. Every minute, a large node's full passes reached a third of the pass's
+/// disk reads. A half hour was too long: some work is still reached only by a full pass (a loop
+/// timeout, an LLM gate's time limit, trust-prompt recovery, rendered files, a gate after a
+/// pending one), and the correction counter cannot see most of it. Lengthen this only after a
+/// day in which the counter shows no correction of any kind. Each full pass is noted in the
+/// profile with any correction it makes.
+pub const FULL_PASS_INTERVAL_MS: u128 = 5 * 60_000;
 /// Periodic work that is slow waits at least this many times its own cost; see
 /// [`cost_scaled_interval`].
 pub const FULL_PASS_COST_MULTIPLE: u128 = 10;
@@ -366,6 +369,16 @@ impl Incremental {
             .map(|last| last.saturating_add(FULL_PASS_INTERVAL_MS))
     }
 
+    /// When `item`'s last evaluation said it is next due, if it said.
+    pub fn due_of(&self, item: &str) -> Option<u128> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .items
+            .get(item)
+            .and_then(|item| item.due)
+    }
+
     /// What `item`'s last evaluation read.
     pub fn reads_of(&self, item: &str) -> BTreeSet<String> {
         let state = self
@@ -563,25 +576,25 @@ pub fn step_due(step: &fractal_kernel::model::StepRunView, now: u128) -> Option<
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_section_is_evaluated_in_full_once_every_half_hour() {
+    fn a_section_is_evaluated_in_full_once_every_five_minutes() {
         use super::*;
         let incremental = Incremental::default();
         // The first pass after a start is full, and the reconciler wakes for the next one.
         assert!(incremental.take_full_pass("member", 0));
-        assert_eq!(incremental.next_full_pass(), Some(30 * 60_000));
+        assert_eq!(incremental.next_full_pass(), Some(5 * 60_000));
         // Every pass in between skips what nothing marked, however long the full pass took.
-        for now in [60_000, 10 * 60_000, 30 * 60_000 - 1] {
+        for now in [30_000, 2 * 60_000, 5 * 60_000 - 1] {
             assert!(
                 !incremental.take_full_pass("member", now),
                 "full again at {now}"
             );
         }
-        assert!(incremental.take_full_pass("member", 30 * 60_000));
-        assert_eq!(incremental.next_full_pass(), Some(60 * 60_000));
-        // Each section keeps its own half hour.
-        assert!(incremental.take_full_pass("stop", 31 * 60_000));
-        assert!(!incremental.take_full_pass("stop", 60 * 60_000));
-        assert!(incremental.take_full_pass("member", 60 * 60_000));
+        assert!(incremental.take_full_pass("member", 5 * 60_000));
+        assert_eq!(incremental.next_full_pass(), Some(10 * 60_000));
+        // Each section keeps its own five minutes.
+        assert!(incremental.take_full_pass("stop", 6 * 60_000));
+        assert!(!incremental.take_full_pass("stop", 10 * 60_000));
+        assert!(incremental.take_full_pass("member", 10 * 60_000));
         assert_eq!(cost_scaled_interval(30_000, 0, 600_000), 30_000);
         assert_eq!(cost_scaled_interval(30_000, 25_000, 600_000), 250_000);
         assert_eq!(cost_scaled_interval(30_000, u128::MAX, 600_000), 600_000);

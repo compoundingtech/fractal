@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/tile/whoami", get(whoami))
         .route("/v1/messages", get(list_messages).post(send_message))
+        .route("/v1/messages/recipient", get(recipient))
         .route("/v1/messages/read/{*subject}", get(read_message))
         .fallback(refuse)
         .with_state(state)
@@ -85,6 +86,14 @@ async fn whoami(Extension(caller): Extension<TileCaller>) -> Json<Value> {
         "person": caller.person,
         "pid": caller.pid,
     }))
+}
+
+async fn recipient(
+    State(state): State<AppState>,
+    Extension(_caller): Extension<TileCaller>,
+    query: Query<super::messages::RecipientQuery>,
+) -> Result<Json<Value>, ApiError> {
+    super::messages::recipient(State(state), query).await
 }
 
 /// Send as the tile's agent. A request naming another sender is refused.

@@ -71,8 +71,10 @@ describe('host-independent SDK', () => {
           kind: 'snapshot', id: subscription.id, collection: 'missions', has_more: false,
           items: [{ id: 'mission/test', revision: '1' }], order: ['mission/test'], snapshot,
         }) })
-        yield* Effect.sleep('10 millis')
-        expect(identities).toEqual(['mission/test'])
+        // Ingest and Effect publication complete on separate scheduler turns.
+        yield* Effect.promise(async () => {
+          await expect.poll(() => identities, { timeout: 2_000 }).toEqual(['mission/test'])
+        })
         yield* Fiber.interrupt(first)
         yield* settle
         expect(commands.filter((command) => command.kind === 'unsubscribe')).toHaveLength(1)

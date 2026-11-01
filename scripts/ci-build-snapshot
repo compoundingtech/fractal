@@ -107,12 +107,22 @@ def stream(archive, command):
 
 def unpack(archive, dest):
     names = stream(archive, ['tar', '-tf', '-']).splitlines()
-    for name in names:
-        parts = Path(name).parts
-        if not parts or name.startswith('/') or '..' in parts or parts[0] not in ('target', 'cargo-home', 'st-ci-cache', 'cost-stores', 'zig-tool'):
+    paths = [Path(name) for name in names]
+    for name, path in zip(names, paths):
+        if not path.parts or name.startswith('/') or '..' in path.parts:
+            raise ValueError('unexpected snapshot archive path')
+    legacy = '-'.join(('st', 'ci', 'cache'))
+    roots = {path.parts[0] for path in paths}
+    directories = {name.rstrip('/') for name in names if name.endswith('/')}
+    if (legacy in roots and 'fractal-ci-cache' not in roots
+            and roots <= {'target', 'cargo-home', legacy, 'cost-stores', 'zig-tool'}
+            and {'target', 'cargo-home/registry', 'cargo-home/git', legacy} <= directories):
+        raise source.IncompatibleSnapshot('snapshot uses the previous cache directory')
+    for path in paths:
+        if path.parts[0] not in ('target', 'cargo-home', 'fractal-ci-cache', 'cost-stores', 'zig-tool'):
             raise ValueError('unexpected snapshot archive path')
     stream(archive, ['tar', '-xf', '-', '-C', str(dest)])
-    for name in ('target', 'cargo-home/registry', 'cargo-home/git', 'st-ci-cache'):
+    for name in ('target', 'cargo-home/registry', 'cargo-home/git', 'fractal-ci-cache'):
         if not (dest / name).is_dir(): raise ValueError('incomplete build snapshot')
 
 
@@ -142,13 +152,17 @@ def restore():
                 source.download(repo, run, name, dest / 'download')
                 archives = list((dest / 'download').rglob('build.tar.zst'))
                 if len(archives) != 1: raise ValueError('missing build snapshot archive')
-                unpack(archives[0], dest)
-                checkpoint = dest / 'st-ci-cache/perf-source-state.json'
+                try:
+                    unpack(archives[0], dest)
+                except source.IncompatibleSnapshot:
+                    summary('Build snapshot skipped: incompatible archive layout; restoring dependency caches.')
+                    continue
+                checkpoint = dest / 'fractal-ci-cache/perf-source-state.json'
                 state = json.loads(checkpoint.read_text())
                 if state['head'] != source.git(work, 'rev-parse', 'HEAD'):
                     raise ValueError('snapshot source identity differs from the checkout')
                 for staged, destination in ((dest / 'target', target), (dest / 'cargo-home/registry', cargo / 'registry'),
-                                            (dest / 'cargo-home/git', cargo / 'git'), (dest / 'st-ci-cache', temp / 'st-ci-cache')):
+                                            (dest / 'cargo-home/git', cargo / 'git'), (dest / 'fractal-ci-cache', temp / 'fractal-ci-cache')):
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     if destination.exists(): shutil.rmtree(destination)
                     shutil.move(staged, destination)
@@ -176,7 +190,7 @@ def restore():
             summary(message, warning=True)
     # Persistent runners keep the same checkpoint next to their actual target directory.
     checkpoint = target / '.ci-source-state.json'
-    if os.environ.get('CI_BUILD_SNAPSHOT_HIT') == '1' or (temp / 'st-ci-cache/perf-source-state.json').exists():
+    if os.environ.get('CI_BUILD_SNAPSHOT_HIT') == '1' or (temp / 'fractal-ci-cache/perf-source-state.json').exists():
         source.restore_sources()
     elif checkpoint.exists():
         source.restore_sources(checkpoint)
@@ -184,7 +198,7 @@ def restore():
 
 def prepare():
     work, temp, cargo, target = paths()
-    for directory in (cargo / 'registry', cargo / 'git', temp / 'st-ci-cache', target): directory.mkdir(parents=True, exist_ok=True)
+    for directory in (cargo / 'registry', cargo / 'git', temp / 'fractal-ci-cache', target): directory.mkdir(parents=True, exist_ok=True)
     if os.environ.get('CI_LOCAL_CACHES') == '1' and (target / '.ci-source-state.json').exists():
         source.restore_sources(target / '.ci-source-state.json')
     source.remember_sources()
@@ -204,7 +218,7 @@ def pack():
         raise ValueError('source changed while compiling')
     shutil.copyfile(captured, target / '.ci-source-state.json')
     if os.environ.get('CI_LOCAL_CACHES') == '1' or os.environ.get('CI_BUILD_SNAPSHOT_HIT') == '1': return
-    shutil.copyfile(captured, temp / 'st-ci-cache/perf-source-state.json')
+    shutil.copyfile(captured, temp / 'fractal-ci-cache/perf-source-state.json')
     output = temp / 'ci-build-snapshot'
     output.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=temp) as tmp:
@@ -213,9 +227,9 @@ def pack():
             try: return os.link(src, dest)
             except OSError: return shutil.copy2(src, dest)
         for src, dest in ((target, staged / 'target'), (cargo / 'registry', staged / 'cargo-home/registry'),
-                          (cargo / 'git', staged / 'cargo-home/git'), (temp / 'st-ci-cache', staged / 'st-ci-cache')):
+                          (cargo / 'git', staged / 'cargo-home/git'), (temp / 'fractal-ci-cache', staged / 'fractal-ci-cache')):
             shutil.copytree(src, dest, copy_function=copy, symlinks=True)
-        names = ['target', 'cargo-home', 'st-ci-cache']
+        names = ['target', 'cargo-home', 'fractal-ci-cache']
         if os.environ.get('CI_ZIG_CACHE_DIR'):
             compiler = Path(os.environ['CI_ZIG_CACHE_DIR'])
             if compiler.is_dir():

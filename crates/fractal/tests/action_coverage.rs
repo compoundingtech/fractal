@@ -7,6 +7,7 @@ use fractal_daemon::SeatsStore;
 use fractal_daemon::EvidenceStore;
 use fractal_daemon::OwnedSetsStore;
 use fractal_daemon::GitChangesStore;
+use fractal_daemon::RetirementsStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -548,19 +549,24 @@ impl Daemon {
     }
 
     fn state(root: &Path, node: &str) -> AppState {
-        AppState { owning_person: None,
-        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: node.into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: Some(root.join("native")),
-        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+        AppState {
+            owning_person: None,
+            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: node.into(),
+            state_dir: root.into(),
+            pty_root: root.join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: Some(root.join("native")),
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        }
     }
 
     fn socket(&self) -> PathBuf {
@@ -849,6 +855,8 @@ async fn dispatch(
         "agent.retire" => agent_retire, "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
         "custom.reply" => custom_reply, "prompt.respond" => prompt_respond,
         "arrangement.edit" => arrangement_edit,
+        "harness.answer" => harness_answer,
+        "arrangement.membership.edit" => arrangement_membership_edit,
         "attention.resolve" => attention_resolve,
         "lane.approve" => lane_approve, "lane.join" => lane_join, "lane.leave" => lane_leave,
         "lane.mark" => lane_mark, "lane.move" => lane_move,
@@ -871,6 +879,49 @@ async fn dispatch(
         "work.publish-mission" => work_publish_mission, "work.release" => work_release,
         "work.renew" => work_renew, "work.retry" => work_retry,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arrangement_membership_edits_survive_stale_fences_and_restarts() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    let subject = "arrangement/person/avery/019a0000-0000-7000-8000-000000000001";
+    let fence = daemon.fence(PERSON).await;
+    dispatch(
+        &daemon.client(PERSON),
+        "arrangement.edit",
+        "coverage:membership-container",
+        fence,
+        json!({"subject": subject, "owner": PERSON, "version": 2,
+            "operations": [{"op": "create", "name": "Restart memberships"}]}),
+    )
+    .await
+    .unwrap();
+    let operations = json!([{"op": "place", "member": WORKER, "bucket": null, "key": "a0"}]);
+    let fence = daemon.fence(PERSON).await;
+    daemon
+        .exercise(
+            PERSON,
+            "arrangement.membership.edit",
+            json!({"subject": subject, "owner": PERSON, "operations": operations}),
+            fence,
+        )
+        .await;
+    // `exercise` reopened the disk-backed daemon after acceptance and replayed the edit.
+    let claims = daemon.store().claims_for(subject, Some("ordered-membership.edited")).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].actor.as_deref(), Some(PERSON));
+    assert_eq!(claims[0].body["fields"]["owner"], PERSON);
+    assert_eq!(claims[0].body["fields"]["operations"], operations);
+    let memberships = daemon.store().ordered_memberships(subject, u64::MAX, None, 10).unwrap();
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(memberships[0]["container"], subject);
+    assert_eq!(memberships[0]["member"], WORKER);
+    assert_eq!(memberships[0]["position"], json!({"bucket": null, "key": "a0"}));
+    assert_eq!(memberships[0]["revision"], claims[0].id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2763,10 +2814,10 @@ async fn cli_reads_preserve_operational_views_after_restart() {
     }
 }
 
-/// What a run waits on reads the daemon's published lists, as a daemon serves them; before and
-/// after a restart, the same run reads the same way.
+/// What a run waits on and the blocked runs read the daemon's published lists, as a daemon
+/// serves them; before and after a restart, the same run reads the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cli_waiting_on_reads_published_lists_after_restart() {
+async fn cli_waiting_on_and_blocked_runs_read_published_lists_after_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -2792,6 +2843,16 @@ async fn cli_waiting_on_reads_published_lists_after_restart() {
         assert_eq!(waiting["open"][0]["path"], "work");
         assert_eq!(waiting["open"][0]["kind"], "ready");
         assert_eq!(waiting["open"][0]["who"], WORKER);
+        // Quiet for longer than a millisecond: nobody claims the ready step.
+        let output = daemon.cli(PERSON, &["missions", "blocked", "--quiet", "1ms"]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let blocked: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(blocked["groups"][0]["cause"], "unclaimed", "{blocked:#}");
+        assert_eq!(blocked["groups"][0]["runs"][0]["run"], run.subject.as_str());
+        let output = daemon.cli(PERSON, &["missions", "blocked"]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let blocked: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(blocked["groups"], json!([]), "within the default quiet limit nothing is blocked");
         daemon.restart().await;
     }
 }
@@ -3306,6 +3367,26 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
         daemon.store().mission_run(&run.id).unwrap().unwrap().status,
         "completed"
     );
+    // The finished run holds no fault, so there is nothing to dismiss, and nothing is written.
+    let index = daemon.store().index().unwrap();
+    let output = daemon
+        .cli(
+            PERSON,
+            &[
+                "missions",
+                "dismiss-fault",
+                &run.subject,
+                "--as",
+                PERSON,
+                "--reason",
+                "The run finished.",
+            ],
+        )
+        .await;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("missing-fault"), "{stderr}");
+    assert_eq!(daemon.store().index().unwrap(), index);
     cli_value(
         daemon
             .cli(
@@ -3331,6 +3412,7 @@ async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
+    daemon.apply("version 2\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-peer-recipient");
     let image = daemon.root.path().join("copper.png");
     std::fs::write(&image, b"\x89PNG\r\n\x1a\nCopper image").unwrap();
     let arguments = [
@@ -3469,6 +3551,7 @@ async fn cli_silent_kinds_and_count_reads_survive_restart() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
+    daemon.apply("version 2\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-peer-recipient");
     const PEER: &str = "agent/example/peer";
     let send = |key: &'static str, flag: &'static str| {
         vec![
@@ -3632,6 +3715,9 @@ async fn cli_aged_unread_cleanup_preserves_fresh_and_read_mail_across_restart() 
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
+    // Seed before the aged mail so the writer's monotonic clock does not make it fresh.
+    daemon.store().set_write_clock_at(now - 7_200_000).unwrap();
+    daemon.apply("version 2\nagent \"example/reader\" { workspace \"/tmp\"; command \"true\"; restart never }\nagent \"example/other\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-cleanup-recipients");
     let mut messages = BTreeMap::new();
     for (name, recipient, phase, fresh) in [
         ("old-sent", READER, "sent", false),
@@ -6596,6 +6682,88 @@ async fn onepassword_field_reference_manifest_registers_validates_replicates_and
     )
     .await;
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_retirement_cli_fences_match_refuse_and_bind_retries() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    const ACTOR: &str = "agent/example/fence-owner";
+    const WORKER: &str = "agent/example/fence-worker";
+    let mut daemon = Daemon::new().await;
+    daemon.apply(
+        "version 2\nagent \"example/fence-owner\" { command \"true\"; workspace \"/tmp\"; }\nagent \"example/fence-worker\" { command \"true\"; workspace \"/tmp\"; }\n",
+        "retirement-fence-declaration",
+    );
+    daemon.store().append_claim(&ClaimInput {
+        subject: WORKER.into(), kind: "runtime.observed".into(), actor: Some(WORKER.into()),
+        fields: serde_json::from_value(json!({
+            "runtime_id": "fence-runtime", "incarnation_id": "fence-runtime:i1",
+            "status": "stopped", "terminal": false,
+        })).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let shown = cli_value(daemon.cli(ACTOR, &["agents", "show", WORKER, "--all"]).await);
+    let revision = shown["value"]["revision"].as_str().unwrap();
+    let incarnation = shown["value"]["incarnation_id"].as_str().unwrap();
+    assert_eq!(revision, daemon.store().selected_desired_revision(WORKER).unwrap().unwrap());
+    let token = daemon.store().selected_desired_token(WORKER).unwrap().unwrap();
+    let args = |revision, incarnation| vec![
+        "agents", "retire", WORKER, "--as", ACTOR, "--reason", "Work finished",
+        "--idempotency-key", "retirement-fenced-cli-operation",
+        "--expect-revision", revision, "--expect-incarnation", incarnation,
+    ];
+    for (expected_revision, expected_incarnation, code, expected, current) in [
+        ("wrong-revision", incarnation, "retire-revision-mismatch", "wrong-revision", revision),
+        (revision, "wrong-incarnation", "retire-incarnation-mismatch", "wrong-incarnation", incarnation),
+    ] {
+        let mismatch = daemon.store().retire_agent_with_successor(
+            WORKER, ACTOR, "Work finished", &token, Some(expected_incarnation),
+            "retirement-fenced-cli-operation", &[], None, Some(expected_revision),
+        ).unwrap_err();
+        assert_eq!(mismatch.code, code);
+        assert_eq!(mismatch.details["expected"], expected);
+        assert_eq!(mismatch.details["current"], current);
+        let refused = daemon.cli(ACTOR, &args(expected_revision, expected_incarnation)).await;
+        assert!(!refused.status.success());
+        let error = format!("{}{}", String::from_utf8_lossy(&refused.stdout), String::from_utf8_lossy(&refused.stderr));
+        assert!(error.contains(code), "{error}");
+        assert!(daemon.store().agent_retirement(WORKER).unwrap().is_none());
+    }
+    let first = cli_value(daemon.cli(ACTOR, &args(revision, incarnation)).await);
+    daemon.restart().await;
+    let repeated = cli_value(daemon.cli(ACTOR, &args(revision, incarnation)).await);
+    assert_eq!(first["value"]["action_id"], repeated["value"]["action_id"]);
+    for (changed_revision, changed_incarnation) in [
+        ("different-revision", incarnation), (revision, "different-incarnation"),
+    ] {
+        let refused = daemon.cli(ACTOR, &args(changed_revision, changed_incarnation)).await;
+        assert!(!refused.status.success());
+        let error = format!("{}{}", String::from_utf8_lossy(&refused.stdout), String::from_utf8_lossy(&refused.stderr));
+        assert!(error.contains("idempotency-conflict") || error.contains("idempotency-mismatch"), "{error}");
+    }
+    let record = daemon.store().agent_retirement(WORKER).unwrap().unwrap();
+    assert_eq!(record.body["fields"]["desired_revision"], revision);
+    assert_eq!(record.body["fields"]["runtime_incarnation"], incarnation);
+    // The append transaction independently rejects fence changes, even without
+    // the action receipt layer, and exact repeats skip the now-terminal admission.
+    let retry = daemon.store().retire_agent_with_successor(
+        WORKER, ACTOR, "Work finished", &token, Some(incarnation),
+        "retirement-fenced-cli-operation", &[], None, Some(revision),
+    ).unwrap();
+    assert!(!retry.1);
+    assert_eq!(retry.0.id, record.id);
+    for (changed_revision, changed_incarnation) in [
+        (Some("different-revision"), Some(incarnation)),
+        (Some(revision), Some("different-incarnation")),
+        (None, None),
+    ] {
+        assert_eq!(daemon.store().retire_agent_with_successor(
+            WORKER, ACTOR, "Work finished", &token, changed_incarnation,
+            "retirement-fenced-cli-operation", &[], None, changed_revision,
+        ).unwrap_err().code, "idempotency-mismatch");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_restart() {
     if fractal_daemon::test_support::supervise_test() {

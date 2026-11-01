@@ -111,7 +111,7 @@ impl Store {
             return resource_references::referrers_from_declarations(&connection, subject);
         }
         let mut statement = connection.prepare_cached(
-            "SELECT owner, name, reason FROM declared_resource_edges WHERE target=?1 ORDER BY owner, name",
+            "SELECT owner, name, reason FROM declared_resource_edges WHERE target=?1 AND relation='declared-resource' ORDER BY owner, name",
         )?;
         let rows = statement.query_map([subject], |row| {
             Ok(json!({
@@ -330,6 +330,7 @@ impl Store {
             }
             let is_pull_request = claim_by_id_tx(&transaction, discovery)
                 .map_err(internal)?
+                .map(|mut claim| { claim.body = fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body); claim })
                 .is_some_and(|claim| {
                     claim.subject == resource
                         && claim.body.pointer("/fields/kind").and_then(Value::as_str)

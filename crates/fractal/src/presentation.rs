@@ -999,9 +999,16 @@ pub(crate) fn render_step_run(
         let _ = writeln!(output, "{}", style.heading("PERSON ANSWERS"));
         for response in &step.person_answers {
             let answer = response.answer.as_ref();
-            let outcome = answer
-                .and_then(|answer| answer["outcome"].as_str())
-                .unwrap_or(response.status.as_str());
+            let by_deadline = response.resolved_by.as_deref() == Some("deadline");
+            // A deadline's default carries the outcome of the answer it stands for; the line
+            // says it timed out, and the id names the default that applied.
+            let outcome = if by_deadline {
+                "timed_out"
+            } else {
+                answer
+                    .and_then(|answer| answer["outcome"].as_str())
+                    .unwrap_or(response.status.as_str())
+            };
             let id = answer
                 .and_then(|answer| answer["id"].as_str())
                 .map(|id| format!(" {id}"))
@@ -1011,6 +1018,9 @@ pub(crate) fn render_step_run(
                 "  • {outcome}{id}: {}  ({}, {})",
                 response.summary, response.respondent, response.ask
             );
+            if by_deadline {
+                let _ = writeln!(output, "    Resolved by its deadline, not by the person");
+            }
             if let Some(sender_class) = &response.sender_class {
                 let _ = writeln!(output, "    Sender class: {sender_class}");
             }
@@ -1626,6 +1636,7 @@ mod tests {
             respondent: "assistant/chatgpt".into(),
             answered_at_unix_ms: 2_000,
             answer: None,
+            resolved_by: None,
             evidence: vec![],
         });
         let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, Some(false));
@@ -1802,6 +1813,8 @@ mod tests {
     #[test]
     fn attention_list_shows_kind_age_targets_and_safe_commands() {
         let item = AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             kind: "fault".into(),
             episode: "failure-one".into(),
             priority: "high".into(),

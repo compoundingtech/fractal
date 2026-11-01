@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """The deterministic risk floor of a review: each named rule fires on what it names, stays quiet on an ordinary change, and the level
 is the highest of what fired."""
+import importlib.machinery
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -11,9 +13,20 @@ sys.dont_write_bytecode = True
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+import runpy
+config_path = runpy.run_path(str(HERE / "review-risk"))["config_path"]
+
+
+def load_review_risk():
+    loader = importlib.machinery.SourceFileLoader("review_risk", str(HERE / "review-risk"))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader("review_risk", loader))
+    loader.exec_module(module)
+    return module
 
 
 class ReviewRisk(unittest.TestCase):
+    module = load_review_risk()
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="review-risk-")
         self.addCleanup(self.temporary.cleanup)
@@ -23,7 +36,7 @@ class ReviewRisk(unittest.TestCase):
         self.git("config", "user.name", "t")
         (self.repo / ".st").mkdir()
         for name in ("risky-classes.json", "review-risk.json"):
-            (self.repo / ".st" / name).write_text((ROOT / ".st" / name).read_text())
+            (self.repo / ".st" / name).write_text((ROOT / config_path(ROOT, ".st/" + name)).read_text())
         self.write("scripts/classify-risk", (ROOT / "scripts" / "classify-risk").read_text())
         self.write("crates/fractal-store/src/store/plain.rs", "fn a() {}\n")
         self.write("crates/fractal-api-core/src/api/routes.rs", "pub fn route() {}\npub struct Reply;\n")
@@ -63,6 +76,206 @@ class ReviewRisk(unittest.TestCase):
         result = self.risk()
         self.assertEqual(result["level"], "high")
         self.assertEqual(self.rules(result)["schema"], "high")
+
+    def test_a_table_in_a_test_file_does_not_score_as_schema(self):
+        for path in ("crates/fractal-store/src/store/plain_tests.rs", "crates/fractal-store/src/store/tests.rs",
+                     "crates/fractal-store/src/store/tests/fixture.rs", "crates/smallclaims/src/window_test.rs"):
+            self.write(path, 'fn t() { exec("CREATE TABLE t (id)"); }\n')
+        result = self.risk()
+        self.assertEqual(result["level"], "low", result)
+        self.assertNotIn("schema", self.rules(result))
+
+    SOURCE = "pub fn run() {}\n"
+    TESTS = '#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn it_runs() {\n        run();\n    }\n}\n'
+
+    def start_from(self, text):
+        """A base whose Rust file already holds TEXT, and a change branch from it."""
+        self.git("checkout", "-q", "main")
+        self.write("crates/fractal-store/src/store/inline.rs", text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "inline")
+        self.git("checkout", "-q", "-B", "change")
+
+    def test_a_table_added_inside_a_trailing_test_module_does_not_score_but_the_same_line_above_it_does(self):
+        self.start_from(self.SOURCE + "\n" + self.TESTS)
+        fixture = '        exec("CREATE TABLE t (id)");\n'
+        self.write("crates/fractal-store/src/store/inline.rs", self.SOURCE + "\n" + self.TESTS.replace("        run();\n", "        run();\n" + fixture))
+        result = self.risk()
+        self.assertEqual(result["level"], "low", result)
+        self.assertNotIn("schema", self.rules(result))
+        self.assertEqual(result["changed_lines"], 1)
+        self.write("crates/fractal-store/src/store/inline.rs", 'pub fn run() { exec("CREATE TABLE t (id)"); }\n\n' + self.TESTS)
+        result = self.risk()
+        self.assertEqual(self.rules(result).get("schema"), "high", result)
+
+    def test_a_table_removed_from_a_trailing_test_module_does_not_score(self):
+        fixture = '        exec("CREATE TABLE t (id)");\n'
+        self.start_from(self.SOURCE + "\n" + self.TESTS.replace("        run();\n", "        run();\n" + fixture))
+        self.write("crates/fractal-store/src/store/inline.rs", self.SOURCE + "\n" + self.TESTS)
+        result = self.risk()
+        self.assertNotIn("schema", self.rules(result), result)
+
+    def test_a_module_called_tests_that_is_not_last_is_still_scored(self):
+        after = "pub fn later() {}\n"
+        self.start_from(self.SOURCE + "\n" + self.TESTS + "\n" + after)
+        fixture = '        exec("CREATE TABLE t (id)");\n'
+        self.write("crates/fractal-store/src/store/inline.rs",
+                   self.SOURCE + "\n" + self.TESTS.replace("        run();\n", "        run();\n" + fixture) + "\n" + after)
+        self.assertEqual(self.rules(self.risk()).get("schema"), "high")
+
+    def test_a_test_module_closed_early_with_code_indented_after_it_is_still_scored(self):
+        """Indentation is not syntax: an indented `}` closes the module, and indented production code follows, closed by a column-0 `}`."""
+        crafted = (self.SOURCE + "\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn it_runs() {\n        run();\n    }\n    }\n"
+                   '    pub mod shipped {\n        pub const SCHEMA: &str = "CREATE TABLE evil(x)";\n        pub fn go() {}\n    }\n}\n')
+        self.assertIsNone(self.module.test_block_start(crafted))
+        self.start_from(self.SOURCE)
+        self.write("crates/fractal-store/src/store/inline.rs", crafted)
+        self.assertEqual(self.rules(self.risk()).get("schema"), "high")
+
+    def test_braces_in_strings_comments_and_chars_do_not_hide_or_fake_the_end_of_a_test_module(self):
+        honest = ("#[cfg(test)]\nmod tests {\n    // a stray } in a comment\n    /* and { another /* nested } */ */\n"
+                  '    const OPEN: &str = "{";\n    const RAW: &str = r#"}"#;\n    fn c() -> (char, char) { (\'}\', \'{\') }\n}\n')
+        self.assertEqual(self.module.test_block_start(self.SOURCE + "\n" + honest), 3)
+        for broken in ('#[cfg(test)]\nmod tests {\n    const S: &str = "unterminated;\n}\n',
+                       "#[cfg(test)]\nmod tests {\n    /* unterminated\n}\n",
+                       "#[cfg(test)]\nmod tests {\n    fn a() {}\n    }\n    fn b() {\n}\n"):
+            self.assertIsNone(self.module.test_block_start(self.SOURCE + "\n" + broken))
+
+    def test_byte_and_c_raw_strings_are_raw_strings_so_a_backslash_before_their_closing_quote_does_not_desync_the_scan(self):
+        for prefix in ("br", "cr", "r"):
+            honest = "#[cfg(test)]\nmod tests {\n    const A: &[u8] = %s\"\\\";\n    const B: &str = \"x\";\n}\n" % prefix
+            self.assertEqual(self.module.test_block_start(self.SOURCE + "\n" + honest), 3, prefix)
+            early = ("#[cfg(test)]\nmod tests {\n    const A: &[u8] = %s\"\\\";\n    }\n    fn production() {}\n"
+                     "    const B: &str = \"x\";\n    const C: &str = \"y\";\n}\n") % prefix
+            self.assertIsNone(self.module.test_block_start(self.SOURCE + "\n" + early), prefix)
+
+    def areas(self, result):
+        return [entry["area"] for entry in result["factory_read"]]
+
+    def test_a_medium_change_in_each_risky_area_needs_a_factory_read_and_the_level_does_not_move(self):
+        # Each case: a path of the area, and a workflow file beside it so that the change is medium on its own account.
+        for area, path in (("replication-and-sync", "crates/smallclaims/src/sync/worker.rs"),
+                           ("replication-and-sync", "crates/smallclaims/src/store/claim_ranges.rs"),
+                           ("store-schema-trim-checkpoints", "crates/smallclaims/src/store/retired.rs"),
+                           ("store-schema-trim-checkpoints", "crates/fractal-store/src/store/local_trim_fault.rs"),
+                           ("concurrency", "crates/fractal-drivers/src/host_lock.rs"),
+                           ("ci-and-signing-stages", "scripts/st-test"),
+                           ("wire-between-versions", "crates/fractal-wire/src/message.rs")):
+            with self.subTest(path=path):
+                self.setUp()
+                self.write(path, "fn a() {}\n")
+                self.write("crates/fractal-api-core/src/api/routes.rs", "pub fn route() {}\npub struct Reply;\npub fn another() {}\n")
+                result = self.risk()
+                self.assertEqual(result["level"], "medium", result)
+                self.assertIn(area, self.areas(result))
+                self.assertTrue(result["needs_factory_read"], result)
+                self.assertIn(path, [p for entry in result["factory_read"] if entry["area"] == area for p in entry["paths"]])
+                self.assertNotIn(area, self.rules(result))
+
+    def test_a_spawned_task_or_a_lock_added_in_ordinary_code_is_the_concurrency_area_and_the_same_line_in_a_test_is_not(self):
+        self.write("crates/fractal-store/src/store/plain.rs", "fn a() { std::thread::spawn(|| {}); let m: Mutex<u8>; }\n")
+        self.write(".github/workflows/x.yml", "name: x\n")
+        result = self.risk()
+        self.assertEqual(self.areas(result), ["concurrency", "ci-and-signing-stages"])
+        self.assertEqual(result["level"], "medium")
+        self.setUp()
+        self.write("crates/fractal-store/src/store/plain_tests.rs", "fn t() { std::thread::spawn(|| {}); }\n")
+        self.write(".github/workflows/x.yml", "name: x\n")
+        result = self.risk()
+        self.assertNotIn("concurrency", self.areas(result))
+
+    def test_a_lock_constructor_without_a_type_annotation_is_the_concurrency_area(self):
+        self.write("crates/fractal-store/src/store/plain.rs", "fn a() { let m = std::sync::Mutex::new(0); let r = RwLock::new(1); }\n")
+        self.write(".github/workflows/x.yml", "name: x\n")
+        result = self.risk()
+        self.assertEqual(result["level"], "medium")
+        self.assertIn("concurrency", self.areas(result))
+        self.assertTrue(result["needs_factory_read"], result)
+
+    def test_a_file_under_a_checkpoint_retired_or_trim_directory_is_the_store_area(self):
+        for path in ("crates/smallclaims/src/store/checkpoint/tombstones.rs",
+                     "crates/fractal-store/src/store/checkpoint_rules/staged.rs",
+                     "crates/smallclaims/src/store/retired/rows.rs",
+                     "crates/smallclaims/src/store/checkpoint_trim/plan.rs"):
+            with self.subTest(path=path):
+                self.setUp()
+                self.write(path, "fn a() {}\n")
+                self.write(".github/workflows/x.yml", "name: x\n")
+                result = self.risk()
+                self.assertEqual(result["level"], "medium")
+                self.assertIn("store-schema-trim-checkpoints", self.areas(result))
+                self.assertTrue(result["needs_factory_read"], result)
+
+    def test_the_resync_and_ivm_root_modules_are_the_concurrency_area(self):
+        for path in ("crates/fractal-drivers/src/resync.rs", "crates/smallclaims/src/ivm.rs"):
+            with self.subTest(path=path):
+                self.setUp()
+                self.write(path, "fn a() {}\n")
+                self.write(".github/workflows/x.yml", "name: x\n")
+                result = self.risk()
+                self.assertIn("concurrency", self.areas(result))
+                self.assertEqual(result["needs_factory_read"], result["level"] == "medium", result)
+
+    def test_changing_an_existing_lock_acquisition_is_the_concurrency_area(self):
+        self.write("crates/fractal-drivers/src/harness_state.rs", "fn a() { let g = self.state.lock().unwrap(); }\n")
+        self.write(".github/workflows/x.yml", "name: x\n")
+        result = self.risk()
+        self.assertEqual(result["level"], "medium")
+        self.assertIn("concurrency", self.areas(result))
+        self.assertTrue(result["needs_factory_read"], result)
+
+    def test_shards_principals_and_plugin_store_files_are_factory_read_areas(self):
+        cases = (
+            ("crates/smallclaims/src/shards.rs", "replication-and-sync"),
+            ("crates/smallclaims/src/shards_breakup/plan.rs", "replication-and-sync"),
+            ("crates/smallclaims/src/store/principals.rs", "store-schema-trim-checkpoints"),
+            ("crates/smallclaims/src/store/principals/verdicts.rs", "store-schema-trim-checkpoints"),
+            ("crates/fractal-reconcile/src/reconcile/github_plugin_store.rs", "store-schema-trim-checkpoints"),
+        )
+        for path, area in cases:
+            with self.subTest(path=path):
+                self.setUp()
+                self.write(path, "fn a() {}\n")
+                self.write(".github/workflows/x.yml", "name: x\n")
+                result = self.risk()
+                self.assertEqual(result["level"], "medium")
+                self.assertIn(area, self.areas(result))
+                self.assertTrue(result["needs_factory_read"], result)
+
+    def test_a_plain_medium_change_does_not_need_a_factory_read(self):
+        self.write("crates/fractal-api-core/src/api/routes.rs", "pub fn route() {}\npub struct Reply;\npub fn another() {}\n")
+        result = self.risk()
+        self.assertEqual(result["level"], "medium")
+        self.assertEqual(result["factory_read"], [])
+        self.assertFalse(result["needs_factory_read"])
+
+    def test_a_low_or_a_high_change_in_a_risky_area_is_listed_but_does_not_need_the_flag(self):
+        self.write("crates/smallclaims/src/sync/backend.rs", "fn a() {}\n")
+        result = self.risk()
+        self.assertEqual(result["level"], "low")
+        self.assertEqual(self.areas(result), ["replication-and-sync"])
+        self.assertFalse(result["needs_factory_read"])
+        self.setUp()
+        self.write("crates/smallclaims/src/store/retired.rs", 'fn a() { exec("CREATE TABLE t (id)"); }\n')
+        result = self.risk()
+        self.assertEqual(result["level"], "high")
+        self.assertIn("store-schema-trim-checkpoints", self.areas(result))
+        self.assertFalse(result["needs_factory_read"])
+
+    def test_a_test_only_change_in_a_risky_area_is_not_that_area(self):
+        self.write("crates/smallclaims/src/sync/worker_tests.rs", "fn t() {}\n")
+        self.write("scripts/ci-build-snapshot-test", "x\n")
+        self.write(".github/workflows/x.yml", "name: x\n")
+        result = self.risk()
+        self.assertEqual(self.areas(result), ["ci-and-signing-stages"])
+        self.assertEqual([p for entry in result["factory_read"] for p in entry["paths"]], [".github/workflows/x.yml"])
+
+    def test_the_areas_are_read_from_the_base_so_a_change_cannot_remove_its_own(self):
+        self.write(".st/review-risk.json", '{"version": 1, "rules": [], "classes": {}}\n')
+        self.write("crates/smallclaims/src/sync/worker.rs", "fn a() {}\n")
+        self.write(".github/workflows/x.yml", "name: x\n")
+        result = self.risk()
+        self.assertIn("replication-and-sync", self.areas(result))
 
     def test_deleting_data_is_high_in_source_and_ignored_in_tests(self):
         self.write("crates/fractal-store/src/store/plain_tests.rs", 'fn t() { exec("DELETE FROM t"); }\n')
@@ -121,18 +334,21 @@ class ReviewRisk(unittest.TestCase):
         self.write("crates/fractal-store/src/store/plain.rs", 'fn a() { exec("DROP TABLE t"); }\n')
         self.assertEqual(self.risk()["level"], "high")
 
-    def test_trust_files_in_st_are_high_and_the_other_st_files_stay_medium(self):
-        for name in (".st/evidence-keys", ".st/evidence-log-key", ".st/evidence-authors.json", ".st/evidence-skip-policy.json",
-                     ".st/evidence-policy.json", ".st/required-lanes.json", ".st/review-risk.json", ".st/risky-classes.json",
-                     ".st/review-verdict.schema.json", ".st/review-harness.json",
-                     "scripts/review-risk", "scripts/review-validate", "scripts/classify-risk", "scripts/review"):
+    def test_trust_files_in_both_layouts_are_high_and_other_config_stays_medium(self):
+        names = [f"{layout}/{file}" for layout in (".st", ".fractal") for file in (
+                "evidence-keys", "evidence-log-key", "evidence-authors.json", "evidence-skip-policy.json",
+                "evidence-policy.json", "required-lanes.json", "review-risk.json", "risky-classes.json",
+                "review-verdict.schema.json", "review-harness.json")]
+        names += ["scripts/review-risk", "scripts/review-validate", "scripts/classify-risk", "scripts/review"]
+        for name in names:
             with self.subTest(name):
                 self.git("checkout", "-q", "-B", "change", "main")
                 self.write(name, "x\n")
                 result = self.risk()
                 self.assertEqual(result["level"], "high", result)
                 self.assertEqual(self.rules(result)["trust-files"], "high")
-        for name in (".st/crate-cut.json", ".st/module-layers.json", ".st/rust-test-inputs.json", ".st/evidence-retention.json"):
+        for name in (f"{layout}/{file}" for layout in (".st", ".fractal") for file in (
+                "crate-cut.json", "module-layers.json", "rust-test-inputs.json", "evidence-retention.json")):
             with self.subTest(name):
                 self.git("checkout", "-q", "-B", "change", "main")
                 self.write(name, "x\n")
@@ -172,7 +388,8 @@ class ReviewRisk(unittest.TestCase):
         run("checkout", "-q", "-b", "change")
         for path in (".st/review-risk.json", ".st/risky-classes.json", "scripts/classify-risk"):
             (other / path).parent.mkdir(parents=True, exist_ok=True)
-            (other / path).write_text((ROOT / path).read_text())
+            selected = config_path(ROOT, path) if path.startswith(".st/") else path
+            (other / path).write_text((ROOT / selected).read_text())
         run("add", "-A")
         run("commit", "-q", "-m", "introduce the rules")
         command = [sys.executable, str(HERE / "review-risk"), "main", "change", "--repo", str(other)]
@@ -195,6 +412,23 @@ class ReviewRisk(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "main moves")
         self.git("checkout", "-q", "-B", "change", "main")
+
+    def test_pinned_new_rules_win_over_old_and_candidate_rules(self):
+        self.on_main({".fractal/review-risk.json": (self.repo / ".st/review-risk.json").read_text(),
+                      ".fractal/risky-classes.json": (self.repo / ".st/risky-classes.json").read_text(),
+                      ".st/review-risk.json": "{", ".st/risky-classes.json": "{"})
+        self.write(".fractal/review-risk.json", "{}")
+        self.write("crates/fractal-store/src/store/plain.rs", 'fn a() { exec("DROP TABLE t"); }\n')
+        self.assertEqual(self.rules(self.risk())["data-deletion"], "high")
+
+    def test_malformed_new_rules_do_not_fall_back_to_valid_old_rules(self):
+        self.on_main({".fractal/review-risk.json": "{"})
+        self.write("docs/readme.md", "changed")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "change")
+        done = subprocess.run([sys.executable, str(HERE / "review-risk"), "main", "change", "--repo", str(self.repo)],
+                              text=True, capture_output=True)
+        self.assertNotEqual(done.returncode, 0)
 
     def test_a_rename_scores_the_old_path_too(self):
         self.on_main({".st/evidence-keys": "key\n"})

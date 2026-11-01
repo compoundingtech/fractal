@@ -3,6 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// The only files belonging to the separately configurable SQLite store directory.
+pub use smallclaims::store::STORE_DATABASE_FILES;
+
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-state-dirs-fractal — DELETE at contraction — #3032
 /// A destination-local receipt: exact migration ID followed by a newline.
 /// Only the later migration's independently verified completion may write it.

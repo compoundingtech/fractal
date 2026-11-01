@@ -28,6 +28,10 @@ latest state. The repository resource keeps only its own facts, such as `reposit
 | `reactions` | `reactions` (each reaction's count), and `last_comment.reactions` |
 | `mentions` | `mentions`: the newest mention of each GitHub login in the item's body or comments (`login`, `by`, `url`, `at`), up to 50 |
 
+The member that polls a repository also keeps each item's full facts, every head it has had and
+the keyed events of each change in its GitHub plugin mirror, which `st gh prs|pr|checks` read; a
+newer `vcs.item.state` is read over an item's observed facts. See [plugins](plugins.md).
+
 `vcs.repository`, `vcs.issue`, and `vcs.pull-request` carry optional GitHub `node_id` facts.
 Subjects keep their existing OWNER/REPO/number names. A repository rename or transfer records
 `moved_to` on the old repository; a relocated item records it on the old item, pointing to the
@@ -328,7 +332,9 @@ polling member's; reading from an earlier point only reads more again. A reposit
 recorded facts is a baseline, which delivers nothing.
 
 A database file the daemon cannot use, damaged or from a newer build, is set aside beside it as
-`github.sqlite3.set-aside-*` and replaced by an empty one, and the daemon starts. A read that
+`github.sqlite3.set-aside-*` and replaced by an empty one, and the daemon starts. It does not
+start only when the directory cannot be made, the file cannot be moved aside, or no database
+opens in its place: each names the path and the cause. A read that
 fails is the observer's fault, and a later pass polls it again. An observer whose poll cannot keep
 its cursor there is `degraded` with error code `github-plugin-database`: it retries the write each
 minute and does not ask GitHub again until the database takes the cursor.

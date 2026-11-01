@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A refused outbound dial no longer publishes a peer as unknown while that peer still exchanges with this member: refusals get the same 90 s missed-exchange grace as other failures, so one member's observation of a dial-refusing peer stops flipping up and unknown on every exchange (about 19,000 transport.observed claims a day for one pair on the measured fleet).",
+  "replay": {"status": "none", "detail": "No claim is written, rewritten or replayed."},
+  "schema": {"status": "none", "detail": "No schema or table change; the refusal row stays local route state as before."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes, and no fleet coordination."},
+  "compatibility": {"status": "changed", "detail": "transport.observed vocabulary is unchanged, but a member whose dial to a peer is refused while the peer keeps exchanging with it now keeps that peer up instead of alternating up and unknown, so Machine.transports and transport links show the peer up during that time. Older members keep flapping until they upgrade; readers need no change, and relay routing still ages links by last_success_at."},
+  "downtime": {"status": "none", "detail": "No startup work."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Rolling back restores the flapping; nothing persisted changes."}
+}

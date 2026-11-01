@@ -39,6 +39,20 @@ export function plainTyping(text: string): string {
   return text.replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/—/g, '--').replace(/…/g, '...');
 }
 
+/**
+ * What a change to the keyboard field adds to what the field held before, which was already
+ * sent. iOS does not reliably empty the field, so it keeps what was typed and only the new part
+ * goes to the terminal: an append, a paste, or text inserted where the caret was moved. A delete
+ * adds nothing; Backspace reaches the terminal as a key press of its own.
+ */
+export function fieldTyping(before: string, after: string): string {
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let end = 0;
+  while (end < before.length - start && end < after.length - start && before[before.length - 1 - end] === after[after.length - 1 - end]) end++;
+  return after.slice(start, after.length - end);
+}
+
 /** A mouse wheel turn at a cell (zero-based), for a program that asked for mouse reports. */
 export function wheelBytes(up: boolean, column: number, row: number, modes: Pick<TerminalModes, 'mouse_tracking' | 'mouse_encoding'>): string {
   if (modes.mouse_tracking === 'none') return '';

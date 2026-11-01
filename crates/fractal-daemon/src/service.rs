@@ -596,7 +596,7 @@ fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     })
 }
 
-/// Whether `argv` is a st3 daemon: the program is `st3` or `st` and one of its arguments is `up`.
+/// Whether `argv` is a Fractal daemon (including transitional names) started with `up`.
 fn is_daemon_argv(argv: &[String]) -> bool {
     let Some(program) = argv.first() else {
         return false;
@@ -605,12 +605,12 @@ fn is_daemon_argv(argv: &[String]) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    matches!(name, "st3" | "st") && argv[1..].iter().any(|argument| argument == "up")
+    matches!(name, "fractal" | "st3" | "st") && argv[1..].iter().any(|argument| argument == "up")
 }
 
 /// Stop the daemon that listens on `socket` when no service manager owns it: ask it to end,
 /// then force it after `grace`. Only the process that answers on this socket (or, on Linux, the one
-/// that holds its startup lock) is signalled, and only when it is a st3 daemon; a signal goes to
+/// that holds its startup lock) is signalled, and only when it is a Fractal daemon; a signal goes to
 /// the process whose start time was read first, never to a later process that reused its pid.
 /// Returns whether such a daemon was found and has ended.
 pub fn stop_daemon_at(socket: &Path, grace: std::time::Duration) -> Result<bool> {
@@ -1207,6 +1207,50 @@ WantedBy=default.target\n",
     )
 }
 
+/// Observe the worker through its supervisor, never through caller-supplied argv.
+pub(crate) fn replication_worker_pid() -> Result<u32> {
+    let service = lookup::native()?.replication;
+    #[cfg(target_os = "linux")]
+    let output = host_command("systemctl")
+        .args(["--user", "show", "--property=MainPID", "--value", &service.name])
+        .output()?;
+    #[cfg(target_os = "macos")]
+    let output = host_command("launchctl")
+        .args(["print", &format!("{}/{}", launch_domain(), service.name)])
+        .output()?;
+    anyhow::ensure!(output.status.success(), "cannot observe replication worker supervisor");
+    let text = std::str::from_utf8(&output.stdout)?;
+    #[cfg(target_os = "linux")]
+    let pid = text.trim().parse::<u32>()?;
+    #[cfg(target_os = "macos")]
+    let pid = text.lines().find_map(|line| line.trim().strip_prefix("pid = "))
+        .context("replication worker has no supervised PID")?.parse::<u32>()?;
+    anyhow::ensure!(pid != 0, "replication worker is not running");
+    Ok(pid)
+}
+
+pub(crate) fn daemon_is_service_managed() -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        // A foreground fixture can inherit its runner's unrelated service cgroup.
+        Ok(daemon_service_cgroup(&fs::read_to_string("/proc/self/cgroup")?))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // launchd directly owns the daemon; a reparented foreground process also fails closed.
+        Ok(unsafe { libc::getppid() } == 1)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_service_cgroup(groups: &str) -> bool {
+    let old = service_name();
+    let new = old.replacen("st3", "fractal", 1);
+    groups.lines().filter_map(|line| line.splitn(3, ':').nth(2))
+        .filter_map(|path| path.trim_end_matches('/').rsplit('/').next())
+        .any(|unit| unit == old || unit == new || unit == "smalltalk.service")
+}
+
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
     render_launchd_plist_for_label(spec, service_label())
 }
@@ -1347,8 +1391,10 @@ mod tests {
     }
 
     #[test]
-    fn a_daemon_is_st3_or_st_started_with_up() {
+    fn a_daemon_is_fractal_or_a_transitional_name_started_with_up() {
         let argv = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert!(is_daemon_argv(&argv("/opt/example/bin/fractal up --config c")));
+        assert!(!is_daemon_argv(&argv("fractal agents ls")));
         assert!(is_daemon_argv(&argv("/opt/example/bin/st3 up --config c")));
         assert!(is_daemon_argv(&argv("st up")));
         assert!(!is_daemon_argv(&argv("st3 agents ls")));
@@ -1434,11 +1480,16 @@ mod tests {
         access_mode: None,
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
+        worker_ingress_generation_check: None,
         seat_priority: None,
+        unlaned_seat: None,
+        seat_admission: None,
+        lanes: None,
         person: None,
         fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
         shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
         state_dir: "/var/lib/st3".into(),
+        store_dir: None,
         pty_root: Some("/var/lib/pty".into()),
         socket: "/run/user/1000/st3.sock".into(),
         client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
@@ -1455,6 +1506,7 @@ mod tests {
         trim: crate::config::TrimConfig::default(),
         limits: crate::config::LimitsConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),
+        asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,
         fleet: None, };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;
@@ -1669,4 +1721,14 @@ mod tests {
         assert_eq!(service_label(), "com.compoundingtech.st3");
         assert_eq!(replication_service_label(), "com.compoundingtech.st3.replication");
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn foreground_worker_enrollment_distinguishes_daemon_and_runner_services() {
+    assert!(daemon_service_cgroup("0::/user.slice/st3.service"));
+    assert!(daemon_service_cgroup("0::/user.slice/fractal.service"));
+    assert!(daemon_service_cgroup("0::/user.slice/smalltalk.service"));
+    assert!(!daemon_service_cgroup("0::/system.slice/actions.runner.service"));
+    assert!(!daemon_service_cgroup("0::/user.slice/fractal-test.scope"));
 }

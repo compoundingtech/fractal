@@ -26,6 +26,9 @@ Existing query options and optional defaults keep their positions: for example,
 `resourcesList(filters, pageOptions, { signal })`. Cancellation is checked before fetching
 and after asynchronous credentials/discovery; the signal stays attached to native fetch while
 the JSON body is consumed. Cancellation does not prove an action was not delivered and never retries it.
+The manifest read ids `harness-questions.list` and `harness-questions.get` map to
+`harnessQuestions(queryOptions, requestOptions)` and `harnessQuestion(id, requestOptions)`;
+their public helper names do not include the manifest's `list`/`get` suffixes.
 
 `collectionStream` resolves to the pre-open command surface. Its optional `onOpen` callback
 reports actual WebSocket readiness once, before buffered commands flush. Commands issued inside
@@ -35,6 +38,23 @@ are structurally validated before `onFrame`; resource rows and timeline entries 
 tolerant per-row decoding. Unknown kinds and additive fields remain available to consumers.
 Malformed framing and exceptions from `onFrame` or `onOpen` close the socket and reach `onEnd(error)`
 once instead of escaping the WebSocket event handler.
+
+Create a new folder-only arrangement using `arrangementEdit` with `parameters.version: 2`;
+omitting the version keeps v1 creation. `ArrangementBody` is a version-discriminated v1/v2
+union, including strict rich-schema decoding. `arrangementMembershipEdit` accepts typed
+place/remove operations (`bucket: null` means root). `arrangementsMemberships` takes the
+arrangement's person name and UUID plus its owning `person/NAME`, returning a typed
+snapshot-bound keyset page. `subscribeOrderedMemberships` requires person and arrangement
+subject and follows lifecycle-aware held-window changes. Existing v1 placements are not
+implicitly migrated.
+Narrow collection frames by `collection === "ordered-memberships"` before passing them to
+`applyWindow` with a `CollectionWindow<OrderedMembership>`; those rows expose the member and
+position directly, and the window keeps the frame's required `membership` state for the whole
+container, replacing it even when a `changes` frame leaves rows and order alone.
+`membership.changed_index` is an opaque host-local invalidation frontier scoped by
+`snapshot.host_id`, not a canonical revision or cross-host value. Other collections keep
+resource windows without membership state. Rich-schema decoding validates membership frames
+and response envelopes, including empty pages, as disjoint variants.
 
 Run the client checks from the repository root with Node 24 and Corepack:
 
@@ -69,6 +89,11 @@ trusted peer name without regard to ASCII case, and sends HTTP and client
 WebSockets through the returned Unix tunnel socket. An explicit NodeID bypasses
 peer-name lookup. It does not start a TCP proxy or forward trusted-local person
 headers. Pairing credentials and signing requirements remain gateway-owned.
+
+The Rust and Node native readers accept exactly `fabric://<NodeID-or-name>/st3-client-v0`
+and `fabric://<NodeID-or-name>/fractal-client-v0`. Both dial the exposed
+`st3-client-v0` gateway service; endpoint formatting and gateway defaults still use
+`st3-client-v0`. Other service names, URI suffixes and trailing line breaks are rejected.
 
 The native TypeScript adapter recognizes canonical hex/base32 NodeID syntax and
 leaves Ed25519 key validity to Fabric. Unlike the Rust adapter's exact identity
@@ -142,6 +167,7 @@ Object constraints beside `oneOf` apply to every generated branch, including sha
 Source break for general pairing callers: `PairingBegin` and `PairedSession` are now untagged unions (`PersonPairingBegin | AssistantPairingBegin`, `PersonPairedSession | AssistantPairedSession`), so callers that read `person_id` or person-only fields off the generic types must narrow to the person variant first; `person_id` is optional on shared projections such as `Device`. Person-only callers can switch to the `PersonPairingBegin`/`PersonPairedSession` types and keep their existing shape. The Rust person variants enforce `deny_unknown_fields`.
 
 Inline semantic keywords provide branded strings and subject references, UTC instants, durations, and redacted credentials. Integer codecs reject unsafe JavaScript integers on decode and encode. Duration codecs round to whole wire units on encode; second durations preserve exact safe-integer units without overflowing millisecond precision. Recursive Glass layouts remain validated through suspended schemas.
+Subject-reference schemas retain authored string-length bounds as well as their family identity checks.
 
 After the root frozen install, run the focused rich checks with:
 

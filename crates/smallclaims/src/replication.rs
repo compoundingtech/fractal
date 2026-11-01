@@ -108,6 +108,11 @@ pub struct ClaimRangeSummary {
     /// The retained claim IDs of each leaf range the peer asked about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ids: Vec<ClaimRangeIds>,
+    /// The same summary of the claim IDs the sender retired, from a member that trims locally
+    /// once its retired ranges are folded. Its `retained` is the whole retired set. Older peers
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<Box<ClaimRangeSummary>>,
 }
 
 /// The most top ranges one query asks the leaves of, and the most leaf ranges it asks the IDs
@@ -132,6 +137,10 @@ pub struct ClaimRangeQuery {
     pub ids_of: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claims: Vec<String>,
+    /// The same walk over the peer's retired claim IDs. Its `claims` is never used: a retired ID
+    /// found missing is recorded, not fetched. Older peers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<Box<ClaimRangeQuery>>,
 }
 
 /// One range's number, population and digest.
@@ -171,6 +180,10 @@ pub struct ClaimRangeComparison {
     /// Claim IDs the peer retains that this node neither retains nor has retired.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
+    /// How the peer's retired claim IDs differ, when both trim locally. Its `missing` are the
+    /// retired IDs this node lacked, which it has recorded as retired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<Box<ClaimRangeComparison>>,
 }
 
 /// The population of a claim range and the hex of its 512-bit digest.
@@ -311,6 +324,9 @@ pub struct ReplicationStatus {
     pub waiting_claims: u64,
     pub invalid_records: u64,
     pub repaired_records: u64,
+    /// Envelopes received and not yet admitted, including those held below.
+    #[serde(default)]
+    pub pending_envelopes: u64,
     /// Envelopes of keyed writers held until their writer's signature arrives.
     #[serde(default)]
     pub unsigned_envelopes: u64,

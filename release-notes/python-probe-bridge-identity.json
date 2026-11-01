@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Delivery probes and the Discord bridge accept FRACTAL_AGENT with the existing ST_AGENT fallback.",
+  "replay": { "status": "none", "detail": "No replay or rebuild is required." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and fleet coordination are unchanged." },
+  "compatibility": { "status": "changed", "detail": "The delivery probe and Discord bridge prefer FRACTAL_AGENT, retain ST_AGENT when the preferred variable is absent, and refuse unequal aliases when FRACTAL_AGENT is nonempty. An explicitly empty FRACTAL_AGENT masks ST_AGENT. Conflict errors name variables without disclosing identity values. Explicit Discord bridge actors retain precedence; X-St3-Person is unchanged. This extends arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read without contracting legacy reads." },
+  "downtime": { "status": "none", "detail": "No running deployment is changed by this commit." },
+  "manual": { "status": "none", "detail": "Legacy-only environments continue to work. Configure aliases equally when setting both to nonempty identities." },
+  "recovery": { "status": "none", "detail": "No state migration is performed. Previous scripts remain usable with ST_AGENT configured." }
+}

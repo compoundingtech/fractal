@@ -81,7 +81,7 @@ pub fn limits_history(store: &Store) -> (Vec<ClaimRecord>, ClaimRecord, ClaimRec
     let two_new = two_new.unwrap();
     // Each writer's newest envelope stays; keep it out of the way.
     store.set_write_clock_at(base + 4 * LIMITS_HOUR).unwrap();
-    store.append_claim(&input("daemon/alder", "daemon.diagnostic", None,
+    store.append_as_older_build_for_test(&input("daemon/alder", "daemon.diagnostic", None,
         json!({"severity": "warning", "code": "slow-request", "reason": "last"}), "limits-last")).unwrap();
     store.seal_local_batches().unwrap();
     (one, two_old, two_new, three)

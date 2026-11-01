@@ -427,19 +427,24 @@ impl Node {
         let notify = Arc::new(Notify::new());
         let reconciler =
             Reconciler::new(store.clone(), runtime.clone(), name.into(), notify.clone());
-        let state = AppState { owning_person: None,
-        store: store.clone(),
-        notify,
-        event_notify: watch::channel(0).0,
-        node: name.into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: Some(FLEET.into()),
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = AppState {
+            owning_person: None,
+            store: store.clone(),
+            notify,
+            event_notify: watch::channel(0).0,
+            node: name.into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: Some(FLEET.into()),
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let socket = root.path().join("st3.sock");
         let router = fractal_daemon::api::router(state);
         let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&socket, router).await });
@@ -534,7 +539,7 @@ agent "example/mover" {{
         let home = self.root.path().to_owned();
         let args = args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
         tokio::task::spawn_blocking(move || {
-            std::process::Command::new(test_bin!("st3")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            std::process::Command::new(test_bin!("fractal")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .env("HOME", &home)
                 .env("XDG_CONFIG_HOME", home.join("config"))

@@ -15,6 +15,7 @@ mod assistant_native;
 mod authored_resume;
 mod backup;
 mod binary_payloads;
+mod store_dir;
 mod boot_canaries;
 mod broken_gates;
 mod claude_idle;
@@ -116,6 +117,7 @@ mod terminal_attach;
 mod terminal_binding;
 mod tiles_root;
 mod version;
+mod validate;
 mod typed_keys;
 mod ui_open;
 

@@ -150,6 +150,49 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
 }
 
 #[tokio::test]
+async fn slo_budgets_forecast_their_use_at_the_reset_from_the_local_history() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let now = client_now_ms() as u64;
+    let (status, body) = json_request(
+        app.clone(),
+        "/v1/claims",
+        json!({"subject": "agent/example.live", "kind": "harness.limits", "actor": "agent/example.live",
+            "fields": {"driver": "claude", "account_ref": "ada/claude-1", "weekly_percent": 30.0,
+                "five_hour_percent": 40.0, "measured_at_unix_ms": now - 10_000,
+                "five_hour_resets_at_unix_ms": now + 3 * 3_600_000,
+                "weekly_resets_at_unix_ms": now + 3 * 86_400_000},
+            "evidence": [], "idempotency_key": "slo-forecast-limits"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, before) = get_request(app.clone(), "/v1/client/slo").await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let find = |list: &Value, id: &str| {
+        list["rows"].as_array().unwrap().iter().find(|row| row["id"] == id).unwrap_or_else(|| panic!("no {id}")).clone()
+    };
+    // No history yet: the budget is listed as it was, with no forecast.
+    assert!(find(&before, "ada/claude-1/5h").get("forecast_used_percent").is_none(), "{before}");
+    // A quarter hour at one percent a minute: 60% is left, so it lasts an hour, not three.
+    let dir = crate::slo_history::dir(&state.state_dir);
+    for ago in (0..=15u64).rev() {
+        let left = json!({"id": "ada/claude-1/5h", "remaining_percent": 60.0 + ago as f64});
+        crate::slo_history::append(&dir, now - ago * 60_000, &[left]).unwrap();
+    }
+    for path in ["/v1/slo", "/v1/client/slo"] {
+        let (status, list) = get_request(app.clone(), path).await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        let five = find(&list, "ada/claude-1/5h");
+        assert_eq!(five["forecast_used_percent"], 100.0, "{path}: {five}");
+        assert!(five["runs_out_at_unix_ms"].as_u64().unwrap() < now + 2 * 3_600_000, "{path}: {five}");
+        assert!(five["explain"].as_str().unwrap().contains("will not last until it resets"), "{path}: {five}");
+        // The weekly budget has no history, so it has no forecast.
+        assert!(find(&list, "ada/claude-1/weekly").get("forecast_used_percent").is_none(), "{path}");
+    }
+}
+
+#[tokio::test]
 async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());

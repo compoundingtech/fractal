@@ -45,6 +45,16 @@ def run(*command, timeout=120):
         return 124, b''
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — no candidate or sibling fallback.
+def config_path(base, legacy):
+    preferred = legacy.replace('.st/', '.fractal/', 1)
+    code, listing = run('git', 'ls-tree', '-z', '--full-tree', base, '--', preferred, legacy)
+    if code != 0:
+        raise RuntimeError(f'could not resolve configuration at {base}')
+    names = {entry.partition(b'\t')[2].decode() for entry in listing.split(b'\0') if entry}
+    return preferred if preferred in names else legacy if legacy in names else None
+
+
 def field(value):
     text = re.sub(r'[^A-Za-z0-9._:/@+=,-]', '_', str(value if value not in (None, '') else '-'))
     return text[:200]
@@ -81,7 +91,8 @@ def main():
         if code != 0 or not OID.match(base):
             return emit(context, 'error', 'no-base-checkout', seconds=elapsed())
         # Everything that decides comes from this checkout (the base branch tip). Read the policy first: a no-op when nothing requires a note.
-        code, policy = run('git', 'show', f'{base}:{POLICY}')
+        policy_path = config_path(base, POLICY)
+        code, policy = run('git', 'show', f'{base}:{policy_path or POLICY}')
         try:
             checks = json.loads(policy)['checks'] if code == 0 else None
         except (ValueError, KeyError, TypeError):
@@ -119,7 +130,7 @@ def main():
                         notes = 'failed'
         command = [sys.executable, VERIFIER, '--repo', '.', '--tree', tree, '--require-all', '--keys-from', base,
                    '--policy-from', base, '--repository', repository]
-        if run('git', 'cat-file', '-e', f'{base}:{LANES}')[0] == 0:
+        if config_path(base, LANES) is not None:
             command += ['--lanes-from', base]
         code, out = run(*command, timeout=VERIFIER_TIMEOUT)
         try:

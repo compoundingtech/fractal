@@ -6,6 +6,8 @@ order: 6
 
 # Products and gates
 
+KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+
 A worker's completion report is a report, not a verdict. **Products** describe promised graph state; **gates** decide whether finished work can pass. All declared products must hold and all gates must pass.
 
 ## Products
@@ -25,7 +27,50 @@ A graph or human gate can remain pending until there is enough evidence. A faile
 
 Inside a mission, place this after a worker's `prepare` step:
 
-```kdl
+```ts group=approval variant=effect
+import { Effect } from 'effect'
+import { Fractal } from 'fractal/effect'
+
+const ada = Fractal.person({ id: 'ada' })
+
+// Sequence after the prepare step inside the mission.
+export const approve = Fractal.step(
+  { id: 'approve' },
+  Effect.gen(function* () {
+    const answer = yield* Fractal.ask({
+      name: 'The operator approves',
+      reviewer: ada,
+      question: 'Is the result ready to use?',
+    })
+    if (answer._tag === 'Rejected') {
+      yield* Effect.fail(new Error('Result rejected'))
+    }
+  }),
+)
+```
+
+```ts group=approval variant=ts
+import { Fractal } from 'fractal'
+
+const ada = Fractal.person({ id: 'ada' })
+
+// Await after the prepare step inside the mission.
+export const approve = () => Fractal.step(
+  { id: 'approve' },
+  async () => {
+    const answer = await Fractal.ask({
+      name: 'The operator approves',
+      reviewer: ada,
+      question: 'Is the result ready to use?',
+    })
+    if (answer._tag === 'Rejected') {
+      throw new Error('Result rejected')
+    }
+  },
+)
+```
+
+```kdl group=approval variant=kdl
 step "approve" {
   agentless
   depends-on { step "prepare" completed }

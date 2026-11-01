@@ -30,6 +30,8 @@ struct Runtime {
     starts: Mutex<Vec<MemberSpec>>,
     stops: Mutex<Vec<String>>,
     refuse_start: Mutex<bool>,
+    /// Refuse each start with this launcher error, as a launcher this build cannot use does.
+    refuse_with: Mutex<Option<String>>,
     attempts: Mutex<Vec<MemberSpec>>,
     exit_on_start: Mutex<bool>,
     before_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -79,6 +81,9 @@ impl RuntimeControl for Runtime {
             !*self.refuse_start.lock().unwrap(),
             "fixture rejected launch"
         );
+        if let Some(error) = self.refuse_with.lock().unwrap().clone() {
+            anyhow::bail!(error);
+        }
         let mut starts = self.starts.lock().unwrap();
         starts.push(member.clone());
         self.observations.lock().unwrap().insert(
@@ -273,19 +278,24 @@ impl Fixture {
         };
         reconciler.reconcile_once().unwrap();
         reconciler.reconcile_once().unwrap();
-        let state = AppState { owning_person: None,
-        store: store.clone(),
-        notify,
-        event_notify: watch::channel(0).0,
-        node: "restart-test".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = AppState {
+            owning_person: None,
+            store: store.clone(),
+            notify,
+            event_notify: watch::channel(0).0,
+            node: "restart-test".into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let socket = root.path().join("st3.sock");
         let router = make_router(state.clone());
         let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&socket, router).await });
@@ -2219,6 +2229,101 @@ async fn a_failed_explicit_retry_is_completed_parked_and_visible_until_a_new_req
             .unwrap(),
         None
     );
+}
+
+/// On 2026-10-21 an explicit restart of a parked seat failed with `spawn PTY failed:
+/// launcher-incompatible` and st parked it again. Its card said only `stopped`, and no agent
+/// heard. Now the card says st parked it, why and when, one fault reaches its owner however many
+/// retries fail, and both clear once the seat runs again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_launcher_incompatible_park_raises_one_fault_to_its_owner_until_the_seat_runs_again() {
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel,
+        r#"harness "omp" { model "example-model"; }"#,
+        "always",
+    )
+    .await;
+    // The fleet's fault agent owns a fault on a seat a person declared outside any run.
+    let owner = "agent/example/faults";
+    let source = format!(
+        "version 2\nagent \"example/faults\" {{ workspace {:?}; command \"sleep 1000\"; handles-faults }}",
+        fixture.root.path().to_str().unwrap()
+    );
+    let intent = fractal_daemon::parse_intent(&source, "restart-test").unwrap();
+    let preview = fixture.store.mission(&intent, fractal_daemon::model::IntentInput { kdl: source.clone(), source_name: None }).unwrap();
+    fixture.store.apply_as(&intent, &preview.subject_tokens, "declare-faults", Some("person/avery")).unwrap();
+    let launcher = "start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)";
+    let faults = || {
+        fixture
+            .store
+            .fault_snapshot(smallclaims::store::now_ms())
+            .unwrap()
+            .into_iter()
+            .filter(|fault| fault.item.subject == subject)
+            .collect::<Vec<_>>()
+    };
+    let fault_messages = || {
+        fixture
+            .store
+            .messages(Some(owner), false)
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.from == "daemon/runtime")
+            .filter(|message| message.content.contains(&subject))
+            .count()
+    };
+    let card = || async {
+        let agents: Value = fixture.client().get("/v1/client/agents?fresh=true").await.unwrap();
+        agents["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["id"] == subject)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing {subject} in {agents}"))
+    };
+    hang_up(&fixture);
+    park(&fixture, &subject, "omp");
+    *fixture.runtime.refuse_with.lock().unwrap() = Some("spawn PTY failed: launcher-incompatible (exit status: 1)".into());
+    let mut episode = None;
+    for key in ["incompatible-first", "incompatible-second"] {
+        let request = fixture.request(&subject, key).await;
+        // A daemon that starts again delivers faults on its first pass.
+        let daemon = restarted_daemon(&fixture);
+        for _ in 0..4 {
+            daemon.reconcile_once().unwrap();
+        }
+        let failed = restart_result(&fixture, &request);
+        assert_eq!(failed.kind, "runtime.action.failed");
+        let reason = failed.body["fields"]["reason"].as_str().unwrap();
+        assert!(reason.contains("parked again") && reason.contains(launcher), "{reason}");
+        let current = faults();
+        assert_eq!(current.len(), 1, "{current:?}");
+        assert_eq!(current[0].owner.as_deref(), Some(owner));
+        assert!(current[0].item.detail.contains("launcher-incompatible"), "{}", current[0].item.detail);
+        // Every failed retry belongs to the park it failed in.
+        assert_eq!(*episode.get_or_insert(current[0].item.episode.clone()), current[0].item.episode);
+        assert_eq!(fault_messages(), 1);
+        let agent = card().await;
+        assert_eq!(agent["state"], "failed");
+        assert_eq!(agent["end_reason"]["kind"], "parked");
+        assert_eq!(agent["end_reason"]["actor"], "daemon/runtime");
+        assert!(agent["end_reason"]["reason"].as_str().unwrap().contains(launcher), "{agent}");
+        let show = succeeded(&st(&fixture.root.path().join("st3.sock"), &["agents", "show", &subject]).await);
+        assert!(show.contains("WHY          parked by st after it failed to start at "), "{show}");
+        assert!(show.contains(launcher), "{show}");
+    }
+    // The launcher works again; a new restart runs the seat, and the fault and the park are over.
+    *fixture.runtime.refuse_with.lock().unwrap() = None;
+    let recovery = fixture.request(&subject, "compatible-again").await;
+    let daemon = restarted_daemon(&fixture);
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(restart_result(&fixture, &recovery).kind, "runtime.action.succeeded");
+    assert!(faults().is_empty(), "{:?}", faults());
+    let agent = card().await;
+    assert_ne!(agent["state"], "failed", "{agent}");
+    assert!(agent["end_reason"].is_null(), "{agent}");
+    assert_eq!(fault_messages(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

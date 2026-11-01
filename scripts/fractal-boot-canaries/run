@@ -64,6 +64,22 @@ CHANNEL_ATTACH_WINDOW_MS = 6000
 CHANNEL_BACKOFF_MS = 1000
 
 
+def process_agent(environment):
+    """Resolve a seat process's identity, refusing ambiguous cleanup candidates.
+
+    Match scripts/fractal-env.mjs: an explicitly empty preferred alias masks the
+    legacy alias, and a nonempty preferred alias conflicts with a differing,
+    present legacy alias. Neither alias may authorize a conflicting process.
+    """
+    env = dict(item.split("=", 1) for item in environment if "=" in item)
+    preferred = env.get("FRACTAL_AGENT")
+    legacy = env.get("ST_AGENT")
+    if preferred and legacy is not None and preferred != legacy:
+        return None
+    agent = preferred if preferred is not None else legacy
+    return agent if agent and agent.startswith("agent/") else None
+
+
 class Failure(Exception):
     pass
 
@@ -204,7 +220,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
                 environ = (proc / "environ").read_bytes().split(b"\0")
                 if f"ST3_ENDPOINT={self.endpoint}".encode() not in environ:
                     continue
-                if not any(item.startswith(b"ST_AGENT=agent/") for item in environ):
+                if process_agent(os.fsdecode(item) for item in environ) is None:
                     continue
                 argv = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode()
                 row = (int(proc.name), argv)
@@ -365,14 +381,16 @@ class Seats:
 
 
 def driver_processes(node):
-    """The seat's long-lived st3 processes (driver and channels), by pid and the inode they execute."""
+    """The seat's long-lived st processes (driver and channels), by pid and the inode they execute."""
     rows = {}
     for pid, argv in node.seat_processes():
         if " driver-hook " in argv:
             continue
         try:
             exe = Path(f"/proc/{pid}/exe").resolve()
-            if exe.name.startswith("st3"):
+            # The test binary is fractal-fixture, an install's is fractal or st3, and the reexec
+            # canary's copy is st3-replacement.
+            if exe.name.startswith(("fractal", "st3")):
                 rows[pid] = (argv, os.stat(f"/proc/{pid}/exe").st_ino)
         except OSError:
             pass
@@ -400,7 +418,7 @@ def replacement_processes(node, subject, previous_incarnation):
     if not incarnation or incarnation == previous_incarnation:
         return None
     processes = node.seat_processes(with_environment=True)
-    if not any(f"ST_AGENT={subject}" in environment
+    if not any(process_agent(environment) == subject
                and f"ST3_INCARNATION={incarnation}" in environment
                for _, _, environment in processes):
         return None
@@ -476,6 +494,10 @@ def forget_native_session(node, harness, session):
     if paths is None or (harness != "opencode" and not paths):
         fail(f"no {harness} transcript of {session} to remove")
     for path in paths:
+        # A staged inventory entry links to the transcript the seat's binding names; resume reads
+        # that file by its own path, so losing the transcript means losing the file too.
+        if path.is_symlink():
+            path.resolve().unlink(missing_ok=True)
         path.unlink()
 
 
@@ -1337,6 +1359,28 @@ def self_test():
             return self.processes
     node = BoundaryNode()
     subject = "agent/fixture/seat"
+    # The prefix selector used for cleanup and the exact replacement fence must
+    # agree, including when only the legacy alias would match.
+    identities = [
+        ([], None),
+        ([f"FRACTAL_AGENT={subject}"], subject),
+        ([f"ST_AGENT={subject}"], subject),
+        ([f"FRACTAL_AGENT={subject}", f"ST_AGENT={subject}"], subject),
+        (["FRACTAL_AGENT=", f"ST_AGENT={subject}"], None),
+        (["FRACTAL_AGENT=", "ST_AGENT="], None),
+        ([f"FRACTAL_AGENT={subject}", "ST_AGENT=agent/fixture/other"], None),
+        (["FRACTAL_AGENT=agent/fixture/other", f"ST_AGENT={subject}"], None),
+        (["FRACTAL_AGENT=person/fixture", f"ST_AGENT={subject}"], None),
+        ([f"FRACTAL_AGENT={subject}", "ST_AGENT="], None),
+        (["FRACTAL_AGENT=person/fixture"], None),
+    ]
+    node.incarnation = "new"
+    for environment, expected in identities:
+        assert process_agent(environment) == expected, environment
+        node.processes = [(2, "st3 driver", [*environment, "ST3_INCARNATION=new"])]
+        sample = replacement_processes(node, subject, "old")
+        assert sample == (node.processes if expected == subject else None), environment
+    node.incarnation = "old"
     old = (1, "st3 driver", [f"ST_AGENT={subject}", "ST3_INCARNATION=old"])
     new = (2, "st3 driver", [f"ST_AGENT={subject}", "ST3_INCARNATION=new"])
     node.processes = [old]

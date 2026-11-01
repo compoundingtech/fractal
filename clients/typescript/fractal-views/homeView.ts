@@ -1,4 +1,4 @@
-import type { Attention, TimelineEntry } from '@fractal/client';
+import type { Attention, AttentionPrompt, TimelineEntry } from '@fractal/client';
 import { ago } from './time.ts';
 
 // Home, drawn the way the Fractal terminal UI draws it (crates/fractal-tui/src/ui/screens.rs home_list, adapt.rs
@@ -116,20 +116,34 @@ export function keepClosed(previous: readonly KeptAttention[], next: readonly At
   return over > 0 ? kept.filter(item => !(item.closedElsewhere && over-- > 0)) : kept;
 }
 
+function rowOf(item: KeptAttention, place: { tier: Tier; kind: HomeKind }, now: number, unplaced = 'Fractal names a card this app does not know'): HomeRow {
+  const step = plain(item.presentation?.waiting)?.path;
+  const waiting = item.closedElsewhere ? 'closed; stays until you clear it'
+    : !item.presentation ? 'Fractal does not say what this is: this host\'s Fractal is older, or has not presented it yet'
+    : place.kind === 'unplaced' ? unplaced
+    : step ? `step ${step}` : null;
+  return { item, ...place, ...kindGlyph(place.kind), title: cleanTitle(item.title), waiting, age: ago(item.requested_at, now) };
+}
+
 export function homeRows(items: KeptAttention[], actor: string | undefined, now = Date.now()): HomeRow[] {
   const rows = items.filter(item => onHome(item, actor)).flatMap((item): HomeRow[] => {
     const place = homeKind(item);
-    if (!place) return [];
-    const step = plain(item.presentation?.waiting)?.path;
-    const waiting = item.closedElsewhere ? 'closed; stays until you clear it'
-      : !item.presentation ? 'Fractal does not say what this is: this host\'s Fractal is older, or has not presented it yet'
-      : place.kind === 'unplaced' ? 'Fractal names a card this app does not know'
-      : step ? `step ${step}` : null;
-    return [{ item, ...place, ...kindGlyph(place.kind), title: cleanTitle(item.title), waiting, age: ago(item.requested_at, now) }];
+    return place ? [rowOf(item, place, now)] : [];
   });
   // A stable sort by tier keeps Fractal's order within each tier; what Fractal closed sits last, apart.
   const rank = (row: HomeRow) => (row.item.closedElsewhere ? TIERS.length : 0) + TIERS.indexOf(row.tier);
   return rows.map((row, index) => ({ row, index })).sort((a, b) => rank(a.row) - rank(b.row) || a.index - b.index).map(({ row }) => row);
+}
+
+/**
+ * The row an item's own screen shows: the row Home lists, or, for an item Home does not list
+ * (Fractal puts it on no Now, as a fault or a message, opened by a link), an unplaced row where Fractal's
+ * alert flag puts it, so the screen always has one to read.
+ */
+export function detailRow(item: KeptAttention, now = Date.now()): HomeRow {
+  const place = homeKind(item);
+  if (place) return rowOf(item, place, now);
+  return rowOf(item, { tier: isAlert(item) ? 'stopped' : 'later', kind: 'unplaced' }, now, 'Fractal keeps this off Now');
 }
 
 export type HomeSection = { tier: Tier; title: string; count: number; rows: HomeRow[]; closed?: boolean };
@@ -206,8 +220,8 @@ export function alertsIn<T extends AlertRow>(items: readonly T[], agentId: strin
 export type PromptAnswers = {
   target_id: string; episode: string; answers: string[];
   /**
-   * The exact call the prompt asks about (a tool use or Codex item id), or null when its harness
-   * named none; undefined from a daemon that predates it.
+   * The exact call the prompt asks about (a tool use or Codex item id), or null when st names
+   * none. A prompt that names none is only denied from here: no unanswered call is guessed at.
    */
   call_id?: string | null;
 };
@@ -221,7 +235,7 @@ export function promptAnswers(item: { readonly actions: readonly string[]; reado
   const episode = typeof parameters.episode === 'string' ? parameters.episode : item.episode ?? '';
   if (!episode) return null;
   const prompt: PromptAnswers = { target_id, episode, answers };
-  if ('call_id' in parameters) prompt.call_id = typeof parameters.call_id === 'string' ? parameters.call_id : null;
+  prompt.call_id = typeof parameters.call_id === 'string' ? parameters.call_id : null;
   return prompt;
 }
 
@@ -235,8 +249,11 @@ export function promptAlertKey(item: { readonly id: string; readonly revision: s
   return [item.id, promptAnswers(item)?.episode ?? item.episode ?? '', item.revision].join('\n');
 }
 
-/** The call a harness recorded before it asked, in full: its tool and each input, lines intact. */
-export type PendingCall = { id: string; tool: string; lines: string[]; input?: unknown };
+/**
+ * The call a harness recorded before it asked: its tool and each input, lines intact. `complete`
+ * is false when st cut its input to its bound, and then nobody allows it from a client.
+ */
+export type PendingCall = { id: string; tool: string; lines: string[]; input?: unknown; complete?: boolean };
 
 function inputLines(args: unknown): string[] {
   let value = args;
@@ -258,8 +275,43 @@ function parsedInput(args: unknown): unknown {
 }
 
 /**
- * Every tool call with no result yet, oldest first. A permission prompt asks about one of them,
- * but the prompt carries no call ID, so with more than one unanswered a client cannot say which.
+ * A prompt as st serves it beside its card (`presentation.prompt`): the calls without a result in
+ * the seat's conversation, each as a person reads it, and whether a client may allow or answer the
+ * call it asks about; or why st serves none (it cannot read the conversation, or it is older).
+ */
+export type ServedPrompt = { calls: PendingCall[]; allow: boolean } | { calls: null; allow: false; why: string };
+export function servedPrompt(item: { readonly presentation?: { readonly prompt?: AttentionPrompt } | null }): ServedPrompt {
+  const prompt = item.presentation?.prompt;
+  if (!prompt) return { calls: null, allow: false, why: "This host's st is older and does not say which call the prompt asks about." };
+  if (!prompt.calls) return { calls: null, allow: false, why: prompt.unknown_reason ?? "st cannot read the agent's conversation." };
+  return {
+    calls: prompt.calls.map(call => ({
+      id: call.call_id, tool: call.tool || 'tool', lines: inputLines(call.input),
+      input: call.input_complete ? parsedInput(call.input) : call.input, complete: call.input_complete,
+    })),
+    allow: prompt.allow,
+  };
+}
+
+/**
+ * The answers a client offers beside a prompt st serves. `allow` and `approve` only where st
+ * allows them, beside the one call shown; `answer` only where st allows it and that call's
+ * questions can be shown and chosen from; every other answer (deny, and a screen prompt's or
+ * denial's own answers) always.
+ */
+export function servedAnswers(prompt: PromptAnswers, served: ServedPrompt): string[] {
+  const shown = served.calls === null ? [] : promptCalls(prompt, served.calls);
+  const certain = served.allow && shown.length === 1;
+  return prompt.answers.filter(answer => {
+    if (answer === 'allow' || answer === 'approve') return certain;
+    if (answer === 'answer') return certain && pendingQuestions(shown) !== null;
+    return true;
+  });
+}
+
+/**
+ * Every tool call with no result yet, oldest first: Fractal's own alerts still read a prompt's
+ * calls this way. A client that reads `presentation.prompt` uses `servedPrompt` instead.
  */
 export function pendingCalls(entries: ReadonlyArray<Pick<TimelineEntry, 'type' | 'body' | 'id'>>): PendingCall[] {
   const answered = new Set<string>();
@@ -339,8 +391,9 @@ export function answerLabel(answer: string): string {
 }
 
 /**
- * The answers a client may offer. `allow` and `approve` only beside the exact call the prompt asks
- * about, shown in full (from an older daemon: the one call unanswered); `answer` only when that
+ * The answers a client may offer from calls it read itself, as Fractal's own alerts still do
+ * (`servedAnswers` reads st's). `allow` and `approve` only beside the exact call the prompt asks
+ * about, shown in full; `answer` only when that
  * call's questions can be shown and chosen from; every other answer (deny, and a screen prompt's
  * or denial's own answers) always.
  */
@@ -355,11 +408,9 @@ export function offeredAnswers(prompt: PromptAnswers, calls: readonly PendingCal
 }
 
 /**
- * The calls to show beside a prompt's answers: the exact call it asks about, when its daemon names
- * it (none when it named none); from a daemon that predates that, every unanswered call, of which
- * only a lone one is certain.
+ * The call to show beside a prompt's answers: the exact call it asks about, when st names it and
+ * it is pending. A prompt that names none has none beside it.
  */
 export function promptCalls(prompt: PromptAnswers, calls: readonly PendingCall[]): PendingCall[] {
-  if (prompt.call_id === undefined) return [...calls];
   return calls.filter(call => call.id === prompt.call_id);
 }

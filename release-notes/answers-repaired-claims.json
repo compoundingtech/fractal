@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The daily answers check no longer counts claims that a record repair replaced. A member that admitted or wrote such a claim before the repair arrived keeps its row, while one that received the repair first never admits it, so members differed in claim counts with every answer the same (see #4282)",
+  "replay": {"status": "none", "detail": "No claim is written or read differently; only the check's summary leaves those claims out."},
+  "schema": {"status": "none", "detail": "No schema change; the summary reads the existing projection_digest_repaired_claims table."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "A member on an older build still counts those claims, so a pair with one keeps reporting the difference until both run this build."},
+  "downtime": {"status": "none", "detail": "No restart beyond the normal upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting restores the earlier count."}
+}
