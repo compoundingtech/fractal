@@ -63,7 +63,7 @@ fn cold_membership_status_never_seals_pending_batches_or_writes() {
         "subject":"note/pending", "kind":"note"
     })).unwrap()).unwrap();
     *store.membership_cache.lock().unwrap() = None;
-    *store.sealing_recovery.lock().unwrap() = true;
+    *store.sealing_recovery.try_lock().unwrap() = true;
     let pending_batches = || store.readers.get().query_row(
         "SELECT COUNT(*) FROM batches WHERE NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=batches.id)",
         [], |row| row.get::<_, u64>(0),
@@ -74,5 +74,5 @@ fn cold_membership_status_never_seals_pending_batches_or_writes() {
     store.checkpoint_status(NOW, &[]).unwrap();
     assert_eq!(store.connection.write().total_changes(), changes);
     assert_eq!(pending_batches(), pending);
-    assert!(*store.sealing_recovery.lock().unwrap(), "status entered sealing recovery");
+    assert!(*store.sealing_recovery.try_lock().unwrap(), "status entered sealing recovery");
 }
