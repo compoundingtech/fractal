@@ -290,7 +290,7 @@ impl Admission {
                 } else {
                     Source::AdmissionProbe
                 },
-                self.attempt.clone(),
+                self.attempt.clone().map(Box::new),
             );
         } else {
             publisher.clear(Stage::VersionGate);
@@ -520,9 +520,9 @@ fn admit_inner(
                 Driver::Omp => omp::probe(
                     &executable,
                     adapter.context("omp needs its shipped extension")?,
-                    &scratch,
+                    scratch,
                 ),
-                Driver::OpenCode => crate::opencode_session::probe_admission(&executable, &scratch)
+                Driver::OpenCode => crate::opencode_session::probe_admission(&executable, scratch)
                     .map(|measurements| {
                         let diagnostic = measurements.iter().find(|m| !m.passed).map(|m| {
                             ProbeDiagnostic {

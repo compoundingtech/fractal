@@ -4443,7 +4443,7 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let Observed::Failure(mut failure) = observed else {
             panic!("missing diagnostic")
         };
-        failure.attempt = Some(fractal_drivers::harness_admission::AttemptDiagnostic {
+        failure.attempt = Some(Box::new(fractal_drivers::harness_admission::AttemptDiagnostic {
             incarnation: "first".into(),
             phase: "version".into(),
             outcome: "timeout".into(),
@@ -4453,7 +4453,7 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
             exit_signal: Some(9),
             stderr_tail: "fixture error".into(),
             error_chain: "admission process timed out".into(),
-        });
+        }));
         let observed = Observed::Failure(failure);
         let claim = admission_diagnostic("agent/node.fixture", "first", &observed).unwrap();
         assert_eq!(claim.fields["code"], "harness-admission-failed");

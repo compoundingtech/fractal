@@ -426,7 +426,7 @@ struct Record {
     observed_at: u64,
     recovery: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    attempt: Option<crate::harness_admission::AttemptDiagnostic>,
+    attempt: Option<Box<crate::harness_admission::AttemptDiagnostic>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,7 +439,7 @@ pub struct Failure {
     pub support: Support,
     pub observed_at: u64,
     pub evidence_age_ms: u64,
-    pub attempt: Option<crate::harness_admission::AttemptDiagnostic>,
+    pub attempt: Option<Box<crate::harness_admission::AttemptDiagnostic>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -676,7 +676,7 @@ impl Publisher {
         stage: Stage,
         reason: Reason,
         source: Source,
-        attempt: Option<crate::harness_admission::AttemptDiagnostic>,
+        attempt: Option<Box<crate::harness_admission::AttemptDiagnostic>>,
     ) {
         let Some(index) = stage.index() else {
             return;
