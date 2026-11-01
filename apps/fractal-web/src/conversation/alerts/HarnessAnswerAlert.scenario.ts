@@ -4,7 +4,8 @@ import { scenarioDomainFixture } from '@fractal/scenarios/domain-fixture'
 export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture
 
 const seed = 2315
-const castWorld = loadWorld('first-run-onboarding', { now: '2026-10-27T12:00:00Z' })
+export const harnessAskWorld = 'ci-failing-fix'
+const castWorld = loadWorld(harnessAskWorld, { now: '2026-10-27T12:00:00Z' })
 
 /** Authored synthetic omp arguments, not a recorded terminal interaction or a settled answer. */
 export const harnessAskConversation = (source: ConversationThread): ConversationThread => {
@@ -41,9 +42,6 @@ export const harnessAskConversation = (source: ConversationThread): Conversation
         },
       ],
     },
-  }).map(item => item.type === 'message' ? {
-    ...item,
-    body: { ...item.body, blocks: [{ id: `block/${source.agent}/omp-ask`, kind: 'tool_call' as const, source_type: 'omp', payload: { body_ref: true } }] },
-  } : item)
+  })
   return { ...source, items, page_size: items.length, has_more: false }
 }

@@ -9,7 +9,7 @@ import { assistantDarkTheme, compositionLightTheme, liveAccentTheme } from '@fra
 import { colorVars as c, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { timelineItems } from '../fromTimeline.ts'
 import { HarnessAnswerAlert } from './HarnessAnswerAlert.tsx'
-import { harnessAskConversation } from './HarnessAnswerAlert.scenario.ts'
+import { harnessAskConversation, harnessAskWorld } from './HarnessAnswerAlert.scenario.ts'
 import { projectHarnessAsks } from './harness-question.ts'
 
 const styles = stylex.create({
@@ -51,7 +51,8 @@ const HarnessAnswerStory = ({ scheme, frame, allStates }: StoryArgs) => {
 const meta = {
   title: 'Fractal/App/Conversation/Harness answer',
   component: HarnessAnswerStory,
-  parameters: { layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['conversation'], world: 'first-run-onboarding' } },
+  tags: ['critical'],
+  parameters: { layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['conversation'], world: harnessAskWorld } },
   args: { scheme: 'dark', frame: 440, allStates: false },
   argTypes: { ...scenarioArgTypes(['conversation']), scheme: { control: 'radio', options: ['light', 'dark'] }, frame: { control: 'radio', options: [440, 1440] }, allStates: { table: { disable: true } } },
 } satisfies Meta<typeof HarnessAnswerStory>
@@ -65,6 +66,7 @@ const interaction: NonNullable<Story['play']> = async ({ canvasElement, args }) 
   await expect(root).toHaveAttribute('data-scheme', args.scheme)
   await expect(root).toHaveStyle({ width: `${args.frame}px` })
   const alert = within(await canvas.findByTestId('multi-question'))
+  await expect(alert.getByRole('group', { name: 'How should we roll out the conversation update? (choose one)' })).toBeVisible()
   const tabs = alert.getByRole('tablist', { name: 'Questions' })
   await expect(within(tabs).getAllByRole('tab')).toHaveLength(2)
   const firstTab = alert.getByRole('tab', { name: 'How should we roll out the conversation update?' })

@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 import type { ConversationCall } from './AgentAlerts.tsx'
 import { projectHarnessAsks } from './harness-question.ts'
 import { unavailableHarnessAnswers } from './harness-answer-port.ts'
+import { decodeConversationChunk } from '@fractal/sdk/effect'
+import { timelineItems } from '../fromTimeline.ts'
+import { harnessAskConversation, harnessAskWorld } from './HarnessAnswerAlert.scenario.ts'
+import { loadWorld } from '@fractal/scenarios'
 
 const question = { id: 'database', question: 'Which database?', options: [
   { label: 'SQLite', description: 'Local storage', preview: 'CREATE TABLE example (id TEXT);' },
@@ -13,6 +17,20 @@ const call = (extra: Partial<ConversationCall> = {}): ConversationCall => ({
 })
 
 describe('projectHarnessAsks', () => {
+  it('projects the Storybook native pending ask through the SDK and timeline adapter', () => {
+    const world = loadWorld(harnessAskWorld, { now: '2026-10-27T12:00:00Z' })
+    const source = world.slices.conversation.state.threads[0]
+    expect(source).toBeDefined()
+    const fixture = harnessAskConversation(source!)
+    const chunk = decodeConversationChunk({ kind: 'conversation', collection: 'conversation', id: 'follow/atlas', session_id: fixture.session_id, replace: true, has_more: false, items: fixture.items })
+    const items = timelineItems([chunk])
+    expect(items).toMatchObject([{ _tag: 'ToolCall', name: 'ask', status: 'running', callSeen: true }])
+    expect(projectHarnessAsks(items)[0]?.questions.map(question => question.title)).toEqual([
+      'How should we roll out the conversation update?',
+      'Which evidence should accompany the rollout?',
+    ])
+  })
+
   it.each([null, 'null'])('normalizes native %j placeholders for optional question and option fields', placeholder => {
     expect(projectHarnessAsks([call({ input: { questions: [{
       id: 'database', question: 'Which database?', multi: placeholder, recommended: placeholder,
