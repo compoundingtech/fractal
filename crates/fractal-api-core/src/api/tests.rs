@@ -1893,7 +1893,15 @@ async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
     assert_eq!(body["value"]["agent"], "agent/node.fixture");
     assert_eq!(body["value"]["runtime_id"], runtime_id.as_str());
     // The runtime's own name for the seat's slice, the one a launch caps (crate::lane::prepare).
-    assert_eq!(body["value"]["slice"], fractal_runtime::seat_slice(&runtime_id).as_str());
+    let slice = fractal_runtime::seat_slice(&runtime_id);
+    assert_eq!(body["value"]["slice"], slice.as_str());
+    // The lane's own sccache server, as the runtime names it in a laned task's environment, under the
+    // daemon's runtime directory; null without one.
+    let sccache = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| fractal_runtime::lane_sccache_socket(&dir, &slice));
+    assert_eq!(body["value"]["sccache_server_uds"], json!(sccache), "{body}");
     let (status, body) = get("/v1/agents/lane?agent=node.nobody").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
@@ -13414,6 +13422,44 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
     assert_eq!(status, StatusCode::OK, "{resumed}");
     assert_eq!(resumed["cleared"], "fixture stopped again");
     assert_eq!(fault(), None);
+}
+
+#[tokio::test]
+async fn a_bound_harness_dismisses_a_fault_only_as_itself() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let dismiss = |bound: Option<&'static str>, actor: &'static str| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/faults/dismiss")
+            .header("content-type", "application/json");
+        if let Some(agent) = bound {
+            request = request.extension(BoundAgent(agent.into()));
+        }
+        let body = json!({"source":"mission-run/ended","reason":"the run ended","actor":actor});
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            (status, envelope.get("value").cloned().unwrap_or(envelope))
+        }
+    };
+    for (bound, actor, code) in [
+        // A harness never names a person; an ordinary agent acting as itself reaches the store,
+        // which refuses it, and a person reaches the store and finds no such fault.
+        (Some("agent/helper"), "person/avery", "foreign-agent-actor"),
+        (Some("agent/helper"), "agent/helper", "fault-dismiss-forbidden"),
+        (None, "person/avery", "missing-fault"),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = dismiss(bound, actor).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], code, "{actor}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before, "{actor}");
+    }
 }
 
 async fn checkpoint_actor_request(

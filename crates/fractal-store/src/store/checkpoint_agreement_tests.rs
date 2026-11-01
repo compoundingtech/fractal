@@ -741,7 +741,7 @@ fn status_names_what_differs_between_verifications() {
         .unwrap()
         .pending
         .unwrap()
-        .terms;
+        .terms.unwrap();
     let (_, mut plan, proof) = birch
         .plan_checkpoint_through(cut, None, scratch.path())
         .unwrap();

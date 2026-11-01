@@ -367,11 +367,29 @@ fn needs_you(state: Signin) -> bool {
     state.first_run == Tri::No || state.signed_in == Tri::No
 }
 
-fn sign_in_words(id: &str) -> &'static str {
-    match id {
-        "claude" => "Claude is installed, but its first launch or sign-in is not finished. Run claude in your own terminal, pick a theme and sign in, then retry.",
-        "codex" => "Codex is installed, but not signed in. Run codex login in your own terminal, then retry.",
-        _ => "OpenCode is installed, but not signed in. Run opencode auth login in your own terminal, then retry.",
+/// What setup says when a harness is installed but still not signed in after the handover.
+///
+/// For an instance the sign-in belongs to the instance's own Claude, Codex or OpenCode account, so
+/// a plain `claude` or `codex login` typed in the person's own terminal would sign in their
+/// default account and leave this check unsatisfied: the words name setup's own retry instead.
+/// Without an instance the harness's own command in the person's terminal is the right one.
+fn sign_in_words(id: &str, instance: Option<&str>) -> String {
+    let (name, command) = match id {
+        "claude" => ("Claude", "claude"),
+        "codex" => ("Codex", "codex login"),
+        _ => ("OpenCode", "opencode auth login"),
+    };
+    match (instance, id) {
+        (Some(instance), "claude") => format!(
+            "{name} is installed, but its sign-in is not finished for this instance. Run fractal --instance {instance} setup to try the sign-in again."
+        ),
+        (Some(instance), _) => format!(
+            "{name} is installed, but not signed in for this instance. Run fractal --instance {instance} setup to try the sign-in again."
+        ),
+        (None, "claude") => format!(
+            "{name} is installed, but its first launch or sign-in is not finished. Run {command} in your own terminal, sign in, then retry."
+        ),
+        (None, _) => format!("{name} is installed, but not signed in. Run {command} in your own terminal, then retry."),
     }
 }
 
@@ -685,7 +703,7 @@ fn set_up_row(id: &str, executable: &Path, reporter: &Reporter) -> Outcome {
     facts.signed_in = state.signed_in;
     reporter.facts(id, facts);
     if needs_you(state) {
-        Outcome::NeedsLogin(sign_in_words(id).into())
+        Outcome::NeedsLogin(sign_in_words(id, fractal_daemon::instance::current().as_ref().map(|instance| instance.name())))
     } else {
         let tail = match state.signed_in {
             Tri::Yes => " You are signed in.",
@@ -937,5 +955,32 @@ mod tests {
         assert_eq!(handover_plan("codex").unwrap().0, ["login"]);
         assert_eq!(handover_plan("opencode").unwrap().0, ["auth", "login"]);
         assert!(handover_plan("pi").is_none());
+    }
+
+    #[test]
+    fn an_instances_closing_words_name_setups_retry_and_never_the_default_folders() {
+        for id in ["claude", "codex", "opencode"] {
+            let words = sign_in_words(id, Some("trial"));
+            assert!(words.contains("fractal --instance trial setup"), "{id}: {words}");
+            assert!(!words.to_lowercase().contains("theme"), "{id}: {words}");
+            // A plain harness command in the person's terminal would sign in their default account.
+            assert!(!words.contains("your own terminal"), "{id}: {words}");
+            assert!(!words.contains("Run claude") && !words.contains("Run codex") && !words.contains("Run opencode"), "{id}: {words}");
+        }
+        assert!(sign_in_words("claude", Some("trial")).starts_with("Claude is installed"));
+        assert!(sign_in_words("codex", Some("trial")).starts_with("Codex is installed"));
+        assert!(sign_in_words("opencode", Some("trial")).starts_with("OpenCode is installed"));
+    }
+
+    #[test]
+    fn without_an_instance_the_closing_words_name_the_harness_command_in_the_persons_terminal() {
+        let claude = sign_in_words("claude", None);
+        assert!(claude.contains("Run claude in your own terminal"), "{claude}");
+        assert!(!claude.to_lowercase().contains("theme"), "no theme to pick once the first-run state is written: {claude}");
+        assert!(sign_in_words("codex", None).contains("Run codex login in your own terminal"));
+        assert!(sign_in_words("opencode", None).contains("Run opencode auth login in your own terminal"));
+        for id in ["claude", "codex", "opencode"] {
+            assert!(!sign_in_words(id, None).contains("--instance"), "{id}");
+        }
     }
 }
