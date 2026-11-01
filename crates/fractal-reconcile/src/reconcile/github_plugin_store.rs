@@ -254,6 +254,14 @@ impl GithubPluginStore {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) fn fail_freshness_writes(&self) {
+        self.connection.lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_freshness BEFORE UPDATE ON plugin_meta
+             WHEN NEW.key LIKE 'observer-freshness:%'
+             BEGIN SELECT RAISE(FAIL, 'freshness write failed'); END;",
+        ).unwrap();
+    }
 
     /// Where `observer` last polled to on this member: `None` when it never polled here (or
     /// this database is new), `Some(None)` when its last poll here ended without a cursor.
