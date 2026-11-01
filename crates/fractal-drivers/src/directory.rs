@@ -54,7 +54,6 @@ pub fn retained_dir_path(dir: &File) -> Result<PathBuf> {
     }
 }
 
-
 fn open_dir_nofollow(path: &Path) -> std::io::Result<File> {
     OpenOptions::new()
         .read(true)
@@ -105,4 +104,3 @@ pub(crate) fn openat_dir_nofollow(parent: &File, name: &std::ffi::OsStr) -> std:
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 }
-

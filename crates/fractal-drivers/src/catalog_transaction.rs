@@ -3396,12 +3396,12 @@ pub(crate) use crate::directory::openat_dir_nofollow;
 pub use crate::directory::{open_dir_beneath, retained_dir_path};
 
 mod capability;
+pub(crate) use capability::*;
 #[doc(hidden)]
 pub use capability::{
-    link_tempfile_from_control, persist_tempfile_from_control,
-    rename_noreplace_between_dirs, sync_dir,
+    link_tempfile_from_control, persist_tempfile_from_control, rename_noreplace_between_dirs,
+    sync_dir,
 };
-pub(crate) use capability::*;
 
 #[cfg(debug_assertions)]
 fn bootstrap_checkpoint(point: &str) {
