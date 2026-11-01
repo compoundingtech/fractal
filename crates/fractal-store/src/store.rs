@@ -19635,16 +19635,21 @@ pub fn enrich_step_wake_at(
 
 #[test]
 fn work_wake_multiple_tags_preserve_attempts_and_manual_exclusion() {
-    for prefix in ["st3-", "fractal-"] {
+    for (prefix, first, source, manual_prefix) in [
+        ("st3-", "st3-", "st3-", "st3-"),
+        ("fractal-", "fractal-", "fractal-", "fractal-"),
+        ("fractal-", "st3-", "st3-", "st3-"),
+        ("st3-", "st3-", "st3-", "fractal-"),
+    ] {
         for manual in [false, true] {
             let store = Store::open_memory("fixture").unwrap();
             let mut tags = vec![
-                "st3-work:other@1@1@other".to_owned(),
+                format!("{first}work:other@1@1@other"),
                 format!("{prefix}work:step-run/r/s@2@3@inc"),
-                "st3-wake-source:auto".into(),
+                format!("{source}wake-source:auto"),
             ];
             if manual {
-                tags.push(format!("{prefix}wake-source:manual"));
+                tags.push(format!("{manual_prefix}wake-source:manual"));
             }
             let input = serde_json::from_value(json!({
                 "subject": "message/wake", "kind": "message.sent", "actor": "daemon/runtime",
@@ -19664,8 +19669,8 @@ fn work_wake_multiple_tags_preserve_attempts_and_manual_exclusion() {
             enrich_step_wake_at(&store.readers.get(), &mut view, u128::MAX).unwrap();
             assert_eq!(
                 view.wake.unwrap().attempts,
-                u32::from(!manual),
-                "{prefix} {manual}"
+                u32::from(first == prefix && (!manual || source != manual_prefix)),
+                "{prefix} {first} {source} {manual_prefix} {manual}"
             );
         }
     }

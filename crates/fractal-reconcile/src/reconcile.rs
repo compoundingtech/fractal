@@ -19723,7 +19723,8 @@ fn work_message_target_accepts_fractal_and_prefers_old() {
             "st3-work:malformed".into(),
             format!("{prefix}work:step@2@3@inc"),
         ];
-        assert_eq!(work_message_target(&message), Some(("step", 2, 3, "inc")));
+        let expected = (prefix == "st3-").then_some(("step", 2, 3, "inc"));
+        assert_eq!(work_message_target(&message), expected);
     }
 }
 

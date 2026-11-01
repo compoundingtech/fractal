@@ -52,15 +52,18 @@ pub fn strip_message_tag_prefix<'a>(tag: &'a str, family: &str) -> Option<&'a st
         .strip_prefix(family)
 }
 
-/// Yield complete legacy values first, preserving tag order within each prefix.
+/// Yield only legacy values when this key has any; otherwise yield new values in tag order.
 pub fn message_tag_values<'a>(
     tags: impl Clone + Iterator<Item = &'a str> + 'a,
     family: &'a str,
 ) -> impl Iterator<Item = &'a str> + 'a {
-    ["st3-", "fractal-"].into_iter().flat_map(move |prefix| {
-        tags.clone()
-            .filter_map(move |tag| tag.strip_prefix(prefix)?.strip_prefix(family))
-    })
+    let legacy = tags.clone().any(|tag| {
+        tag.strip_prefix("st3-")
+            .and_then(|value| value.strip_prefix(family))
+            .is_some()
+    });
+    let prefix = if legacy { "st3-" } else { "fractal-" };
+    tags.filter_map(move |tag| tag.strip_prefix(prefix)?.strip_prefix(family))
 }
 // LIVE-MIGRATION END
 
@@ -363,7 +366,7 @@ mod tests {
             for tags in [[old.as_str(), new.as_str()], [new.as_str(), old.as_str()]] {
                 assert_eq!(
                     message_tag_values(tags.into_iter(), family).collect::<Vec<_>>(),
-                    ["old", "new"]
+                    ["old"]
                 );
             }
             assert_eq!(
@@ -377,7 +380,8 @@ mod tests {
         }
         for prefix in ["st3-", "fractal-"] {
             let manual = format!("{prefix}wake-source:manual");
-            let tags = ["st3-wake-source:auto", manual.as_str()];
+            let auto = format!("{prefix}wake-source:auto");
+            let tags = [auto.as_str(), manual.as_str()];
             assert!(message_tag_values(tags.into_iter(), "wake-source:").any(|v| v == "manual"));
         }
     }
