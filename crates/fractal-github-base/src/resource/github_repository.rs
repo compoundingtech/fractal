@@ -4768,6 +4768,13 @@ mod tests {
         let cursor = error.downcast_ref::<crate::resource::BudgetContinuation>().unwrap().0.as_deref().unwrap();
         assert_eq!(github.take_requests().len(), 2);
         // No ProviderObservation was returned: absence cannot close items mid-poll.
+        let graphql = github.graphql.lock().clone();
+        *github.graphql.lock() = json!({"errors": [{"message": "fixture failure"}]}).to_string();
+        let failed = observe_at(request(&["issues"], Some(cursor), None), &base,
+            Some(&GithubAuth::test("test"))).await.unwrap_err();
+        assert_eq!(failed.downcast_ref::<crate::resource::BudgetContinuation>().unwrap().0, None);
+        assert!(failed.to_string().contains("fixture failure"), "the original error stays visible");
+        *github.graphql.lock() = graphql;
         let complete = observe_at(request(&["issues"], Some(cursor), None), &base,
             Some(&GithubAuth::test("test"))).await.unwrap();
         assert_eq!(item(&complete.facts, "issues", 1)["number"], 1);

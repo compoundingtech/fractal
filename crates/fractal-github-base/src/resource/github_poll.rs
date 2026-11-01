@@ -29,11 +29,11 @@ struct Checkpoint {
 
 /// Durable position after an unfinished budget-cut poll; never a published snapshot.
 #[derive(Debug)]
-pub struct BudgetContinuation(pub Option<String>);
+pub struct BudgetContinuation(pub Option<String>, String);
 
 impl std::fmt::Display for BudgetContinuation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("GitHub observation interrupted; retaining its durable read position")
+        f.write_str(&self.1)
     }
 }
 impl std::error::Error for BudgetContinuation {}
@@ -111,12 +111,16 @@ where
         match result {
             Err(error) if error.downcast_ref::<LocalObserverBudget>().is_some() => {
                 let cursor = POLL.with(|poll| poll.borrow().encode())?;
+                let reason = error.to_string();
                 Err(match cursor {
-                    Some(cursor) => error.context(BudgetContinuation(Some(cursor))),
-                    None => error.context(BudgetContinuation(previous_cursor)),
+                    Some(cursor) => error.context(BudgetContinuation(Some(cursor), reason)),
+                    None => error.context(BudgetContinuation(previous_cursor, reason)),
                 })
             }
-            Err(error) if resumed => Err(error.context(BudgetContinuation(previous_cursor))),
+            Err(error) if resumed => {
+                let reason = error.to_string();
+                Err(error.context(BudgetContinuation(previous_cursor, reason)))
+            }
             other => other,
         }
     }).await
