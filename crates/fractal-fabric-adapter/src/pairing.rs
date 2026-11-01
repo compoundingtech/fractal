@@ -176,7 +176,8 @@ async fn snapshot(client: &reqwest::Client) -> Result<super::LeaveSnapshot> {
         );
         bytes.extend_from_slice(&chunk);
     }
-    let snapshot: super::LeaveSnapshot = serde_json::from_slice(&bytes)?;
+    let snapshot =
+        serde_json::from_slice::<smallclaims::sync::PeerResponse<super::LeaveSnapshot>>(&bytes)?.value;
     ensure!(
         snapshot.persistence_error.is_none() && snapshot.membership.anchor.is_some(),
         "st membership is not durable and verified"
@@ -451,8 +452,9 @@ async fn process(
             .send()
             .await?
             .error_for_status()?
-            .json::<JoinResponse>()
-            .await?;
+            .json::<smallclaims::sync::PeerResponse<JoinResponse>>()
+            .await?
+            .value;
         bound(
             &snapshot(client).await?,
             &request.name,
