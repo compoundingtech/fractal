@@ -1289,8 +1289,8 @@ pub struct Reconciler<R = NativeRuntime> {
     /// kept, so an arm that retired another waits for that look rather than polling from the
     /// cursor it moved past.
     observer_looks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
-    /// The longest one look may hold its observer's look lock, provider calls and a mirror
-    /// refill together: past it the look ends as a failure and the lock is free.
+    /// How long one look's GitHub calls, its provider look and a mirror refill together, may run
+    /// while it holds its observer's look lock: past it the look ends as a failure.
     look_limit: Duration,
     /// Each observer's poll cursor across restarts, in the GitHub plugin's own database rather
     /// than the graph (see [`github_plugin_store`]).
@@ -17068,8 +17068,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 // to publish the cursor it kept, then reads on from it: a look from the cursor
                 // before would find the mirror ahead of it and record a full snapshot.
                 // Lock order: this is the outermost lock. It is taken holding no store writer
-                // and no other observer's lock, and nothing inside a look takes it again. A look
-                // holds it at most `look_limit`, so a stuck GitHub call cannot hold it longer.
+                // and no other observer's lock, and nothing inside a look takes it again. The
+                // look's GitHub calls, its provider look and a mirror refill, end at `look_limit`,
+                // so a stuck GitHub call cannot hold it; the local store writes after them can.
                 let _look = look_lock.clone().lock_owned().await;
                 let look_deadline = tokio::time::Instant::now() + look_limit;
                 if !armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation) { return; }
