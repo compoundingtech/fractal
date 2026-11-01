@@ -6,9 +6,22 @@ impl<R: RuntimeControl> Reconciler<R> {
         if !matches!(subject.kind.as_str(), "agent" | "exec" | "pty") {
             return Ok(true); // Internal gate runners share the runtime, not seat admission.
         }
-        if !self.lane_fits(subject, member)? {
-            return Ok(false);
+        let lane = match self.lane_fit(subject, member)? {
+            LaneFit::Waits => return Ok(false),
+            LaneFit::Fits(lane) => Some(lane),
+            LaneFit::Unlaned => None,
+        };
+        let admitted = self.admit_by_envelope(subject, member, request)?;
+        // Room is held only for a seat that starts.
+        if admitted && let Some(lane) = lane {
+            self.seat_admission.status.lane_admitted(&subject.subject, lane, u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX));
+            self.incremental.touch("seat-admission");
+            self.signal_changed();
         }
+        Ok(admitted)
+    }
+
+    fn admit_by_envelope(&self, subject: &DesiredSubject, member: &MemberSpec, request: Option<&crate::model::ClaimRecord>) -> Result<bool> {
         let status = &self.seat_admission.status;
         if status.state().decision.mode == "off" { return Ok(true); }
         smallclaims::touched::note_read(|| "seat-admission".into());
@@ -39,28 +52,30 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Whether a laned seat's lane fits now: what the host gives lanes, less the lanes of its other
     /// live seats and what its seats outside lanes hold. Seats wait for room in order, so a large
     /// lane is not passed by smaller ones; one larger than the host can ever give waits out of line.
-    fn lane_fits(&self, subject: &DesiredSubject, member: &MemberSpec) -> Result<bool> {
+    fn lane_fit(&self, subject: &DesiredSubject, member: &MemberSpec) -> Result<LaneFit> {
         let (Some(host), Some(lane)) = (self.seat_admission.lanes, member.capacity) else {
-            return Ok(true);
+            return Ok(LaneFit::Unlaned);
         };
         if subject.kind != "agent" {
-            return Ok(true);
+            return Ok(LaneFit::Unlaned);
         }
+        smallclaims::touched::note_read(|| "seat-admission".into());
         let status = &self.seat_admission.status;
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         let room = host.room;
         if lane.cores > room.cores || lane.memory > room.memory {
-            status.lane_wait(&subject.subject, format!(
-                "lane {} can never fit on this host, which gives lanes {}", show_lane(lane), show_lane(room)), false, now);
-            return Ok(false);
+            let reason = format!("lane {} can never fit on this host, which gives lanes {}", show_lane(lane), show_lane(room));
+            if status.lane_wait(&subject.subject, reason, false, now) {
+                self.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
+            }
+            return Ok(LaneFit::Waits);
         }
         let held = self.held_lanes(&subject.subject, now)?;
         let outside = (host.outside)().unwrap_or(0);
         let free = room.memory.saturating_sub(held).saturating_sub(outside);
-        let head = status.lane_head();
+        let head = status.lane_head(now);
         if lane.memory <= free && head.as_deref().is_none_or(|head| head == subject.subject) {
-            status.lane_admitted(&subject.subject, lane, now);
-            return Ok(true);
+            return Ok(LaneFit::Fits(lane));
         }
         let room_now = format!(
             "{} free of the {} this host gives lanes (other lanes hold {}, seats outside lanes {})",
@@ -69,9 +84,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             Some(head) => format!("lane {} waits behind {head}, first in line for room: {room_now}", show_lane(lane)),
             None => format!("lane {} does not fit: {room_now}", show_lane(lane)),
         };
-        status.lane_wait(&subject.subject, reason, true, now);
-        self.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
-        Ok(false)
+        if status.lane_wait(&subject.subject, reason, true, now) {
+            self.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
+        }
+        // What seats outside lanes hold and a start that never ran change without a claim: try
+        // again soon.
+        smallclaims::touched::note_due(now_ms() + LANE_RETRY_MS);
+        Ok(LaneFit::Waits)
     }
 
     /// The memory of this host's other laned seats that run, or were admitted to start and are not
@@ -120,10 +139,28 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && matches!(subject.kind.as_str(), "agent" | "exec" | "pty")
                 && subject.member.as_ref().is_some_and(|member| member.host == self.host)));
         }
-        // A seat that left this host's desired laned seats no longer waits for room.
-        self.seat_admission.status.state().lane_waits.retain(|wait| desired.iter().any(|subject| subject.subject == wait.subject
-            && subject.kind == "agent"
-            && subject.member.as_ref().is_some_and(|member| member.host == self.host && member.capacity.is_some())));
+        // A seat that is no longer tried for a start, or no longer this host's laned seat, gives up
+        // its place in line, as a pending one does below.
+        let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
+        let waits = self.seat_admission.status.state().lane_waits.clone();
+        let mut gone = BTreeSet::new();
+        for wait in waits {
+            let selected = desired.iter().find(|subject| subject.subject == wait.subject
+                && subject.kind == "agent"
+                && subject.member.as_ref().is_some_and(|member| member.host == self.host && member.capacity.is_some()));
+            let retained = if let Some(selected) = selected {
+                now.saturating_sub(wait.checked) <= fractal_runtime::seat_admission_status::LANE_WAIT_STALE_SECS
+                    && self.store.owned_desired_guard(selected).is_ok()
+                    && self.store.helper_launcher_alive(&wait.subject)?
+                    && !crate::suspension::current(&self.store, &wait.subject)?.is_some_and(|state| state.action == "suspend")
+            } else { false };
+            if !retained { gone.insert(wait.subject); }
+        }
+        if !gone.is_empty() {
+            self.seat_admission.status.state().lane_waits.retain(|wait| !gone.contains(&wait.subject));
+            self.incremental.touch("seat-admission");
+            self.signal_changed();
+        }
         let pending = self.seat_admission.status.state().pending.iter().cloned().collect::<Vec<_>>();
         let mut removed = BTreeSet::new();
         for entry in pending {
@@ -159,4 +196,14 @@ fn show_lane(lane: fractal_runtime::Capacity) -> String {
 /// Bytes as the reasons show them: GiB with one decimal.
 fn show_memory(bytes: u64) -> String {
     format!("{:.1}G", bytes as f64 / f64::from(1u32 << 30))
+}
+
+/// How soon a seat waiting for room is tried again without a claim to wake it.
+const LANE_RETRY_MS: u128 = 30_000;
+
+enum LaneFit {
+    /// No lane, or lanes are off: admission by fit does not apply.
+    Unlaned,
+    Fits(fractal_runtime::Capacity),
+    Waits,
 }

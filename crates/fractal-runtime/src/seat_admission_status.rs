@@ -23,7 +23,14 @@ pub struct LaneWait {
     /// In line for room. A lane larger than the host can ever give waits out of line, so it holds
     /// no one back.
     pub queued: bool,
+    /// When admission last found it waiting. A seat no longer tried, such as one suspended or
+    /// crash-looping, stops holding its place once this is older than [`LANE_WAIT_STALE_SECS`].
+    pub checked: u64,
 }
+
+/// How long a waiting seat keeps its place without being tried again: longer than a full
+/// reconcile pass, which tries every seat that should start.
+pub const LANE_WAIT_STALE_SECS: u64 = 360;
 
 pub struct State {
     pub decision: Decision,
@@ -104,20 +111,27 @@ impl Status {
 }
 
 impl Status {
-    /// The first seat in line for room, which a later one may not pass.
-    pub fn lane_head(&self) -> Option<String> {
-        self.state().lane_waits.iter().find(|wait| wait.queued).map(|wait| wait.subject.clone())
+    /// The first seat in line for room, which a later one may not pass. A wait not tried for
+    /// [`LANE_WAIT_STALE_SECS`] holds no place.
+    pub fn lane_head(&self, now: u64) -> Option<String> {
+        self.state().lane_waits.iter()
+            .find(|wait| wait.queued && now.saturating_sub(wait.checked) <= LANE_WAIT_STALE_SECS)
+            .map(|wait| wait.subject.clone())
     }
 
-    /// Records why `subject` waits for room, keeping its place in line.
-    pub fn lane_wait(&self, subject: &str, reason: String, queued: bool, now: u64) {
+    /// Records why `subject` waits for room, keeping its place in line. True when the wait is new
+    /// or its reason changed.
+    pub fn lane_wait(&self, subject: &str, reason: String, queued: bool, now: u64) -> bool {
         let mut state = self.state();
         if let Some(wait) = state.lane_waits.iter_mut().find(|wait| wait.subject == subject) {
+            let changed = wait.reason != reason || wait.queued != queued;
             wait.reason = reason;
             wait.queued = queued;
-            return;
+            wait.checked = now;
+            return changed;
         }
-        state.lane_waits.push_back(LaneWait { subject: subject.into(), since: now, reason, queued });
+        state.lane_waits.push_back(LaneWait { subject: subject.into(), since: now, reason, queued, checked: now });
+        true
     }
 
     /// `subject`'s lane fit and it starts: it leaves the line and holds its room until it is seen
@@ -170,7 +184,7 @@ mod tests {
         status.lane_wait("huge", "lane 64 cores/1T can never fit".into(), false, 11);
         status.lane_wait("small", "behind big".into(), true, 12);
         status.lane_wait("big", "lane 8 cores/23G still does not fit".into(), true, 15);
-        assert_eq!(status.lane_head().as_deref(), Some("big"));
+        assert_eq!(status.lane_head(20).as_deref(), Some("big"));
         let big = status.subject("big", 20).unwrap();
         assert_eq!((big["queuePosition"].as_u64(), big["pendingAgeSecs"].as_u64()), (Some(1), Some(10)));
         assert_eq!(big["reason"], "lane 8 cores/23G still does not fit");
@@ -178,9 +192,13 @@ mod tests {
         assert!(status.subject("huge", 20).unwrap()["queuePosition"].is_null());
         assert_eq!(status.snapshot(20)["laneWaits"].as_array().unwrap().len(), 3);
         status.lane_admitted("big", crate::Capacity { cores: 8, memory: 23 << 30 }, 21);
-        assert_eq!(status.lane_head().as_deref(), Some("small"));
+        assert_eq!(status.lane_head(21).as_deref(), Some("small"));
         assert!(status.subject("big", 21).is_none());
         assert!(status.state().lane_starts.contains_key("big"));
+        // A seat no longer tried stops holding its place.
+        assert_eq!(status.lane_head(12 + LANE_WAIT_STALE_SECS + 1), None);
+        assert!(!status.lane_wait("small", "behind big".into(), true, 400));
+        assert!(status.lane_wait("small", "fits soon".into(), true, 401));
     }
 
     #[test]

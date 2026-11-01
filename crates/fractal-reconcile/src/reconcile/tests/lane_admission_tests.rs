@@ -78,3 +78,33 @@ agent "huge" { workspace "/tmp"; command "true"; capacity cores=64 memory="1T" }
     let desired = store.desired_subjects().unwrap().remove(0);
     assert!(reconciler.admit_seat_start(&desired, desired.member.as_ref().unwrap(), None).unwrap());
 }
+
+#[test]
+fn a_seat_first_in_line_that_is_suspended_gives_up_its_place() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+    apply_source(&store, r#"version 2
+agent "held" { workspace "/tmp"; command "true"; capacity cores=8 memory="24G" }
+agent "big" { workspace "/tmp"; command "true"; capacity cores=8 memory="30G" }
+agent "small" { workspace "/tmp"; command "true"; capacity cores=1 memory="4G" }"#, "seats");
+    let desired = store.desired_subjects().unwrap().into_iter()
+        .map(|desired| (desired.subject.clone(), desired)).collect::<BTreeMap<_, _>>();
+    let admit = |name: &str| {
+        let desired = &desired[&format!("agent/node.{name}")];
+        reconciler.admit_seat_start(desired, desired.member.as_ref().unwrap(), None).unwrap()
+    };
+    observe(&store, "agent/node.held", "running");
+    assert!(!admit("big"));
+    assert!(!admit("small"), "behind big");
+    // Suspended, big is no longer tried for a start, so it must not hold the line.
+    store.append_claim(&ClaimInput {
+        subject: "agent/node.big".into(), kind: "runtime.action.requested".into(), actor: Some("person/test".into()),
+        fields: serde_json::from_value(json!({"action": "suspend"})).unwrap(),
+        evidence: vec![store.selected_desired_token("agent/node.big").unwrap().unwrap()],
+        expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    reconciler.cancel_invalid_admissions(&store.desired_subjects().unwrap()).unwrap();
+    assert!(reconciler.seat_admission.status.subject("agent/node.big", 0).is_none());
+    assert!(admit("small"));
+}

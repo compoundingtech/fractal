@@ -237,7 +237,11 @@ lane 8 cores/30.0G does not fit: 28.0G free of the 54.0G this host gives lanes (
 
 Seats wait in order: a smaller lane that would fit does not pass the first seat in line ("waits
 behind …, first in line for room"), so a large lane is not starved. A lane larger than the host can
-ever give waits out of line and holds no one back. A seat without a lane is not held. The order and
+ever give waits out of line and holds no one back. A seat leaves the line when it is no longer tried
+for a start: suspended, stopped, no longer owned, or not tried for six minutes (a crash loop, a
+workspace error). Room is held only for a seat that starts, after any envelope admission also lets it.
+A waiting seat is tried again every 30 seconds, since what seats outside lanes hold changes without a
+claim. A seat without a lane is not held. The order and
 the reasons live in the daemon's memory, as the envelope queue's do; a daemon restart rebuilds them
 from the next pass. `builds.slice` keeps its own cap and admission and is not counted.
 
