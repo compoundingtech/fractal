@@ -74,7 +74,7 @@ mission "orchid" state="ready" {
     *runtime.lane_held.lock().unwrap() = Some(G);
     reconciler.hold_step_lanes(&builder, "builder-2", &member, &store.work_for_reconcile(&builder).unwrap()).unwrap();
     assert_eq!(runtime.lanes_resized.lock().unwrap().last(), Some(&(member.runtime_id.clone(), member.capacity.unwrap())));
-    assert!(reconciler.seat_admission.status.state().lane_raised.get(&builder).is_none());
+    assert!(!reconciler.seat_admission.status.state().lane_raised.contains_key(&builder));
 }
 
 #[test]
