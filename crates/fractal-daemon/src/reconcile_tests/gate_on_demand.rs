@@ -235,6 +235,7 @@ let gate = format!("agent/{}/gate", fixture.round.id);
 use tower::ServiceExt;
 let root = tempfile::tempdir().unwrap();
 let state = crate::api::AppState {
+    seat_admission: Default::default(),
     owning_person: None,
     store: fixture.store.clone(),
     notify: Arc::new(Notify::new()),

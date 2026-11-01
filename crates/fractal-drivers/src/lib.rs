@@ -73,6 +73,7 @@ pub mod harness_state;
 pub mod harness_timeline;
 pub mod harness_version;
 pub mod hooks;
+pub mod host;
 pub mod host_lock;
 pub mod identity;
 pub mod isolate;

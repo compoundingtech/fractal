@@ -7769,6 +7769,23 @@ mod tests {
     }
 
     #[test]
+    fn usage_links_to_the_otel_ui_when_the_member_has_one() {
+        let mut ui = glass();
+        ui.click(Hit::Usage);
+        for _ in 0..40 {
+            if ui.selected_id().as_deref() == Some("slo/anthropic-weekly") {
+                break;
+            }
+            press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
+        }
+        let detail = screen(&ui);
+        assert!(detail.contains("history") && detail.contains("https://otel.example.test/d/slo"), "{detail}");
+        ui.world.slo_otel_url = None;
+        let shown = screen(&ui);
+        assert!(!shown.contains("otel.example.test"), "no link without a configured address:\n{shown}");
+    }
+
+    #[test]
     fn an_unread_objectives_list_never_reads_as_no_spend_all_clear() {
         let mut ui = glass();
         ui.world.usage = Load::Ready(Vec::new());

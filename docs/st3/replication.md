@@ -390,6 +390,27 @@ gateway version that generated them. The reader derives the root routing session
 the native parent (recursively for descendants), then uses the current internal shape.
 This does not add a legacy writer or relax transcript ownership and path validation.
 
+## The messages shard
+
+Each daemon also opens a second store beside its database, the messages shard
+(`shards/messages/claims.sqlite3`), and replicates it on the same listener and worker. An
+exchange names it with `shard_id = "messages"`; the default store's exchanges omit the field.
+
+- **Who is dialed.** A member dials a peer for the shard only when that peer's newest
+  `daemon.started` in its current incarnation carries `features.messages_stream=1`. A member
+  on an older release is never dialed for it, and its graph sync is unchanged. A peer that
+  answers for another store, or refuses the exchange with `shard-mismatch`, parks that route
+  until the peer set changes.
+- **Authority.** The shard holds no fleet claims. It takes its fleet id and membership from
+  the graph. Its envelopes sign `st3-shard-envelope-v1` over the shard ID, so a signature made
+  for the graph never counts in the shard or the other way round. A keyed member's shard
+  envelope needs a signature in that domain by a key of one of its non-removed incarnations; a
+  writer without membership is judged as the graph judges it.
+- **Contents.** One immutable `message.sent` per message, written by an agent or the daemon.
+  A person's device-signed message and an external assistant's message stay graph claims.
+- **No checkpoint.** Nothing in the shard is superseded, so it is never sealed or trimmed and
+  has no checkpoint or answers routes.
+
 ## Rolling upgrades and waiting claims
 
 A registry difference never refuses an exchange. Admission checks the envelope signature,

@@ -14,9 +14,8 @@ use super::view::{Load, World};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use fractal_client::{SloHistory, SloRow};
+use fractal_ui_model::slo::{NEARLY_SPENT, Tone};
 
-/// A budget with this little left (percent) reads as nearly spent.
-pub const NEARLY_SPENT: f64 = 10.0;
 
 /// The longest span a chart covers, in hours: st keeps seven days of readings.
 pub const CHART_HOURS: u64 = 168;
@@ -39,20 +38,19 @@ pub fn slo_id(id: &str) -> Option<&str> {
 
 /// Whether a row needs the person: an objective is missed, or a budget is nearly spent.
 pub fn is_red(row: &SloRow) -> bool {
-    row.status == "missed"
-        || row.kind == "budget"
-            && row.remaining_percent.is_some_and(|left| left <= NEARLY_SPENT)
+    tone(row) == Tone::Red
+}
+
+fn tone(row: &SloRow) -> Tone {
+    fractal_ui_model::slo::tone(&row.kind, &row.status, row.remaining_percent)
 }
 
 fn color(row: &SloRow) -> ratatui::style::Color {
-    if is_red(row) {
-        theme::RED
-    } else {
-        match row.status.as_str() {
-            "met" => theme::GREEN,
-            "stale" => theme::YELLOW,
-            _ => theme::OVERLAY1,
-        }
+    match tone(row) {
+        Tone::Red => theme::RED,
+        Tone::Green => theme::GREEN,
+        Tone::Yellow => theme::YELLOW,
+        Tone::Quiet => theme::OVERLAY1,
     }
 }
 
@@ -241,6 +239,9 @@ pub fn detail(world: &World, id: &str, hours: u64, width: usize) -> Doc {
         );
     }
     doc.field("explain", &row.explain, width, theme::text());
+    if let Some(url) = &world.slo_otel_url {
+        doc.field("history", url, width, theme::text());
+    }
     doc.blank();
     let hours = hours.min(CHART_HOURS);
     let what = if row.kind == "budget" {
@@ -408,6 +409,7 @@ mod tests {
             remaining_percent: left,
             status: status.into(),
             resets_at_unix_ms: None,
+            tone: None,
             forecast_used_percent: None,
             forecast_basis_minutes: None,
             runs_out_at_unix_ms: None,

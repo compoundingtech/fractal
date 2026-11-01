@@ -489,6 +489,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         }).unwrap();
     };
     let state = fractal_daemon::api::AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
@@ -2568,6 +2569,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             .unwrap();
     }
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -2664,6 +2666,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         })
         .collect::<Vec<_>>();
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
@@ -2743,6 +2746,7 @@ async fn trace_wait_starts_after_existing_events() {
             .store_index;
     }
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
@@ -5959,6 +5963,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("message-read-state").unwrap()),
         notify: Arc::new(Notify::new()),
@@ -6058,6 +6063,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
         &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
+        seat_admission: Default::default(),
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
         state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
@@ -7436,6 +7442,44 @@ fn a_graph_read_releases_the_native_delivery_fifo() {
     assert_eq!(fractal_drivers::message::list_dir(&archive).unwrap().len(), 1);
 }
 
+#[test]
+fn projected_inbox_tags_accept_both_families_without_merging() {
+    let root = tempfile::tempdir().unwrap();
+    let inbox = root.path().join("inbox");
+    let archive = root.path().join("archive");
+    for tags in [
+        vec!["st3-message:message/old"],
+        vec!["fractal-message:message/new"],
+        vec![
+            "fractal-message:message/ignored",
+            "st3-message:message/legacy",
+            "st3-message:message/second",
+        ],
+        vec!["unknown-message:message/refused"],
+    ] {
+        let tags = tags.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        fractal_drivers::message::send_to_inbox(&inbox, "requester", None, None, &tags, "body")
+            .unwrap();
+    }
+    let subjects = projected_message_subjects(&inbox, &archive).unwrap();
+    assert_eq!(subjects.len(), 4);
+    assert!(subjects.contains("message/second"));
+    assert!(!subjects.contains("message/ignored"));
+    assert!(!subjects.contains("message/refused"));
+    sync_consumed_projected_messages(
+        &inbox,
+        &archive,
+        &BTreeSet::from(["message/new".into(), "message/ignored".into()]),
+    )
+    .unwrap();
+    let archived = fractal_drivers::message::list_dir(&archive).unwrap();
+    assert_eq!(archived.len(), 1);
+    sync_consumed_projected_messages(&inbox, &archive, &BTreeSet::from(["message/second".into()]))
+        .unwrap();
+    let archived = fractal_drivers::message::list_dir(&archive).unwrap();
+    assert_eq!(archived.len(), 2);
+}
+
 #[tokio::test]
 async fn a_closed_message_missing_from_the_active_page_archives_its_projected_file() {
     use axum::{Json, Router, routing::get};
@@ -7995,6 +8039,7 @@ async fn serve_test_store(
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
