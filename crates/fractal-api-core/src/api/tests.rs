@@ -2272,7 +2272,7 @@ async fn a_local_only_harness_observation_wakes_only_the_client_feed() {
         expected_subject: None,
         idempotency_key: Some(format!("wake-usage-{tokens}")),
     };
-    let post = |input: ClaimInput| post_claim(State(state.clone()), Json(input));
+    let post = |input: ClaimInput| post_claim(State(state.clone()), None, Json(input));
     let reconciler_woke = || async {
         tokio::time::timeout(Duration::from_millis(20), state.notify.notified())
             .await
@@ -7207,6 +7207,219 @@ version 2
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{stale}");
     assert_eq!(stale["code"], "stale-launch-generation");
+}
+
+#[tokio::test]
+async fn message_send_peer_binding_accepts_own_sender_and_rejects_spoofing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    // Exercise the endpoint itself, even without the serving boundary's actor middleware.
+    let app = router(state.clone()).layer(Extension(BoundAgent("agent/sender".into())));
+    let identity = public_identity(
+        &state.store, crate::store::identities::IdentityKind::Agent, "agent/sender",
+    ).unwrap().identity;
+    for (key, from) in [("own-label", "agent/sender"), ("own-short", "sender"), ("own-identity", identity.as_str())] {
+        let (status, body) = json_request(app.clone(), "/v1/messages", json!({
+            "idempotency_key": key, "from": from, "to": "agent/receiver", "content": "Hello",
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["from"], identity);
+    }
+    for from in ["agent/other", "person/alex", "requester", "daemon/runtime"] {
+        let before = state.store.index().unwrap();
+        let (status, body) = json_request(app.clone(), "/v1/messages", json!({
+            // Even replaying an accepted key must check the bound sender first.
+            "idempotency_key": "own-label", "from": from, "to": "agent/receiver", "content": "Hello",
+        })).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{from}: {body}");
+        assert_eq!(body["code"], "foreign-agent-actor", "{from}: {body}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn message_send_peer_binding_preserves_unbound_local_sender_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for from in ["agent/sender", "agent/other", "person/alex", "requester", "daemon/runtime"] {
+        let (status, body) = json_request(app.clone(), "/v1/messages", json!({
+            "idempotency_key": format!("unbound-{from}"),
+            "from": from, "to": "agent/receiver", "content": "Hello",
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{from}: {body}");
+        assert!(body["from"].as_str().is_some(), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn message_claim_peer_binding_accepts_own_sender_and_rejects_spoofing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    // Keep the top-level actor valid: the attack is in the nested sender, not actor.
+    let app = router(state.clone()).layer(Extension(BoundAgent("agent/sender".into())));
+    let identity = public_identity(
+        &state.store, crate::store::identities::IdentityKind::Agent, "agent/sender",
+    ).unwrap().identity;
+    for (key, from) in [("own-label", "agent/sender"), ("own-identity", identity.as_str())] {
+        let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+            "subject": format!("message/{key}"), "kind": "message.sent", "actor": "agent/sender",
+            "fields": {"from": from, "to": "agent/receiver", "content": "Hello", "status": "sent"},
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{from}: {body}");
+        assert_eq!(body["body"]["fields"]["from"], from, "{body}");
+    }
+    for from in ["agent/other", "person/alex", "requester", "daemon/runtime"] {
+        for subject in ["message/spoofed", "message/own-label"] {
+            let before = state.store.index().unwrap();
+            let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+                "subject": subject, "kind": "message.sent", "actor": "agent/sender",
+                "fields": {"from": from, "to": "agent/receiver", "content": "Hello", "status": "sent"},
+            })).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{from}: {body}");
+            assert_eq!(body["code"], "foreign-agent-actor", "{from}: {body}");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+    assert!(state.store.claims_for("message/spoofed", None).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn message_claim_peer_binding_rejects_missing_or_null_sender_before_write_or_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(Extension(BoundAgent("agent/sender".into())));
+    let (status, accepted) = json_request(app.clone(), "/v1/claims", json!({
+        "subject": "message/accepted", "kind": "message.sent", "actor": "agent/sender",
+        "idempotency_key": "accepted-message",
+        "fields": {"from": "agent/sender", "to": "agent/receiver", "content": "Hello", "status": "sent"},
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+
+    for (name, from) in [("missing", None), ("null", Some(Value::Null))] {
+        for (subject, key) in [
+            (format!("message/{name}"), format!("refused-{name}")),
+            ("message/accepted".into(), "accepted-message".into()),
+        ] {
+            let mut fields = json!({"to": "agent/receiver", "content": "Hello", "status": "sent"});
+            if let Some(from) = &from {
+                fields["from"] = from.clone();
+            }
+            let request = json!({
+                "subject": subject, "kind": "message.sent", "actor": "agent/sender",
+                "idempotency_key": key, "fields": fields,
+            });
+            // Retry a refused key explicitly, and also attempt replay of an accepted key.
+            for _ in 0..2 {
+                let before = state.store.index().unwrap();
+                let (status, body) = json_request(app.clone(), "/v1/claims", request.clone()).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{name}: {body}");
+                assert_eq!(body["code"], "foreign-agent-actor", "{name}: {body}");
+                assert_eq!(state.store.index().unwrap(), before);
+            }
+        }
+        assert!(state.store.claims_for(&format!("message/{name}"), None).unwrap().is_empty());
+        assert!(state.store.message(&format!("message/{name}")).unwrap().is_none());
+    }
+    assert_eq!(state.store.claims_for("message/accepted", Some("message.sent")).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn message_claim_peer_binding_preserves_unbound_local_sender_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (index, from) in ["agent/sender", "agent/other", "person/alex", "person/requester", "daemon/runtime"].into_iter().enumerate() {
+        let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+            "subject": format!("message/unbound-{index}"), "kind": "message.sent", "actor": "agent/sender",
+            "fields": {"from": from, "to": "agent/receiver", "content": "Hello", "status": "sent"},
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{from}: {body}");
+        assert_eq!(body["body"]["fields"]["from"], from, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn message_intent_peer_binding_accepts_own_sender_and_rejects_spoofing_before_write_or_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(Extension(BoundAgent("agent/sender".into())));
+    let identity = public_identity(
+        &state.store, crate::store::identities::IdentityKind::Agent, "agent/sender",
+    ).unwrap().identity;
+    for (key, from) in [("own-label", "agent/sender"), ("own-short", "sender"), ("own-identity", identity.as_str())] {
+        let source = format!(
+            "version 2\nagent \"example/receiver\" {{ workspace \"/tmp\"; command \"true\"; }}\nmessage {key:?} {{ from {from:?}; to \"agent/example/receiver\"; content \"Hello\"; }}",
+        );
+        let request = apply_request(&state, &source, "agent/sender", key);
+        let (status, body) = json_request(
+            app.clone(), "/v1/intent/apply", serde_json::to_value(request).unwrap(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{from}: {body}");
+        let message = state.store.message(&format!("message/{key}")).unwrap().unwrap();
+        assert_eq!(message.from, identity);
+        assert_eq!(message.status, "sent");
+        let (mailbox, _) = state.store.messages_page_for_delivery(
+            "agent/example/receiver", None, state.store.index().unwrap(), 100,
+        ).unwrap();
+        assert!(mailbox.iter().any(|message| message.subject == format!("message/{key}") && message.from == identity));
+    }
+    for (name, from) in [
+        ("agent", Some("agent/other")),
+        ("person", Some("person/alex")),
+        ("requester", Some("requester")),
+        ("daemon", Some("daemon/runtime")),
+        ("missing", None),
+    ] {
+        for (subject, key) in [
+            (format!("refused-{name}"), format!("refused-{name}")),
+            ("own-label".into(), "own-label".into()),
+        ] {
+            let sender = from.map(|from| format!("from {from:?};")).unwrap_or_default();
+            // An earlier valid declaration must not write before a later invalid sender.
+            let source = format!(
+                "version 2\nmessage \"atomic-companion\" {{ from \"agent/sender\"; to \"agent/example/receiver\"; content \"Hello\"; }}\nmessage {subject:?} {{ {sender} to \"agent/example/receiver\"; content \"Forged\"; }}",
+            );
+            let request = apply_request(&state, &source, "agent/sender", &key);
+            for _ in 0..2 {
+                let before = state.store.index().unwrap();
+                let (status, body) = json_request(
+                    app.clone(), "/v1/intent/apply", serde_json::to_value(&request).unwrap(),
+                ).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{name}: {body}");
+                assert_eq!(body["code"], "foreign-agent-actor", "{name}: {body}");
+                assert_eq!(state.store.index().unwrap(), before);
+            }
+        }
+        assert!(state.store.claims_for(&format!("message/refused-{name}"), None).unwrap().is_empty());
+        assert!(state.store.message(&format!("message/refused-{name}")).unwrap().is_none());
+    }
+    assert!(state.store.message("message/atomic-companion").unwrap().is_none());
+    assert_eq!(state.store.claims_for("message/own-label", Some("intent.desired")).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn message_intent_peer_binding_preserves_unbound_local_sender_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (index, from) in [
+        Some("agent/sender"), Some("agent/other"), Some("person/alex"),
+        Some("requester"), Some("daemon/runtime"), None,
+    ].into_iter().enumerate() {
+        let sender = from.map(|from| format!("from {from:?};")).unwrap_or_default();
+        let source = format!(
+            "version 2\nagent \"example/receiver\" {{ workspace \"/tmp\"; command \"true\"; }}\nmessage \"unbound-{index}\" {{ {sender} to \"agent/example/receiver\"; content \"Hello\"; }}",
+        );
+        let request = apply_request(&state, &source, "person/operator", &format!("unbound-{index}"));
+        let (status, body) = json_request(
+            app.clone(), "/v1/intent/apply", serde_json::to_value(request).unwrap(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{from:?}: {body}");
+        let message = state.store.message(&format!("message/unbound-{index}")).unwrap().unwrap();
+        assert_eq!(message.status, "sent");
+        assert_eq!(message.content, "Hello");
+    }
 }
 
 #[tokio::test]
