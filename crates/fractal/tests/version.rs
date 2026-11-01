@@ -68,7 +68,10 @@ fn version_is_baked_and_available_without_a_daemon() {
     ] {
         let output = version(root.path(), &args);
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(value, serde_json::json!({ "machine_version": expected }));
+        assert_eq!(value, serde_json::json!({
+            "machine_version": expected,
+            "commit": fractal_drivers::version::build_commit(),
+        }));
         assert_eq!(output.lines().count(), 1);
     }
     let human = version(root.path(), &["--version"]);
