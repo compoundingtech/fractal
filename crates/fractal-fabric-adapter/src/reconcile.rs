@@ -251,16 +251,11 @@ fn retained_policy(snapshot: &Snapshot, owner: &str, desired: &DesiredPolicy) ->
             {
                 return None;
             }
-            let allowed = peer
-                .services
-                .iter()
-                .filter(|(service, sources)| {
-                    sources.iter().any(|source| source.owned_by(owner))
-                        && service_allowed(expected, service)
-                })
-                .map(|(service, _)| service.clone())
-                .collect();
-            Some((peer.node_id.clone(), allowed))
+            let actual: BTreeSet<_> = peer.services.iter()
+                .filter(|(_, sources)| sources.iter().any(|source| source.owned_by(owner)))
+                .map(|(service, _)| service.clone()).collect();
+            actual.iter().all(|service| service_allowed(expected, service))
+                .then(|| (peer.node_id.clone(), actual))
         })
         .collect()
 }
@@ -438,6 +433,10 @@ async fn save_journal(state_dir: &Path, journal: &Journal) -> Result<()> {
 }
 
 fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy) -> bool {
+    if pending.request["owner"].as_str().is_some_and(|owner| owner.starts_with("fractal/fleet/")) {
+        return pending.request["operations"].as_array().is_some_and(|operations|
+            operations.iter().all(|operation| operation["op"] == "remove_peer"));
+    }
     pending.request["operations"]
         .as_array()
         .is_some_and(|operations| {
@@ -450,16 +449,6 @@ fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy) -> bool {
                     Some("remove_peer") => !desired.contains_key(node),
                     Some("set_grants") => desired.get(node).is_some_and(|grants| {
                         operation["grants"].as_array().is_some_and(|services| {
-                            if pending.request["owner"]
-                                .as_str()
-                                .is_some_and(|owner| owner.starts_with("fractal/fleet/"))
-                            {
-                                return services.iter().all(|service| {
-                                    service
-                                        .as_str()
-                                        .is_some_and(|service| service_allowed(grants, service))
-                                });
-                            }
                             services.len() == grants.len()
                                 && grants.iter().all(|grant| {
                                     services

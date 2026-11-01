@@ -535,6 +535,7 @@ async fn finish_confirmation(
     journal: &mut Journal,
     confirmation: Value,
 ) -> Result<()> {
+    ensure!(journal_owner(journal)? == owner(&journal.fleet), "renamed-owner permit remains pending; reader phase cannot confirm new authority");
     let reply = control(socket, &json!({"type":"pairing","request":confirmation})).await?;
     if reply["type"] == "pairing" && reply["reply"]["error"]["code"] == "policy_revision_conflict" {
         // This explicit refusal cannot have committed. Only this case may discard
@@ -779,6 +780,8 @@ pub async fn join(socket: &Path, state: &Path) -> Result<()> {
                 && retained["request"]["operations"][0]["node_id"] == pairing.gateway,
             "retained reciprocal mutation belongs to another identity"
         );
+        ensure!(retained["request"]["owner"] == owner(&sealed.fleet_id),
+            "renamed-owner reciprocal addition remains pending; reader phase cannot replay new authority");
         retained
     } else {
         json!({"type":"runtime_peers","request":{"operation":"batch","owner":owner(&sealed.fleet_id),"request_id":format!("pair-{}", pairing.attempt),"expected_revision":revision(socket).await?,"operations":[{"op":"add_peer","node_id":pairing.gateway,"direction":"normal"},{"op":"set_grants","node_id":pairing.gateway,"grants":grants(&sealed.fleet_id)}]}})

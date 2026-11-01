@@ -81,6 +81,15 @@ fn recovered_pairing_owner_is_exact_and_legacy_journals_keep_their_owner() {
     assert!(journal_owner(&recovered).is_err());
 }
 
+#[tokio::test]
+async fn renamed_permit_cannot_confirm_or_install_grants() {
+    let mut journal = journal();
+    journal.owner = Some("fractal/fleet/fleet".into());
+    assert!(finish_confirmation(Path::new("absent.sock"), Path::new("absent.json"),
+        &mut journal, json!({"operation":"confirm"})).await.unwrap_err()
+        .to_string().contains("remains pending"));
+}
+
 #[test]
 fn quarantined_pairing_writes_fail_closed_without_accepting_a_status() {
     let error = pairing_reply(json!({
