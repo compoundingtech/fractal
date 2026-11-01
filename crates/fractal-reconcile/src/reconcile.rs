@@ -17422,14 +17422,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let mut active = armed.lock().unwrap_or_else(PoisonError::into_inner);
                     let armed_now = active.contains(&operation);
                     let still_current = armed_now && revision_state == Some(true);
-                    if still_current {
-                        if let Some(next_check) = completed_deadline {
-                            deadlines.lock().unwrap_or_else(PoisonError::into_inner)
-                                .insert(deadline_key.clone(), next_check);
-                            if let Some(interval) = standing_interval {
-                                intervals.lock().unwrap_or_else(PoisonError::into_inner)
-                                    .insert(deadline_key.clone(), interval);
-                            }
+                    if still_current && let Some(next_check) = completed_deadline {
+                        deadlines.lock().unwrap_or_else(PoisonError::into_inner)
+                            .insert(deadline_key.clone(), next_check);
+                        if let Some(interval) = standing_interval {
+                            intervals.lock().unwrap_or_else(PoisonError::into_inner)
+                                .insert(deadline_key.clone(), interval);
                         }
                     }
                     // The plugin database already keeps the cursor this look recorded to, so it is
