@@ -1,6 +1,5 @@
 {
-  "version": 1,
-  "summary": "Recognize both exact fleet adapter owners during recovery and revocation without switching policy producers.",
+  "version": 1, "summary": "Recognize both exact fleet adapter owners during recovery and revocation without switching policy producers.",
   "replay": {"status": "none", "detail": "Pending requests retain their exact owner and request identity."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No claim or checkpoint change."},
