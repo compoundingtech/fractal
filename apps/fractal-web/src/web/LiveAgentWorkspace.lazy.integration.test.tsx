@@ -43,6 +43,7 @@ vi.mock('../data/react.tsx', () => ({
   useAgent: (ref: string) => rosterFeed._tag === 'Observed' ? { ...rosterFeed, value: rosterFeed.value.agents.find(row => row.ref === ref) } : rosterFeed,
   useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
   useAskingAgents: () => askingAgents,
+  useAttention: () => ({ _tag: 'Waiting' }),
   useSubjectList: () => [],
   useConnection: () => ({ _tag: 'Live' }),
   useNow: () => 0,

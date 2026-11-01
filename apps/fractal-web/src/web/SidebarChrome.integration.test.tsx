@@ -180,7 +180,7 @@ describe('sidebar split (real kit ResizableSplit)', () => {
   })
 })
 
-const NavigationFixture = ({ show }: { readonly show: () => void }) => <>{useSidebarNavigation(show)}</>
+const NavigationFixture = ({ show }: { readonly show: (tab: 'agents' | 'alerts') => void }) => <>{useSidebarNavigation(show)}</>
 describe('sidebar navigation chords', () => {
   const press = (key: string, target: EventTarget = document) => target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
   it('opens Agents on g a and lists the available chord in help', async () => {
@@ -188,11 +188,15 @@ describe('sidebar navigation chords', () => {
     await act(async () => root.render(<NavigationFixture show={show} />))
     await act(async () => { press('g'); press('a') })
     expect(show).toHaveBeenCalledOnce()
+    expect(show).toHaveBeenLastCalledWith('agents')
+    await act(async () => { press('g'); press('l') })
+    expect(show).toHaveBeenLastCalledWith('alerts')
     await act(async () => press('?'))
     const help = within(document.body).getByRole('dialog', { name: 'Keyboard shortcuts' })
     expect(help.textContent).toContain('g a')
     expect(help.textContent).toContain('Show Agents')
-    expect(help.textContent).not.toContain('g l')
+    expect(help.textContent).toContain('g l')
+    expect(help.textContent).toContain('Show Alerts')
     await act(async () => within(help).getByRole('button', { name: 'Close' }).click())
     expect(within(document.body).queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull()
   })
@@ -200,7 +204,7 @@ describe('sidebar navigation chords', () => {
     const show = vi.fn()
     await act(async () => root.render(<><NavigationFixture show={show} />{kind === 'input' ? <input /> : kind === 'textarea' ? <textarea /> : <div {...(kind === 'terminal' ? { 'aria-roledescription': 'terminal' } : { contentEditable: true })} />}</>))
     const target = host.lastElementChild!
-    await act(async () => { press('g', target); press('a', target); press('?', target) })
+    await act(async () => { press('g', target); press('a', target); press('g', target); press('l', target); press('?', target) })
     expect(show).not.toHaveBeenCalled()
     expect(within(document.body).queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull()
   })
@@ -211,7 +215,7 @@ describe('sidebar navigation chords', () => {
     press('g')
     clock.mockReturnValue(1002)
     press('a')
-    for (const key of ['l', 'm', 'f']) { press('g'); expect(press(key)).toBe(true) }
+    for (const key of ['m', 'f']) { press('g'); expect(press(key)).toBe(true) }
     expect(show).not.toHaveBeenCalled()
     clock.mockRestore()
   })
