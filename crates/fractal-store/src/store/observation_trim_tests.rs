@@ -4,10 +4,11 @@ use super::*;
 use rusqlite::params;
 use std::collections::BTreeSet;
 
+type SearchHook = Box<dyn FnOnce(&Store)>;
+
 thread_local! {
     /// Runs once on the trimming thread between a page's search and its deletes.
-    pub(super) static AFTER_SEARCH: std::cell::RefCell<Option<Box<dyn FnOnce(&Store)>>> =
-        const { std::cell::RefCell::new(None) };
+    pub(super) static AFTER_SEARCH: std::cell::RefCell<Option<SearchHook>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The rows the trim deleted before #4610, by its own predicate (no chunk limit).
