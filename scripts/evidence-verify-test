@@ -2353,10 +2353,9 @@ class InputKeyed(unittest.TestCase):
         host = self.f.key('host', 'host/box')
         key = self.key(self.tree)
         obsolete = self.f.note(self.commit, self.tree, host, 'host/box', runner=OBSERVED, inputs={'source_inputs': key},
-                               seconds=-900, sign=False,
-                               command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'))
+                               seconds=-900, command=('wrong-command',))
         code, result = self.f.verify(self.tree, rules=rules, prefer_levels=('host',))
-        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'bad_signature', obsolete))
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'wrong_command', obsolete))
         later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs'})
         self.observed(later, other, key, exit_code=1, seconds=-400)
         newest = self.observed(later, other, key, seconds=0)
