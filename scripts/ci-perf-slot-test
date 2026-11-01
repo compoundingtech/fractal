@@ -16,6 +16,7 @@ import socket
 import stat
 from unittest import TestCase
 import base64
+import itertools
 
 
 def utc():
@@ -86,8 +87,12 @@ def validate_receipt(receipt, require_origin=False):
     for field in ("caller_pid", "caller_starttime", "gate_slot", "invocation", "source_head", "source_sha256",
                   "hostname", "started_utc", "ended_utc"):
         require(receipt[field], f"missing attribution: {field}")
-    require(not require_origin or "origin_head" in receipt, "origin attribution required")
-    if "origin_head" in receipt:
+    fields = {"origin_head", "origin_tree", "sparse_head", "sparse_tree", "origin_commit", "sparse_commit"}
+    present = (fields | {"paths", "paths_sha256"}) & receipt.keys()
+    require(not require_origin or present, "origin attribution required")
+    if present:
+        require(fields <= receipt.keys(), "incomplete origin attribution")
+        require(("paths" in receipt) == ("paths_sha256" in receipt), "incomplete sparse derivation")
         validate_origin(receipt)
     require({"unit", "cgroup"} <= receipt["gate_slot"].keys())
     require(receipt["remaining_units"] == receipt["remaining_cgroups"] == 0)
@@ -499,9 +504,18 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
     validate_receipt(complete)
     legacy = {key: value for key, value in complete.items() if key not in fixture_origin or key == "source_head"}
     validate_receipt(legacy)
+    origin_fields = tuple(key for key in fixture_origin if key != "source_head")
+    for count in range(1, len(origin_fields)):
+        for subset in itertools.combinations(origin_fields, count):
+            for strict in (False, True):
+                with TestCase().assertRaises(ValueError):
+                    validate_receipt(dict(legacy, **{key: fixture_origin[key] for key in subset}), require_origin=strict)
     wrong = dict(complete, gate_slot={"unit": "gate.scope", "cgroup": "/other.slice/gate.scope"})
     for candidate, accepted in ((complete, True), (legacy, True), (wrong, False), (dict(complete, outcome="failure"), False),
                                 (dict(complete, origin_head="short"), False), (dict(complete, origin_head=None), False),
+                                (dict(legacy, origin_commit=encoded), False),
+                                ({key: value for key, value in complete.items() if key != "origin_head"}, False),
+                                (dict(legacy, paths=[]), False), (dict(complete, paths_sha256="0" * 64), False),
                                 (dict(complete, origin_tree="invalid"), False), (dict(complete, sparse_head="different"), False),
                                 (dict(complete, gate_slot={"unit": None, "cgroup": None}), False),
                                 (dict(complete, caller_cgroup="/system.slice/runner.service"), False),
