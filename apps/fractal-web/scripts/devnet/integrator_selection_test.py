@@ -57,6 +57,108 @@ class SelectionTest(unittest.TestCase):
         self.module.recovery_select_build('b' * 40)
         return str(self.module.P / 'builds' / ('a' * 40))
 
+    def test_existing_main_probe_ejects_breaking_pr_and_keeps_later_pr(self):
+        main, broken, later = ('a' * 40, 'b' * 40, 'c' * 40)
+        build_root = self.root / 'build-root'
+        receipt = build_root / 'live-r3-probe' / 'builds' / main / 'build-receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({'buildIdentity': {'rev': main}}))
+        current = {'sha': later, 'tree': 'full'}
+        builds = []
+
+        def git(*args, **kwargs):
+            if args[0] == 'checkout':
+                current['sha'] = args[-1]
+                if args[-1] == main:
+                    current['tree'] = 'reduced'
+            elif args[0] == 'merge':
+                current['sha'] = later
+            return subprocess.CompletedProcess([], 0)
+
+        def build(name):
+            builds.append((name, current['sha']))
+            # The old shared namespace collides; fresh probes really compile.
+            ok = ((name == 'live-r3' and current['tree'] == 'reduced') or
+                  (name.startswith('live-r3-probe-') and current['sha'] == main))
+            return subprocess.CompletedProcess([], 0 if ok else 1)
+
+        row = {'included': [{'pr': 10}, {'pr': 11}], 'skipped': []}
+        checkpoints = [{'sha': main, 'pr': None},
+                       {'sha': broken, 'pr': 10, 'head': 'broken-head'},
+                       {'sha': later, 'pr': 11, 'head': 'later-head'}]
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root),
+                        FRACTAL_BUILD_SNAPSHOT_ROOT=str(self.root / 'snapshots')), \
+                patch.object(self.module, 'git', side_effect=git) as commands, \
+                patch.object(self.module, 'text', side_effect=lambda *args: current['sha']), \
+                patch.object(self.module, 'candidate_key', side_effect=lambda _: current['tree']), \
+                patch.object(self.module, 'prepare_dependencies'), \
+                patch.object(self.module, 'stamp'), \
+                patch.object(self.module, 'retain_main_registry'), \
+                patch.object(self.module, 'build', side_effect=build):
+            self.assertTrue(self.module.build_candidate(row, 'overlay', checkpoints))
+        self.assertEqual(row['included'], [{'pr': 11}])
+        self.assertEqual(row['skipped'], [{'pr': 10, 'reason': 'build-break', 'files': []}])
+        self.assertEqual([sha for _, sha in builds], [later, main, broken, later])
+        self.assertEqual(builds[0][0], 'live-r3')
+        self.assertEqual(builds[-1][0], 'live-r3')
+        self.assertTrue(all(name.startswith('live-r3-probe-') for name, _ in builds[1:3]))
+        self.assertNotEqual(builds[1][0], builds[2][0])
+        self.assertTrue(all(not (build_root / name).exists() for name, _ in builds[1:3]))
+        self.assertIn(('merge', '--no-ff', '--no-edit', 'later-head'),
+                      [call.args for call in commands.call_args_list])
+        cached = json.loads((self.module.L / 'live-r3-tree-cache.json').read_text())
+        self.assertEqual(cached['full']['ejected'], 10)
+        self.assertEqual(cached['full']['included'], [{'pr': 11}])
+
+    def test_changed_overlay_rebuilds_main_and_does_not_eject_a_pr(self):
+        sha = 'a' * 40
+        build_root = self.root / 'build-root'
+        receipt = build_root / 'live-r3-probe' / 'builds' / sha / 'build-receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({'buildIdentity': {'rev': sha}, 'overlay': 'old'}))
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root),
+                        FRACTAL_BUILD_SNAPSHOT_ROOT=str(self.root / 'snapshots')), \
+                patch.object(self.module, 'git'), \
+                patch.object(self.module, 'prepare_dependencies'), \
+                patch.object(self.module, 'build', return_value=subprocess.CompletedProcess([], 1)) as build:
+            # The same git revision with today's overlay now fails to build.
+            self.assertIsNone(self.module.first_break([sha, 'b' * 40], self.module.probe_revision))
+        build.assert_called_once()
+        self.assertTrue(build.call_args.args[0].startswith('live-r3-probe-'))
+
+    def test_raw_receipt_from_interrupted_validation_is_not_reused(self):
+        sha = 'a' * 40
+        build_root = self.root / 'build-root'
+        receipt = build_root / 'live-r3-probe' / 'builds' / sha / 'build-receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({'buildIdentity': {'rev': sha}}))
+        names = []
+
+        def build(name):
+            names.append(name)
+            output = build_root / name / 'builds' / sha
+            output.mkdir(parents=True)
+            (output / 'build-receipt.json').write_text(receipt.read_text())
+            # Promotion produced a matching raw receipt, but host validation failed.
+            return subprocess.CompletedProcess([], 1)
+
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root),
+                        FRACTAL_BUILD_SNAPSHOT_ROOT=str(self.root / 'snapshots')), \
+                patch.object(self.module, 'git'), \
+                patch.object(self.module, 'prepare_dependencies'), \
+                patch.object(self.module, 'build', side_effect=build):
+            self.assertFalse(self.module.probe_revision(sha))
+            self.assertFalse(self.module.probe_revision(sha))
+        self.assertEqual(len(set(names)), 2)
+        self.assertTrue(all(not (build_root / name).exists() for name in names))
+        self.assertTrue(receipt.exists())
+
+    def test_tree_cache_identity_changes_with_integrator_version(self):
+        with patch.object(self.module, 'text', return_value='tree'):
+            old = self.module.candidate_key('overlay')
+            with patch.object(self.module, 'INTEGRATOR_VERSION', self.module.INTEGRATOR_VERSION + 1):
+                self.assertNotEqual(self.module.candidate_key('overlay'), old)
+
     def test_activation_replaces_serving_generation_without_down(self):
         previous = self.activation_builds()
         for rollback, observations in (
