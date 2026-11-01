@@ -13,7 +13,7 @@ const grammar = vi.hoisted(() => {
   const finished = new Promise<void>(resolve => { loaded = resolve })
   return { ready, release, finished, loaded, requested: false }
 })
-vi.mock('../../../../packages/fractal-ui/src/assistant-ui/composition/SyntaxSource', async importOriginal => {
+vi.mock('../../../../packages/fractal-ui/src/assistant-ui/composition/syntaxGrammar', async importOriginal => {
   grammar.requested = true
   await grammar.ready
   const actual = await importOriginal()
