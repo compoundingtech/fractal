@@ -56,6 +56,18 @@ host decides, and the run's creation is one claim. An observation that arrives l
 placement worse than it could have been, never wrong: the chosen host still admits the run's seats by
 fit and holds them in line if the room is gone.
 
+## Rollout
+
+Each part lands on its own, additive first, so no member reads what it cannot:
+
+1. The observation: a new replicated claim kind, `host.capacity-observed`, which an older member keeps
+   retryable until it upgrades (as for any unknown kind), and `capacity.state: "reported"` on the
+   machines API, which clients must accept before any member serves it. High: a new replicated kind.
+2. Placement, behind a per-host switch and advertised on `daemon.started` like `mission_capacity`: a
+   member places a run on another only when every current member advertises it, and `placed_on` is
+   added to the run record only for a placed run, so an unplaced run's record is unchanged.
+3. `st missions move`, by hand, once placements have run without surprise for a week.
+
 ## Not in this note
 
 Packing several runs together, preempting a running seat for a waiting one, and placing a run's seats
