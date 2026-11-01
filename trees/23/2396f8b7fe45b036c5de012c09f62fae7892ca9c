@@ -67,3 +67,13 @@ record f1ba2e1f0015679eec322948aabe686a78781b2f typescript-client 0 fleet/ci 202
 record f6b85e80f690b7e3ff402e232ec1b003eb300809 rust-tests 0 fleet/ci 2026-11-01T07:32:30Z
 record f8de26a08ff1db27c71f2e756844c401cd5c926b rust-tests 0 fleet/ci 2026-11-01T07:33:29Z
 record ff30ca6aa631eecd0c5c790c871195e1637e2c38 rust-tests 0 fleet/ci 2026-11-01T07:32:30Z
+record 2a9b682e1f9f1d6af63e2b053bb3f6410fd30125 rust-tests 0 host/forge 2026-11-01T08:52:38Z
+record 2b4ed2c56a9e5a5b36647e47a3f609349b2db0b0 rust-tests 0 host/forge 2026-11-01T08:52:38Z
+record 2b6d3ef4c370c199b08912229226f38e5fa23fd6 rust-tests 0 host/forge 2026-11-01T08:52:38Z
+record 7aad73981073393e8cc06749224d0371c4ffc44e rust-tests 0 host/forge 2026-11-01T08:52:37Z
+record 8e03a0279cc434c3c8d1192de6bf5e32bfe4c450 rust-tests 0 host/forge 2026-11-01T08:52:27Z
+record 9fd9dd85c4d476b0276b5db0c9ad9055e89f32ad rust-tests 0 host/forge 2026-11-01T08:52:38Z
+record a62571678d44fd472288b480fd264496df4debc9 rust-tests 0 host/forge 2026-11-01T08:52:38Z
+record d4bdda71cdaa85911c1ecbe9e5433f5e9008eb04 rust-tests 0 host/forge 2026-11-01T08:52:37Z
+record f348545756c6faf1a9b7faded0257ff5bfd043fe rust-tests 0 host/forge 2026-11-01T08:52:51Z
+record f4c609e25eb5162d3783046ab81a11aa0bab4f5b rust-tests 0 host/forge 2026-11-01T08:52:38Z
