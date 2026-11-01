@@ -52,6 +52,8 @@ const proveHeaders = async (url, mode) => {
   const html = await response.text()
   const policy = response.headers.get('content-security-policy')
   assert(policy?.includes("img-src 'self' data: blob:"), `${mode}: HTML policy`)
+  assert(policy?.includes("script-src 'self' 'wasm-unsafe-eval'"), `${mode}: Highlights WebAssembly compilation policy`)
+  console.log(JSON.stringify({ mode, wasmDirective: "script-src 'self' 'wasm-unsafe-eval'" }))
   const head = await fetch(url, { method: 'HEAD' })
   assert.equal(head.headers.get('content-security-policy'), policy, `${mode}: HEAD must retain inline script hashes`)
   const cached = await fetch(url, { headers: { 'if-none-match': response.headers.get('etag') } })
@@ -93,7 +95,7 @@ const prove = async (url, enforced, mode) => {
           socket.send(JSON.stringify({ kind: 'conversation', id: command.id, collection: 'conversation',
             session_id: 'session/proof', replace: true, has_more: false, items: [{
               id: 'timeline-entry/image', sequence: 1, revision: 1, type: 'content', role: 'assistant',
-              final: true, timestamp: snapshot.created_at, body: { text: '![Preview](' + remote + ')', media_type: 'text/markdown' },
+              final: true, timestamp: snapshot.created_at, body: { text: '![Preview](' + remote + ')\\n\\n\`\`\`typescript\\nconst answer = 42\\n\`\`\`', media_type: 'text/markdown' },
             }] }))
         } else {
           socket.send(JSON.stringify({ kind: 'snapshot', id: command.id,
@@ -106,6 +108,7 @@ const prove = async (url, enforced, mode) => {
     await testPage.getByTestId('live-agent-workspace').waitFor({ timeout: 60000 })
     const placeholder = testPage.getByTestId('deferred-image')
     await placeholder.waitFor({ timeout: 60000 })
+    await testPage.locator('[data-syntax-token="keyword"]').first().waitFor({ timeout: 60000 })
     const hostShown = (await placeholder.textContent()).includes('example.invalid')
     const remoteImagesBefore = await testPage.locator('img[src="' + remote + '"]').count()
     await placeholder.getByRole('button', { name: 'Open image · example.invalid', exact: true }).click()
@@ -185,10 +188,7 @@ try {
     optimizeDeps: { ...devLoaded.config.optimizeDeps, include: [
       ...(devLoaded.config.optimizeDeps?.include ?? []),
       'react', 'react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime', '@assistant-ui/react',
-      'react-aria-components', 'react-markdown', 'remark-gfm', 'refractor/core',
-      'refractor/typescript', 'refractor/tsx', 'refractor/javascript', 'refractor/json',
-      'refractor/bash', 'refractor/diff', 'refractor/rust', 'refractor/nix', 'refractor/python',
-      'refractor/yaml', 'refractor/markdown', 'refractor/css',
+      'react-aria-components', 'react-markdown', 'remark-gfm', '@pierre/highlights',
     ] },
     // As in the existing browser proofs, never inherit a paired live gateway.
     plugins: devLoaded.config.plugins.flat().filter((plugin) => plugin?.name !== 'wf:shared-client-gateway'),

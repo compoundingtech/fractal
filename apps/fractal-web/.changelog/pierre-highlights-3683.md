@@ -1,0 +1,1 @@
+Markdown code fences and diff rows now use Pierre Highlights with the existing light and dark token palette. Source appears as plain text before the shared highlighter loads; unknown languages remain plain text, and streaming, copy and wrap behavior are preserved.

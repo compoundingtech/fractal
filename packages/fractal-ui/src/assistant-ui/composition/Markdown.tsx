@@ -3,20 +3,8 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Link, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { Components, ExtraProps } from 'react-markdown'
-import type { Root, RootContent as SyntaxNode } from 'hast'
-import { refractor } from 'refractor/core'
-import typescript from 'refractor/typescript'
-import tsx from 'refractor/tsx'
-import javascript from 'refractor/javascript'
-import json from 'refractor/json'
-import bash from 'refractor/bash'
-import diff from 'refractor/diff'
-import rust from 'refractor/rust'
-import nix from 'refractor/nix'
-import python from 'refractor/python'
-import yaml from 'refractor/yaml'
-import markdown from 'refractor/markdown'
-import css from 'refractor/css'
+import type { Root } from 'hast'
+import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
 import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { Tooltip as CopyTooltip } from './Controls'
@@ -127,40 +115,65 @@ function InlineCode({ children }: React.ComponentProps<'code'>) {
   return rendered === undefined ? <code {...stylex.props(styles.inlineCode)}>{children}</code> : rendered
 }
 
-// Eager, fixed package grammars: authored fences never trigger a module request.
-const grammars = { typescript, tsx, javascript, json, bash, diff, rust, nix, python, yaml, markdown, css }
-for (const grammar of Object.values(grammars)) refractor.register(grammar)
-const languageAliases: Readonly<Record<string, keyof typeof grammars>> = {
+const pathLanguages: Readonly<Record<string, true>> = { typescript: true, tsx: true, javascript: true, json: true, bash: true, diff: true, rust: true, nix: true, python: true, yaml: true, markdown: true, css: true }
+const languageAliases: Readonly<Record<string, string>> = {
   ts: 'typescript', js: 'javascript', sh: 'bash', shell: 'bash', shellscript: 'bash',
   rs: 'rust', py: 'python', yml: 'yaml', md: 'markdown',
 }
 
-/** File-path language lookup uses the same eager grammar allowlist as fenced code. */
+/** Keep file-path detection limited to the existing twelve language extensions. */
 export function languageFromPath(path: string): string {
   const extension = /\.([^.]+)$/.exec(path)?.[1]?.toLowerCase() ?? ''
   const canonical = Object.hasOwn(languageAliases, extension) ? languageAliases[extension]! : extension
-  return Object.hasOwn(grammars, canonical) ? canonical : ''
+  return Object.hasOwn(pathLanguages, canonical) ? canonical : ''
 }
 
-function SyntaxToken({ node }: { node: SyntaxNode }): React.ReactNode {
-  if (node.type === 'text') return node.value
-  if (node.type !== 'element') return null
-  const classes = Array.isArray(node.properties.className) ? node.properties.className.map(String) : []
-  return <span data-syntax-token={classes.filter(value => value !== 'token').join(' ')} {...stylex.props(
-    classes.some(value => ['comment', 'prolog', 'doctype', 'cdata'].includes(value)) && styles.syntaxComment,
-    classes.some(value => ['keyword', 'atrule', 'tag', 'selector'].includes(value)) && styles.syntaxKeyword,
-    classes.some(value => ['string', 'char', 'attr-value', 'inserted'].includes(value)) && styles.syntaxString,
-    classes.some(value => ['number', 'boolean', 'constant', 'symbol'].includes(value)) && styles.syntaxLiteral,
-    classes.some(value => ['function', 'class-name', 'builtin'].includes(value)) && styles.syntaxFunction,
-    classes.includes('deleted') && styles.syntaxDeleted,
-  )}>{node.children.map((child, index) => <SyntaxToken key={index} node={child} />)}</span>
+// These marker colours select semantic StyleX styles; they are never rendered as colours.
+const syntaxTheme: Highlights.Theme = {
+  name: 'Fractal semantic tokens', appearance: 'dark',
+  style: { syntax: {
+    comment: '#000001', keyword: '#000002', tag: '#000002', selector: '#000002',
+    string: '#000003', 'diff.plus': '#000003',
+    number: '#000004', boolean: '#000007', constant: '#000008',
+    function: '#000005', type: '#000005', constructor: '#000005',
+    'diff.minus': '#000006',
+  } },
 }
+let highlightsRequest: Promise<typeof Highlights> | undefined
+const loadHighlights = () => highlightsRequest ??= new Promise<typeof Highlights>((resolve, reject) => {
+  // Importing the published entry compiles embedded WASM synchronously. Defer that
+  // work until after the pane's plain-text first paint, never during render.
+  requestAnimationFrame(() => setTimeout(() => {
+    import('@pierre/highlights').then(resolve, reject)
+  }, 0))
+})
 
 export function HighlightedSource({ code, language }: { code: string; language: string }) {
+  const [highlights, setHighlights] = React.useState<typeof Highlights>()
   const normalized = language.toLowerCase()
   const canonical = Object.hasOwn(languageAliases, normalized) ? languageAliases[normalized]! : normalized
-  const nodes = React.useMemo(() => Object.hasOwn(grammars, canonical) ? refractor.highlight(code, canonical).children : undefined, [code, canonical])
-  return nodes === undefined ? code : <>{nodes.map((node, index) => <SyntaxToken key={index} node={node} />)}</>
+  React.useEffect(() => {
+    if (!canonical) return
+    let active = true
+    loadHighlights().then(module => { if (active) setHighlights(module) }, error => console.error('Code highlighting failed to load', error))
+    return () => { active = false }
+  }, [canonical])
+  const lines = React.useMemo(() => highlights?.isSupportedLanguage(canonical)
+    ? highlights.codeToTokens(code, { lang: canonical, theme: syntaxTheme }).tokens
+    : undefined, [code, canonical, highlights])
+  return lines === undefined ? code : <>{lines.map((line, lineIndex) => <React.Fragment key={lineIndex}>
+    {lineIndex > 0 ? '\n' : ''}{line.map((token, index) => <span key={index} data-syntax-token={token.color === undefined ? undefined : ({
+      '#000001': 'comment', '#000002': 'keyword', '#000003': 'string',
+      '#000004': 'number', '#000005': 'function', '#000006': 'deleted', '#000007': 'boolean', '#000008': 'constant',
+    }[token.color])} {...stylex.props(
+      token.color === '#000001' && styles.syntaxComment,
+      token.color === '#000002' && styles.syntaxKeyword,
+      token.color === '#000003' && styles.syntaxString,
+      (token.color === '#000004' || token.color === '#000007' || token.color === '#000008') && styles.syntaxLiteral,
+      token.color === '#000005' && styles.syntaxFunction,
+      token.color === '#000006' && styles.syntaxDeleted,
+    )}>{token.content}</span>)}
+  </React.Fragment>)}</>
 }
 
 const CodeBlock = React.memo(function CodeBlock({ code, language }: { code: string; language: string }) {
