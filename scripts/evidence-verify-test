@@ -2348,6 +2348,20 @@ class InputKeyed(unittest.TestCase):
         self.assertEqual(self.f.cli('--check', 'unit', '--revision', 'HEAD', '--members', '--prefer-levels', 'host',
                                     '--keys', str(self.f.keys))[0], 2)
 
+    def test_an_invalid_preferred_host_pass_before_a_failure_does_not_block_a_newer_valid_ci_pass(self):
+        rules = evidence_verify.policy_rules(policy_text(inputs=self.PATHS, trust_levels=['machine', 'host']), 'unit', 'org/repo')
+        host = self.f.key('host', 'host/box')
+        key = self.key(self.tree)
+        obsolete = self.f.note(self.commit, self.tree, host, 'host/box', runner=OBSERVED, inputs={'source_inputs': key},
+                               seconds=-900, command=('wrong-command',))
+        code, result = self.f.verify(self.tree, rules=rules, prefer_levels=('host',))
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'wrong_command', obsolete))
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs'})
+        self.observed(later, other, key, exit_code=1, seconds=-400)
+        newest = self.observed(later, other, key, seconds=0)
+        code, result = self.f.verify(self.tree, rules=rules, prefer_levels=('host',))
+        self.assertEqual((code, result['record'], result['decided_by'], result['trust_level']), (0, newest, newest, 'machine'))
+
     # ---- which record decides (#4241): the newest pass that validates, unless a failure is dated after it ------------------------
 
     THIS_LANE, OTHER_LANE = 'a' * 64, 'b' * 64
