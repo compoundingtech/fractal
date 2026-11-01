@@ -170,7 +170,12 @@ impl ClientRelay {
         }
         self.auth.verify(&response_headers, "RESPONSE", SEAT_FRESHNESS_PATH, &bytes, Some(&peer.name), Some(digest))?;
         let envelope: ApiResponse<Value> = serde_json::from_slice(&bytes)?;
-        anyhow::ensure!(envelope.api_version == "st3.v1", "the peer seat freshness protocol differs");
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        anyhow::ensure!(
+            smallclaims::sync::ACCEPTED_PEER_API_VERSIONS.contains(&envelope.api_version.as_str()),
+            "the peer seat freshness protocol differs"
+        );
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
         anyhow::ensure!(status.is_success(), "{} refused seat freshness: {}", peer.name, envelope.value);
         Ok(Some(serde_json::from_value(envelope.value)?))
     }
