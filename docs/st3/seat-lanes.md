@@ -222,6 +222,8 @@ hosts that run a build with this change, and remove it before downgrading a host
   memory − max(4G, 12.5%)). Memory is firm: the sum of every lane's base and burst memory must
   fit. CPU is shareable: quotas may oversubscribe, weights decide under contention. Whatever waits
   says why, naming the host's free capacity.
+- **Placement.** A mission that pins no host runs on a member with room for it: see
+  [lane-placement.md](lane-placement.md).
 - **Starvation.** Waiters age. After 15 minutes the host drains to fit (admits nothing new until
   the oldest waiter fits). A lane or burst may declare a minimum and start smaller. After 30
   minutes the seat should move to a host with room (by hand until moves are automatic). A wait
