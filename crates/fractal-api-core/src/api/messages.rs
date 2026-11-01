@@ -503,6 +503,31 @@ pub async fn post_message_claim(
                 fields.insert("runtime_id".into(), Value::String(runtime_id));
             }
         }
+        // A stream item's lifecycle is this member's record, not a graph claim.
+        if message.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
+            if request.expected_subject.is_some() {
+                return Err(ApiError::bad(St3Error::new(
+                    "expected-subject-unsupported",
+                    format!("`{subject}` is a stream item: it has no graph claim to compare with"),
+                )));
+            }
+            // A delegated or successor's transition is checked by the graph's write rules, which
+            // a stream item does not reach yet; only the recipient's own transitions are recorded.
+            if fields.contains_key("acting_for") || request.delegation.is_some() {
+                return Err(ApiError::bad(St3Error::new(
+                    "stream-lifecycle-unsupported",
+                    format!("`{subject}` is a stream item: only its recipient records its lifecycle"),
+                )));
+            }
+            let appended = crate::store::messages_shard::record_lifecycle(
+                &store, &subject, kind, Some(&actor), &fields,
+            )
+            .map_err(ApiError::bad)?;
+            let record = crate::store::messages_shard::lifecycle_receipt(
+                &store.graph.origin, &subject, kind, Some(&actor), &fields,
+            );
+            return Ok((record, appended, is_work_wake(&message.tags)));
+        }
         let (record, appended) = store
             .append_claim_outcome(&ClaimInput {
                 subject,
