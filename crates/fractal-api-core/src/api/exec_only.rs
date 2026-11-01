@@ -36,13 +36,15 @@ pub(super) fn cards(
     let statuses = store.agent_card_status_at(Some(&names), index, true)?.subjects
         .into_iter().map(|child| (child.subject.clone(), child)).collect::<BTreeMap<_, _>>();
     let connection = store.readers.get();
-    let mut fresh_receipt = connection.prepare_cached(
-        "SELECT actual.store_index>=desired.store_index FROM claims actual
-         JOIN claims desired ON desired.id=?2 WHERE actual.id=?1",
-    )?;
+    static FRESH_RECEIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
+        "SELECT {} FROM claims actual JOIN claims desired ON desired.id=?2 WHERE actual.id=?1",
+        smallclaims::store::canonical::after_sql("actual", "desired"),
+    ));
+    let mut fresh_receipt = connection.prepare_cached(&FRESH_RECEIPT)?;
     let mut cards = BTreeMap::new();
     for (name, (root, tasks)) in declarations {
-        let mut card = Card { state: "stopped", runtime_ids: Vec::with_capacity(tasks.len()),
+        let mut runtimes = Vec::with_capacity(tasks.len());
+        let mut card = Card { state: "stopped", runtime_ids: Vec::new(),
             host: None, workspace: crate::graph::canonical_child_value(&root.desired, "workspace")
                 .and_then(Value::as_str).unwrap_or(".").to_owned() };
         let mut severity = 0;
@@ -57,7 +59,6 @@ pub(super) fn cards(
             });
             let member = child.and_then(|child| child.member.as_ref());
             if let Some(member) = member {
-                card.runtime_ids.push(format!("runtime/{}", member.runtime_id));
                 if crate::graph::canonical_child_value(node, "host").is_none() {
                     inherited_hosts.insert(member.host.clone());
                 }
@@ -74,11 +75,22 @@ pub(super) fn cards(
                 fresh_receipt.query_row([actual, desired], |row| row.get::<_, bool>(0))
                     .optional()?.unwrap_or(false)
             } else { false };
-            let observed = fields.filter(|fields| fresh && member.is_some_and(|member| {
+            let fields = fields.filter(|fields| fresh && member.is_some_and(|member| {
                 fields["runtime_id"].as_str() == Some(member.runtime_id.as_str())
-            })).and_then(|fields| fields["status"].as_str());
+            }));
+            if let Some(fields) = fields.filter(|_| status.is_some_and(|status| status.actual_origin.is_some())) {
+                // Runtime resources require an observation. Terminal-capable resources come
+                // first so clients selecting runtime_ids[0] can open an available terminal.
+                runtimes.push((fields["terminal"].as_bool() != Some(true),
+                    format!("runtime/{}", fields["runtime_id"].as_str().expect("fenced runtime ID"))));
+            }
+            let observed = fields.and_then(|fields| fields["status"].as_str());
             let (rank, state) = match observed {
                 Some("failed") => (4, "failed"),
+                Some("exited") if fields.is_some_and(|fields| {
+                    fields["exit_code"].as_i64().is_some_and(|code| code != 0)
+                        || fields["exit_signal"].as_i64().is_some()
+                }) => (4, "failed"),
                 Some("stopped" | "exited" | "ended" | "absent") => (0, "stopped"),
                 _ if status.is_none_or(|status| status.reachability != "reachable") => (3, "waiting"),
                 Some("running" | "ready" | "working" | "idle") => (1, "running"),
@@ -91,8 +103,9 @@ pub(super) fn cards(
             .and_then(Value::as_str).filter(|host| *host != "local").map(str::to_owned)
             .or_else(|| (inherited_hosts.len() == 1).then(|| inherited_hosts.pop_first()).flatten())
             .map(|host| client_host_id(&host));
-        card.runtime_ids.sort();
-        card.runtime_ids.dedup();
+        runtimes.sort();
+        runtimes.dedup_by(|left, right| left.1 == right.1);
+        card.runtime_ids = runtimes.into_iter().map(|(_, id)| id).collect();
         cards.insert(name, card);
     }
     Ok(cards)

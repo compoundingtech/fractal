@@ -8,12 +8,9 @@ fn declare_exec_card(store: &Store, body: &str, key: &str) {
 }
 
 fn observe_exec_card(store: &Store, name: &str, status: &str) {
-    store.append_claim(&ClaimInput {
-        subject: format!("exec/example/workers/{name}"), kind: "runtime.observed".into(),
-        actor: None, fields: serde_json::from_value(json!({
-            "status":status, "runtime_id":name, "host":"node", "incarnation_id":"one"
-        })).unwrap(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-    }).unwrap();
+    roster_fixture_append(store, &format!("exec/example/workers/{name}"), "runtime.observed", json!({
+        "status":status, "runtime_id":name, "host":"node", "incarnation_id":"one"
+    }));
 }
 
 fn exec_card(store: &Store) -> Value {
@@ -60,8 +57,13 @@ fn exec_only_card_running_children_and_refresh() {
     assert!(card["incarnation_id"].is_null());
     assert!(card["current_session_id"].is_null());
     assert!(store.desired_subjects_named(&["agent/example/workers".into()]).unwrap()[0].member.is_none());
-    observe_exec_card(store, "second", "failed");
-    assert_eq!(exec_card(store)["state"], "failed", "a running sibling cannot mask failure");
+    roster_fixture_append(store, "exec/example/workers/second", "runtime.observed",
+        json!({"status":"exited", "exit_code":1, "runtime_id":"second", "host":"node"}));
+    assert_eq!(exec_card(store)["state"], "failed", "a running sibling cannot mask an unsuccessful exit");
+    roster_fixture_append(store, "exec/example/workers/first", "runtime.observed",
+        json!({"status":"exited", "exit_code":1, "runtime_id":"first", "host":"node"}));
+    assert_eq!(exec_card(store)["state"], "failed", "unsuccessful exits are not all-stopped");
+    observe_exec_card(store, "first", "running");
     observe_exec_card(store, "second", "indeterminate");
     assert_eq!(exec_card(store)["state"], "waiting", "unknown cannot turn green");
     observe_exec_card(store, "second", "exited");
@@ -143,4 +145,71 @@ fn exec_only_card_harness_root_unchanged() {
     assert_eq!(before["host_id"], after["host_id"]);
     assert_eq!(before["workspace"], after["workspace"]);
     assert_eq!(before["driver"], after["driver"]);
+}
+
+#[test]
+fn exec_only_card_runtime_resources_are_observed_and_terminal_first() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    declare_exec_card(store, r#"
+        host "node"
+        exec "first" { id "aaa-exec"; command "true"; }
+        exec "unobserved" { id "aaa-unobserved"; command "true"; }
+        pty "console" { id "zzz-console"; command "true"; }
+    "#, "mixed-runtime-kinds");
+    assert_eq!(exec_card(store)["runtime_ids"], json!([]));
+    for (subject, runtime, terminal) in [
+        ("exec/example/workers/first", "aaa-exec", false),
+        ("pty/example/workers/console", "zzz-console", true),
+    ] {
+        roster_fixture_append(store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":runtime, "terminal":terminal, "host":"node"
+        }));
+    }
+    assert_eq!(exec_card(store)["runtime_ids"], json!(["runtime/zzz-console", "runtime/aaa-exec"]));
+}
+
+#[test]
+fn exec_only_card_replication_arrival_order_does_not_prove_launch_freshness() {
+    const FLEET: &str = "6b61ab61-a6b5-40f4-b9bf-223e4104c7aa";
+    let author = Store::open_memory("author").unwrap();
+    let executor = Store::open_memory("node").unwrap();
+    let late = Store::open_memory("late-reader").unwrap();
+    let early = Store::open_memory("early-reader").unwrap();
+    for store in [&author, &executor, &late, &early] { store.bind_fleet(FLEET).unwrap(); }
+    let replicate = |from: &Store, to: &Store, writer: Option<&str>| {
+        let mut exchange = from.export_replication_exchange_answering(
+            FLEET, &to.replication_inventory().unwrap(), &to.replication_signature_requests().unwrap(),
+        ).unwrap();
+        if let Some(writer) = writer { exchange.envelopes.retain(|envelope| envelope.writer == writer); }
+        to.receive_replication_exchange(from.origin(), FLEET, &exchange).unwrap();
+        to.validate_replication_backlog().unwrap();
+        to.project_replication_backlog().unwrap();
+    };
+    let source = r#"host "node"; exec "first" { id "first"; command "true"; }"#;
+    declare_exec_card(&author, source, "initial");
+    for reader in [&executor, &late, &early] { replicate(&author, reader, None); }
+    observe_exec_card(&executor, "first", "running");
+    let old = executor.latest_claim("exec/example/workers/first", Some("runtime.observed")).unwrap().unwrap();
+    // Distinct canonical times, independently of local ingestion order on either reader.
+    std::thread::sleep(Duration::from_millis(2));
+    declare_exec_card(&author, &source.replace("true", "false"), "replacement");
+    let desired = author.selected_desired_token("exec/example/workers/first").unwrap().unwrap();
+    replicate(&author, &late, None);
+    replicate(&executor, &late, None);
+    assert!(late.claim_by_id(&old.id).unwrap().unwrap().store_index
+        > late.claim_by_id(&desired).unwrap().unwrap().store_index);
+    assert_eq!(exec_card(&late)["runtime_ids"], json!([]), "a delayed old receipt cannot prove the replacement");
+    replicate(&author, &executor, None);
+    std::thread::sleep(Duration::from_millis(2));
+    observe_exec_card(&executor, "first", "running");
+    let new = executor.latest_claim("exec/example/workers/first", Some("runtime.observed")).unwrap().unwrap();
+    // The observation writer's envelope is independent of the declaration writer.
+    replicate(&executor, &early, Some(executor.origin()));
+    replicate(&author, &early, None);
+    assert!(early.claim_by_id(&new.id).unwrap().unwrap().store_index
+        < early.claim_by_id(&desired).unwrap().unwrap().store_index);
+    assert_eq!(exec_card(&early)["runtime_ids"], json!(["runtime/first"]),
+        "a valid receipt remains valid when its declaration arrives later");
 }
