@@ -135,7 +135,7 @@ const LiveSidebarTreeView = React.memo((props: {
 })
 LiveSidebarTreeView.displayName = 'LiveSidebarTreeView'
 
-// A static import would evaluate the kit Transcript/Markdown/refractor before the shell paints.
+// A static import would evaluate the kit Transcript/Markdown before the shell paints.
 // Demand and speculative prefetch share one in-flight request; rejection releases it for retry.
 let conversationPaneModule: Promise<typeof ConversationPaneModule> | undefined
 const loadConversationPane = () => {
