@@ -10,6 +10,7 @@ tracked file or a directory; one that matches no tracked file is an error (the l
 During arn:lmig:smalltalk:2026-10-27-dot-fractal-config, a declared pair `.st`, `.fractal` requires at least one layout, not both.
 --link PATH symlinks an untracked directory of the repository into the copy when it exists (the megarepo members under repos/, which the
 tests that run genie import): environment the inputs pin (megarepo.lock, flake.lock), not an input of its own.
+The git-private ci-sparse-origin.json records the originating commit/tree and synthetic HEAD for diagnostic receipts; it is not an input.
 """
 import argparse
 import json
@@ -88,6 +89,8 @@ def main(argv):
     if unmatched:
         raise SystemExit(f'ci-sparse-tree: inputs of {args.check} that match no tracked file: {", ".join(unmatched)}')
     args.into.mkdir(parents=True, exist_ok=True)
+    origin_head = subprocess.check_output(['git', '-C', str(args.repo), 'rev-parse', 'HEAD'], text=True).strip()
+    origin_tree = subprocess.check_output(['git', '-C', str(args.repo), 'rev-parse', f'{origin_head}^{{tree}}'], text=True).strip()
     copy(args.repo, args.into, names)
     for link in args.link:
         source = (args.repo / link).resolve()
@@ -105,6 +108,10 @@ def main(argv):
     subprocess.run(['git', '--literal-pathspecs', '-C', str(args.into), 'add', '-f', '--pathspec-from-file=-', '--pathspec-file-nul'], check=True, env=env, capture_output=True,
                    input='\0'.join(names).encode())
     subprocess.run(['git', '-C', str(args.into), 'commit', '-q', '-m', f'sparse tree of {args.check}'], check=True, env=env, capture_output=True)
+    sparse_head = subprocess.check_output(['git', '-C', str(args.into), 'rev-parse', 'HEAD'], text=True, env=env).strip()
+    # Git-private metadata cannot be supplied by a tracked input or alter the sparse input tree.
+    (args.into / '.git/ci-sparse-origin.json').write_text(json.dumps({
+        'version': 1, 'origin_head': origin_head, 'origin_tree': origin_tree, 'sparse_head': sparse_head}) + '\n')
     print(f'ci-sparse-tree: {len(names)} files of {args.check} in {args.into}')
     return 0
 
