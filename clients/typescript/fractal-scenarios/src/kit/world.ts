@@ -106,7 +106,7 @@ export const buildWorld = (definition: WorldDefinition, generic: VariantTable, n
   const ctx: FactoryContext = { world: definition.scope ?? definition.id, rng: fork(rng, 'slices'), cast, t: timeContext(now) }
   const written = definition.slices(ctx)
   const authored: Slices = { ...written, objectives: written.objectives ?? { kind: 'objectives', variant: 'default', source: { _tag: 'synthetic', seed: definition.seed },
-    decode: 'strict', loading: false, state: noObjectives(ctx), timeline: [] } }
+    decode: 'strict', loading: false, state: noObjectives(), timeline: [] } }
   // Only named default inventories get folders; explicit slice overrides retain their own data.
   const own: Slices = definition.id === 'fleet-mid-refactor' || definition.id === 'huge' ? {
     ...authored,

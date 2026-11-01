@@ -513,10 +513,10 @@
           "window": "5 hours"
         },
         {
-          "about": "fleet/api weekly limit",
+          "about": "atlas/api weekly limit",
           "account": "fleet-api",
           "current": "64% used",
-          "explain": "What fleet/api allows before anthropic stops its agents until the reset.",
+          "explain": "What atlas/api allows before anthropic stops its agents until the reset.",
           "id": "fleet-api/weekly",
           "kind": "budget",
           "measured_at_unix_ms": 1893497700000,
@@ -605,7 +605,7 @@
             "used_microusd": 128400000
           },
           "kind": "api-key",
-          "name": "fleet/api",
+          "name": "atlas/api",
           "provider": "anthropic"
         }
       ],
