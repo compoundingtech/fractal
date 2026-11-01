@@ -362,7 +362,7 @@
    ]
   },
   "fractal-terminal-direct": {
-   "extra": []
+   "extra": ["crates/fractal"]
   },
   "fractal-tiles-registry": {
    "extra": []
