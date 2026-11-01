@@ -355,7 +355,7 @@ mod tests {
                     runtime: primary.clone(), published: primary,
                 },
             ));
-            assert_eq!(client.socket_path().as_deref(), Some(live.as_path()));
+            assert_eq!(client.socket_path().as_deref(), Some(fs::canonicalize(&live).unwrap().as_path()));
             let hash = hex::encode(Sha256::digest(b"image"));
             let message = serde_json::from_value(serde_json::json!({
                 "subject":"message/example", "from":"person/example", "to":"agent/example",
