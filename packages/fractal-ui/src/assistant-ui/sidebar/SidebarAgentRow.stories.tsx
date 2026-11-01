@@ -162,7 +162,7 @@ async function paintedText(card: HTMLElement): Promise<string> {
 
 async function assertCompactCard(canvasElement: HTMLElement) {
   await assertRowNames(canvasElement)
-  const cards = within(canvasElement).getAllByTestId('agent-hover-card')
+  const cards = await within(canvasElement).findAllByTestId('agent-hover-card')
   await expect(cards).toHaveLength(1)
   const card = cards[0]!
   await expect(card.getBoundingClientRect().width).toBeLessThanOrEqual(400)
