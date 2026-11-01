@@ -360,9 +360,14 @@ with tempfile.TemporaryDirectory() as tmp:
     # Ctrl-C and SIGTERM on the wrapper stop the run and free the slot too.
     for number in (signal.SIGINT, signal.SIGTERM):
         stopped = start(env, command=["sleep", "60"])
-        until(holder.exists, "run holds the slot")
-        pid = json.loads(holder.read_text())["pid"]
+        # No pause between looks, and nothing read first: the signal comes as soon as the record shows the slot held, which is
+        # where a wrapper that installed its handlers after publishing the record exited without dropping it (2026-11-01, two
+        # merge groups). The record names the wrapper itself.
+        deadline = time.time() + 10
+        while not holder.exists():
+            assert time.time() < deadline, "timed out: run holds the slot"
         stopped.send_signal(number)
+        pid = stopped.pid
         assert stopped.wait(10) == 128 + number
         assert not alive(pid) and not holder.exists()
 
