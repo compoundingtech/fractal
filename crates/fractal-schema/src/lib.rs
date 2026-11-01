@@ -18,6 +18,11 @@ pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
 pub mod review;
+pub mod task_grants;
+pub use task_grants::{
+    TaskManifestError, TaskManifestV1, canonicalize_task_manifest_v1,
+    digest_task_manifest_v1, parse_task_manifest_v1,
+};
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;

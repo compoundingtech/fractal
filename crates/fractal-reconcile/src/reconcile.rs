@@ -61,6 +61,8 @@ pub mod placement;
 pub mod run_report;
 pub mod start_spacing;
 pub mod start_jobs;
+pub mod seat_admission;
+mod seat_admission_queue;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
@@ -1234,6 +1236,7 @@ pub struct Reconciler<R = NativeRuntime> {
     event_notify: watch::Sender<u64>,
     start_spacing: start_spacing::StartSpacing,
     start_jobs: start_jobs::StartJobs,
+    seat_admission: seat_admission::Controller,
     #[cfg(any(test, feature = "test-support"))]
     pub wait_for_test_starts: AtomicBool,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
@@ -1475,6 +1478,7 @@ impl Reconciler<NativeRuntime> {
             event_notify,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
@@ -1655,6 +1659,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             event_notify: watch::channel(0_u64).0,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
@@ -2828,6 +2833,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_pass(&self) -> Result<()> {
+        self.refresh_seat_admission();
         // Start completion can mutate the runtime-observation fence. Capture before
         // it can read the shared snapshot, so pre-completion evidence cannot later
         // be presented to planning as a post-completion observation.
@@ -2906,6 +2912,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject.kind = "stop".into();
             }
         }
+        self.cancel_invalid_admissions(&desired)?;
         // A stopped root ends every task it declared: each runs the exec's own stop below and is
         // not launched or restarted meanwhile. Starting the root again declares them again.
         let stopped_roots = desired
@@ -5943,10 +5950,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut attempts = messages
                 .iter()
                 .filter(|message| {
-                    !message
-                        .tags
-                        .iter()
-                        .any(|tag| tag == "st3-wake-source:manual")
+                    !crate::silent::message_tag_values(
+                        message.tags.iter().map(String::as_str),
+                        "wake-source:",
+                    )
+                    .any(|value| value == "manual")
                 })
                 .filter(|message| {
                     work_message_target(message).is_some_and(
@@ -7490,6 +7498,32 @@ impl<R: RuntimeControl> Reconciler<R> {
                 )?;
                 return Ok(false);
             }
+        }
+        if !self.admit_seat_start(subject, member, request)? {
+            return Ok(false);
+        }
+        if let Some(id) = member.environment.get(crate::rollout::OPERATION_ENV) {
+            let mut operation = self
+                .store
+                .rollout(&subject.subject)?
+                .context("rollout start has no operation")?;
+            anyhow::ensure!(
+                operation.id == *id && operation.phase == "starting",
+                "rollout changed before start admission"
+            );
+            operation.desired_token = self
+                .store
+                .selected_desired_token(&subject.subject)?
+                .context("replacement has no desired token")?;
+            crate::rollout::phase(
+                &self.store,
+                &subject.subject,
+                &operation,
+                "start-attempted",
+                None,
+                &[],
+            )?;
+            self.signal_changed();
         }
         let workspace = Path::new(&member.workspace);
         if workspace.exists() {
@@ -15079,7 +15113,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         // Held mail waits for the seat's next turn, not for this seat.
                         && !crate::silent::waits_for_turn(&message)
                         && !message.tags.iter().any(|tag| {
-                            tag.starts_with("st3-work:") || tag.starts_with("st3-wake-source:")
+                            crate::silent::strip_message_tag_prefix(tag, "work:").is_some()
+                                || crate::silent::strip_message_tag_prefix(tag, "wake-source:").is_some()
                         })
                 });
             Ok(if unread {
@@ -16930,6 +16965,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let unkept_cursors = self.unkept_cursors.clone();
         let github_plugin = self.github_plugin.clone();
         let refill_mirrors = self.refill_mirrors;
+        let poller_host = self.host.clone();
         let agent_workspaces = agent_workspaces.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
@@ -17070,7 +17106,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .and_then(crate::resource::replicated_cursor),
                             _ => observation.cursor.clone(),
                         };
-                        match store.record_resource_observation_outcome(
+                        let mirrored = (spec.provider == "github.repository")
+                            .then(|| mirrored_prior(&store, &github_plugin, &poller_host, &spec, &observation.facts, cursor.as_deref()))
+                            .flatten();
+                        match store.record_resource_observation_mirrored(
                             &observer_subject,
                             &revision,
                             refresh_attempt.as_deref(),
@@ -17080,6 +17119,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             observation.next_check_unix_ms,
                             &selected,
                             Some(&current),
+                            mirrored.as_ref(),
                         ) {
                             Ok((outcome, wrote)) => {
                                 if standing {
@@ -17099,7 +17139,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 durable_changed = wrote;
                                 if spec.provider == "github.repository" {
                                     mirror_observation(
-                                        &github_plugin, &observer_subject, &spec,
+                                        &store, &github_plugin, &observer_subject, &spec,
                                         cursor.as_deref(), observation.cursor.as_deref(), &outcome.recorded_items,
                                     );
                                     // A mirror that is new, moved, restored, set aside or behind
@@ -17110,7 +17150,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         && github_plugin.refill_due(&spec.resource, now_ms())
                                     {
                                         refill_mirror(
-                                            provider.as_ref(), &github_plugin, &observer_subject, &spec,
+                                            &store, provider.as_ref(), &github_plugin, &observer_subject, &spec,
                                             observation.cursor.as_deref(),
                                         ).await;
                                     }
@@ -18499,7 +18539,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .store
                 .claim_by_id(claim_id)?
                 .filter(|claim| claim.subject == name)
-                .map(|claim| claim.body));
+                // A gate on a compact item state reads its compact facts, as on an observation.
+                .map(|claim| fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body)));
         }
         self.store.latest_actual_value(subject)
     }
@@ -18682,6 +18723,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 /// look. The mirror is a cache: a failure is logged and the reads it serves fall back to the
 /// graph, never failing the observer.
 fn mirror_observation(
+    store: &Store,
     plugin: &github_plugin_store::GithubPluginStore,
     observer: &str,
     spec: &crate::model::ObserverSpec,
@@ -18700,17 +18742,118 @@ fn mirror_observation(
             })
         })
         .collect::<Vec<_>>();
-    if let Err(error) = plugin.mirror(&spec.resource, observer, &spec.locator, polled_from, cursor, &items) {
-        tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
+    let in_graph = |subject: &str| -> Result<bool> { Ok(store.latest_claim_id(subject)?.is_some()) };
+    let events = match plugin.mirror_checked(&spec.resource, observer, &spec.locator, polled_from, cursor, &items, &in_graph) {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
+            return;
+        }
+    };
+    // Each event is one keyed claim, written once, within the plugin's graph allowlist.
+    for event in events {
+        let Some(subject) = event["subject"].as_str() else { continue };
+        let mut fields = BTreeMap::from([
+            ("version".to_owned(), Value::from(fractal_schema::github_plugin::VERSION)),
+            ("item".to_owned(), event["item"].clone()),
+            ("event".to_owned(), event["event"].clone()),
+            ("observer".to_owned(), Value::String(observer.to_owned())),
+            ("at".to_owned(), event["at"].clone()),
+            ("detail".to_owned(), event["detail"].clone()),
+        ]);
+        if let Some(head) = event["head_sha"].as_str() {
+            fields.insert("head_sha".into(), Value::String(head.to_owned()));
+        }
+        let written = github_plugin_store::MANIFEST
+            .admit(subject, fractal_schema::github_plugin::EVENT, &fields)
+            .map_err(anyhow::Error::new)
+            .and_then(|()| {
+                store.append_claim(&ClaimInput {
+                    subject: subject.to_owned(),
+                    kind: fractal_schema::github_plugin::EVENT.into(),
+                    actor: None,
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("github-event:{subject}")),
+                }).map_err(|error| anyhow::anyhow!(error.message))
+            });
+        if let Err(error) = written {
+            tracing::warn!(observer, subject, "a GitHub event was not written to the graph; the mirror keeps it: {error:#}");
+        }
     }
+}
+
+/// What a repository's poller lays beside a look it records, from a filled mirror: each listed
+/// item's mirrored facts, and whether the repository is in compact mode. Compact mode, where an
+/// item's change is recorded as `vcs.item.state` alone, needs every current member of the fleet
+/// to advertise the GitHub plugin; it is decided again on each look, so a member of an older
+/// build turns snapshots back on. `None` without a filled mirror, or when reading it fails: the
+/// look is then recorded as before.
+fn mirrored_prior(
+    store: &Store,
+    plugin: &github_plugin_store::GithubPluginStore,
+    host: &str,
+    spec: &crate::model::ObserverSpec,
+    facts: &Value,
+    polled_from: Option<&str>,
+) -> Option<crate::model::MirroredPrior> {
+    let read = || -> Result<Option<crate::model::MirroredPrior>> {
+        // Only a mirror that followed every look up to the one this look starts from knows at
+        // least what the graph does.
+        if !plugin.current(&spec.resource, polled_from)? {
+            return Ok(None);
+        }
+        let mut items = HashMap::new();
+        for (segment, field) in [("pull-request", "pull_requests"), ("issue", "issues")] {
+            for number in facts.get(field).and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|item| item.get("number").and_then(Value::as_u64))
+            {
+                if let Some(item) = plugin.item(&spec.resource, number)? {
+                    items.insert(format!("{}/{segment}/{number}", spec.resource), item["facts"].clone());
+                }
+            }
+        }
+        // Compact mode fails closed: every current member of the fleet, whatever it reads,
+        // must advertise the plugin, so a member that is older, or whose dependency on this
+        // repository has not reached this poller yet, keeps reading full snapshots.
+        let membership = store.fleet_membership()?;
+        let mut holding = None;
+        for member in membership.incarnations()
+            .filter(|member| member.end.is_none() && member.name != host)
+            .map(|member| member.name.clone())
+            .collect::<BTreeSet<_>>()
+        {
+            let advertised = store.advertised_feature(&member, "github_plugin")?;
+            if advertised.as_ref().and_then(Value::as_i64).is_none_or(|version| version < 1) {
+                holding = Some(member);
+                break;
+            }
+        }
+        let compact = holding.is_none();
+        if plugin.note_compact(&spec.resource, compact) {
+            match &holding {
+                None => tracing::info!(resource = %spec.resource, "compact mode on: every member advertises the GitHub plugin; item snapshots stop"),
+                Some(member) => tracing::info!(resource = %spec.resource, member, "compact mode off: this member does not advertise the GitHub plugin, so item snapshots continue"),
+            }
+        }
+        Ok(Some(crate::model::MirroredPrior { compact, items }))
+    };
+    read().unwrap_or_else(|error| {
+        tracing::warn!(resource = %spec.resource, "the GitHub plugin mirror could not be read for a look; it is recorded from the graph: {error:#}");
+        None
+    })
 }
 
 /// Fill a repository's mirror from GitHub itself: one fresh look by the repository provider, as a
 /// new poller's first look reads (the open items, with each open pull request's details), within
 /// the same request budget as the observer's own polls. It records nothing in the graph and
 /// moves no cursor: the observer's own looks keep delivering from where they read to. Each item
-/// is laid over the mirror's row as a recording would lay it.
+/// is laid over the mirror's row as a recording would lay it, with the comments the graph has
+/// recorded on it: a fresh listing does not reach older comments, and a row without them would
+/// take each one for new on the item's next look and hand it out as an event (#4549).
 async fn refill_mirror(
+    store: &Store,
     provider: &dyn ResourceProvider,
     plugin: &github_plugin_store::GithubPluginStore,
     observer: &str,
@@ -18728,9 +18871,25 @@ async fn refill_mirror(
     };
     let filled = async {
         let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;
+        let recorded_comments = store
+            .repository_items(&spec.resource, None)?
+            .into_iter()
+            .filter_map(|item| Some((item.subject, item.facts.get("recent_comments")?.as_array()?.clone())))
+            .collect::<HashMap<_, _>>();
         let mut known = |subject: &str| {
             let number = subject.rsplit('/').next()?.parse::<u64>().ok()?;
-            Some(plugin.item(&spec.resource, number).ok()??["facts"].clone())
+            let mirrored = plugin.item(&spec.resource, number).ok()?.map(|item| item["facts"].clone());
+            let Some(recorded) = recorded_comments.get(subject) else {
+                return mirrored;
+            };
+            let mut facts = mirrored.unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+            let comments = crate::resource::merge_recent_comments(
+                facts.get("recent_comments").and_then(Value::as_array).into_iter().flatten(),
+                recorded,
+                Some(crate::resource::RECENT_COMMENTS),
+            );
+            facts["recent_comments"] = Value::Array(comments);
+            Some(facts)
         };
         let items = crate::store::repository_item_facts(&spec.resource, &observation.facts, &mut known)
             .into_iter()
@@ -19581,14 +19740,44 @@ fn nested_under_work(step: &StepRunView, work: &[StepRunView]) -> bool {
 }
 
 fn work_message_target(message: &crate::model::MessageView) -> Option<(&str, u32, u32, &str)> {
-    message.tags.iter().find_map(|tag| {
-        let mut parts = tag.strip_prefix("st3-work:")?.rsplitn(4, '@');
-        let incarnation = parts.next()?;
-        let readiness_epoch = parts.next()?.parse::<u32>().ok()?;
-        let attempt = parts.next()?.parse::<u32>().ok()?;
-        let step_subject = parts.next()?;
-        Some((step_subject, attempt, readiness_epoch, incarnation))
-    })
+    crate::silent::message_tag_values(message.tags.iter().map(String::as_str), "work:").find_map(
+        |value| {
+            let mut parts = value.rsplitn(4, '@');
+            let incarnation = parts.next()?;
+            let readiness_epoch = parts.next()?.parse::<u32>().ok()?;
+            let attempt = parts.next()?.parse::<u32>().ok()?;
+            Some((parts.next()?, attempt, readiness_epoch, incarnation))
+        },
+    )
+}
+
+#[test]
+fn work_message_target_accepts_fractal_and_prefers_old() {
+    let mut message: crate::model::MessageView = serde_json::from_value(serde_json::json!({
+        "subject": "message/test", "from": "daemon/runtime", "to": "agent/worker",
+        "content": "", "status": "sent", "tags": [], "in_reply_to": null, "created_index": 0
+    }))
+    .unwrap();
+    for prefix in ["st3-", "fractal-"] {
+        message.tags = vec![format!("{prefix}work:step-run/r/s@2@3@inc")];
+        assert_eq!(
+            work_message_target(&message),
+            Some(("step-run/r/s", 2, 3, "inc"))
+        );
+    }
+    message.tags = vec![
+        "fractal-work:other@9@8@new".into(),
+        "st3-work:old@1@2@old".into(),
+    ];
+    assert_eq!(work_message_target(&message), Some(("old", 1, 2, "old")));
+    for prefix in ["st3-", "fractal-"] {
+        message.tags = vec![
+            "st3-work:malformed".into(),
+            format!("{prefix}work:step@2@3@inc"),
+        ];
+        let expected = (prefix == "st3-").then_some(("step", 2, 3, "inc"));
+        assert_eq!(work_message_target(&message), expected);
+    }
 }
 
 fn work_message_should_close(
@@ -20297,6 +20486,7 @@ pub mod tests {
     mod run_report_tests;
     mod start_spacing_loop;
     mod start_preemption;
+    mod seat_admission_queue;
     mod terminal_step_guard;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
@@ -40967,6 +41157,230 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0]["event"], "closed");
         assert_eq!(events[0]["subject"], "github-event/repo/issue/3/closed");
+    }
+
+    /// In compact mode a poller records a change confined to compact facts as `vcs.item.state`
+    /// alone, and each derived event as one `github.event` claim. A change to a fact a wake or
+    /// a delivery reads, such as a new comment, still writes a full snapshot, so when polling
+    /// moves to a member without the mirror, nothing is delivered twice: the facts that drifted
+    /// in the graph are a baseline for its first look.
+    #[tokio::test]
+    async fn compact_mode_records_compact_changes_alone_and_a_move_delivers_nothing_twice() {
+        struct OnePoll {
+            facts: Value,
+            cursor: String,
+        }
+        impl ResourceProvider for OnePoll {
+            fn observe(&self, _: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts: self.facts.clone(),
+                    cursor: Some(self.cursor.clone()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "comments"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example.reader"; delivery "message" }
+subscription "comments" { observer "observer/repo"; on "comments"; to "agent/example.reader"; delivery "message" }"#,
+            "compact-mode",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let issue = |state: &str, title: &str, comments: &[u64]| serde_json::json!({
+            "node_id": "I_orchid", "number": 1, "state": state, "title": title,
+            "url": "https://github.com/acme/garden/issues/1",
+            "comments": comments.len(),
+            "recent_comments": comments.iter().map(|id| serde_json::json!({
+                "kind": "comment", "id": id, "author": "fern", "at": format!("2026-10-30T10:0{id}:00Z"),
+            })).collect::<Vec<_>>(),
+        });
+        let listing = |state: &str, title: &str, comments: &[u64]| serde_json::json!({"repository_id": 7, "issues": [issue(state, title, comments)]});
+        let poll = |plugin: Arc<github_plugin_store::GithubPluginStore>, facts: Value, cursor: &str| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
+            .with_resource_provider(Arc::new(OnePoll { facts, cursor: cursor.to_owned() }));
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            let cursor = cursor.to_owned();
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while plugin.cursor("observer/repo").unwrap() != Some(Some(cursor.clone())) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll keeps its cursor");
+            }
+        };
+        let item = "resource/repo/issue/1";
+        let count = |kind: &str| store.claims_for(item, None).unwrap().into_iter()
+            .filter(|claim| claim.kind == kind).count();
+        let delivered = || store.messages(Some("agent/example.reader"), true).unwrap().len();
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+
+        // The first look is a baseline, and the mirror fills from it.
+        poll(plugin.clone(), listing("open", "Orchid", &[]), "c1").await;
+        assert!(plugin.filled("resource/repo").unwrap());
+        assert_eq!(delivered(), 0);
+
+        // A comment is a delivery fact: it is delivered once and keeps a full snapshot.
+        let snapshots = count("resource.observed");
+        poll(plugin.clone(), listing("open", "Orchid", &[1]), "c2").await;
+        assert_eq!(delivered(), 1);
+        assert_eq!(count("resource.observed"), snapshots + 1, "a comment writes a snapshot");
+        poll(plugin.clone(), listing("open", "Orchid", &[1]), "c3").await;
+        assert_eq!(delivered(), 1, "a known comment is not delivered again");
+
+        // A close and a new title are not delivery facts: the close is compact state and one
+        // keyed event, and neither writes a snapshot.
+        let snapshots = count("resource.observed");
+        let states = count("vcs.item.state");
+        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4").await;
+        assert_eq!(count("resource.observed"), snapshots, "a compact-only change writes no snapshot");
+        assert_eq!(count("vcs.item.state"), states + 1);
+        assert_eq!(store.latest_actual_value(item).unwrap().unwrap()["facts"]["state"], "closed");
+        assert_eq!(store.claims_for("github-event/repo/issue/1/closed", None).unwrap().len(), 1);
+        let after_close = delivered();
+        // The same facts again: an unchanged look writes no snapshot and no state.
+        let (snapshots, states) = (count("resource.observed"), count("vcs.item.state"));
+        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4b").await;
+        assert_eq!((count("resource.observed"), count("vcs.item.state")), (snapshots, states), "an unchanged look records nothing");
+
+        // Polling moves to a member with no mirror. Its first look finds the title the graph
+        // never recorded: that is a baseline, and nothing is delivered twice.
+        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed", &[1]), "c5").await;
+        assert_eq!(delivered(), after_close, "a move after compact-only changes delivers nothing twice");
+
+        // A filled mirror that missed a look, as when its write failed after the graph write, is
+        // not a look's prior: the look is compared with the graph.
+        let spec = crate::graph::observer_spec(
+            &store.desired_subjects_named(&["observer/repo".into()]).unwrap()[0].desired,
+        ).unwrap();
+        let facts = listing("closed", "Orchid, renamed", &[1]);
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c4b")).is_some());
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c9")).is_none(), "behind the cursor");
+
+        // The graph moves on while this mirror and its cursor stay at the earlier look, as when
+        // the daemon stops between the graph write and the mirror write. The look from that
+        // cursor sees a comment the graph already delivered: it is not delivered again.
+        let comments = delivered();
+        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed", &[1, 2]), "c6").await;
+        assert_eq!(delivered(), comments + 1, "the second comment is delivered");
+        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1, 2]), "c7").await;
+        assert_eq!(delivered(), comments + 1, "a mirror behind the graph delivers it nothing twice");
+    }
+
+    /// A mirror refilled from GitHub keeps the comments the graph recorded on each item, which
+    /// a fresh listing does not reach: the next look at an item it filled hands out no event
+    /// for an old comment, and a new comment is still one event (#4549).
+    #[tokio::test]
+    async fn a_refilled_mirror_hands_out_no_event_for_an_old_comment() {
+        /// Answers a look from a cursor with `look`, and the refill's look from none with
+        /// `refill`, a listing that names no comment.
+        struct Answers {
+            look: Value,
+            refill: Value,
+            cursor: String,
+        }
+        impl ResourceProvider for Answers {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                let facts = if request.cursor.is_some() { self.look.clone() } else { self.refill.clone() };
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts,
+                    cursor: Some(self.cursor.clone()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "comments"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "comments" { observer "observer/repo"; on "comments"; to "agent/example.reader"; delivery "message" }"#,
+            "refill-comments",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let issue = |number: u64, title: &str, comments: &[u64]| {
+            let mut issue = serde_json::json!({
+                "node_id": format!("I_moss{number}"), "number": number, "state": "open", "title": title,
+                "url": format!("https://github.com/acme/garden/issues/{number}"),
+            });
+            if !comments.is_empty() {
+                issue["comments"] = Value::from(comments.len());
+                issue["recent_comments"] = comments.iter().map(|id| serde_json::json!({
+                    "kind": "comment", "id": id, "author": "fern", "at": format!("2026-10-2{id}T10:00:00Z"),
+                })).collect();
+            }
+            issue
+        };
+        let listing = |issues: Vec<Value>| serde_json::json!({"repository_id": 7, "issues": issues});
+        let poll = |plugin: Arc<github_plugin_store::GithubPluginStore>, look: Value, refill: Value, cursor: &str| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
+            .with_resource_provider(Arc::new(Answers { look, refill, cursor: cursor.to_owned() }));
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            let cursor = cursor.to_owned();
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                // A bound for a loaded machine, not an expected duration.
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while plugin.cursor("observer/repo").unwrap() != Some(Some(cursor.clone())) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll keeps its cursor");
+            }
+        };
+        let comment_event = |id: u64| store.claims_for(&format!("github-event/repo/issue/2/comment/{id}"), None).unwrap().len();
+
+        // Issue 2's comment 3 is recorded in the graph, by a poller whose mirror is then lost.
+        let first = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        let both = listing(vec![issue(1, "Fern", &[]), issue(2, "Moss", &[3])]);
+        poll(first.clone(), both.clone(), both, "c1").await;
+        let commented = listing(vec![issue(2, "Moss", &[3, 4])]);
+        poll(first, commented.clone(), commented, "c2").await;
+        assert_eq!(comment_event(4), 1, "a new comment is one event");
+
+        // A poller with no mirror looks at issue 1 alone, then refills from a listing that names
+        // neither issue's comments.
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        let bare = listing(vec![issue(1, "Fern", &[]), issue(2, "Moss", &[])]);
+        poll(plugin.clone(), listing(vec![issue(1, "Fern, renamed", &[])]), bare.clone(), "c3").await;
+        assert!(plugin.filled("resource/repo").unwrap());
+
+        // Its next look sees issue 2 with the comments it already had: none is an event.
+        poll(plugin.clone(), listing(vec![issue(2, "Moss, renamed", &[3, 4])]), bare.clone(), "c4").await;
+        let events = plugin.events("resource/repo", Some(2), 10).unwrap();
+        assert!(events.is_empty(), "an old comment is no event: {events:?}");
+        assert_eq!((comment_event(3), comment_event(4)), (0, 1));
+
+        // A comment written after the refill is one event.
+        poll(plugin.clone(), listing(vec![issue(2, "Moss, renamed", &[3, 4, 5])]), bare, "c5").await;
+        let events = plugin.events("resource/repo", Some(2), 10).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["subject"], "github-event/repo/issue/2/comment/5");
+        assert_eq!(comment_event(5), 1);
     }
 
     /// Polling moves to a member without the plugin database, between two polls by the real

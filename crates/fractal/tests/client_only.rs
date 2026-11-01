@@ -144,6 +144,7 @@ fn state(root: &Path, node: &str) -> AppState {
         ))
         .unwrap();
     AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(store),
         notify: Arc::new(Notify::new()),

@@ -43,11 +43,11 @@ pub struct Prepared {
 }
 
 impl Prepared {
-    pub async fn serve(self, state: crate::api::AppState) -> anyhow::Result<()> {
+    pub async fn serve(self, state: crate::api::AppState, mode: crate::config::WorkerIngressGenerationCheck) -> anyhow::Result<()> {
         let Some((listener, web)) = self.listener else {
             return std::future::pending().await;
         };
-        let app = crate::api::worker_authenticated(crate::api::router(state), crate::api::worker_observer(None)?)
+        let app = crate::api::worker_authenticated(crate::api::router(state), crate::api::worker_observer(None)?, mode)
             .fallback_service(Router::new().fallback(static_asset).with_state(web.clone()))
             .layer(middleware::from_fn_with_state(web, admission));
         axum::serve(listener, app).await?;

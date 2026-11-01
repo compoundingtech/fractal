@@ -58,7 +58,7 @@ impl Store {
                 subjects.push(status);
             }
         }
-        Ok(StatusResponse { store_index: index, subjects, pending_actions: Vec::new() })
+        Ok(StatusResponse { seat_admission: None, store_index: index, subjects, pending_actions: Vec::new() })
     }
 
     pub fn pending_human_reviews(&self, reviewer: Option<&str>) -> Result<Vec<HumanReviewView>> {

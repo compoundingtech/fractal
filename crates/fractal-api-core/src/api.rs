@@ -238,6 +238,8 @@ pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
     pub store: Arc<Store>,
+    /// Process-local seat admission observations, never replicated as graph claims.
+    pub seat_admission: Arc<fractal_runtime::seat_admission_status::Status>,
     pub private_notes: Arc<crate::private_notes::Authority>,
     pub notify: Arc<Notify>,
     pub event_notify: watch::Sender<u64>,
@@ -382,9 +384,19 @@ pub fn signal_changed(state: &AppState) {
     signal_visible_change(state);
 }
 
-/// The reconciler reads a message only when it is a work wake, tagged `st3-work:`.
+/// The reconciler reads a message only when it carries a work-wake tag.
 pub fn is_work_wake(tags: &[String]) -> bool {
-    tags.iter().any(|tag| tag.starts_with("st3-work:"))
+    crate::silent::message_tag_values(tags.iter().map(String::as_str), "work:")
+        .next()
+        .is_some()
+}
+
+#[test]
+fn work_wake_prefixes() {
+    for prefix in ["st3-", "fractal-"] {
+        assert!(is_work_wake(&[format!("{prefix}work:step-run/r/s@1@1@x")]));
+    }
+    assert!(!is_work_wake(&["fractal-work-handoff:r/s".into()]));
 }
 
 /// A message write wakes the reconciler only for a work wake, since the reconciler reads no other
@@ -675,6 +687,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
+        .route("/v1/agents/rename-id/proof/export", post(agents::export_agent_rename_proof))
+        .route("/v1/missions/rename-id/proof/export", post(agents::export_mission_rename_proof))
+        .route("/v1/fleet/anchor", get(fleet::fleet_anchor))
         .route("/v1/agents/restart", post(agents::restart_agent))
         .route("/v1/agents/rollout", post(agents::rollout_agent))
         .route("/v1/agents/start", post(agents::start_mission_seat))
@@ -7166,6 +7181,23 @@ pub async fn serve_tcp(address: &str, app: Router) -> anyhow::Result<()> {
 }
 
 
+pub fn admission_now() -> u64 {
+    (client_now_ms() / 1_000).min(u128::from(u64::MAX)) as u64
+}
+
+/// Attach process-local admission facts only at a current API response boundary.
+pub fn overlay_seat_admission(state: &AppState, items: &mut [Value], history: bool) {
+    if history { return; }
+    let now = admission_now();
+    for item in items {
+        let admission = item["id"].as_str()
+            .and_then(|subject| state.seat_admission.subject(subject, now));
+        if let Some(admission) = admission {
+            item["seat_admission"] = admission;
+        }
+    }
+}
+
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({
         "status": "ready",
@@ -7175,7 +7207,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":1},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
     })))
 }
 
@@ -7796,6 +7828,15 @@ fn doctor_report_with_operation_drift(
     drift: &anyhow::Result<Vec<String>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
     let mut checks = Vec::new();
+    let admission = state.seat_admission.snapshot(admission_now());
+    checks.push(DoctorCheck {
+        name: "seat-admission".into(),
+        status: "pass".into(),
+        message: format!("mode={}; reason={}; pendingCount={}; oldestPendingAgeSecs={}",
+            admission["mode"].as_str().unwrap_or("unknown"),
+            admission["reason"].as_str().unwrap_or("unknown"),
+            admission["pendingCount"], admission["oldestPendingAgeSecs"]),
+    });
     let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
         .map_err(ApiError::internal)?
         .is_some_and(|claim| claim.body.pointer("/fields/features/harness_access_auto").and_then(Value::as_u64) == Some(1));
@@ -8577,11 +8618,13 @@ fn doctor_report_with_operation_drift(
     } else {
         "pass"
     };
+    let mut performance = crate::performance::snapshot();
+    performance["seatAdmission"] = admission;
     Ok(Json(DoctorReport {
         machine_version: Some(fractal_drivers::version::machine_version()),
         status: report_status.into(),
         checks,
-        performance: crate::performance::snapshot(),
+        performance,
     }))
 }
 

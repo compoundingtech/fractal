@@ -428,6 +428,7 @@ impl Node {
         let reconciler =
             Reconciler::new(store.clone(), runtime.clone(), name.into(), notify.clone());
         let state = AppState {
+            seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify,

@@ -541,6 +541,15 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
     }
     let client = Client::new(endpoint.clone());
     match command {
+        FleetCommand::Anchor { command: FleetAnchorCommand::Show } => {
+            let anchor = generated_client(endpoint, None)?.fleet_anchor().await?;
+            if json_output {
+                print_value(&anchor, true)
+            } else {
+                println!("{}", anchor.fleet_anchor);
+                Ok(())
+            }
+        }
         FleetCommand::Create(args) => {
             anyhow::ensure!(
                 fractal_daemon::config::FleetFile::load(&config.state_dir)?.is_none(),

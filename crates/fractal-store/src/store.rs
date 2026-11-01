@@ -2247,7 +2247,8 @@ pub fn stale_pull_request_request_tx(
     discovery: &str,
 ) -> Result<Option<String>> {
     smallclaims::touched::note_read(|| resource.to_owned());
-    let Some(requested) = claim_by_id_tx(connection, discovery)?.filter(|claim| {
+    // A compact item state, as a poller in compact mode pins, reads as its observation.
+    let Some(requested) = claim_by_id_tx(connection, discovery)?.map(|mut claim| { claim.body = fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body); claim }).filter(|claim| {
         claim.subject == resource
             && claim.body.pointer("/fields/kind").and_then(Value::as_str)
                 == Some("vcs.pull-request")
@@ -3118,6 +3119,7 @@ impl Store {
                     }
                 }
                 validate_documents(transaction, &intent.document_refs)?;
+                attention_snapshot::refuse_second_fault_agent(transaction, intent)?;
                 for desired in intent
                     .subjects
                     .values()
@@ -5087,6 +5089,7 @@ impl Store {
                     .collect::<Vec<_>>()
             });
             let mut merged = StatusResponse {
+                seat_admission: None,
                 store_index,
                 subjects: Vec::new(),
                 pending_actions: Vec::new(),
@@ -5214,6 +5217,7 @@ impl Store {
             subjects.push(status);
         }
         Ok(StatusResponse {
+            seat_admission: None,
             store_index,
             subjects,
             pending_actions,
@@ -5859,12 +5863,28 @@ impl Store {
     }
 
     /// Each dismissed fault, by subject and episode. A new episode at the same source is a new
-    /// fault, so a dismissal never hides a later failure.
+    /// fault, so a dismissal never hides a later failure. Only a dismissal by a person, or by an
+    /// agent whose declaration carried `handles-faults` when it was written, counts: one that
+    /// another member accepted from any other actor hides nothing here.
     pub fn dismissed_faults(&self) -> Result<HashSet<(String, String)>> {
         let connection = self.readers.get();
         let mut query = connection.prepare(
-            "SELECT subject, json_extract(body, '$.fields.episode') FROM claims INDEXED BY claims_kind_index
-             WHERE kind='fault.dismissed'",
+            "SELECT dismissal.subject, json_extract(dismissal.body, '$.fields.episode')
+             FROM claims AS dismissal INDEXED BY claims_kind_index
+             WHERE dismissal.kind='fault.dismissed'
+               AND (substr(dismissal.actor, 1, 7)='person/' OR (
+                 SELECT json_extract(declaration.body, '$.kind')='agent' AND EXISTS (
+                     SELECT 1 FROM json_each(declaration.body, '$.desired.children')
+                     WHERE json_extract(value, '$.name')='handles-faults'
+                   )
+                 FROM claims AS declaration INDEXED BY claims_subject_kind_accepted_index
+                 WHERE declaration.subject=dismissal.actor AND declaration.kind='intent.desired'
+                   AND (length(declaration.accepted_at_unix_ms), declaration.accepted_at_unix_ms)
+                     <= (length(dismissal.accepted_at_unix_ms), dismissal.accepted_at_unix_ms)
+                 ORDER BY length(declaration.accepted_at_unix_ms) DESC,
+                   declaration.accepted_at_unix_ms DESC, declaration.store_index DESC
+                 LIMIT 1
+               ) = 1)",
         )?;
         Ok(query
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?
@@ -7940,7 +7960,7 @@ fn resolve_mission_run_inputs(
                 let claim_id = if let Some(claim_id) = requested_claim {
                     let exists = transaction
                         .query_row(
-                            "SELECT 1 FROM claims WHERE id=?1 AND subject=?2 AND kind='resource.observed'",
+                            "SELECT 1 FROM claims WHERE id=?1 AND subject=?2 AND kind IN ('resource.observed','vcs.item.state')",
                             params![claim_id, subject],
                             |_| Ok(()),
                         )
@@ -7965,14 +7985,23 @@ fn resolve_mission_run_inputs(
                     }
                     claim_id.to_owned()
                 } else {
-                    transaction
+                    // The item's newest record: a compact state only when it is newer than the
+                    // newest snapshot, whose facts are fuller.
+                    let observed: Option<(String, String)> = transaction
                         .query_row(
-                            /* sqlite-large-value: allow-for-now lv-h35da657ee22f owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1"),
+                            /* sqlite-large-value: allow-for-now lv-h842f1ac38047 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1"),
                             [subject],
-                            |row| row.get(0),
+                            |row| Ok((row.get(0)?, row.get(1)?)),
                         )
                         .optional()
-                        .map_err(internal)?
+                        .map_err(internal)?;
+                    let state = crate::store::resources::newest_item_state(transaction, subject).map_err(internal)?;
+                    match (observed, state) {
+                        (Some((_, observed_at)), Some((id, _, state_at)))
+                            if state_at.parse::<u128>().unwrap_or_default() > observed_at.parse::<u128>().unwrap_or_default() => Some(id),
+                        (None, Some((id, _, _))) => Some(id),
+                        (observed, _) => observed.map(|(id, _)| id),
+                    }
                         .ok_or_else(|| {
                             St3Error::new(
                                 "missing-resource-input",
@@ -19420,14 +19449,14 @@ pub fn enrich_step_wake_at(
         hex::encode(Sha256::digest(current_incarnation_id.as_bytes()))[..12].to_owned();
     let mut attempts = Vec::new();
     let wake_tag_prefix = format!(
-        "st3-work:{}@{}@{}@",
+        "{}@{}@{}@",
         view.subject, view.attempt, view.readiness_epoch
     );
     let bare_assignee = assignee
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha4b73baa9121 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h193b5e906715 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.body, claims.accepted_at_unix_ms,
                 EXISTS(SELECT 1 FROM claims consumed
                        WHERE consumed.subject=claims.subject
@@ -19443,7 +19472,7 @@ pub fn enrich_step_wake_at(
                          AND staged.accepted_at_unix_ms<=?1)
          FROM claims INDEXED BY claims_message_to_index
          WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
-           AND instr(claims.body, ?2)>0
+           AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
            AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
          ORDER BY CANONICAL_ASC(claims)",
     ))?;
@@ -19472,8 +19501,11 @@ pub fn enrich_step_wake_at(
             .get("tags")
             .and_then(Value::as_array)
             .is_some_and(|tags| {
-                tags.iter()
-                    .any(|tag| tag.as_str() == Some("st3-wake-source:manual"))
+                crate::silent::message_tag_values(
+                    tags.iter().filter_map(Value::as_str),
+                    "wake-source:",
+                )
+                .any(|value| value == "manual")
             })
         {
             continue;
@@ -19483,7 +19515,8 @@ pub fn enrich_step_wake_at(
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(Value::as_str)
+            .filter_map(Value::as_str);
+        let matching_incarnation = crate::silent::message_tag_values(matching_incarnation, "work:")
             .find_map(|tag| {
                 work_wake_tag_incarnation(tag, &view.subject, view.attempt, view.readiness_epoch)
                     .map(str::to_owned)
@@ -19602,13 +19635,56 @@ pub fn enrich_step_wake_at(
     Ok(())
 }
 
+#[test]
+fn work_wake_multiple_tags_preserve_attempts_and_manual_exclusion() {
+    for (prefix, first, source, manual_prefix) in [
+        ("st3-", "st3-", "st3-", "st3-"),
+        ("fractal-", "fractal-", "fractal-", "fractal-"),
+        ("fractal-", "st3-", "st3-", "st3-"),
+        ("st3-", "st3-", "st3-", "fractal-"),
+    ] {
+        for manual in [false, true] {
+            let store = Store::open_memory("fixture").unwrap();
+            let mut tags = vec![
+                format!("{first}work:other@1@1@other"),
+                format!("{prefix}work:step-run/r/s@2@3@inc"),
+                format!("{source}wake-source:auto"),
+            ];
+            if manual {
+                tags.push(format!("{manual_prefix}wake-source:manual"));
+            }
+            let input = serde_json::from_value(json!({
+                "subject": "message/wake", "kind": "message.sent", "actor": "daemon/runtime",
+                "fields": {"from": "daemon/runtime", "to": "agent/worker", "content": "",
+                    "status": "sent", "tags": tags}, "evidence": [],
+                "expected_subject": null, "idempotency_key": null
+            }))
+            .unwrap();
+            store.append_claim(&input).unwrap();
+            let mut view: StepRunView = serde_json::from_value(json!({
+                "subject": "step-run/r/s", "run": "mission-run/r", "generation": "g", "step": "s",
+                "definition_hash": "", "status": "ready", "attempt": 2, "readiness_epoch": 3,
+                "assigned_to": "agent/worker", "agentless": false, "worker_reported": false,
+                "created_at_unix_ms": 0, "updated_at_unix_ms": 0
+            }))
+            .unwrap();
+            enrich_step_wake_at(&store.readers.get(), &mut view, u128::MAX).unwrap();
+            assert_eq!(
+                view.wake.unwrap().attempts,
+                u32::from(first == prefix && (!manual || source != manual_prefix)),
+                "{prefix} {first} {source} {manual_prefix} {manual}"
+            );
+        }
+    }
+}
+
 fn work_wake_tag_incarnation<'a>(
     tag: &'a str,
     step_subject: &str,
     attempt: u32,
     readiness_epoch: u32,
 ) -> Option<&'a str> {
-    let tag = tag.strip_prefix("st3-work:")?;
+    // Each value is decoded independently; fields from different tags are never merged.
     let mut parts = tag.rsplitn(4, '@');
     let incarnation = parts.next()?;
     (parts.next().and_then(|value| value.parse::<u32>().ok()) == Some(readiness_epoch)

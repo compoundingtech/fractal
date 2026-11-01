@@ -22,6 +22,14 @@ pub enum Lanes {
     Off,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkerIngressGenerationCheck {
+    #[default]
+    Observe,
+    Enforce,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -36,12 +44,18 @@ pub struct Config {
     /// Separate explicit opt-in for non-authorizing legacy topology observations. Off by default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_primary_ownership_observe: Option<bool>,
+    /// Worker socket-generation admission. Absent observes without refusing; restart to change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_ingress_generation_check: Option<WorkerIngressGenerationCheck>,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
     /// Explicit placement for daemon-launched seats without a lane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
+    /// Optional Linux envelope admission policy. Absent means off without reading a state file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seat_admission: Option<fractal_runtime::seat_admission::Config>,
     /// `on` caps each seat that declares `capacity` in its lane (docs/st3/seat-lanes.md). Absent
     /// means `off`: such a seat starts without one. Seats without a declaration never change.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -591,8 +605,10 @@ impl Default for Config {
             access_mode: None,
             claude_primary_ownership: None,
             claude_primary_ownership_observe: None,
+            worker_ingress_generation_check: None,
             seat_priority: None,
             unlaned_seat: None,
+            seat_admission: None,
             lanes: None,
             person: None,
             fleet_id: None,
@@ -1253,6 +1269,19 @@ mod tests {
     }
 
     #[test]
+    fn worker_ingress_generation_check_is_strict_and_defaults_to_observe() {
+        use super::WorkerIngressGenerationCheck::{Enforce, Observe};
+        for (text, expected) in [("", Observe),
+            ("worker_ingress_generation_check='observe'", Observe),
+            ("worker_ingress_generation_check='enforce'", Enforce)] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert_eq!(config.worker_ingress_generation_check.unwrap_or_default(), expected);
+        }
+        assert!(toml::from_str::<Config>("worker_ingress_generation_check='enfroce'").is_err());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("worker_ingress_generation_check"));
+    }
+
+    #[test]
     fn seat_priority_defaults_to_background_and_accepts_normal() {
         use fractal_runtime::SeatPriority;
         assert_eq!(Config::default().active_seat_priority(), SeatPriority::Background);
@@ -1276,6 +1305,19 @@ mod tests {
         assert!(toml::from_str::<Config>("[unlaned_seat]\nmemoryMax = 1024\n").is_err());
         assert!(toml::from_str::<Config>(&fields.replace("8589934592", "0")).is_err());
         assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
+    }
+
+    #[test]
+    fn seat_admission_is_optional_and_strict() {
+        assert!(Config::default().seat_admission.is_none());
+        assert!(toml::from_str::<Config>("").unwrap().seat_admission.is_none());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_admission"));
+        let fields = "[seat_admission]\nstateFile = '/run/admission.state'\nbatchPausedMinSecs = 30\n";
+        let configured: Config = toml::from_str(fields).unwrap();
+        let encoded = toml::to_string(&configured).unwrap();
+        assert_eq!(toml::from_str::<Config>(&encoded).unwrap(), configured);
+        assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
+        assert!(toml::from_str::<Config>("[seat_admission]\nstateFile = 'state'\n").is_err());
     }
 
     #[test]
