@@ -113,19 +113,6 @@ owned_fractal_link() {
     return 1
 }
 canonical=$bin_dir/fractal
-if [ -e "$canonical" ] || [ -L "$canonical" ]; then
-    owned=false
-    if owned_fractal_link "$canonical"; then
-        owned=true
-    elif [ -f "$canonical" ] && [ -x "$canonical" ] && [ ! -L "$canonical" ]; then
-        owned=true
-        for name in st st3; do
-            if [ ! -L "$bin_dir/$name" ]; then owned=false; break; fi
-            case "$(readlink "$bin_dir/$name")" in fractal|"$canonical") ;; *) owned=false; break ;; esac
-        done
-    fi
-    "$owned" || { printf 'install: refusing to replace foreign fractal command: %s\n' "$canonical" >&2; exit 1; }
-fi
 old_ifs=$IFS
 IFS=:
 set -f
@@ -205,6 +192,29 @@ tar -xzf "$work/$archive" -C "$work"
 # This is an archive-format decoder, not a fallback around a foreign destination.
 command_name=fractal
 [ -x "$work/$package/bin/fractal" ] && [ ! -L "$work/$package/bin/fractal" ] || command_name=st3
+# Receipt recognition needs the checksum-verified incoming executable, never the
+# destination command. Defer only this destination check until after extraction.
+receipt_owned=false
+for receipt in "$bin_dir/.fractal-install.json" "$bin_dir/.fractal-install.json.pending"; do
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+        "$work/$package/bin/$command_name" setup --receipt-verify "$bin_dir"
+        receipt_owned=true
+        break
+    fi
+done
+if ! "$receipt_owned" && { [ -e "$canonical" ] || [ -L "$canonical" ]; }; then
+    owned=false
+    if owned_fractal_link "$canonical"; then
+        owned=true
+    elif [ -f "$canonical" ] && [ -x "$canonical" ] && [ ! -L "$canonical" ]; then
+        owned=true
+        for name in st st3; do
+            if [ ! -L "$bin_dir/$name" ]; then owned=false; break; fi
+            case "$(readlink "$bin_dir/$name")" in fractal|"$canonical") ;; *) owned=false; break ;; esac
+        done
+    fi
+    "$owned" || { printf 'install: refusing to replace foreign fractal command: %s\n' "$canonical" >&2; exit 1; }
+fi
 # Retained releases keep their historical installer spelling.
 "$work/$package/install.sh" --bin-dir "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd)
@@ -215,10 +225,16 @@ write_receipt() (
     trap '[ -z "$receipt_stage" ] || rm -f "$receipt_stage"' EXIT
     release_binary="$work/$package/bin/$command_name"
     version=$("$release_binary" --version --json) || return 1
-    case "$version" in '{"machine_version":"'*'"}') ;; *) return 1 ;; esac
-    version=${version#'{"machine_version":"'}
-    version=${version%'"}'}
-    commit=${version##*+}
+    case "$version" in
+        *'"commit":"'*)
+            commit=${version#*'"commit":"'}
+            commit=${commit%%'"'*} ;;
+        '{"machine_version":"'*'"}')
+            version=${version#'{"machine_version":"'}
+            version=${version%'"}'}
+            commit=${version##*+} ;;
+        *) return 1 ;;
+    esac
     case "$commit" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "${#commit}" -ge 7 ] || return 1
     receipt="$bin_dir/RELEASE.json"

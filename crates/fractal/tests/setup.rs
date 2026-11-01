@@ -407,7 +407,7 @@ fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
         ));
         let manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(data.join("st3/install.json")).unwrap()).unwrap();
-        for name in ["fractal", "st3", "st", "pty"] {
+        for name in ["fractal", "st3", "st", "pty", ".fractal-install.json", ".fractal-install.json.pending"] {
             let installed = fixture.path(&format!("home/.local/bin/{name}"));
             assert!(
                 manifest["files"]
@@ -428,7 +428,7 @@ fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
                     "--keep-binaries",
                 ],
             ));
-            for name in ["fractal", "st3", "st", "pty"] {
+            for name in ["fractal", "st3", "st", "pty", ".fractal-install.json"] {
                 assert!(fixture.path(&format!("home/.local/bin/{name}")).exists());
             }
             // Setup is the archive installer again, so it can record this second install.
@@ -448,9 +448,11 @@ fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
                 ],
             ));
         }
+        // A later interrupted upgrade's prepared intent belongs to uninstall too.
+        fs::write(fixture.path("home/.local/bin/.fractal-install.json.pending"), b"prepared upgrade").unwrap();
         let dry = success(&run(&installed, &["uninstall", "--dry-run"]));
         assert!(!dry.contains("no release install manifest"), "{dry}");
-        for name in ["fractal", "st3", "st", "pty"] {
+        for name in ["fractal", "st3", "st", "pty", ".fractal-install.json", ".fractal-install.json.pending"] {
             assert!(
                 dry.contains(&format!(
                     "remove\t{}",
@@ -463,7 +465,8 @@ fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
             &installed,
             &["uninstall", "--yes", "--erase-local-graph", "--no-service"],
         ));
-        for name in ["fractal", "st3", "st", "pty"] {
+        assert!(!fixture.path("home/.local/bin/.fractal-install.json.pending").exists());
+        for name in ["fractal", "st3", "st", "pty", ".fractal-install.json"] {
             assert!(
                 fs::symlink_metadata(fixture.path(&format!("home/.local/bin/{name}"))).is_err()
             );
@@ -517,8 +520,8 @@ fn setup_refuses_foreign_canonical_commands_before_payload_or_alias_mutations() 
         return;
     }
     for (named_instance, case) in [
-        (false, "regular"), (false, "symlink"), (false, "dangling"), (false, "elsewhere"),
-        (true, "regular"), (true, "symlink"), (true, "dangling"),
+        (false, "regular"), (false, "identical"), (false, "symlink"), (false, "dangling"), (false, "elsewhere"),
+        (true, "regular"), (true, "identical"), (true, "symlink"), (true, "dangling"),
     ] {
         let fixture = Fixture::new();
         fixture.unpack_archive();
@@ -535,6 +538,10 @@ fn setup_refuses_foreign_canonical_commands_before_payload_or_alias_mutations() 
         match case {
             "regular" => {
                 fs::write(&canonical, b"foreign executable").unwrap();
+                fs::set_permissions(&canonical, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            "identical" => {
+                fs::copy(fixture.path("archive/fractal"), &canonical).unwrap();
                 fs::set_permissions(&canonical, fs::Permissions::from_mode(0o755)).unwrap();
             }
             "symlink" => symlink("pty", &canonical).unwrap(),
@@ -612,6 +619,282 @@ fn setup_upgrades_owned_physical_and_historical_alias_layouts() {
         for name in ["st", "st3"] {
             assert_eq!(fs::read_link(bin.join(name)).unwrap(), Path::new("fractal"));
         }
+    }
+}
+
+#[test]
+fn setup_verifies_receipts_before_recognizing_owned_installs() {
+    use sha2::Digest as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for case in ["receipt-and-aliases", "receipt-only", "aliases-only", "tampered", "symlink"] {
+        let fixture = Fixture::new();
+        fixture.unpack_archive();
+        let bin = fixture.path("home/.local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let old = b"#!/bin/sh\necho destination-executed > \"$HOME/destination-ran\"\nexit 99\n";
+        fs::write(bin.join("fractal"), old).unwrap();
+        fs::set_permissions(bin.join("fractal"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(bin.join("pty"), b"previous pty").unwrap();
+        if case != "receipt-only" {
+            for name in ["st", "st3"] {
+                symlink("fractal", bin.join(name)).unwrap();
+            }
+        }
+        let receipt_path = bin.join(".fractal-install.json");
+        if case != "aliases-only" {
+            let receipt = serde_json::to_vec(&serde_json::json!({
+                "schema": 1,
+                "name": "fractal",
+                "sha256": if case == "tampered" {
+                    "0".repeat(64)
+                } else {
+                    format!("{:x}", sha2::Sha256::digest(old))
+                },
+                "installer": "script",
+                "version": "previous-version",
+                "commit": "previous-commit",
+            })).unwrap();
+            if case == "symlink" {
+                fs::write(fixture.path("receipt-target"), &receipt).unwrap();
+                symlink(fixture.path("receipt-target"), &receipt_path).unwrap();
+            } else {
+                fs::write(&receipt_path, receipt).unwrap();
+            }
+        }
+        let before = fs::read_dir(&bin).unwrap().map(|entry| {
+            let path = entry.unwrap().path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            let bytes = metadata.is_file().then(|| fs::read(&path).unwrap());
+            (path.clone(), metadata.ino(), fs::read_link(&path).ok(), bytes)
+        }).collect::<Vec<_>>();
+        let output = fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--person", "ada", "--yes", "--service", "false", "--start", "false"])
+            .output().unwrap();
+        if matches!(case, "tampered" | "symlink") {
+            assert!(!output.status.success(), "{case}: {output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(&receipt_path.display().to_string()), "{stderr}");
+            assert!(stderr.contains("reinstall"), "{stderr}");
+            assert_eq!(fs::read_dir(&bin).unwrap().count(), before.len());
+            for (path, inode, link, bytes) in before {
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                assert_eq!(metadata.ino(), inode, "{case}: {path:?}");
+                assert_eq!(fs::read_link(&path).ok(), link);
+                assert_eq!(metadata.is_file().then(|| fs::read(&path).unwrap()), bytes);
+            }
+            assert!(!fixture.path("home/.local/share/st3/install.json").exists());
+        } else {
+            success(&output);
+            let installed = fs::read(bin.join("fractal")).unwrap();
+            assert_eq!(installed, fs::read(fixture.path("archive/fractal")).unwrap());
+            assert!(!fs::symlink_metadata(&receipt_path).unwrap().file_type().is_symlink());
+            let receipt: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+            let identity: serde_json::Value = serde_json::from_slice(&fixture
+                .command(&fixture.path("archive/fractal")).args(["--version", "--json"])
+                .output().unwrap().stdout).unwrap();
+            assert_eq!(receipt, serde_json::json!({
+                "schema": 1,
+                "name": "fractal",
+                "sha256": format!("{:x}", sha2::Sha256::digest(&installed)),
+                "installer": "setup",
+                "version": identity["machine_version"],
+                "commit": identity["commit"],
+            }));
+            for name in ["st", "st3"] {
+                assert_eq!(fs::read_link(bin.join(name)).unwrap(), Path::new("fractal"));
+            }
+        }
+        assert!(!fixture.path("home/destination-ran").exists());
+    }
+}
+
+#[test]
+fn prepared_receipts_recover_setup_before_and_after_executable_replacement() {
+    use sha2::Digest as _;
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for state in ["fresh-prepared", "upgrade-prepared", "upgrade-replaced"] {
+        let fixture = Fixture::new();
+        fixture.unpack_archive();
+        let bin = fixture.path("home/.local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let old = b"previous runtime";
+        fs::write(bin.join("fractal"), old).unwrap();
+        fs::set_permissions(bin.join("fractal"), fs::Permissions::from_mode(0o755)).unwrap();
+        let finalized = serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "name": "fractal",
+            "sha256": format!("{:x}", sha2::Sha256::digest(old)),
+        })).unwrap();
+        fs::write(bin.join(".fractal-install.json"), &finalized).unwrap();
+        success(&fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--receipt-prepare"]).arg(&bin)
+            .args(["--receipt-installer", "script"]).output().unwrap());
+        let pending = fs::read(bin.join(".fractal-install.json.pending")).unwrap();
+        assert_eq!(fs::read(bin.join(".fractal-install.json")).unwrap(), finalized);
+        if state == "fresh-prepared" {
+            fs::remove_file(bin.join("fractal")).unwrap();
+            fs::remove_file(bin.join(".fractal-install.json")).unwrap();
+        }
+        // Finalize cannot bless the old executable with the incoming image's identity.
+        let output = fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--receipt-write"]).arg(&bin).output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(fs::read(bin.join(".fractal-install.json.pending")).unwrap(), pending);
+        if state == "upgrade-replaced" {
+            fs::copy(fixture.path("archive/fractal"), bin.join("fractal")).unwrap();
+        }
+        // Recovery does not need aliases to establish ownership.
+        success(&fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--receipt-verify"]).arg(&bin).output().unwrap());
+        success(&fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--person", "ada", "--yes", "--service", "false", "--start", "false"])
+            .output().unwrap());
+        assert!(!bin.join(".fractal-install.json.pending").exists());
+        success(&fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--receipt-verify"]).arg(&bin).output().unwrap());
+    }
+}
+
+#[test]
+fn receipt_helpers_finalize_prepared_identity_for_physical_and_managed_images() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for managed in [false, true] {
+        let fixture = Fixture::new();
+        fixture.unpack_archive();
+        let bin = fixture.path("home/.local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        success(&fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--receipt-prepare"]).arg(&bin)
+            .args(["--receipt-installer", "hm"]).output().unwrap());
+        assert!(!bin.join(".fractal-install.json").exists());
+        let pending = fs::read(bin.join(".fractal-install.json.pending")).unwrap();
+        if managed {
+            symlink(fixture.path("archive/fractal"), bin.join("fractal")).unwrap();
+        } else {
+            fs::copy(fixture.path("archive/fractal"), bin.join("fractal")).unwrap();
+        }
+        success(&fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--receipt-verify"]).arg(&bin).output().unwrap());
+        success(&fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--receipt-write"]).arg(&bin).output().unwrap());
+        assert_eq!(fs::read(bin.join(".fractal-install.json")).unwrap(), pending);
+        assert!(!bin.join(".fractal-install.json.pending").exists());
+        let output = fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--receipt-write"]).arg(&bin).output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        success(&fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--receipt-verify"]).arg(&bin).output().unwrap());
+    }
+}
+
+#[test]
+fn receipt_helpers_reject_symlinks_and_fifos_without_blocking() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for name in [".fractal-install.json", ".fractal-install.json.pending", "fractal"] {
+        for fifo in [false, true] {
+            // Physical executable links are deliberately supported for managed apps.
+            if name == "fractal" && !fifo {
+                continue;
+            }
+            let fixture = Fixture::new();
+            fixture.unpack_archive();
+            let bin = fixture.path("home/.local/bin");
+            fs::create_dir_all(&bin).unwrap();
+            fs::copy(fixture.path("archive/fractal"), bin.join("fractal")).unwrap();
+            success(&fixture.command(&fixture.path("archive/fractal"))
+                .args(["setup", "--receipt-prepare"]).arg(&bin).output().unwrap());
+            let target = bin.join(name);
+            if target.exists() {
+                fs::remove_file(&target).unwrap();
+            }
+            if fifo {
+                let path = CString::new(target.as_os_str().as_bytes()).unwrap();
+                // SAFETY: path is a live NUL-terminated filesystem path.
+                assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            } else {
+                fs::write(fixture.path("receipt-target"), b"{}").unwrap();
+                symlink(fixture.path("receipt-target"), &target).unwrap();
+            }
+            let mut child = fixture.command(&fixture.path("archive/fractal"))
+                .args(["setup", "--receipt-verify"]).arg(&bin)
+                .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(!status.success(), "{name}: fifo={fifo}");
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("receipt verification blocked on {name}: fifo={fifo}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+#[test]
+fn setup_rolls_back_binary_receipt_and_aliases_when_manifest_cannot_be_recorded() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for (existing_receipt, existing_pending) in [(false, false), (true, false), (true, true)] {
+        let fixture = Fixture::new();
+        fixture.unpack_archive();
+        let bin = fixture.path("home/.local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("fractal"), b"previous runtime").unwrap();
+        fs::set_permissions(bin.join("fractal"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(bin.join("pty"), b"previous pty").unwrap();
+        for name in ["st", "st3"] {
+            symlink("fractal", bin.join(name)).unwrap();
+        }
+        if existing_receipt {
+            use sha2::Digest as _;
+            fs::write(bin.join(".fractal-install.json"), serde_json::to_vec(&serde_json::json!({
+                "schema": 1,
+                "name": "fractal",
+                "sha256": format!("{:x}", sha2::Sha256::digest(b"previous runtime")),
+                "installer": "script",
+                "version": "previous-version",
+                "commit": "previous-commit",
+            })).unwrap()).unwrap();
+        }
+        let before = fs::read(bin.join(".fractal-install.json")).ok();
+        if existing_pending {
+            fs::write(bin.join(".fractal-install.json.pending"), before.as_ref().unwrap()).unwrap();
+        }
+        let pending_before = fs::read(bin.join(".fractal-install.json.pending")).ok();
+        fs::write(fixture.path("blocked-data"), b"not a directory").unwrap();
+        let output = fixture.command(&fixture.path("archive/fractal"))
+            .env("XDG_DATA_HOME", fixture.path("blocked-data"))
+            .args(["setup", "--person", "ada", "--yes", "--service", "false", "--start", "false"])
+            .output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(fs::read(bin.join("fractal")).unwrap(), b"previous runtime");
+        assert_eq!(fs::read(bin.join("pty")).unwrap(), b"previous pty");
+        assert_eq!(fs::read(bin.join(".fractal-install.json")).ok(), before);
+        assert_eq!(fs::read(bin.join(".fractal-install.json.pending")).ok(), pending_before);
+        for name in ["st", "st3"] {
+            assert_eq!(fs::read_link(bin.join(name)).unwrap(), Path::new("fractal"));
+        }
+        assert_eq!(fs::read_dir(&bin).unwrap().count(),
+            4 + usize::from(existing_receipt) + usize::from(existing_pending));
     }
 }
 
