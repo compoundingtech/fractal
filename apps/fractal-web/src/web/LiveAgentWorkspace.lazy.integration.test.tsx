@@ -51,7 +51,6 @@ vi.mock('../data/react.tsx', () => ({
   useGatewaySync: () => gatewayObservation,
   useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, missions: waitingFeed, attention: waitingFeed }),
   useFeedInterest: () => {},
-  useAttention: () => ({ _tag: 'Waiting' }),
 }))
 
 let workspace: typeof WorkspaceModule
