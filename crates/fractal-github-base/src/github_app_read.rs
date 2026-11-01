@@ -152,12 +152,58 @@ pub fn route(url: &reqwest::Url) -> Option<(&str, &'static str, bool)> {
     Some((owner, app, statuses))
 }
 
+/// Inspect only buffered read responses; preserve the original body for normal decoding.
+async fn forbidden(response: reqwest::Response, graphql: bool) -> Result<(reqwest::Response, bool)> {
+    use reqwest::ResponseBuilderExt as _;
+    let rest = response.status() == reqwest::StatusCode::FORBIDDEN;
+    if !rest && !(graphql && response.status().is_success()) {
+        return Ok((response, false));
+    }
+    let mut raw = axum::http::Response::builder()
+        .status(response.status()).version(response.version()).url(response.url().clone());
+    *raw.headers_mut().unwrap() = response.headers().clone();
+    let rate_limited = response.headers().get("x-ratelimit-remaining")
+        .is_some_and(|remaining| remaining == "0");
+    let body = response.bytes().await?;
+    let json = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let integration = |error: &serde_json::Value| {
+        error.get("message").and_then(serde_json::Value::as_str)
+            == Some("Resource not accessible by integration")
+    };
+    let denied = if rest {
+        !rate_limited && json.as_ref().is_some_and(integration)
+    } else {
+        json.as_ref().and_then(|body| body.get("errors"))
+            .and_then(serde_json::Value::as_array).is_some_and(|errors| errors.iter().any(|error|
+                error.get("type").and_then(serde_json::Value::as_str) == Some("FORBIDDEN")
+                    || integration(error)))
+    };
+    Ok((reqwest::Response::from(raw.body(body)?), denied))
+}
+
+async fn replay_pat(request: reqwest::RequestBuilder, source: &ReadSource, pat: &GithubAuth, reason: &str) -> Result<(reqwest::Response, Option<ReadSource>)> {
+    fallback(&source.owner, &source.app, reason);
+    source.used_fallback.store(true, Ordering::Relaxed);
+    // An installation ETag cannot validate a potentially different PAT representation.
+    let (client, request) = request.build_split();
+    let mut request = request?;
+    request.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
+    let builder = reqwest::RequestBuilder::from_parts(client, request);
+    Ok((crate::github_http::send_once(builder, pat).await?, None))
+}
+
 pub async fn send(request: reqwest::RequestBuilder, source: &ReadSource, pat: &GithubAuth) -> Result<(reqwest::Response, Option<ReadSource>)> {
     let retry = request.try_clone();
+    // send_selected_read has already excluded mutations using its query detection.
+    let graphql = retry.as_ref().and_then(reqwest::RequestBuilder::try_clone)
+        .and_then(|request| request.build().ok())
+        .is_some_and(|request| request.method() == reqwest::Method::POST);
     let auth = GithubAuth::Local { token: source.token.clone(), cache: None };
     let response = crate::github_http::send_once(request, &auth).await?;
-    if response.status() != reqwest::StatusCode::UNAUTHORIZED { return Ok((response, Some(source.clone()))); }
+    let (response, denied) = forbidden(response, graphql).await?;
     let Some(retry) = retry else { return Ok((response, Some(source.clone()))); };
+    if denied { return replay_pat(retry, source, pat, "forbidden").await; }
+    if response.status() != reqwest::StatusCode::UNAUTHORIZED { return Ok((response, Some(source.clone()))); }
     // Reload once for atomic minter rotation. Never replay any mutation.
     let fallback_request = retry.try_clone();
     if let Ok(reloaded) = load(&source.root, &source.owner, &source.app) {
@@ -170,17 +216,17 @@ pub async fn send(request: reqwest::RequestBuilder, source: &ReadSource, pat: &G
         } else { retry };
         let auth = GithubAuth::Local { token: reloaded.token.clone(), cache: None };
         let response = crate::github_http::send_once(retry, &auth).await?;
+        let (response, denied) = forbidden(response, graphql).await?;
+        if denied {
+            if let Some(request) = fallback_request {
+                return replay_pat(request, source, pat, "forbidden").await;
+            }
+            return Ok((response, Some(reloaded)));
+        }
         if response.status() != reqwest::StatusCode::UNAUTHORIZED { return Ok((response, Some(reloaded))); }
     }
     let Some(request) = fallback_request else { return Ok((response, Some(source.clone()))); };
-    fallback(&source.owner, &source.app, "401");
-    source.used_fallback.store(true, Ordering::Relaxed);
-    // The app's ETag must not validate a potentially different PAT representation.
-    let (client, request) = request.build_split();
-    let mut request = request?;
-    request.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
-    let builder = reqwest::RequestBuilder::from_parts(client, request);
-    Ok((crate::github_http::send_once(builder, pat).await?, None))
+    replay_pat(request, source, pat, "401").await
 }
 
 #[cfg(test)]
@@ -204,20 +250,28 @@ pub(crate) mod tests {
         })).unwrap()).unwrap();
     }
 
-    type Handler = dyn Fn(&str, &str, &Value) -> (StatusCode, Value) + Send + Sync;
+    type Handler = dyn Fn(&reqwest::header::HeaderMap, &str, &str, &Value) -> (StatusCode, reqwest::header::HeaderMap, Value) + Send + Sync;
     pub(crate) struct Server {
         pub base: String,
         task: tokio::task::JoinHandle<()>,
     }
     impl Drop for Server { fn drop(&mut self) { self.task.abort(); } }
     pub(crate) async fn server(handler: impl Fn(&str, &str, &Value) -> (StatusCode, Value) + Send + Sync + 'static) -> Server {
+        server_with_headers(move |_, authorization, path, body| {
+            let (status, body) = handler(authorization, path, body);
+            (status, reqwest::header::HeaderMap::new(), body)
+        }).await
+    }
+
+    async fn server_with_headers(handler: impl Fn(&reqwest::header::HeaderMap, &str, &str, &Value) -> (StatusCode, reqwest::header::HeaderMap, Value) + Send + Sync + 'static) -> Server {
         async fn handle(State(handler): State<Arc<Handler>>, request: axum::extract::Request) -> axum::response::Response {
             let authorization = request.headers().get("authorization").unwrap().to_str().unwrap().to_owned();
             let path = request.uri().to_string();
+            let headers = request.headers().clone();
             let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
             let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-            let (status, body) = handler(&authorization, &path, &body);
-            (status, axum::Json(body)).into_response()
+            let (status, headers, body) = handler(&headers, &authorization, &path, &body);
+            (status, headers, axum::Json(body)).into_response()
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -314,6 +368,82 @@ pub(crate) mod tests {
         std::fs::write(root.path().join(app).join(format!("{owner}.json")), b"invalid").unwrap();
         select(Some(root.path()), owner, app, &pat);
         assert_eq!(count(owner, app, "unreadable"), 3);
+    }
+
+    #[tokio::test]
+    async fn forbidden_reads_replay_once_without_app_etag_but_mutations_do_not() {
+        for graphql in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let owner = if graphql { "graphql-forbidden" } else { "rest-forbidden" };
+            install(root.path(), owner, "gh-ci", "fixture-app", chrono::Utc::now() + chrono::Duration::minutes(60));
+            let auth = select(Some(root.path()), owner, "gh-ci", &GithubAuth::test("fixture-pat"));
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let recorded = calls.clone();
+            let fixture = server_with_headers(move |headers, authorization, _, body| {
+                recorded.lock().push((authorization.to_owned(), body.clone()));
+                if authorization == "Bearer fixture-app" {
+                    assert_eq!(headers["if-none-match"], "\"app-etag\"");
+                    let body = if graphql { json!({"errors":[{"type":"FORBIDDEN","message":"denied"}]}) }
+                        else { json!({"message":"Resource not accessible by integration"}) };
+                    (if graphql { StatusCode::OK } else { StatusCode::FORBIDDEN }, Default::default(), body)
+                } else {
+                    assert_eq!(authorization, "Bearer fixture-pat");
+                    assert!(!headers.contains_key("if-none-match"));
+                    (StatusCode::OK, Default::default(), json!({"data":{"ok":true}}))
+                }
+            }).await;
+            let client = reqwest::Client::new();
+            let request = if graphql {
+                client.post(format!("{}/graphql", fixture.base)).json(&json!({"query":"query { viewer { login } }","variables":{"n":1}}))
+            } else { client.get(format!("{}/repos/{owner}/repo/pulls", fixture.base)) };
+            let response = crate::github_http::send_read(request.header("if-none-match", "\"app-etag\""), &auth).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!crate::github_http::read_response_cacheable(&response));
+            assert_eq!(count(owner, "gh-ci", "forbidden"), 1);
+            let calls = calls.lock();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0].1, calls[1].1);
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let fixture = server(move |authorization, _, _| {
+            recorded.lock().push(authorization.to_owned());
+            (StatusCode::OK, json!({"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration"}]}))
+        }).await;
+        let root = tempfile::tempdir().unwrap();
+        install(root.path(), "mutation-forbidden", "gh-ci", "fixture-app", chrono::Utc::now() + chrono::Duration::minutes(60));
+        let auth = select(Some(root.path()), "mutation-forbidden", "gh-ci", &GithubAuth::test("fixture-pat"));
+        crate::github_http::send_read(reqwest::Client::new().post(format!("{}/graphql", fixture.base))
+            .json(&json!({"query":"mutation { addComment }"})), &auth).await.unwrap();
+        assert_eq!(*calls.lock(), ["Bearer fixture-pat"]);
+        assert_eq!(count("mutation-forbidden", "gh-ci", "forbidden"), 0);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_403s_are_not_replayed() {
+        for exhausted in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let owner = if exhausted { "primary-limit" } else { "secondary-limit" };
+            install(root.path(), owner, "gh-ci", "fixture-app", chrono::Utc::now() + chrono::Duration::minutes(60));
+            let auth = select(Some(root.path()), owner, "gh-ci", &GithubAuth::test("fixture-pat"));
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let recorded = calls.clone();
+            let fixture = server_with_headers(move |_, authorization, _, _| {
+                recorded.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(authorization, "Bearer fixture-app");
+                let mut headers = reqwest::header::HeaderMap::new();
+                if exhausted { headers.insert("x-ratelimit-remaining", "0".parse().unwrap()); }
+                (StatusCode::FORBIDDEN, headers, json!({"message": if exhausted {
+                    "Resource not accessible by integration"
+                } else { "You have exceeded a secondary rate limit." }}))
+            }).await;
+            let response = crate::github_http::send_read(reqwest::Client::new()
+                .get(format!("{}/repos/{owner}/repo/pulls", fixture.base)), &auth).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            assert_eq!(count(owner, "gh-ci", "forbidden"), 0);
+            assert!(response.json::<Value>().await.unwrap().get("message").is_some());
+        }
     }
 
     #[tokio::test]

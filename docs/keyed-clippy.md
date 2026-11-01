@@ -109,12 +109,19 @@ base, so it has no `base_inputs` and is not base-bound in st-test. Its check is 
   is not an input: no messaging test runs in this stage;
 - what the stage executes (`scripts/lane-definition-closure --lane linux-fleet-compat --write`).
 
-Its lane is `scripts/ci-fleet-compat-keyed`, which sets `CI_KEYED_FLEET_COMPAT_POLICY` (CI's linux-fleet-compat job sets it too). With
-it, the stage first builds the test with `--no-run --message-format=json` and runs `scripts/dep-info-check --check linux-fleet-compat
---jsonl 'fleet-compat-*.jsonl' --warn` (clippy's warned the same way until PR 2); linux-gate runs the stage without it and never depends on the policy file. The
-first measurement (2026-10-26, a warm target) read 474 units and 1035 files, and found one uncovered, `crates/pty-launch-environment.rs`,
-which is why `#[path]` targets are in the key. The job skips on linux-gate's gate or its own, as clippy's does. st-test signs it on
-request (`--check linux-fleet-compat`), not with `--all`, until linux-gate shrinks. `scripts/evidence-verify-test` (`FleetCompatKey`)
+CI's linux-fleet-compat job sets `CI_KEYED_FLEET_COMPAT_POLICY`. With it, the stage first builds the test with `--no-run
+--message-format=json` and runs `scripts/dep-info-check --check linux-fleet-compat --jsonl 'fleet-compat-*.jsonl' --warn` (clippy's
+warned the same way until PR 2); linux-gate runs the stage without it and never depends on the policy file. The first measurement
+(2026-10-26, a warm target) read 474 units and 1035 files, and found one uncovered, `crates/pty-launch-environment.rs`, which is why
+`#[path]` targets are in the key. The job skips on linux-gate's gate or its own, as clippy's does.
+
+st-test signs linux-fleet-compat by default, the way PR 2 did linux-clippy: from linux-gate's own fleet-compat stage when linux-gate
+runs in the same invocation, so the stage runs once (`CI_FLEET_COMPAT_REPORT`: the build's cargo messages, then `passed` only when the
+whole stage passed), else from the stage run alone (`scripts/ci-local fleet-compat`). The note records `python3
+scripts/ci-fleet-compat-result`, which reads that report and runs the same dep-info check without `--warn`, so a local run fails on an
+uncovered read before the merge queue sees it; it records `run_command_sha256` (which run made the report) and the input key
+(`source_inputs`), so a tree with the same key reuses it. linux-gate keeps its fleet-compat stage while linux-fleet-compat is in shadow.
+`scripts/evidence-verify-test` (`FleetCompatKey`)
 changes each declared input alone and sees the key change, and changes files the stage does not read (a doc, `scripts/st-test`, the
 root package, a crate outside the closure, the messaging baseline) and sees it stay.
 

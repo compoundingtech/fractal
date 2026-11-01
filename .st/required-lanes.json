@@ -620,11 +620,14 @@
     },
     "linux-fleet-compat": {
       "argv": [
-        "nix",
-        "develop",
-        "-c",
-        "bash",
-        "scripts/ci-fleet-compat-keyed"
+        "python3",
+        "scripts/ci-fleet-compat-result"
+      ],
+      "ci_inputs": [
+        ".github/workflows/fleet.yml::jobs.evidence-gate-linux-fleet-compat",
+        ".github/workflows/fleet.yml::jobs.linux-fleet-compat",
+        ".st/evidence-skip-policy.json",
+        ".st/required-lanes.json::lanes.linux-fleet-compat"
       ],
       "definition_paths": [
         ".cargo/config.toml",
@@ -639,7 +642,7 @@
         "scripts/ci-build-snapshot-test",
         "scripts/ci-cargo-tools-env",
         "scripts/ci-cargo-tools-env-test",
-        "scripts/ci-fleet-compat-keyed",
+        "scripts/ci-fleet-compat-result",
         "scripts/ci-install-built-hooks",
         "scripts/ci-linux",
         "scripts/ci-local",
@@ -766,7 +769,7 @@
         "scripts/ci-build-snapshot-test",
         "scripts/ci-cargo-tools-env",
         "scripts/ci-cargo-tools-env-test",
-        "scripts/ci-fleet-compat-keyed",
+        "scripts/ci-fleet-compat-result",
         "scripts/ci-install-built-hooks",
         "scripts/ci-linux",
         "scripts/ci-local",
