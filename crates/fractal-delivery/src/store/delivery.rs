@@ -740,13 +740,18 @@ impl DeliveryStore for Store {
         let names = |party: &str| recipient_names(&connection, party, message_bare_recipient(party));
         let recipients = recipient.as_deref().map(names).transpose()?;
         let senders = sender.as_deref().map(names).transpose()?;
-        let (stream, more) = self.stream_page_after(
-            recipients.as_deref(),
-            senders.as_deref(),
-            after.unwrap_or(0),
-            limit - output.len(),
-            matches,
-        )?;
+        let filter = fractal_store::store::messages_shard::Filter {
+            recipients: recipients.as_deref(),
+            senders: senders.as_deref(),
+            open_only: !include_closed,
+        };
+        // Only a title is beyond the shard's query: its match reads each item the filter passes.
+        let mut titled = |message: &MessageView| {
+            subject.is_none_or(|title| message.title.as_deref() == Some(title))
+                && subject_prefix.is_none_or(|prefix| message.title.as_deref().is_some_and(|title| title.starts_with(prefix)))
+        };
+        let keep = (subject.is_some() || subject_prefix.is_some()).then_some(&mut titled as &mut dyn FnMut(&MessageView) -> bool);
+        let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - output.len(), keep)?;
         output.extend(stream);
         let next = stream_cursor(more, &output, last_read);
         Ok((output, next))
