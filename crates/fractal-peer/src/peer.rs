@@ -1725,6 +1725,9 @@ fn signed_client_read_failure(
 pub struct MainBackend {
     socket: PathBuf,
     client: Client,
+    /// A named shard this backend reaches instead of the graph. A shard has no checkpoints,
+    /// answers or worker status of its own; it shares the graph's fleet and endpoints.
+    shard: Option<String>,
 }
 
 impl MainBackend {
@@ -1732,6 +1735,23 @@ impl MainBackend {
         Self {
             client: Client::unix(socket.clone()),
             socket,
+            shard: None,
+        }
+    }
+
+    /// The daemon's named shard `shard`, over the same socket.
+    pub fn for_shard(socket: PathBuf, shard: &str) -> Self {
+        Self {
+            shard: Some(shard.to_owned()),
+            ..Self::new(socket)
+        }
+    }
+
+    /// Where an internal replication call for this backend's store goes.
+    fn replication_path(&self, operation: &str) -> String {
+        match &self.shard {
+            Some(shard) => format!("/v1/internal/replication/shard/{shard}/{operation}"),
+            None => format!("/v1/internal/replication/{operation}"),
         }
     }
 
@@ -1819,7 +1839,7 @@ impl Backend for MainBackend {
         let started = std::time::Instant::now();
         self.client
             .post(
-                "/v1/internal/replication/export",
+                &self.replication_path("export"),
                 &ReplicationExportRequest {
                     fleet_id: fleet_id.to_owned(),
                     inventory: inventory.clone(),
@@ -1839,7 +1859,7 @@ impl Backend for MainBackend {
         // Old daemons ignore it and return the same complete summary.
         self.client
             .post(
-                "/v1/internal/replication/export",
+                &self.replication_path("export"),
                 &ReplicationExportRequest {
                     fleet_id: fleet_id.to_owned(),
                     inventory: ReplicationInventory::default(),
@@ -1858,7 +1878,7 @@ impl Backend for MainBackend {
         let response: ReplicationExportResponse = self
             .client
             .post(
-                "/v1/internal/replication/export",
+                &self.replication_path("export"),
                 &ReplicationExportRequest {
                     fleet_id: fleet_id.to_owned(),
                     inventory: ReplicationInventory::default(),
@@ -1883,7 +1903,7 @@ impl Backend for MainBackend {
         let started = std::time::Instant::now();
         self.client
             .post(
-                "/v1/internal/replication/receive",
+                &self.replication_path("receive"),
                 &ReplicationReceiveRequest {
                     peer: peer.to_owned(),
                     fleet_id: fleet_id.to_owned(),
@@ -1901,6 +1921,7 @@ impl Backend for MainBackend {
         &self,
         request: &CheckpointManifestRequest,
     ) -> Result<CheckpointManifestPage> {
+        anyhow::ensure!(self.shard.is_none(), "a shard has no checkpoints");
         self.client
             .post("/v1/internal/replication/checkpoint", request)
             .await
@@ -1910,10 +1931,16 @@ impl Backend for MainBackend {
         &self,
         request: &smallclaims::answers::AnswersRequest,
     ) -> Result<Option<smallclaims::answers::AnswersReply>> {
+        if self.shard.is_some() {
+            return Ok(None);
+        }
         self.client.post("/v1/internal/replication/answers", request).await
     }
 
     async fn record_answers_check(&self, check: &smallclaims::answers::AnswersCheck) -> Result<()> {
+        if self.shard.is_some() {
+            return Ok(());
+        }
         let _: Value = self
             .client
             .post("/v1/internal/replication/answers-check", check)
@@ -1922,6 +1949,9 @@ impl Backend for MainBackend {
     }
 
     async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
+        if self.shard.is_some() {
+            return Ok(None);
+        }
         self.client
             .post(
                 "/v1/internal/replication/checkpoint-need",
@@ -1931,6 +1961,7 @@ impl Backend for MainBackend {
     }
 
     async fn adopt_checkpoint(&self, manifest: &CheckpointManifest) -> Result<Vec<CheckpointAction>> {
+        anyhow::ensure!(self.shard.is_none(), "a shard has no checkpoints");
         self.client
             .post("/v1/internal/replication/checkpoint-adopt", manifest)
             .await
@@ -1963,6 +1994,10 @@ impl Backend for MainBackend {
         peer: &str,
         worker: smallclaims::replication::ReplicationWorkerStatus,
     ) -> Result<()> {
+        // Worker status describes each peer's graph exchanges.
+        if self.shard.is_some() {
+            return Ok(());
+        }
         let _: Value = self
             .client
             .post(
@@ -1988,7 +2023,7 @@ impl Backend for MainBackend {
         let _: serde_json::Value = self
             .client
             .post(
-                "/v1/internal/replication/peer-failure",
+                &self.replication_path("peer-failure"),
                 &ReplicationPeerFailureRequest {
                     peer: peer.to_owned(),
                     status: status.to_owned(),
@@ -2005,9 +2040,13 @@ impl Backend for MainBackend {
         if !self.socket.exists() {
             return;
         }
+        let path = match &self.shard {
+            Some(_) => self.replication_path("wake"),
+            None => "/v1/internal/replication-wake".to_owned(),
+        };
         let _ = self
             .client
-            .post::<_, serde_json::Value>("/v1/internal/replication-wake", &serde_json::json!({}))
+            .post::<_, serde_json::Value>(&path, &serde_json::json!({}))
             .await;
     }
 }
@@ -2096,13 +2135,78 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     database_watcher.watch(&wake_file, notify::RecursiveMode::NonRecursive)?;
     started_at_unix_ms();
     tokio::spawn(MainBackend::new(config.socket.clone()).report_process_cpu());
-    smallclaims::sync::run(
-        worker,
-        MainBackend::new(config.socket.clone()),
-        wake,
-        fractal_routes(splice),
-    )
-    .await
+    let main = MainBackend::new(config.socket.clone());
+    main.ready().await;
+    let mut shards = Vec::new();
+    // Graph sync never waits on the shard. A 404 or 405 means this daemon holds none. Any other
+    // failure is taken as passing on a daemon that holds it: the shard is followed from an empty
+    // peer set, and if that guess is wrong the sync stays idle and dials nobody.
+    let held = match shard_peers(&main, MESSAGES_SHARD).await {
+        Ok(peers) => peers,
+        Err(error) => {
+            eprintln!("st replication-worker: messages shard peers unavailable, following: {error:#}");
+            Some(BTreeSet::new())
+        }
+    };
+    if let Some(peers) = held {
+        let (sender, receiver) = watch::channel(peers);
+        let shard_wake = wake.clone();
+        tokio::spawn(follow_shard_peers(main.clone(), MESSAGES_SHARD, sender, wake.subscribe()));
+        shards.push(smallclaims::sync::ShardSync {
+            id: smallclaims::shards::ShardId::parse(MESSAGES_SHARD)?,
+            backend: MainBackend::for_shard(config.socket.clone(), MESSAGES_SHARD),
+            peers: receiver,
+            wake: shard_wake,
+        });
+    }
+    smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards).await
+}
+
+/// The shard the daemon keeps messages in; see `fractal_store::store::messages_shard`.
+const MESSAGES_SHARD: &str = "messages";
+
+/// The members whose current daemon advertises holding `shard`, or `None` when this daemon
+/// holds no such shard: it opened none, or it predates shards and has no route for it.
+async fn shard_peers(backend: &MainBackend, shard: &str) -> Result<Option<BTreeSet<String>>> {
+    #[derive(serde::Deserialize)]
+    struct Peers {
+        peers: BTreeSet<String>,
+    }
+    match backend
+        .client
+        .get::<Peers>(&format!("/v1/internal/replication/shard/{shard}/peers"))
+        .await
+    {
+        Ok(peers) => Ok(Some(peers.peers)),
+        Err(error) if matches!(crate::client::http_status(&error), Some(404 | 405)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Keep a shard's peer set current: advertisements arrive as graph claims, so look again
+/// when the graph wakes the dialers, at most every 5 seconds and at least every 30.
+async fn follow_shard_peers(
+    backend: MainBackend,
+    shard: &'static str,
+    peers: watch::Sender<BTreeSet<String>>,
+    mut wake: watch::Receiver<u64>,
+) {
+    loop {
+        tokio::select! {
+            changed = wake.changed() => if changed.is_err() { return },
+            () = tokio::time::sleep(Duration::from_secs(30)) => {}
+        }
+        // Graph wakes come in bursts; one look covers every wake in the pause.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        wake.mark_unchanged();
+        if let Ok(Some(current)) = shard_peers(&backend, shard).await {
+            peers.send_if_modified(|known| {
+                let changed = *known != current;
+                *known = current;
+                changed
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2213,6 +2317,7 @@ mod tests {
         let backend = MainBackend {
             client: Client::new(crate::client::Endpoint::Http(format!("http://{address}"))),
             socket: PathBuf::new(),
+            shard: None,
         };
         let result = backend.export("sample", &ReplicationInventory::default(), false, &[]).await;
         server.abort();
@@ -2229,6 +2334,49 @@ mod tests {
         assert_eq!(contextual.phase, ReplicationFailurePhase::FollowUpExport);
         assert_eq!(contextual.elapsed_ms, failure.elapsed_ms);
         assert_eq!(contextual.http_status, Some(500));
+    }
+
+    /// A daemon without the shard's route holds no shard; one that answers it names its peers;
+    /// any other failure is an error the caller follows from an empty peer set.
+    #[tokio::test]
+    async fn a_daemon_without_the_shard_route_holds_no_shard() {
+        use std::future::IntoFuture as _;
+        async fn answer(app: Router) -> Result<Option<BTreeSet<String>>> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(axum::serve(listener, app).into_future());
+            let backend = MainBackend {
+                client: Client::new(crate::client::Endpoint::Http(format!("http://{address}"))),
+                socket: PathBuf::new(),
+                shard: None,
+            };
+            let result = shard_peers(&backend, "messages").await;
+            server.abort();
+            let _ = server.await;
+            result
+        }
+        let route = "/v1/internal/replication/shard/messages/peers";
+        assert_eq!(answer(Router::new()).await.unwrap(), None);
+        assert_eq!(
+            answer(Router::new().route(route, post(|| async { "" }))).await.unwrap(),
+            None,
+        );
+        let held = Router::new().route(
+            route,
+            get(|| async {
+                axum::Json(serde_json::json!({"api_version": "fractal.v1", "value": {"peers": ["host-b"]}}))
+            }),
+        );
+        assert_eq!(answer(held).await.unwrap(), Some(BTreeSet::from(["host-b".to_owned()])));
+        let failing = Router::new().route(
+            route,
+            get(|| async {
+                (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({
+                    "code": "unavailable", "message": "busy", "details": {}
+                })))
+            }),
+        );
+        assert!(answer(failing).await.is_err());
     }
 
     #[test]
