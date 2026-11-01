@@ -1480,6 +1480,7 @@ mod tests {
         access_mode: None,
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
+        worker_ingress_generation_check: None,
         seat_priority: None,
         unlaned_seat: None,
         lanes: None,

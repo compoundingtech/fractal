@@ -3,6 +3,7 @@
 use super::*;
 use axum::{body::Body, extract::Request, middleware::{Next, from_fn}, response::IntoResponse};
 use std::sync::Arc;
+use crate::config::WorkerIngressGenerationCheck;
 
 type Observe = Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>;
 
@@ -23,7 +24,7 @@ fn authorize(peer: Option<&LocalPeer>, observe: &dyn Fn() -> anyhow::Result<u32>
     generation.validate()
 }
 
-fn protect(app: Router, observe: Observe) -> Router {
+fn protect(app: Router, observe: Observe, mode: WorkerIngressGenerationCheck) -> Router {
     app.layer(from_fn(move |request: Request<Body>, next: Next| {
         let observe = observe.clone();
         async move {
@@ -35,6 +36,10 @@ fn protect(app: Router, observe: Observe) -> Router {
                 let peer = request.extensions().get::<LocalPeer>().cloned();
                 let admitted = tokio::task::spawn_blocking(move || authorize(peer.as_ref(), &*observe)).await;
                 if !matches!(admitted, Ok(Ok(()))) {
+                    if mode == WorkerIngressGenerationCheck::Observe {
+                        eprintln!("fractal: worker authority observation would refuse {}", request.uri().path());
+                        return next.run(request).await;
+                    }
                     return (axum::http::StatusCode::FORBIDDEN,
                         axum::Json(serde_json::json!({"code":"worker-authentication-required",
                             "message":"this route requires the authenticated replication worker"}))).into_response();
@@ -64,9 +69,9 @@ pub fn worker_observer(pid: Option<u32>) -> anyhow::Result<Observe> {
     }
 }
 
-/// On Linux refuse before body decoding; re-observation admits restarts and revokes predecessors.
-pub fn worker_authenticated(app: Router, observe: Observe) -> Router {
-    protect(app, observe)
+/// On Linux observe by default; explicit enforcement refuses before body decoding.
+pub fn worker_authenticated(app: Router, observe: Observe, mode: WorkerIngressGenerationCheck) -> Router {
+    protect(app, observe, mode)
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -111,7 +116,7 @@ mod tests {
         let current = observed.clone();
         let app = protect(Router::new().route("/v1/internal/replication/receive",
             axum::routing::post(|_: axum::body::Bytes| async { "accepted" })),
-            Arc::new(move || Ok(current.load(Ordering::SeqCst))));
+            Arc::new(move || Ok(current.load(Ordering::SeqCst))), WorkerIngressGenerationCheck::Enforce);
         let request = |body| {
             let mut request = Request::post("/v1/internal/replication/receive").body(body).unwrap();
             request.extensions_mut().insert(peer.clone());
@@ -124,5 +129,16 @@ mod tests {
         assert_eq!(app.clone().oneshot(request(Body::from("[]"))).await.unwrap().status(), 200);
         observed.store(0, Ordering::SeqCst);
         assert_eq!(app.oneshot(request(Body::empty())).await.unwrap().status(), 403);
+    }
+
+    #[tokio::test]
+    async fn worker_ingress_observe_admits_unbound_callers_on_every_route_class() {
+        for path in ["/v1/internal/replication/receive", "/v1/internal/seat-freshness",
+            "/v1/internal/seat-snapshot", crate::peer::CLIENT_READ_FORWARD_PATH] {
+            let app = protect(Router::new().route(path, axum::routing::post(|| async { "accepted" })),
+                Arc::new(|| anyhow::bail!("supervisor unavailable")), WorkerIngressGenerationCheck::Observe);
+            let response = app.oneshot(Request::post(path).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), 200, "{path}");
+        }
     }
 }

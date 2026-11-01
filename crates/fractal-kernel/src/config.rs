@@ -22,6 +22,14 @@ pub enum Lanes {
     Off,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkerIngressGenerationCheck {
+    #[default]
+    Observe,
+    Enforce,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -36,6 +44,9 @@ pub struct Config {
     /// Separate explicit opt-in for non-authorizing legacy topology observations. Off by default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_primary_ownership_observe: Option<bool>,
+    /// Worker socket-generation admission. Absent observes without refusing; restart to change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_ingress_generation_check: Option<WorkerIngressGenerationCheck>,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
@@ -591,6 +602,7 @@ impl Default for Config {
             access_mode: None,
             claude_primary_ownership: None,
             claude_primary_ownership_observe: None,
+            worker_ingress_generation_check: None,
             seat_priority: None,
             unlaned_seat: None,
             lanes: None,
@@ -1250,6 +1262,19 @@ mod tests {
         let config: Config = toml::from_str("node=\"example\"\n").unwrap();
         assert!(config.work_root.is_none());
         assert!(!toml::to_string(&config).unwrap().contains("work_root"));
+    }
+
+    #[test]
+    fn worker_ingress_generation_check_is_strict_and_defaults_to_observe() {
+        use super::WorkerIngressGenerationCheck::{Enforce, Observe};
+        for (text, expected) in [("", Observe),
+            ("worker_ingress_generation_check='observe'", Observe),
+            ("worker_ingress_generation_check='enforce'", Enforce)] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert_eq!(config.worker_ingress_generation_check.unwrap_or_default(), expected);
+        }
+        assert!(toml::from_str::<Config>("worker_ingress_generation_check='enfroce'").is_err());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("worker_ingress_generation_check"));
     }
 
     #[test]
