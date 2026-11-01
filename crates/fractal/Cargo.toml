@@ -116,6 +116,17 @@ required-features = ["test-support"]
 path = "src/main.rs"
 doctest = false
 
+# The production CLI without a build identity, for the tests here that run the CLI as a user does. It is a
+# target of this package, so Cargo builds it with those tests from the same sources and configuration, and
+# only test builds (test-support) link it. The installed fractal is crates/fractal-cli.
+[[bin]]
+name = "fractal-unstamped"
+path = "src/unstamped.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+doc = false
+
 [[bin]]
 name = "fractal-fixture"
 path = "src/fixture.rs"

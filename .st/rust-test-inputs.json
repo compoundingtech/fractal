@@ -32,8 +32,6 @@
     "AGENTS.md",
     "CLAUDE.md",
     "clients",
-    "crates/fractal-build-stamp",
-    "crates/fractal-cli",
     "docs/st3/action-coverage.json",
     "docs/st3/actor-contract.json",
     "docs/st3/client-v0",

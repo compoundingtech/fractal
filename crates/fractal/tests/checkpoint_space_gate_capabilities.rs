@@ -8,7 +8,7 @@ use std::process::Command;
 #[test]
 fn staged_binary_reports_gate_without_state_and_rejects_extra_arguments() {
     let dir = tempfile::tempdir().unwrap();
-    let binary = fractal_bin!();
+    let binary = test_env!("CARGO_BIN_EXE_fractal-unstamped");
     let invoke = |extra: &[&str]| {
         let mut command = Command::new(binary);
         command.arg("--checkpoint-space-gate-capabilities").args(extra);

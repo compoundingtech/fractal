@@ -128,8 +128,8 @@ Verification:
 
 ```sh
 cargo test -p fractal-tui --locked --lib
-cargo test -p fractal-cli -p fractal --locked --test integration typed_keys
-cargo test -p fractal-cli -p fractal --locked --test integration client_only
+cargo test -p fractal --locked --test integration typed_keys
+cargo test -p fractal --locked --test integration client_only
 cargo build -p fractal-cli --locked
 ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/fractal --ui
 ```
