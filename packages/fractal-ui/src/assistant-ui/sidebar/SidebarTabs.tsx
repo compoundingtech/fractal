@@ -2,7 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
-import { accentVars as accent, borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 /** Shared status glyphs: working ●, idle ○, ended ×, fault !, pending ~. */
@@ -86,11 +86,11 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, children }: S
   return <div ref={bar} data-sidebar-tabs data-sidebar-tab-counts={countsFit ? 'shown' : 'dropped'} {...stylex.props(styles.root)}>
     {/* Hidden replica of the row with every count, at intrinsic width; outside Tabs, whose collection pass renders its content twice. */}
     <div ref={replica} aria-hidden inert data-sidebar-tabs-measure {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
-      {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touch)}><TabFace tab={tab} showCount /></span>)}
+      {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount /></span>)}
     </div>
     <Tabs selectedKey={selectedId} onSelectionChange={key => onSelectionChange(String(key))} {...stylex.props(styles.root)}>
       <TabList aria-label="Sidebar" {...stylex.props(styles.bar, narrow && styles.touch)}>
-        {tabs.map(tab => <Tab key={tab.id} id={tab.id} data-sidebar-tab={tab.id} aria-label={sidebarTabName(tab)} {...stylex.props(styles.tab, narrow && styles.touch)}><TabFace tab={tab} showCount={countsFit} /></Tab>)}
+        {tabs.map(tab => <Tab key={tab.id} id={tab.id} data-sidebar-tab={tab.id} aria-label={sidebarTabName(tab)} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={countsFit} /></Tab>)}
       </TabList>
       {/* One panel per tab with a stable id, so every tab's aria-controls resolves; only the selected one holds content. */}
       {tabs.map(tab => <TabPanel key={tab.id} id={tab.id} data-sidebar-tab-panel={tab.id} {...stylex.props(styles.panel)}>{tab.id === selectedId ? children : null}</TabPanel>)}
@@ -101,12 +101,13 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, children }: S
 const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' } as const
 const styles = stylex.create({
   root: { position: 'relative', display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  bar: { display: 'flex', alignItems: 'center', gap: s.xs2, flexShrink: 0, boxSizing: 'border-box', height: g.controlLg, paddingInline: s.xs, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  bar: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'minmax(0, 1fr)', alignItems: 'center', gap: 0, flexShrink: 0, boxSizing: 'border-box', height: g.controlLg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   // Same box as the bar but sized by its content and taking no layout space, so measuring never changes what is measured.
   measure: { position: 'absolute', top: 0, insetInlineStart: 0, width: 'max-content', visibility: 'hidden', pointerEvents: 'none' },
-  // Tabs share the spare width; none shrinks below its label.
-  tab: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flex: '1 0 auto', height: g.controlSm, paddingInline: s.xs, borderRadius: r.control, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: ink.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: ink.fg }, ':is([data-focus-visible])': focusRing },
+  // Equal tracks keep tab positions stable when counts change; labels never shrink.
+  tab: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: g.controlSm, borderRadius: r.control, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: ink.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: ink.fg }, ':is([data-focus-visible])': focusRing },
   touch: { height: g.touchTarget },
+  touchTab: { height: g.touchTarget, minWidth: g.touchTarget, boxSizing: 'border-box' },
   face: { whiteSpace: 'nowrap' },
   marker: { fontWeight: t.weightSemibold, fontVariantNumeric: 'tabular-nums' },
   question: { color: accent.primary },

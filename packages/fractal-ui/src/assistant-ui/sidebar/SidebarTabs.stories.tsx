@@ -155,6 +155,9 @@ const visibleText = (tablist: HTMLElement) => within(tablist).getAllByRole('tab'
 /** Every tab label paints whole: nothing in the row overflows, and the tabs end at the bar's content edge. */
 async function assertNoClip(tablist: HTMLElement) {
   await expect(tablist.scrollWidth).toBeLessThanOrEqual(tablist.clientWidth)
+  const widths = within(tablist).getAllByRole('tab').map(tab => tab.getBoundingClientRect().width)
+  await expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1)
+  if (window.innerWidth < 900) for (const width of widths) await expect(width).toBeGreaterThanOrEqual(44)
   for (const label of tablist.querySelectorAll<HTMLElement>('[data-sidebar-tab-label]')) {
     const tab = label.closest<HTMLElement>('[role="tab"]')!.getBoundingClientRect(), box = label.getBoundingClientRect()
     await expect(box.left).toBeGreaterThanOrEqual(tab.left)
