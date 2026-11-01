@@ -321,6 +321,30 @@ pub(crate) fn prepare(capacity: Option<Capacity>, runtime_id: &str) -> Result<Op
     }
 }
 
+/// Sets the live lane of `runtime_id` to `capacity`: raised for a step its seat holds, and back to
+/// its own when the seat no longer holds it (docs/st3/seat-lanes.md). False when the seat has no
+/// lane on this host to change, such as a seat that declares no capacity or one on a host without
+/// enforced lanes.
+pub fn resize(capacity: Capacity, runtime_id: &str) -> Result<bool> {
+    if !enforced() || crate::isolation_mode() != crate::Isolation::Scope || !crate::isolate::systemd_254() {
+        return Ok(false);
+    }
+    let slice = seat_slice(runtime_id);
+    if !slice_cgroup(&slice).is_some_and(|cgroup| cgroup.is_dir()) {
+        return Ok(false);
+    }
+    let output = crate::isolate::systemctl()
+        .args(["--user", "set-property", "--runtime", &slice])
+        .args(capacity.slice_properties())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("resize the lane {slice}"))?;
+    if !output.status.success() {
+        bail!("resize the lane {slice}: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(true)
+}
+
 /// Ends the lane of `runtime_id`, when it has one: everything still running in its slice, the jobs
 /// the seat started included, then the slice's limits. In the background, since the units in it
 /// get their own stop timeouts. For a seat that stopped for good; a restart keeps its lane, and a

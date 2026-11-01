@@ -110,17 +110,21 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// The memory of this host's other laned seats that run, or were admitted to start and are not
     /// yet seen running.
-    fn held_lanes(&self, candidate: &str, now: u64) -> Result<u64> {
+    pub(super) fn held_lanes(&self, candidate: &str, now: u64) -> Result<u64> {
         const STARTING_SECS: u64 = 600;
         let status = &self.seat_admission.status;
         let mut held = 0;
         let mut running = BTreeSet::new();
         for desired in self.store.desired_subjects()? {
             let Some(member) = desired.member.as_ref().filter(|member| member.host == self.host) else { continue };
-            let Some(lane) = member.capacity else { continue };
+            let Some(base) = member.capacity else { continue };
+            // A seat holding a step that raises its lane holds the raised lane.
+            let lane = status.state().lane_raised.get(&desired.subject).copied().unwrap_or(base);
             if desired.kind != "agent" || desired.subject == candidate {
                 continue;
             }
+            // Its observations decide the room, so a change to them is a reason to look again.
+            smallclaims::touched::note_read(|| desired.subject.clone());
             if self.store.latest_observation(&desired.subject, "runtime.observed")?
                 .is_some_and(|claim| claim.body["fields"]["status"] == "running")
             {
@@ -204,12 +208,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 }
 
-fn show_lane(lane: fractal_runtime::Capacity) -> String {
+pub(super) fn show_lane(lane: fractal_runtime::Capacity) -> String {
     format!("{} cores/{}", lane.cores, show_memory(lane.memory))
 }
 
 /// Bytes as the reasons show them: GiB with one decimal.
-fn show_memory(bytes: u64) -> String {
+pub(super) fn show_memory(bytes: u64) -> String {
     format!("{:.1}G", bytes as f64 / f64::from(1u32 << 30))
 }
 
