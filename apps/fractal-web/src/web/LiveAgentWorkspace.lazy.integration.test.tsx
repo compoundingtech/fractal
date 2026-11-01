@@ -90,6 +90,8 @@ beforeEach(async () => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/')
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // jsdom does not supply the CSSOM escaping used when the selected React Aria tab receives focus.
+  vi.stubGlobal('CSS', { escape: (value: string) => Array.from(value, char => /[a-zA-Z_-]/.test(char) ? char : `\\${char.codePointAt(0)?.toString(16)} `).join('') })
   vi.stubGlobal('ResizeObserver', class {
     observe() {}
     unobserve() {}

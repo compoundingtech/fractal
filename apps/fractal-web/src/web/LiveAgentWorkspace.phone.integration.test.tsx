@@ -114,6 +114,7 @@ it('closes the phone drawer when an alert opens its mission', async () => {
   })
   const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Expand sidebar"]')!
   expect(trigger.getAttribute('aria-expanded')).toBe('true')
+  await act(async () => vi.dynamicImportSettled())
   await vi.waitFor(async () => {
     await act(async () => {})
     expect(host.querySelector('[aria-label="Actions for Approve deployment"]')).not.toBeNull()
