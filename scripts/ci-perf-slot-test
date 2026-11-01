@@ -14,6 +14,7 @@ from unittest.mock import patch
 import hashlib
 import socket
 import stat
+from unittest import TestCase
 
 
 def utc():
@@ -44,15 +45,27 @@ def validate_receipt(receipt):
     assert len(fixtures) == 2 and len({r["unit"] for r in fixtures}) == 2
     for record in fixtures:
         assert record["drain"] == "empty and collected"
-        assert isinstance(record["peak_sampled_before_termination"], int)
-        assert "peak_final_lifecycle" in record
+        assert type(record["peak_sampled_before_termination"]) is int and record["peak_sampled_before_termination"] >= 0
+        final = record["peak_final_lifecycle"]
+        assert (type(final) is int and final >= 0) or final == "unavailable (collected)"
         assert record["limits"] == {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}
         assert record["RuntimeMaxUSec"] == 90000000
         assert record["manager"]["MemoryMax"] == "67108864"
         assert record["manager"]["MemorySwapMax"] == "0" and record["manager"]["TasksMax"] == "16"
+        assert record["manager"]["ControlGroup"] == record["cgroup"]
+        assert record["manager"]["Slice"] == record["slice"] == Path(record["parent_slice"]).name
+        assert record["cgroup"] == f"{record['caller_slice']}/{record['unit']}"
+        assert runtime_usec(record["manager"]["RuntimeMaxUSec"]) == record["RuntimeMaxUSec"]
         for field in ("pid", "starttime", "cgroup", "slice", "caller_slice", "parent_slice"):
             assert record[field]
         assert record["unit"].startswith(f"ci-perf-slot-fixture-{receipt['invocation']}-")
+
+
+def fixture_cgroups(lane, prefix):
+    def failed(error):
+        if not (isinstance(error, FileNotFoundError) and Path(error.filename) == lane):
+            raise error
+    return sum(Path(directory).name.startswith(prefix) for directory, children, files in os.walk(lane, onerror=failed))
 
 
 def receipt_directory(path, roots):
@@ -326,6 +339,10 @@ for helper, call in ((fixture_listing, "check_output"), (stop_fixture, "run")):
             raise AssertionError("manager timeout must fail the drain")
 with tempfile.TemporaryDirectory() as receipt_tmp:
     sink = Path(receipt_tmp)
+    assert fixture_cgroups(sink / "missing", "fixture-") == 0
+    for error in (PermissionError(13, "denied", str(sink)), FileNotFoundError(2, "gone", str(sink / "child"))):
+        with patch.object(os, "walk", side_effect=lambda lane, onerror: onerror(error)), TestCase().assertRaises(type(error)):
+            fixture_cgroups(sink, "fixture-")
     for final in (False, True):
         record = {}
         try:
@@ -357,7 +374,8 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
         for existing in sink.iterdir():
             existing.unlink()
         with patch.dict(os.environ, {"GATE_SLOT_SCOPE_UNIT": ""}), patch.object(
-                sys.modules[__name__], "receipt_directory", side_effect=lambda path, roots: real_directory(path, [])), contextlib.ExitStack() as stack:
+                sys.modules[__name__], "receipt_directory", side_effect=lambda path, roots: real_directory(path, [])), \
+                patch.object(subprocess, "check_output", return_value="fixture-source"), contextlib.ExitStack() as stack:
             try:
                 with receipt_sink(sink) as saved:
                     assert json.loads(next(sink.iterdir()).read_text())["status"] == "started"
@@ -380,19 +398,26 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
     good = dict(data, outcome="success", status="final", ended_utc=utc(), remaining_units=0, remaining_cgroups=0,
                 skip="no-user-manager", caller_cgroup="/system.slice/runner.service")
     validate_receipt(good)
-    fixture = dict(unit=f"ci-perf-slot-fixture-{good['invocation']}-0.scope", pid=1, starttime=1, cgroup="/fixture",
+    fixture = dict(unit=f"ci-perf-slot-fixture-{good['invocation']}-0.scope", pid=1, starttime=1,
                    slice="app.slice", caller_slice="/app.slice", parent_slice="/app.slice",
                    limits={"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}, RuntimeMaxUSec=90000000,
-                   manager={"MemoryMax": "67108864", "MemorySwapMax": "0", "TasksMax": "16"},
+                   manager={"MemoryMax": "67108864", "MemorySwapMax": "0", "TasksMax": "16", "RuntimeMaxUSec": "90s", "Slice": "app.slice"},
                    peak_sampled_before_termination=1, peak_final_lifecycle="unavailable (collected)", drain="empty and collected")
-    complete = dict(good, skip=None, fixtures=[fixture, dict(fixture, unit=fixture["unit"].replace("-0.scope", "-1.scope"))])
+    fixtures = [dict(fixture, unit=fixture["unit"].replace("-0.scope", f"-{n}.scope")) for n in range(2)]
+    for record in fixtures:
+        record["cgroup"] = f"/app.slice/{record['unit']}"
+        record["manager"] = dict(record["manager"], ControlGroup=record["cgroup"])
+    complete = dict(good, skip=None, fixtures=fixtures)
     validate_receipt(complete)
-    try:
-        validate_receipt(dict(complete, fixtures=[fixture, dict(complete["fixtures"][1], drain="not confirmed")]))
-    except AssertionError:
-        pass
-    else:
-        raise AssertionError("unconfirmed drain accepted")
+    for change in ({"drain": "not confirmed"}, *({"peak_final_lifecycle": value} for value in (None, -1, "unknown")),
+                   *({"manager": dict(fixtures[1]["manager"], **{field: value})}
+                     for field, value in (("ControlGroup", "/wrong"), ("Slice", "wrong.slice"), ("RuntimeMaxUSec", "1s")))):
+        try:
+            validate_receipt(dict(complete, fixtures=[fixtures[0], dict(fixtures[1], **change)]))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("invalid fixture receipt accepted")
     for bad in (dict(good, status="started"), dict(good, outcome="failure"), dict(good, remaining_units=1),
                 dict(good, remaining_cgroups=1), dict(good, hostname=""), dict(good, ended_utc=""),
                 dict(good, skip=None, fixtures=[]), dict(good, skip=None, fixtures=[{"drain": "not confirmed"}] * 2)):
@@ -525,10 +550,8 @@ with receipt_sink(os.environ.get("CI_PERF_SLOT_RECEIPT_DIR")) as receipt, tempfi
                 until(no_fixtures, "all fixture scopes and processes are gone")
                 receipt["remaining_units"] = len(fixture_listing(systemctl, receipt["invocation"]).splitlines())
                 manager_root = Path("/sys/fs/cgroup", slice_path.lstrip("/").split(".service/", 1)[0] + ".service")
-                receipt["remaining_cgroups"] = sum(
-                    1 for lane in ("app.slice", "builds.slice")
-                    for directory, children, files in os.walk(manager_root / lane, onerror=lambda error: (_ for _ in ()).throw(error))
-                    if Path(directory).name.startswith(f"ci-perf-slot-fixture-{receipt['invocation']}-"))
+                receipt["remaining_cgroups"] = sum(fixture_cgroups(manager_root / lane, f"ci-perf-slot-fixture-{receipt['invocation']}-")
+                                                  for lane in ("app.slice", "builds.slice"))
                 assert receipt["remaining_units"] == receipt["remaining_cgroups"] == 0, "fixture cgroups remain"
                 cleaned = True
             except subprocess.TimeoutExpired as error:
