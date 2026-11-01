@@ -1,3 +1,5 @@
 record 618fbb8b60ffdb7a424c563cfab1561b0d5b4dde typescript-client 0 host/spindle 2026-11-01T13:00:20Z
 record bcad4ddc723853c63d991ed8583f9b49bfd22c05 genie-freshness 0 host/spindle 2026-11-01T13:02:43Z
 record 1857e696ccda9e33800d1b209233323b17192f04 ci-script-tests 0 host/spindle 2026-11-01T13:08:52Z
+record 872416dd4cd18eae1be15d6fdf4100595831c4e7 linux-clippy 0 host/spindle 2026-11-01T13:20:02Z
+record ee80ee27465a180ef50479b3e0facc55c9b94894 linux-gate 0 host/spindle 2026-11-01T13:19:05Z
