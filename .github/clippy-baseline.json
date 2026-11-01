@@ -14,10 +14,6 @@
       "clippy::useless_format": 1,
       "clippy::while_let_loop": 1
     },
-    "fractal-legacy-runner": {
-      "clippy::obfuscated_if_else": 1,
-      "clippy::too_many_arguments": 2
-    },
     "fractal": {
       "clippy::collapsible_if": 4,
       "clippy::collapsible_match": 1,

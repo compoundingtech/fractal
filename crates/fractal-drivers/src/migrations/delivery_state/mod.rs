@@ -31,7 +31,7 @@
 //! # Deletion trigger
 //!
 //! `docs/vrs/.delta/DELTA-006-delivery-state-v1-arm.md`, whose Resolution Signal is produced by
-//! [`resolution_signal`] and printed per seat by `st2 doctor`: no `delivery-state.json` beside a
+//! [`resolution_signal`] for supplied native state directories: no `delivery-state.json` beside a
 //! ledger and no ledger entry still carrying an asserted phase, on every admitted host, for
 //! seven days. Deleting this arm is this directory, the one seam statement in
 //! [`crate::delivery_ledger::Ledger::open`], and the attestation instrumentation the trigger

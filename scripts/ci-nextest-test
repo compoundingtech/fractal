@@ -9,7 +9,6 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 
 FAKE_CARGO = """#!/usr/bin/env bash
-if [[ "$1" == metadata ]]; then echo '{"workspace_members":[],"packages":[]}'; exit 0; fi
 printf '%s\\n' "$@" > "$CALLS"
 """
 
@@ -19,8 +18,7 @@ def selection(filterset, lane=None, extra=()):
         temp = Path(temp)
         (temp / "scripts").mkdir()
         (temp / ".config").mkdir()
-        for script in ("ci-nextest", "ci-nextest-targets"):
-            shutil.copy(ROOT / "scripts" / script, temp / "scripts" / script)
+        shutil.copy(ROOT / "scripts/ci-nextest", temp / "scripts/ci-nextest")
         (temp / ".config" / "daily-only.filterset").write_text(filterset)
         (temp / "bin").mkdir()
         cargo = temp / "bin" / "cargo"

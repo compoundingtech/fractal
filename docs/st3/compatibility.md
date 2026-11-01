@@ -2,11 +2,12 @@
 
 ## Required rolling window
 
-[R49](../vrs/requirements.md#must-support-rolling-fleet-upgrades) requires this window: adjacent published releases
+**R49 Adjacent-release fleet window** requires this: adjacent published releases
 **N and N-1 must coexist for at least 14 days** without lost work, duplicate
 schedule fires, or blocked schedules. Features that need all members activate
 only when every active member advertises support. An older-release member that
-returns within **30 days offline** must not block or corrupt the fleet.
+returns within **30 days offline** must not block or corrupt the fleet. Downgrade
+is not required.
 
 **Implementation status: open — [#4002](https://github.com/compoundingtech/fractal/issues/4002).**
 The adjacent-release window is a required target and design sketch, **not a current guarantee**.

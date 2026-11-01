@@ -1,6 +1,4 @@
-//! The restart cap (M1b) — st2's crash-loop guard, driven by the job's declared `restart{}` policy
-//! (`docs/vrs/requirements.md` R31), so every conformant runner behaves identically on a flapping
-//! task.
+//! The catalog runner's crash-loop guard, driven by the job's declared `restart{}` policy.
 //!
 //! st2 owns liveness (it respawns a dead task on the next reconcile), so it also owns the restart
 //! decision. Per task it enforces `delay` spacing, then applies `mode`: `delay` **rate-limits** using

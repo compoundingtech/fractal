@@ -42,7 +42,6 @@ root="$(mktemp -d /tmp/cmr.XXXXXX)"
 trap "perf_stop_daemon '$root' >/dev/null 2>&1 || true; rm -rf '$root'" EXIT
 mkdir -p "$root/bin" "$root/state" "$root/pty" "$root/work"
 cp "$bin_dir/st3" "$root/bin/"
-[[ -x $bin_dir/st2 ]] && cp "$bin_dir/st2" "$root/bin/"
 git init -q "$root/work"
 cat >"$root/config.toml" <<TOML
 node = "evalnode"

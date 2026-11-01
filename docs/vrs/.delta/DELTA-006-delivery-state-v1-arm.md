@@ -1,134 +1,49 @@
-# DELTA-006: the pre-ledger `delivery-state.json` boundary arm outlives its own necessity
+# DELTA-006: retained native delivery-state translation
 
 Status: open
 
-## Divergence
+The canonical ledger owns `st.delivery-ledger.v1`.
+`crates/fractal-drivers/src/delivery_ledger.rs` calls
+`migrations::delivery_state::recover` only from `Ledger::open`'s missing-ledger arm.
+The translation reads a pre-ledger `delivery-state.json` and carries its in-flight
+attempt as asserted evidence. It authorizes no resend or stronger observed receipt.
+This remains reachable from Fractal's native Codex and OpenCode drivers after the
+catalog CLI retires.
 
-The canonical delivery ledger owns exactly one schema, `st.delivery-ledger.v1`,
-and `crates/fractal-drivers/src/delivery_ledger.rs` is written as though only that format had ever
-shipped. It nevertheless carries one statement that knows otherwise: the
-`ErrorKind::NotFound` arm of `Ledger::open` calls
-`crate::migrations::delivery_state::recover`, which reads the single-binding
-`delivery-state.json` record every pre-ledger release wrote and carries an
-in-flight attempt forward as an assertion instead of letting it be re-sent.
-
-That arm is correct today and is dead weight the moment no such record exists
-anywhere. Nothing in the code can observe that condition, so the divergence is
-between an implementation that must still translate a retired format and a
-design that owns one format — and it closes by deletion, on a fleet
-observation, not by an amendment.
-
-## VRS
-
-No ratified requirement mentions either record. The rule the arm exists to
-preserve is [`DING-R07`](../01-ding/requirements.md) staged ownership: once an
-attempt has started, ambiguity about whether it landed is resolved by
-inspection, never by pasting the same notice again. A release boundary is
-exactly such an ambiguity — the old binary's record is the only evidence that
-an attempt was made — so dropping that record on upgrade would resolve the
-ambiguity by re-sending, which DING-R07 forbids and DING-T01 answers the other
-way: every ambiguous case resolves toward deferral.
-
-Requirements therefore need no change. What needs recording is that a piece of
-the implementation is deliberately temporary, with the observation that ends
-it.
-
-`crates/fractal-drivers/src/migrations/delivery_state/` owns the whole boundary:
-`mod.rs` (entry point, ownership filter, legacy filename, recovery and
-resolution-signal logic), `codex_v1.rs`, and `opencode_v1.rs` (one retired wire
-struct each, plus the meaning of its labels — Codex's `accepted` was a typed
-in-turn receipt and grades to `consumed`, OpenCode's was a storage read-back and
-grades to `persisted`; see
-`crates/fractal-drivers/src/migrations/delivery_state/codex_v1.rs:72` and
-`opencode_v1.rs:72`).
-
-Canonical code gains one version-free field, `Attestation{Observed, Asserted}`
-on `Entry`: whether this build graded the phase or another authority asserted
-it (`crates/fractal-drivers/src/delivery_ledger.rs:160-162`). It changes no
-`Retention`, `RetryDecision`, or transport decision; the phase is what keeps
-carried-forward attempts from being re-sent. The field makes the unobserved
-phase countable for clause 2 of the Resolution Signal, so it is trigger
-instrumentation, not a permanent concept.
+The live requirement is [native delivery ownership](../../st3/invariants.md):
+ambiguity about a staged attempt must hold for inspection rather than duplicate
+transport. The translator remains necessary while an older record or an asserted
+entry can still carry that evidence.
 
 ## Deletion prerequisites
 
-**The signal requires two zero counts per admitted host for seven consecutive
-days:** (1) no pre-ledger `delivery-state.json` in the Codex/OpenCode state dirs,
-and (2) no ledger entry carrying an `Asserted` phase. The counts are emitted by
-`resolution_signal` (`crates/fractal-drivers/src/migrations/delivery_state/mod.rs:107-143`),
-which checks the legacy path and calls `delivery_ledger::asserted_entries`;
-the latter reads and parses ledgers and counts asserted entries without
-consuming them (`crates/fractal-drivers/src/delivery_ledger.rs:670-692`). Its
-behavior is pinned for both clauses and read-only repeat measurement in
-`mod.rs:288-334`. `st2 doctor` reports the per-seat advisory only while either
-count is nonzero (`src/main.rs:1140-1162`).
+For **every admitted host**, retain read-only observations showing both counts at
+zero for **seven consecutive days**:
 
-**Deletion requires fleet observations and a ratified rollback decision.** Both
-signal clauses must be clear on every admitted host for seven consecutive days;
-the pre-ledger release must also be retired as a supported rollback target, as
-required below. Code inspection proves
-the local no-old-record case is a no-op (`mod.rs:73-105`, test at
-`mod.rs:269-285`), but does not establish absence of old records fleet-wide.
-`Ledger::open` still calls `recover` on `NotFound`
-(`crates/fractal-drivers/src/delivery_ledger.rs:265-284`), so deleting the arm now
-could discard evidence of an in-flight attempt and permit a duplicate delivery.
-Do not delete the migration code until both signal clauses and the rollback
-decision prerequisite are evidenced.
+1. No pre-ledger `delivery-state.json` beside any relevant Codex/OpenCode state directory.
+2. No ledger entry carrying an `Asserted` phase.
 
-When ready, deletion is `git rm -r crates/fractal-drivers/src/migrations`, replacing
-the seam arm with `Ok(())`, and removing the now-unneeded `Entry.attestation`
-and `Attestation`, `delivery_ledger::asserted_entries`,
-`migrations::delivery_state::resolution_signal`, and doctor row. The recorded
-scope says this leaves first-run behavior; this audit does not execute that
-deletion.
+`migrations::delivery_state::resolution_signal` is the shared read-only producer.
+It takes the actual per-harness state directories and counts the legacy paths and
+`delivery_ledger::asserted_entries` without consuming them. The test
+`the_resolution_signal_counts_each_clause_without_consuming_it` pins both counts
+and repeat measurement. Missing or inaccessible hosts are not zero observations.
+Fractal's doctor does not call this producer or print its advisory; its silence is
+not evidence for either clause. The retired catalog CLI's state-tree recipe does
+not inventory current Fractal driver state.
 
-## Direction
+A **ratified rollback decision** must also retire the pre-ledger release line as a
+supported rollback target. Record that decision under `docs/vrs/.decisions/` and
+cite its exact artifact here before deletion. No such decision is established by
+this reference. A rolled-back binary can write another old record; the test
+`a_rollback_then_roll_forward_does_not_see_the_record_written_in_between` pins the
+boundary that makes the decision necessary.
 
-update implementation
+## Eventual removal
 
-## Resolution Signal
-
-`st2 doctor` prints, per seat, a `pre-ledger delivery state (DELTA-006)`
-advisory carrying `preLedgerRecords` and `assertedEntries`, and prints nothing
-when both are zero. The trigger resolves when that line is absent from
-`st2 doctor` on every admitted host for seven consecutive days. Producer:
-`migrations::delivery_state::resolution_signal`, pinned by
-`migrations::delivery_state::tests::the_resolution_signal_counts_each_clause_without_consuming_it`;
-measuring is read-only, so a diagnostic cannot make the record it counts
-disappear. Implementation evidence: `src/main.rs:1140-1162` and
-`crates/fractal-drivers/src/migrations/delivery_state/mod.rs:107-143`.
-
-The migration also runs inside st through the shared Codex driver. The st daemon
-does not call `resolution_signal` or print this advisory: silence from `st doctor`
-is not evidence for either clause. Read-only measurement for an st seat must
-supply that seat's actual per-harness state directories to `resolution_signal`;
-the legacy st2 directory examples below do not inventory current st driver state.
-
-The two clauses, and the equivalent commands for the legacy st2 state tree:
-
-```sh
-state="${XDG_STATE_HOME:-$HOME/.local/state}/st2"
-
-# 1. No pre-ledger record is left beside any per-harness state dir, so no
-#    unread attempt can still need carrying forward.
-find "$state/codex" "$state/opencode" -maxdepth 2 -name delivery-state.json -print
-
-# 2. No ledger entry still holds a phase this fleet never observed. While one
-#    exists, the translation that produced it is load-bearing.
-find "$state/codex" "$state/opencode" -maxdepth 2 -name delivery-ledger.json -print0 \
-  | xargs -0 -r jq -r 'select([.entries[].attestation] | any(. == "asserted")) | input_filename'
-```
-
-Clause 1 additionally requires a named artifact, not a recollection: a ratified
-decision under `docs/vrs/.decisions/` recording that the pre-ledger release line
-is no longer a supported rollback target. While no such record exists clause 1
-stays open, because a rolled-back binary can write a new `delivery-state.json`
-and the roll-forward window it opens is pinned by
-`migrations::delivery_state::tests::a_rollback_then_roll_forward_does_not_see_the_record_written_in_between`.
-That record's existence is what closes the clause; cite it by number here when
-it lands.
-
-The local half of the trigger — that with no old record present the module
-contributes nothing and writes nothing, so removing it cannot change observed
-behaviour — is asserted by
-`migrations::delivery_state::tests::deletion_trigger_absent_old_record_makes_this_module_a_no_op`.
+Only after the fleet observations and rollback decision are evidenced, remove the
+`migrations/delivery_state` module and its `Ledger::open` seam, then remove the
+unused `Attestation`, `Entry.attestation`, `asserted_entries`, and resolution-signal
+code and proofs. The local absent-old-record test proves only that local no-op
+case; it does not establish fleet-wide absence. Root CLI retirement supplies none
+of the deletion evidence above.

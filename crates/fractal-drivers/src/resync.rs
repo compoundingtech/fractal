@@ -1,5 +1,5 @@
 //! Resync events: supervisor-emitted notifications when a live agent's declared resource carriers
-//! change on disk ([`06-resync`](../docs/vrs/06-resync/spec.md)).
+//! change on disk.
 //!
 //! Delivery rides the event-stream machinery through a crate-internal admission for the built-in
 //! reserved `resync` stream that exists on every running agent without declaration. Public event
