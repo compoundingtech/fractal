@@ -718,20 +718,23 @@
         st3 = fractal;
         # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 
-        stChatgpt = pkgs.rustPlatform.buildRustPackage {
-          pname = "st-chatgpt";
+        fractalChatgpt = pkgs.rustPlatform.buildRustPackage {
+          pname = "fractal-chatgpt";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "st-chatgpt" ];
+          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "fractal-chatgpt" ];
           # .cargo/config.toml links Linux targets with mold.
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+          postInstall = ''ln -s fractal-chatgpt "$out/bin/st-chatgpt"'';
+          # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
           meta = {
             description = "Standalone Fractal ChatGPT MCP adapter";
             homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
-            mainProgram = "st-chatgpt";
+            mainProgram = "fractal-chatgpt";
           };
         };
 
@@ -1099,7 +1102,10 @@
         packages.st3 = st3;
         packages.fractal-web = fractalWeb;
         packages.fractal = fractal;
-        packages.st-chatgpt = stChatgpt;
+        packages.fractal-chatgpt = fractalChatgpt;
+        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        packages.st-chatgpt = fractalChatgpt;
+        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
         packages.st-fabric-adapter = stFabricAdapter;
         # Isolated bootstrap/live proofs use the exact pairing API revision.
         packages.fabric-pairing = fabric.packages.${system}.default;
