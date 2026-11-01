@@ -6548,11 +6548,10 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     poller.start().await;
 }
 
-/// An older poller beside a member of this build: the member answers from its graph and says the
-/// poller runs a build without the plugin, and both keep replicating. Upgrading the poller in
-/// place refills its mirror from GitHub while it reads on from the history the older build
-/// recorded, and the member then relays
-/// to it.
+/// An older poller beside a member of this build: if the release predates the GitHub plugin,
+/// the member answers from its graph and explains the missing plugin. A release that already
+/// advertises the plugin skips only those fallback expectations. Both keep replicating, and
+/// upgrading the poller in place must leave its mirror readable and the member relaying to it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_poller_beside_a_github_plugin_member_and_its_upgrade() {
@@ -6573,14 +6572,26 @@ async fn previous_release_poller_beside_a_github_plugin_member_and_its_upgrade()
     poller.start().await;
     watch_fixture_app(&poller);
 
-    wait_until("the member reads the old poller's pull request from its graph", 120, || {
+    wait_until("the member reads the old poller's pull request", 120, || {
         let answer = gh_prs(&member, PERSON);
         async move { answer["pulls"][0]["number"] == 12 }
     }).await;
     let answer = gh_prs(&member, PERSON);
-    assert_eq!(answer["source"]["kind"], "graph", "{answer}");
+    let release_has_plugin = poller.claims().await.iter().any(|claim| {
+        claim["subject"] == "daemon/fixture-old-poller" && claim["kind"] == "daemon.started"
+            && claim.pointer("/body/fields/features/github_plugin").and_then(Value::as_i64)
+                .is_some_and(|version| version >= 1)
+    });
     assert_eq!(answer["poller"], "host/fixture-old-poller");
-    assert!(answer["source"]["reason"].as_str().unwrap().contains("runs a build without the GitHub plugin"), "{answer}");
+    if release_has_plugin {
+        eprintln!(
+            "baseline release already advertises the GitHub plugin; skipping only the \
+             graph-fallback and missing-plugin reason assertions before upgrade"
+        );
+    } else {
+        assert_eq!(answer["source"]["kind"], "graph", "{answer}");
+        assert!(answer["source"]["reason"].as_str().unwrap().contains("runs a build without the GitHub plugin"), "{answer}");
+    }
     for node in [&member, &poller] {
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
@@ -6620,9 +6631,10 @@ async fn item_claim_with_head(node: &Node, kind: &str, head: &str) -> bool {
     })
 }
 
-/// A member of the previous release in the fleet keeps a repository's poller writing item
-/// snapshots, which its seat watching the repository reads. Once it upgrades and advertises the
-/// GitHub plugin, the poller records the next compact-only change as compact state alone.
+/// A previous release without the GitHub plugin keeps the poller writing item snapshots.
+/// If the release already advertises the plugin, skip only that snapshot expectation and
+/// require the elder to receive compact state instead. After upgrade, both baselines must
+/// allow compact-only changes and read the latest head.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
@@ -6659,12 +6671,25 @@ async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
         })
     }).await;
 
-    // A new head while the elder runs the previous release: the poller still writes a snapshot,
-    // which the elder receives.
+    let release_has_plugin = elder.claims().await.iter().any(|claim| {
+        claim["subject"] == "daemon/fixture-elder" && claim["kind"] == "daemon.started"
+            && claim.pointer("/body/fields/features/github_plugin").and_then(Value::as_i64)
+                .is_some_and(|version| version >= 1)
+    });
+    let item_kind = if release_has_plugin {
+        eprintln!(
+            "baseline release already advertises the GitHub plugin; skipping only the \
+             pre-upgrade item-snapshot expectation and checking compact-state receipt instead"
+        );
+        "vcs.item.state"
+    } else {
+        "resource.observed"
+    };
+    // The elder must receive the new head in the representation its capability requires.
     *head.lock().unwrap() = "c".repeat(40);
     refresh_fixture_app(&poller, "head-c");
-    wait_until("the elder receives a snapshot of head c", 120, || async {
-        item_claim_with_head(&elder, "resource.observed", &"c".repeat(40)).await
+    wait_until("the elder receives head c", 120, || async {
+        item_claim_with_head(&elder, item_kind, &"c".repeat(40)).await
     }).await;
 
     // The elder upgrades in place and advertises the plugin: the next head is compact state alone.
