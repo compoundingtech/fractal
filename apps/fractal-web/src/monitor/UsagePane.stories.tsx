@@ -35,7 +35,7 @@ const meta = {
   globals: { scenarioNow: ANCHOR_MS },
   argTypes: { ...scenarioArgTypes(['objectives']), scheme: { control: 'radio', options: ['dark', 'light'] }, reads: { table: { disable: true } } },
   parameters: { layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['objectives'] } },
-} satisfies Meta<UsageArgs>
+} satisfies Meta<UsageArgs & React.ComponentProps<typeof UsagePane>>
 export default meta
 type Story = StoryObj<typeof meta>
 const pane = (canvas: HTMLElement, read: UsageRead) => within(canvas.querySelector<HTMLElement>(`[data-usage-read="${read}"]`)!)
@@ -44,10 +44,10 @@ export const AllStates: Story = {
   args: { reads: usageReads },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    for (const read of usageReads) await expect(canvas.getByRole('region', { name: `Usage · ${read}`, exact: true })).toBeVisible()
+    for (const read of usageReads) await expect(canvas.getByRole('region', { name: `Usage · ${read}` })).toBeVisible()
     for (const read of ['live', 'stale'] as const) {
       for (const group of ['budgets', 'objectives', 'accounts']) {
-        await expect(canvas.getByRole('region', { name: `Usage · ${read}: ${group}`, exact: true })).toBeVisible()
+        await expect(canvas.getByRole('region', { name: `Usage · ${read}: ${group}` })).toBeVisible()
       }
     }
     await waitFor(() => expect(pane(canvasElement, 'live').getByRole('heading', { name: 'budgets 4' })).toBeVisible())
