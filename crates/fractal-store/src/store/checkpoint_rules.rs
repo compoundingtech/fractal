@@ -52,7 +52,9 @@ pub use staged::plan_staged;
 /// the current one, so a seat's needs-login `since` stays where the current run began.
 /// Version 25 keeps each incarnation's newest `working` and newest `ended` observation, which
 /// readers of a seat's last turn ask for.
-pub const RULES_VERSION: u32 = 25;
+/// Version 26 includes winner-preserving legacy placement migration and its authority marker
+/// in the existing arrangement/membership witnesses; it adds no claim-drop rule.
+pub const RULES_VERSION: u32 = 26;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest

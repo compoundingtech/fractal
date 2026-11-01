@@ -1672,6 +1672,7 @@ public enum ArrangementOperation: Codable, Sendable {
     case folderMove(id: String, parent: String?, key: String)
     case folderDelete(id: String)
     case subjectPlace(subject: String, folder: String?, key: String)
+    case membershipMigrate
     case retire
     enum CodingKeys: String, CodingKey { case op, id, name, parent, key, subject, folder }
     public init(from decoder: Decoder) throws {
@@ -1684,6 +1685,7 @@ public enum ArrangementOperation: Codable, Sendable {
         case "folder.move": self = .folderMove(id: try box.decode(String.self, forKey: .id), parent: try box.decode(String?.self, forKey: .parent), key: try box.decode(String.self, forKey: .key))
         case "folder.delete": self = .folderDelete(id: try box.decode(String.self, forKey: .id))
         case "subject.place": self = .subjectPlace(subject: try box.decode(String.self, forKey: .subject), folder: try box.decode(String?.self, forKey: .folder), key: try box.decode(String.self, forKey: .key))
+        case "membership.migrate": self = .membershipMigrate
         case "retire": self = .retire
         default: throw DecodingError.dataCorruptedError(forKey: .op, in: box, debugDescription: "Unknown arrangement operation")
         }
@@ -1698,6 +1700,7 @@ public enum ArrangementOperation: Codable, Sendable {
         case .folderMove(let id, let parent, let key): try box.encode("folder.move", forKey: .op); try box.encode(id, forKey: .id); try box.encode(parent, forKey: .parent); try box.encode(key, forKey: .key)
         case .folderDelete(let id): try box.encode("folder.delete", forKey: .op); try box.encode(id, forKey: .id)
         case .subjectPlace(let subject, let folder, let key): try box.encode("subject.place", forKey: .op); try box.encode(subject, forKey: .subject); try box.encode(folder, forKey: .folder); try box.encode(key, forKey: .key)
+        case .membershipMigrate: try box.encode("membership.migrate", forKey: .op)
         case .retire: try box.encode("retire", forKey: .op)
         }
     }

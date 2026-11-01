@@ -95,6 +95,14 @@ test('harness refusal details stay closed while result statuses remain lossless'
     const known = { status: 'accepted', resolution: { status: 'answered', revision: 'claim/observed', answers: {}, resolved_at: 1793008801000 } };
     assert.deepEqual(Schema.encodeSync(Rich.HarnessAnswerResult)(Rich.decodeUnknownSync(Rich.HarnessAnswerResult, 'strict')(known)), known);
 });
+test('placement migration is a strict typed arrangement operation', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const operation = { op: 'membership.migrate' };
+    const decoded = Rich.decodeUnknownSync(Rich.ArrangementOperation, 'strict')(operation);
+    assert.deepEqual(Schema.encodeSync(Rich.ArrangementOperation)(decoded), operation);
+    assert.throws(() => Rich.decodeUnknownSync(Rich.ArrangementOperation, 'strict')({ ...operation, version: 2 }));
+});
+
 test('revisioned agents opt-in and frames are strict disjoint branches with lossless provenance', async () => {
     const [{ Schema }, Rich] = await modules;
     const command = require('../../../docs/st3/client-v0/fixtures/agents-publication-subscribe.json');

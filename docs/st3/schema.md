@@ -277,6 +277,7 @@ Replication retains unknown operation tags and unknown placement subject familie
 - `folder.move`
 - `folder.delete`
 - `subject.place`
+- `membership.migrate`
 - `retire`
 
 ## Harness todo snapshots
