@@ -124,7 +124,7 @@ fn write_uniqueness_destructive_shapes_and_exact_targets() {
 fn readers_are_exact_scoped_positive_and_pair_unique() {
     let reader = json!({"principal":"agent/reader","peerHost":"peer","inventoryIds":["token","token"],"maxUses":1});
     let mut value = fixture(); value["readers"] = json!([reader]); check(value.clone()).unwrap();
-    for (key, bad) in [("principal", json!("person/reader")), ("principal", json!("agent/**")), ("peerHost", json!("*")), ("maxUses", json!(0)), ("maxUses", json!(MAX_SAFE_INTEGER+1)), ("inventoryIds", json!(["unknown"]))] {
+    for (key, bad) in [("principal", json!("person/example")), ("principal", json!("agent/**")), ("peerHost", json!("*")), ("maxUses", json!(0)), ("maxUses", json!(MAX_SAFE_INTEGER+1)), ("inventoryIds", json!(["unknown"]))] {
         let mut invalid = value.clone(); invalid["readers"][0][key] = bad; refuse(invalid);
     }
     let mut duplicate = value["readers"][0].clone(); duplicate["maxUses"] = json!(2);
