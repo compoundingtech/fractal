@@ -7825,7 +7825,9 @@ pub(crate) const DOCTOR_TOTAL: Duration = Duration::from_secs(60);
 pub(crate) const DOCTOR_CHECK: Duration = Duration::from_secs(15);
 
 /// Deadlines for doctor's checks. Each check reads under a child of doctor's budget, so the
-/// store's read interrupt ends a slow check without ending the report.
+/// store's read interrupt ends a slow check without ending the report. The deadline stops store
+/// reads and lock waits only: a check's filesystem and runtime observations run to their end,
+/// and the check is then reported as timed out.
 pub(crate) struct DoctorClock {
     total: smallclaims::read_budget::ReadBudget,
     check: Duration,

@@ -216,8 +216,9 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
     );
     let audits = newcomer.try_run(&["rules", "audit"]).unwrap();
     assert!(audits.starts_with("no write"), "{audits}");
-    // Doctor reads what is sealed and judged; the daemon's own verdict passes judge a claim
-    // shortly after its batch is sealed.
+    // Doctor reads what is sealed and judged, and seals nothing itself. A node without a fleet
+    // seals its batches only for an exchange or a backup, so its newest claims stay counted as
+    // not yet sealed; the daemon's own verdict passes judge a claim soon after it is sealed.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let check = loop {
         let check = newcomer.signatures();

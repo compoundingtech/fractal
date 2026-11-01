@@ -13,12 +13,12 @@ pub(super) fn client_config_check(unknown: &[String]) -> Option<DoctorCheck> {
     })
 }
 
-/// A local warning can raise a pass, but must never hide an existing failure.
 /// The checks the daemon gave up on at their deadline, which doctor names as it exits non-zero.
 pub(super) fn timed_out(checks: &[DoctorCheck]) -> Vec<&str> {
     checks.iter().filter(|check| check.status == "timeout").map(|check| check.name.as_str()).collect()
 }
 
+/// A local warning can raise a pass, but must never hide an existing failure.
 pub(super) fn client_config_status(status: &str, has_unknown_keys: bool) -> &str {
     if status == "pass" && has_unknown_keys {
         "warn"
