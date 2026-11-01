@@ -3,7 +3,7 @@
   "summary": "A seat whose mission run has ended is not restarted (the restart request is refused, or retired if it predates the end), a stop ends an earlier member-reconcile fault on every member, and a missing working directory is reported as such instead of as an unknown or launcher failure",
   "replay": {
     "status": "none",
-    "detail": "No claim, projection or replay changes. Faults are read with the subject's current stop declaration; nothing is rewritten."
+    "detail": "No claim, projection or replay changes. A member-reconcile fault is read against the subject's stop declarations in this store; nothing is rewritten."
   },
   "schema": {
     "status": "none",
