@@ -14,13 +14,13 @@ same way, relative to its package's directory (from the stage's own cargo metada
 `dep-info: check=NAME units=N files=M uncovered=K`, which the daily report counts.
 
 The skip policy is named by the caller (--policy), never by this script. CI's keyed jobs run it inside their stage (scripts/ci-linux, when
-CI_KEYED_CLIPPY_POLICY or CI_KEYED_FLEET_COMPAT_POLICY names the policy), and linux-clippy's local command, scripts/ci-clippy-result, runs it
-after the stage. linux-gate runs the same stages without either, so linux-gate never depends on the policy file
+CI_KEYED_CLIPPY_POLICY or CI_KEYED_FLEET_COMPAT_POLICY names the policy), and the local commands, scripts/ci-clippy-result and
+scripts/ci-fleet-compat-result, run it after the stage. linux-gate runs the same stages without either, so linux-gate never depends on the policy file
 (lane-definition-closure --check holds it to that).
 
---warn reports the same files as warnings and exits 0. linux-fleet-compat is in shadow and no default local run checks it yet, so the
-merge queue would be the first place a failure showed; scripts/ci-linux passes --warn for it until it is a default local check.
-linux-clippy is one (scripts/st-test), so its check fails.
+--warn reports the same files as warnings and exits 0. scripts/ci-linux still passes it for CI's linux-fleet-compat job while that check is
+in shadow, though every default local run now checks it without --warn (scripts/ci-fleet-compat-result), as for linux-clippy, whose CI
+check already fails.
 """
 import argparse
 import json

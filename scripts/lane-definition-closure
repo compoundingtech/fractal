@@ -115,6 +115,9 @@ EXTRA = {
     # The same for linux-clippy: the recorded argv (scripts/ci-clippy-result) reads a clippy stage's report, made by the stage scripts/st-test
     # runs alone when linux-gate does not run (RUN_CLIPPY), or by linux-gate's own run of it, already in linux-gate's closure.
     'linux-clippy': {'argv': [['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'clippy']]},
+    # And for linux-fleet-compat: scripts/ci-fleet-compat-result reads a fleet-compat stage's report, made by the stage scripts/st-test runs
+    # alone when linux-gate does not run (RUN_FLEET_COMPAT), or by linux-gate's own run of it.
+    'linux-fleet-compat': {'argv': [['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'fleet-compat']]},
 }
 # The tree under test: what the lanes build and test (the Rust workspace, the pnpm workspace packages), their `tree_inputs`. A script
 # that reads a file here (a lint over the crates, a test that copies a build script into a fixture) reads the subject of the check,
