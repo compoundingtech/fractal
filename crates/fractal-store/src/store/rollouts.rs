@@ -311,8 +311,8 @@ pub fn message_allowed_under(
         return Ok(true);
     }
     if message.from == "daemon/runtime"
-        && crate::silent::message_tag_value(message.tags.iter().map(String::as_str), "work:")
-            .is_some_and(|value| {
+        && crate::silent::message_tag_values(message.tags.iter().map(String::as_str), "work:")
+            .any(|value| {
             let mut parts = value.rsplitn(4, '@');
             let _incarnation = parts.next();
             let _epoch = parts.next();

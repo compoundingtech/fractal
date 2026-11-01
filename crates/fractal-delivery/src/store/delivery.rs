@@ -548,10 +548,11 @@ impl DeliveryStore for Store {
                     }
                 };
                 if message.to == recipient
-                    && crate::silent::message_tag_value(
+                    && crate::silent::message_tag_values(
                         message.tags.iter().map(String::as_str),
                         "work:",
                     )
+                    .next()
                     .is_some()
                 {
                     messages.push(message);

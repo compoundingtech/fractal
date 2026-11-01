@@ -52,14 +52,14 @@ pub fn strip_message_tag_prefix<'a>(tag: &'a str, family: &str) -> Option<&'a st
         .strip_prefix(family)
 }
 
-/// Prefer the complete old value, even when a conflicting new tag precedes it.
-pub fn message_tag_value<'a>(
-    tags: impl Clone + Iterator<Item = &'a str>,
-    family: &str,
-) -> Option<&'a str> {
-    ["st3-", "fractal-"].into_iter().find_map(|prefix| {
+/// Yield complete legacy values first, preserving tag order within each prefix.
+pub fn message_tag_values<'a>(
+    tags: impl Clone + Iterator<Item = &'a str> + 'a,
+    family: &'a str,
+) -> impl Iterator<Item = &'a str> + 'a {
+    ["st3-", "fractal-"].into_iter().flat_map(move |prefix| {
         tags.clone()
-            .find_map(|tag| tag.strip_prefix(prefix)?.strip_prefix(family))
+            .filter_map(move |tag| tag.strip_prefix(prefix)?.strip_prefix(family))
     })
 }
 // LIVE-MIGRATION END
@@ -361,16 +361,24 @@ mod tests {
             let old = format!("st3-{family}old");
             let new = format!("fractal-{family}new");
             for tags in [[old.as_str(), new.as_str()], [new.as_str(), old.as_str()]] {
-                assert_eq!(message_tag_value(tags.into_iter(), family), Some("old"));
+                assert_eq!(
+                    message_tag_values(tags.into_iter(), family).collect::<Vec<_>>(),
+                    ["old", "new"]
+                );
             }
             assert_eq!(
-                message_tag_value([new.as_str()].into_iter(), family),
+                message_tag_values([new.as_str()].into_iter(), family).next(),
                 Some("new")
             );
             assert_eq!(
-                message_tag_value([old.as_str()].into_iter(), family),
+                message_tag_values([old.as_str()].into_iter(), family).next(),
                 Some("old")
             );
+        }
+        for prefix in ["st3-", "fractal-"] {
+            let manual = format!("{prefix}wake-source:manual");
+            let tags = ["st3-wake-source:auto", manual.as_str()];
+            assert!(message_tag_values(tags.into_iter(), "wake-source:").any(|v| v == "manual"));
         }
     }
 

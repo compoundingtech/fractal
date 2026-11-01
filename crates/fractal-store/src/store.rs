@@ -19499,10 +19499,11 @@ pub fn enrich_step_wake_at(
             .get("tags")
             .and_then(Value::as_array)
             .is_some_and(|tags| {
-                crate::silent::message_tag_value(
+                crate::silent::message_tag_values(
                     tags.iter().filter_map(Value::as_str),
                     "wake-source:",
-                ) == Some("manual")
+                )
+                .any(|value| value == "manual")
             })
         {
             continue;
@@ -19513,8 +19514,8 @@ pub fn enrich_step_wake_at(
             .into_iter()
             .flatten()
             .filter_map(Value::as_str);
-        let matching_incarnation = crate::silent::message_tag_value(matching_incarnation, "work:")
-            .and_then(|tag| {
+        let matching_incarnation = crate::silent::message_tag_values(matching_incarnation, "work:")
+            .find_map(|tag| {
                 work_wake_tag_incarnation(tag, &view.subject, view.attempt, view.readiness_epoch)
                     .map(str::to_owned)
             });
@@ -19633,20 +19634,40 @@ pub fn enrich_step_wake_at(
 }
 
 #[test]
-fn work_wake_incarnation_accepts_both_prefixes_without_merging() {
-    for tags in [
-        vec!["st3-work:step-run/r/s@2@3@old"],
-        vec!["fractal-work:step-run/r/s@2@3@old"],
-        vec![
-            "fractal-work:step-run/r/s@9@8@new",
-            "st3-work:step-run/r/s@2@3@old",
-        ],
-    ] {
-        let value = crate::silent::message_tag_value(tags.into_iter(), "work:").unwrap();
-        assert_eq!(
-            work_wake_tag_incarnation(value, "step-run/r/s", 2, 3),
-            Some("old")
-        );
+fn work_wake_multiple_tags_preserve_attempts_and_manual_exclusion() {
+    for prefix in ["st3-", "fractal-"] {
+        for manual in [false, true] {
+            let store = Store::open_memory("fixture").unwrap();
+            let mut tags = vec![
+                "st3-work:other@1@1@other".to_owned(),
+                format!("{prefix}work:step-run/r/s@2@3@inc"),
+                "st3-wake-source:auto".into(),
+            ];
+            if manual {
+                tags.push(format!("{prefix}wake-source:manual"));
+            }
+            let input = serde_json::from_value(json!({
+                "subject": "message/wake", "kind": "message.sent", "actor": "daemon/runtime",
+                "fields": {"from": "daemon/runtime", "to": "agent/worker", "content": "",
+                    "status": "sent", "tags": tags}, "evidence": [],
+                "expected_subject": null, "idempotency_key": null
+            }))
+            .unwrap();
+            store.append_claim(&input).unwrap();
+            let mut view: StepRunView = serde_json::from_value(json!({
+                "subject": "step-run/r/s", "run": "mission-run/r", "generation": "g", "step": "s",
+                "definition_hash": "", "status": "ready", "attempt": 2, "readiness_epoch": 3,
+                "assigned_to": "agent/worker", "agentless": false, "worker_reported": false,
+                "created_at_unix_ms": 0, "updated_at_unix_ms": 0
+            }))
+            .unwrap();
+            enrich_step_wake_at(&store.readers.get(), &mut view, u128::MAX).unwrap();
+            assert_eq!(
+                view.wake.unwrap().attempts,
+                u32::from(!manual),
+                "{prefix} {manual}"
+            );
+        }
     }
 }
 
@@ -19656,7 +19677,7 @@ fn work_wake_tag_incarnation<'a>(
     attempt: u32,
     readiness_epoch: u32,
 ) -> Option<&'a str> {
-    // The caller selects one complete work-tag value with legacy-first precedence.
+    // Each value is decoded independently; fields from different tags are never merged.
     let mut parts = tag.rsplitn(4, '@');
     let incarnation = parts.next()?;
     (parts.next().and_then(|value| value.parse::<u32>().ok()) == Some(readiness_epoch)

@@ -384,7 +384,9 @@ pub fn signal_changed(state: &AppState) {
 
 /// The reconciler reads a message only when it carries a work-wake tag.
 pub fn is_work_wake(tags: &[String]) -> bool {
-    crate::silent::message_tag_value(tags.iter().map(String::as_str), "work:").is_some()
+    crate::silent::message_tag_values(tags.iter().map(String::as_str), "work:")
+        .next()
+        .is_some()
 }
 
 #[test]

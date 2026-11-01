@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "Durable signed and stored messages are decoded in place, never rewritten."},
   "schema": {"status": "none", "detail": "Existing recipient and subject indexes remain in use; no schema change."},
   "rules": {"status": "none", "detail": "No checkpoint or fleet coordination version change."},
-  "compatibility": {"status": "changed", "detail": "Work-wake readers and reserved-tag admission accept st3- and fractal-. Conflicting values prefer the complete st3- tag. Writers still emit st3-. Run-report idle projection compatibility is deferred because its persistent triggers and indexed projection require a separate change."},
+  "compatibility": {"status": "changed", "detail": "Work-wake readers and reserved-tag admission accept st3- and fractal-. Repeated tags retain all values, with matching st3- work values considered first; a manual wake-source under either prefix excludes the message from automatic attempts. Writers still emit st3-. Run-report idle projection compatibility is deferred because its persistent triggers and indexed projection require a separate change."},
   "downtime": {"status": "none", "detail": "Reader-only change; no service interruption required."},
   "manual": {"status": "none", "detail": "No message rewriting or operator steps."},
   "recovery": {"status": "none", "detail": "Existing writers remain compatible with the previous release; do not switch writers until all readers are expanded."}

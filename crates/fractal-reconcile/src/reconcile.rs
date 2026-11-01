@@ -5943,10 +5943,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut attempts = messages
                 .iter()
                 .filter(|message| {
-                    crate::silent::message_tag_value(
+                    !crate::silent::message_tag_values(
                         message.tags.iter().map(String::as_str),
                         "wake-source:",
-                    ) != Some("manual")
+                    )
+                    .any(|value| value == "manual")
                 })
                 .filter(|message| {
                     work_message_target(message).is_some_and(
@@ -19687,13 +19688,15 @@ fn nested_under_work(step: &StepRunView, work: &[StepRunView]) -> bool {
 }
 
 fn work_message_target(message: &crate::model::MessageView) -> Option<(&str, u32, u32, &str)> {
-    let value = crate::silent::message_tag_value(message.tags.iter().map(String::as_str), "work:")?;
-    let mut parts = value.rsplitn(4, '@');
-    let incarnation = parts.next()?;
-    let readiness_epoch = parts.next()?.parse::<u32>().ok()?;
-    let attempt = parts.next()?.parse::<u32>().ok()?;
-    let step_subject = parts.next()?;
-    Some((step_subject, attempt, readiness_epoch, incarnation))
+    crate::silent::message_tag_values(message.tags.iter().map(String::as_str), "work:").find_map(
+        |value| {
+            let mut parts = value.rsplitn(4, '@');
+            let incarnation = parts.next()?;
+            let readiness_epoch = parts.next()?.parse::<u32>().ok()?;
+            let attempt = parts.next()?.parse::<u32>().ok()?;
+            Some((parts.next()?, attempt, readiness_epoch, incarnation))
+        },
+    )
 }
 
 #[test]
@@ -19715,6 +19718,13 @@ fn work_message_target_accepts_fractal_and_prefers_old() {
         "st3-work:old@1@2@old".into(),
     ];
     assert_eq!(work_message_target(&message), Some(("old", 1, 2, "old")));
+    for prefix in ["st3-", "fractal-"] {
+        message.tags = vec![
+            "st3-work:malformed".into(),
+            format!("{prefix}work:step@2@3@inc"),
+        ];
+        assert_eq!(work_message_target(&message), Some(("step", 2, 3, "inc")));
+    }
 }
 
 fn work_message_should_close(
