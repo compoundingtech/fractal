@@ -61,6 +61,7 @@ pub mod placement;
 pub mod run_report;
 pub mod start_spacing;
 pub mod start_jobs;
+pub mod seat_admission;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
@@ -1234,6 +1235,7 @@ pub struct Reconciler<R = NativeRuntime> {
     event_notify: watch::Sender<u64>,
     start_spacing: start_spacing::StartSpacing,
     start_jobs: start_jobs::StartJobs,
+    seat_admission: seat_admission::Controller,
     #[cfg(any(test, feature = "test-support"))]
     pub wait_for_test_starts: AtomicBool,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
@@ -1475,6 +1477,7 @@ impl Reconciler<NativeRuntime> {
             event_notify,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
@@ -1655,6 +1658,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             event_notify: watch::channel(0_u64).0,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
@@ -2828,6 +2832,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_pass(&self) -> Result<()> {
+        self.refresh_seat_admission();
         // Start completion can mutate the runtime-observation fence. Capture before
         // it can read the shared snapshot, so pre-completion evidence cannot later
         // be presented to planning as a post-completion observation.
