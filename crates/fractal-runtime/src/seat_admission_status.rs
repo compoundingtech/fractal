@@ -120,11 +120,11 @@ impl Status {
     }
 
     /// Records why `subject` waits for room, keeping its place in line. True when the wait is new
-    /// or its reason changed.
+    /// or moved in or out of line; a reason whose figures moved is served as it is, unannounced.
     pub fn lane_wait(&self, subject: &str, reason: String, queued: bool, now: u64) -> bool {
         let mut state = self.state();
         if let Some(wait) = state.lane_waits.iter_mut().find(|wait| wait.subject == subject) {
-            let changed = wait.reason != reason || wait.queued != queued;
+            let changed = wait.queued != queued;
             wait.reason = reason;
             wait.queued = queued;
             wait.checked = now;
@@ -132,6 +132,14 @@ impl Status {
         }
         state.lane_waits.push_back(LaneWait { subject: subject.into(), since: now, reason, queued, checked: now });
         true
+    }
+
+    /// `subject` was tried for a start and its lane fit, but something else held it: it keeps its
+    /// place in line.
+    pub fn lane_tried(&self, subject: &str, now: u64) {
+        if let Some(wait) = self.state().lane_waits.iter_mut().find(|wait| wait.subject == subject) {
+            wait.checked = now;
+        }
     }
 
     /// `subject`'s lane fit and it starts: it leaves the line and holds its room until it is seen
@@ -197,8 +205,10 @@ mod tests {
         assert!(status.state().lane_starts.contains_key("big"));
         // A seat no longer tried stops holding its place.
         assert_eq!(status.lane_head(12 + LANE_WAIT_STALE_SECS + 1), None);
-        assert!(!status.lane_wait("small", "behind big".into(), true, 400));
-        assert!(status.lane_wait("small", "fits soon".into(), true, 401));
+        assert!(!status.lane_wait("small", "behind big, 3.0G free".into(), true, 400));
+        assert!(status.lane_wait("small", "can never fit".into(), false, 401));
+        status.lane_tried("small", 900);
+        assert_eq!(status.state().lane_waits.iter().find(|wait| wait.subject == "small").unwrap().checked, 900);
     }
 
     #[test]

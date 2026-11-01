@@ -12,11 +12,16 @@ impl<R: RuntimeControl> Reconciler<R> {
             LaneFit::Unlaned => None,
         };
         let admitted = self.admit_by_envelope(subject, member, request)?;
-        // Room is held only for a seat that starts.
-        if admitted && let Some(lane) = lane {
-            self.seat_admission.status.lane_admitted(&subject.subject, lane, u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX));
-            self.incremental.touch("seat-admission");
-            self.signal_changed();
+        // Room is held only for a seat that starts; one held by the envelope keeps its place.
+        let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
+        match lane {
+            Some(lane) if admitted => {
+                self.seat_admission.status.lane_admitted(&subject.subject, lane, now);
+                self.incremental.touch("seat-admission");
+                self.signal_changed();
+            }
+            Some(_) => self.seat_admission.status.lane_tried(&subject.subject, now),
+            None => {}
         }
         Ok(admitted)
     }
