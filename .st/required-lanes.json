@@ -38,7 +38,8 @@
         "scripts/ci-local-web",
         "scripts/ci-web-shell",
         "scripts/ci-web-shell-inputs.jq",
-        "scripts/ci-web-shell-test"
+        "scripts/ci-web-shell-test",
+        "scripts/prepare-pnpm-source-inputs.py"
       ],
       "tree_inputs": [
         ".buckconfig",
@@ -415,7 +416,8 @@
         "pnpm-source-inputs.json",
         "pnpm-workspace.yaml",
         "scripts/ci-nix-fixed-outputs",
-        "scripts/ci-typescript-client"
+        "scripts/ci-typescript-client",
+        "scripts/prepare-pnpm-source-inputs.py"
       ],
       "tree_inputs": [
         "apps/fractal-web/package.json",

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Prepare locked megarepo members and root-owned pnpm source inputs before unattended iOS Release builds, using the same commands as CI and the web shell.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of stored data." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "The delivery worker now requires nix on PATH. Missing tooling or failed source preparation refuses the build before pnpm installation." },
+  "downtime": { "status": "none", "detail": "No service restart or device downtime is required by this source change." },
+  "manual": { "status": "required", "detail": "Add the installed Nix bin directory to the delivery job PATH and re-pin its trusted release_delivery.py blob to the reviewed merge commit before enabling the updated worker." },
+  "recovery": { "status": "none", "detail": "A failed preparation leaves the previously installed app untouched; inspect the build log, restore the missing tool or pinned source, and let delivery retry." }
+}

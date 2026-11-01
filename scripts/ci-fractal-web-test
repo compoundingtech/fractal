@@ -76,6 +76,7 @@ web_inputs = (
     "flake.lock",
     "scripts/ci-web-shell",
     "scripts/ci-web-shell-test",
+    "scripts/prepare-pnpm-source-inputs.py",
     # Read by the lane without a web source naming them (the frozen install, an SDK fixture, the web shell hook, the
     # scenario privacy lane): a change to only these must still run the lane.
     "apps/ios/package.json",
