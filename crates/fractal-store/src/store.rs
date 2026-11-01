@@ -18801,7 +18801,7 @@ fn step_hashes(mission: &MissionSpec) -> BTreeMap<String, String> {
 }
 
 fn mission_header_hash(mission: &MissionSpec) -> Result<String, St3Error> {
-    let value = json!({
+    let mut value = json!({
         "id": mission.id,
         "state": mission.state,
         "inputs": mission.inputs,
@@ -18820,6 +18820,10 @@ fn mission_header_hash(mission: &MissionSpec) -> Result<String, St3Error> {
         "products": mission.products,
         "gates": mission.gates,
     });
+    // Only when declared, so an undeclared mission's header hashes as it did before the field.
+    if let Some(capacity) = mission.capacity {
+        value["capacity"] = json!(capacity);
+    }
     serde_json::to_vec(&value)
         .map(|bytes| hex::encode(Sha256::digest(bytes)))
         .map_err(internal)

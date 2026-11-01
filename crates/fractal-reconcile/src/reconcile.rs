@@ -13909,7 +13909,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let variables = run_variables(run, step, view);
         let source = crate::mission::interpolate_kdl(source, &variables)?;
-        let source = crate::mission::with_mission_capacity(&source, mission.capacity)?;
+        let source = crate::mission::with_mission_capacity(&source, step.mission_capacity)?;
         let mut intent = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
         if assigned_agents_only {
             let selected_agent = |subject: &str, desired: &DesiredSubject| {
@@ -13987,6 +13987,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             let variables = crate::store::mission_run_variables(run, &mission.revision);
             let source = crate::mission::interpolate_kdl(source, &variables)?;
+            let source = crate::mission::with_mission_capacity(&source, mission.capacity)?;
             let declarations = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
             if declarations
                 .subjects
@@ -19028,6 +19029,9 @@ struct RuntimeStep<'a> {
     spec: &'a StepSpec,
     dependency_prefix: String,
     parent: Option<String>,
+    /// The capacity of the mission that declares this step, nested or not: the lane of the agents
+    /// the step declares without one.
+    mission_capacity: Option<fractal_runtime::Capacity>,
 }
 
 /// Each failed finally step of a run with the reason it failed.
@@ -19062,6 +19066,7 @@ fn flatten_mission_steps(mission: &MissionSpec) -> Vec<RuntimeStep<'_>> {
                 spec: step,
                 dependency_prefix: dependency_prefix.clone(),
                 parent: parent.clone(),
+                mission_capacity: mission.capacity,
             });
             if let Some(nested) = &step.nested_mission {
                 append(

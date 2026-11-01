@@ -1885,13 +1885,14 @@ pub fn with_mission_capacity(
             "memory",
             fractal_runtime::show_lane_memory(capacity.memory),
         ));
+        // Format only the added node: the rest stays the author's text.
+        lane.autoformat();
         children.nodes_mut().push(lane);
         changed = true;
     }
     if !changed {
         return Ok(std::borrow::Cow::Borrowed(source));
     }
-    document.autoformat();
     Ok(std::borrow::Cow::Owned(document.to_string()))
 }
 

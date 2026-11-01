@@ -5035,6 +5035,12 @@ agent "seat" {
         )
         .unwrap();
         let source = crate::mission::with_mission_capacity(&source, spec.capacity).unwrap();
+        // Only the lane is added; the rest is the author's text.
+        let kept = "version 2\nagent \"worker\"  {   command \"true\" // kept\n}\n";
+        let added = crate::mission::with_mission_capacity(kept, spec.capacity).unwrap();
+        assert!(added.starts_with("version 2\nagent \"worker\"  {   command \"true\" // kept\n"), "{added}");
+        assert!(parse_execution_intent(&added, "node", "migration-proof").unwrap().subjects
+            .values().any(|desired| desired.member.as_ref().is_some_and(|member| member.capacity == spec.capacity)));
         let seats = parse_execution_intent(&source, "node", "migration-proof").unwrap();
         let lane = |name: &str| seats.subjects[&format!("agent/migration-proof/{name}")].member.as_ref().unwrap().capacity;
         assert_eq!(lane("worker"), Some(fractal_runtime::Capacity { cores: 2, memory: 4 * G }));
@@ -5084,6 +5090,29 @@ agent "seat" {
         ] {
             assert!(mission(mission_capacity, step).is_err(), "{mission_capacity} / {step}");
         }
+    }
+
+    #[test]
+    fn a_revision_of_only_a_missions_capacity_changes_its_header() {
+        let spec = |capacity: &str| {
+            parse_intent(
+                &format!("version 2\nmission \"example/laned\" state=\"ready\" revisions=\"human-only\" revision-reviewer=\"person/reviewer\" {{\n  goal \"Work.\"\n  {capacity}\n  step \"work\" {{\n    agentless\n    goal \"Work.\"\n  }}\n}}\n"),
+                "node",
+            )
+            .unwrap()
+            .missions
+            .remove("example/laned")
+            .unwrap()
+        };
+        for (old, new) in [("", "capacity cores=2"), ("capacity cores=2", "capacity cores=3"), ("capacity cores=2", "")] {
+            // Accepted, with the header's reviewers, and the step itself carries unchanged.
+            let (compatible, reviewers) =
+                crate::store::analyze_mission_revision(&spec(old), &spec(new), "person/author").unwrap();
+            assert_eq!(compatible, BTreeSet::from(["work".to_owned()]), "{old} -> {new}");
+            assert!(reviewers.contains("person/reviewer"), "{old} -> {new}: {reviewers:?}");
+        }
+        let unchanged = crate::store::analyze_mission_revision(&spec(""), &spec(""), "person/author").unwrap_err();
+        assert_eq!(unchanged.code, "unchanged-mission-revision");
     }
 
     #[test]
