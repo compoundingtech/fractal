@@ -1468,6 +1468,65 @@ fn assert_manual_rollout_after_exit(native_session: &str) {
 }
 
 #[test]
+fn stopped_rollout_waits_before_start_attempt_and_releases_fifo_after_admission() {
+    let seat = Seat::new();
+    seat.publish_mode(2, "second", None, false, true);
+    seat.runtime.observation.lock().unwrap().as_mut().unwrap().status = "exited".into();
+    let desired = seat.desired();
+    seat.append("runtime.observed", json!({
+        "status":"exited", "runtime_id":desired.member.as_ref().unwrap().runtime_id,
+        "host":"amber", "terminal":true, "incarnation_id":"original-1"
+    }));
+    let selected = seat.store.rollout_selection(SUBJECT).unwrap().unwrap();
+    let (_, old) = rollout::launched_member(&seat.store, SUBJECT, "original-1").unwrap().unwrap();
+    seat.store.request_rollout(SUBJECT, &selected.desired_token, &old, "original-1",
+        "person/operator", &Policy::when_idle(1_800_000, false), "queued-ended").unwrap();
+    let status = Arc::new(fractal_runtime::seat_admission_status::Status::default());
+    let reconciler = Reconciler::new(seat.store.clone(), seat.runtime.clone(), "amber".into(),
+        Arc::new(Notify::new())).with_seat_admission(None, status.clone());
+    status.state().decision = fractal_runtime::seat_admission::Decision {
+        mode: "enforce".into(), reason: "test pressure".into(), queue: true, observed_at: None,
+    };
+    for _ in 0..8 {
+        let observed = seat.runtime.observation.lock().unwrap().clone();
+        assert!(reconciler.reconcile_rollout(&desired, observed.as_ref(), None).unwrap());
+        if !status.state().pending.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(seat.operation().phase, "starting");
+    for _ in 0..4 {
+        let observed = seat.runtime.observation.lock().unwrap().clone();
+        assert!(reconciler.reconcile_rollout(&desired, observed.as_ref(), None).unwrap());
+        assert!(!seat.operation().start_attempted);
+        assert!(seat.store.runtime_start_for(SUBJECT).unwrap().is_none());
+        assert!(seat.runtime.starts.lock().unwrap().is_empty());
+        assert_eq!(status.state().pending.front().unwrap().subject, SUBJECT);
+        assert_eq!(status.state().pending.len(), 1);
+    }
+    // The runtime fixture models one process; exercise its FIFO successor through Status.
+    let later = "agent/garden/later";
+    assert!(!status.admit(later, None, None, false, 1));
+    status.state().decision.queue = false;
+    assert!(!status.admit(later, None, None, false, 2));
+    for _ in 0..5 {
+        let observed = seat.runtime.observation.lock().unwrap().clone();
+        assert!(reconciler.reconcile_rollout(&desired, observed.as_ref(), None).unwrap());
+    }
+    assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
+    assert!(seat.operation().start_attempted);
+    assert_eq!(status.state().pending.front().unwrap().subject, later);
+    assert!(status.admit(later, None, None, false, 3));
+    assert!(status.state().pending.is_empty());
+    seat.binding("replacement-1", "native-one");
+    let observed = seat.runtime.observation.lock().unwrap().clone();
+    assert!(reconciler.reconcile_rollout(&desired, observed.as_ref(), None).unwrap());
+    assert_eq!(seat.operation().phase, "running");
+    assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
+}
+
+
+#[test]
 fn manual_publication_preserves_completed_suspension_across_reopens() {
     let mut seat = Seat::new();
     let (operation, _, _) = seat.finish_suspend();
