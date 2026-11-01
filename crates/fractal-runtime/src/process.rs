@@ -493,9 +493,16 @@ impl ExecRuntime {
             anyhow::bail!("exec `{id}` changed incarnation before signal {signal}");
         }
         if let Some(unit) = &generation.scope_unit {
-            tracing::info!(signal, guard_decision = "allow", reason = "running_generation_scope", "signalling exec work scope");
+            // Read before the signal: a leader that has not joined its scope yet is systemd-run,
+            // alone in its group, and the scope's signal reaches nobody, so the group gets it too.
+            // Should the scope start in between, the task keeps the leader's PID and group.
+            let joined = crate::isolate::joined(unit, generation.pid);
+            tracing::info!(signal, joined, guard_decision = "allow", reason = "running_generation_scope", "signalling exec work scope");
             match crate::signal_scope(unit, signal) {
-                Ok(true) => return Ok(()),
+                Ok(true) if joined => return Ok(()),
+                Ok(true) => {
+                    tracing::debug!(signal, reason = "leader_not_in_scope", "signalling exec process group as well");
+                }
                 Ok(false) => {
                     tracing::debug!(signal, reason = "scope_signal_not_sent", "falling back to exec process group");
                 }
@@ -2010,6 +2017,92 @@ libc.pthread_exit(None)
         runtime
             .kill_if("work", Some(&replacement.generation_id))
             .unwrap();
+        wait_for_exit(&runtime, "work");
+    }
+
+    /// A oneshot unit that is starting until something is written to `release`, so a scope ordered
+    /// after it waits, loaded and empty. Stopped when dropped.
+    #[cfg(target_os = "linux")]
+    struct StartGate(String);
+
+    #[cfg(target_os = "linux")]
+    impl StartGate {
+        fn new(release: &Path) -> Self {
+            use std::os::unix::ffi::OsStrExt as _;
+            let name = std::ffi::CString::new(release.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+            let unit = format!("st3-test-start-gate-{}-{nanos}.service", std::process::id());
+            let status = std::process::Command::new("systemd-run")
+                .args(["--user", "--quiet", "--no-block", "--collect", "--property=Type=oneshot"])
+                .arg(format!("--unit={unit}"))
+                .args(["sh", "-c", "read line < \"$0\""])
+                .arg(release)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            Self(unit)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for StartGate {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "stop", &self.0])
+                .status();
+        }
+    }
+
+    /// A kill sent before the exec's scope has started ends the exec. `systemd-run` moves into its
+    /// scope when the user manager starts it and only then runs the task, and until then the
+    /// scope is loaded and empty. Here its start waits for a unit the test releases.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kill_before_the_exec_has_joined_its_scope_ends_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            eprintln!("skipped: no systemd user scopes");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let _kill = KillOnDrop(runtime.clone());
+        let release = root.path().join("release");
+        let gate = StartGate::new(&release);
+        // The spawn's own PATH finds a systemd-run that orders the scope after the gate.
+        let mut environment = scope_environment();
+        let systemd_run = crate::resolve_executable("systemd-run", &environment).unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let shim = bin.join("systemd-run");
+        fs::write(
+            &shim,
+            format!("#!/bin/sh\nexec '{}' --property=After={} \"$@\"\n", systemd_run.display(), gate.0),
+        )
+        .unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), environment["PATH"]);
+        environment.insert("PATH".into(), path);
+        let generation = runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec!["sleep".into(), "600".into()]),
+                root.path(),
+                &environment,
+            )
+            .unwrap();
+        let unit = generation.scope_unit.clone().unwrap();
+        wait_until("the exec's scope was never loaded", || {
+            systemctl_show(&unit, "LoadState") == "loaded"
+        });
+        assert!(!crate::isolate::joined(&unit, generation.pid));
+
+        runtime
+            .kill_if("work", Some(&generation.generation_id))
+            .unwrap();
+        fs::write(&release, "\n").unwrap();
+
         wait_for_exit(&runtime, "work");
     }
 
