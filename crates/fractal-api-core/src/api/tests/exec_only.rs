@@ -9,7 +9,8 @@ fn declare_exec_card(store: &Store, body: &str, key: &str) {
 
 fn observe_exec_card(store: &Store, name: &str, status: &str) {
     roster_fixture_append(store, &format!("exec/example/workers/{name}"), "runtime.observed", json!({
-        "status":status, "runtime_id":name, "host":"node", "incarnation_id":"one"
+        "status":status, "runtime_id":name, "host":"node", "incarnation_id":"one",
+        "exit_code": (status == "exited").then_some(0),
     }));
 }
 
