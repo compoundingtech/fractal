@@ -196,6 +196,16 @@ describe('sidebar navigation chords', () => {
     await act(async () => within(help).getByRole('button', { name: 'Close' }).click())
     expect(within(document.body).queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull()
   })
+  it('opens help while the desktop sidebar is collapsed', async () => {
+    const Fixture = () => {
+      const help = useSidebarNavigation(() => undefined)
+      return <>{help}<ResponsiveAgentSidebar viewport={1440} width={256} maxWidth={440} collapsed drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => undefined} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined}><span>Sidebar body</span></ResponsiveAgentSidebar></>
+    }
+    await act(async () => root.render(<Fixture />))
+    expect(host.textContent).not.toContain('Sidebar body')
+    await act(async () => press('?'))
+    expect(within(document.body).getByRole('dialog', { name: 'Keyboard shortcuts' })).toBeTruthy()
+  })
   it.each(['input', 'textarea', 'terminal', 'editable'])('does not capture typing in %s', async kind => {
     const show = vi.fn()
     await act(async () => root.render(<><NavigationFixture show={show} />{kind === 'input' ? <input /> : kind === 'textarea' ? <textarea /> : <div {...(kind === 'terminal' ? { 'aria-roledescription': 'terminal' } : { contentEditable: true })} />}</>))
