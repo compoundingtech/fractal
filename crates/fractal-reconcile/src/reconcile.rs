@@ -17035,10 +17035,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 cursor => cursor,
             };
-            Ok((cursor, kept_cursor))
+            let freshness = self.github_plugin.observer_freshness(&observer.subject, now_ms())?;
+            Ok((cursor, kept_cursor, freshness))
         })();
         // A database that cannot be read leaves no arm behind, so a later pass polls again.
-        let (mut cursor, mut kept_cursor) = match resolved {
+        let (mut cursor, mut kept_cursor, mut freshness) = match resolved {
             Ok(resolved) => resolved,
             Err(error) => {
                 self.armed_observers.lock().unwrap_or_else(PoisonError::into_inner).remove(&operation);
@@ -17142,14 +17143,25 @@ impl<R: RuntimeControl> Reconciler<R> {
                     every_ms: spec.every_ms,
                     refresh: refresh_attempt.is_some(),
                 };
-                let observed = tokio::time::timeout_at(
-                    look_deadline,
-                    crate::resource::spend_as(observer_subject.clone(), provider.observe(request)),
-                )
-                .await
-                .unwrap_or_else(|_| Err(anyhow::anyhow!(
-                    "the look ran past its {}s limit", look_limit.as_secs(),
-                )));
+                // Reload under the look lock: a retired arm may have completed while we waited.
+                let refreshed = github_plugin.observer_freshness(&observer_subject, now_ms());
+                let observed = match refreshed {
+                    Ok(latest) => {
+                        freshness = latest;
+                        tokio::time::timeout_at(
+                            look_deadline,
+                            crate::resource::spend_as(observer_subject.clone(), provider.observe(request)),
+                        ).await.unwrap_or_else(|_| Err(anyhow::anyhow!(
+                            "the look ran past its {}s limit", look_limit.as_secs(),
+                        )))
+                    }
+                    Err(error) => Err(error),
+                };
+                let freshness_error = if observed.is_ok() {
+                    github_plugin.complete_observation(&observer_subject, &mut freshness, now_ms()).err()
+                } else {
+                    None
+                };
                 // This UUID is the arm generation. The writer checks it inside the
                 // transaction; never keep the scheduler lock while waiting for Store I/O.
                 let current = || {
@@ -17271,7 +17283,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 // that cannot keep it there is the observer's failure, which its
                                 // state shows until the database takes it. A provider that never
                                 // gives this observer a cursor needs no row: nothing is adopted.
-                                let failed = if kept_cursor.as_ref() == Some(&observation.cursor)
+                                let failed = if freshness_error.is_some() {
+                                    freshness_error
+                                } else if kept_cursor.as_ref() == Some(&observation.cursor)
                                     || (kept_cursor.is_none() && cursor.is_none() && observation.cursor.is_none())
                                 {
                                     None
@@ -17296,7 +17310,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         completed_deadline = Some(now_ms().saturating_add(60_000));
                                         error_backoff = true;
                                         let unkept_cursor = observation.cursor;
-                                        let reason = format!("the GitHub plugin database did not keep the cursor: {error:#}");
+                                        let reason = format!("the GitHub plugin database did not keep observation state: {error:#}");
                                         // The healthy receipt this poll recorded names the episode,
                                         // so a failure after a recovery records its own receipt.
                                         let episode = store.latest_claim_id(&observer_subject).ok().flatten().unwrap_or_default();
@@ -17389,9 +17403,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                         let previous = store.latest_actual_value(&observer_subject).ok().flatten();
                         let condition = ObserverCondition::of(&error, previous.as_ref());
                         let state = if matches!(condition, ObserverCondition::LocalBudget(_)) {
-                            // Existing readers alert on degraded and reject new state values.
-                            // Local admission made no provider attempt; retain facts and expose the defer code/deadline.
-                            "healthy"
+                            freshness.budget_state(now, if standing {
+                                standing_interval.unwrap_or(180_000)
+                            } else {
+                                spec.every_ms.unwrap_or(60_000)
+                            })
                         } else {
                             "unreachable"
                         };
@@ -38476,6 +38492,75 @@ observer "{subject}" {{
         })
         .await
         .expect("the observation finished");
+    }
+
+    #[tokio::test]
+    async fn local_budget_health_uses_every_complete_poll_not_changed_receipts() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, SCRIPTED_OBSERVER, "budget-freshness");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let retry = now_ms() + 180_000;
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).with_resource_provider(Arc::new(ScriptedResourceProvider::new(calls.clone(), [
+            ScriptedObservation::Observe,
+            ScriptedObservation::Observe,
+            ScriptedObservation::LocalBudget(retry),
+            ScriptedObservation::LocalBudget(retry),
+            ScriptedObservation::Observe,
+            ScriptedObservation::LocalBudget(retry),
+        ])));
+        observe_now(&reconciler, &calls).await;
+        let receipts = store.claims_for("observer/repo", Some("observer.state")).unwrap().len();
+        let age_clock = || {
+            let mut clock = reconciler.github_plugin.observer_freshness("observer/repo", now_ms()).unwrap();
+            reconciler.github_plugin.complete_observation(
+                "observer/repo", &mut clock, now_ms() - 31 * 60_000,
+            ).unwrap();
+        };
+        age_clock();
+        // Identical facts and cursor suppress receipts but must reset local freshness.
+        observe_now(&reconciler, &calls).await;
+        assert_eq!(store.claims_for("observer/repo", Some("observer.state")).unwrap().len(), receipts);
+        observe_now(&reconciler, &calls).await;
+        assert_eq!(store.latest_actual_value("observer/repo").unwrap().unwrap()["state"], "healthy");
+        age_clock();
+        // A new arm reads the durable clock, just as a restarted reconciler does.
+        observe_now(&reconciler, &calls).await;
+        let actual = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(actual["state"], "degraded");
+        assert_eq!(actual["error_code"], "local-observer-budget");
+        assert_eq!(actual["next_check_unix_ms"], retry.to_string());
+        assert!(actual["reason"].as_str().unwrap().contains("local observer budget reached"));
+        assert!(observer_items(&store).is_empty(), "local budget does not require a person");
+        observe_now(&reconciler, &calls).await;
+        observe_now(&reconciler, &calls).await;
+        assert_eq!(store.latest_actual_value("observer/repo").unwrap().unwrap()["state"], "healthy");
+    }
+
+    #[tokio::test]
+    async fn failed_freshness_write_degrades_with_backoff_instead_of_repolling() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, SCRIPTED_OBSERVER, "failed-freshness");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).with_resource_provider(Arc::new(ScriptedResourceProvider::new(
+            calls.clone(), [ScriptedObservation::Observe],
+        )));
+        reconciler.github_plugin.fail_freshness_writes();
+        let before = now_ms();
+        observe_now(&reconciler, &calls).await;
+        let actual = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(actual["state"], "degraded");
+        assert_eq!(actual["error_code"], "github-plugin-database");
+        assert!(actual["reason"].as_str().unwrap().contains("freshness write failed"));
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let key = format!("observer/repo:{revision}");
+        assert!(reconciler.observer_deadlines.lock().unwrap()[&key] >= before + 60_000);
+        reconciler.reconcile_once().unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
