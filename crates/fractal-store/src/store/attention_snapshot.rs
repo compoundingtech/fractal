@@ -1029,12 +1029,13 @@ impl Store {
                 .unwrap_or("the observer cannot observe")
                 .to_owned();
             let code = fields["error_code"].as_str().unwrap_or("unreachable");
-            let condition = if fields["state"] == "degraded" {
+            let condition = if code == "local-observer-budget" {
+                ObserverCondition::LocalBudget(reason)
+            } else if fields["state"] == "degraded" {
                 ObserverCondition::Rejected(reason)
             } else {
                 match code {
                     "access-denied" => ObserverCondition::Access(reason),
-                    "local-observer-budget" => ObserverCondition::LocalBudget(reason),
                     "rate-limited" => ObserverCondition::RateLimited {
                         reason,
                         outlasted: fields["next_check_unix_ms"]
