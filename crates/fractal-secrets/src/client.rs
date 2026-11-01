@@ -35,7 +35,8 @@ impl Endpoint {
     /// Resolve discovery at use time; explicit Unix endpoints remain exact.
     pub fn unix_socket(&self) -> Option<std::borrow::Cow<'_, Path>> {
         match self {
-            Self::Unix(path) => Some(std::borrow::Cow::Borrowed(path)),
+            Self::Unix(path) | Self::DiscoveredUnix(fractal_client::UnixSocketDiscovery::Explicit(path)) =>
+                Some(std::borrow::Cow::Borrowed(path)),
             Self::DiscoveredUnix(discovery) => Some(std::borrow::Cow::Owned(discovery.resolve())),
             Self::Http(_) | Self::Fabric(_) => None,
         }
@@ -597,7 +598,7 @@ impl Client {
         &self,
         request: &fractal_schema::deploy::VerifyGoRequest,
     ) -> Result<fractal_schema::deploy::VerifyGoReceipt> {
-        if self.endpoint.unix_socket().is_none() {
+        if !matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
             return Err(crate::model::St3Error::new(
                 "deploy-local-only",
                 "deploy verification requires the local Unix endpoint",
@@ -834,7 +835,7 @@ impl Client {
     /// read without any graph write. `None` leaves the attach to the WebSocket: an HTTP endpoint
     /// can be another host, and a daemon from before direct attachment has no such route.
     pub async fn local_terminal(&self, subject: &str) -> Result<Option<LocalTerminal>> {
-        if self.endpoint.unix_socket().is_none() {
+        if !matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
             return Ok(None);
         }
         match self
