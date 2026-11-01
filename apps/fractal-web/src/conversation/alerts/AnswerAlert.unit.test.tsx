@@ -339,3 +339,34 @@ describe('gatewayAlertActions', () => {
     expect(workDone).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('served sidebar prompts', () => {
+  it.each([true, false])('respects the daemon allow=%s verdict while showing its call', allow => {
+    const alert = item({
+      attention_kind: 'harness-prompt', actions: ['prompt.respond'],
+      action_parameters: { 'prompt.respond': { target_id: seat, episode: 'prompt/one', call_id: 'call/one', answers: ['allow', 'deny'] } },
+      presentation: {
+        tier: Option.some('stopped'), kind: Option.some('prompt'), agent: Option.none(), raised_by: Option.none(), waiting: Option.none(),
+        prompt: { allow, calls: Option.some([{ call_id: 'call/one', tool: 'Bash', input: '{"command":"deploy"}', input_complete: allow }]), answers: ['allow', 'deny'] },
+      },
+    })
+    const html = renderToStaticMarkup(
+      <AgentAlerts alerts={[alert]} calls={[]} served onAnswer={async () => ({ _tag: 'Sent' })} />,
+    )
+    expect(html).toContain('deploy')
+    expect(html.includes('>Allow</button>')).toBe(allow)
+    expect(html).toContain('>Deny</button>')
+  })
+
+  it('offers no allow action when a daemon serves no calls, even with unrelated conversation calls', () => {
+    const alert = item({
+      attention_kind: 'harness-prompt', actions: ['prompt.respond'],
+      action_parameters: { 'prompt.respond': { episode: 'prompt/one', call_id: 'call/one', answers: ['allow', 'deny'] } },
+    })
+    const html = renderToStaticMarkup(
+      <AgentAlerts alerts={[alert]} calls={[{ id: 'call/one', tool: 'Bash', lines: ['deploy'] }]} served onAnswer={async () => ({ _tag: 'Sent' })} />,
+    )
+    expect(html).not.toContain('>Allow</button>')
+    expect(html).toContain('>Deny</button>')
+  })
+})

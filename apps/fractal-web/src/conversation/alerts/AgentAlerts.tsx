@@ -1,6 +1,7 @@
-import type * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
+import { Schema } from 'effect'
 
 import {
   alertConversations,
@@ -13,6 +14,8 @@ import {
   promptAlertKey,
   promptCalls,
   questionAnswer,
+  servedAnswers,
+  servedPrompt,
   type PendingCall,
 } from '../../../../../clients/typescript/fractal-views/homeView.ts'
 import { geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -109,17 +112,19 @@ export const AgentAlerts = ({
   calls,
   onAnswer,
   onAct,
+  served = false,
 }: {
   readonly alerts: readonly Native.Attention[]
   readonly calls: readonly PendingCall[]
   readonly onAnswer?: Answer
   readonly onAct?: Act
+  readonly served?: boolean
 }): React.ReactNode => {
   if (alerts.length === 0) return null
   const one = (alert: Native.Attention) =>
     alert.attention_kind === 'harness-prompt'
       // A new prompt or revision behind the same alert starts with nothing chosen.
-      ? <PromptAlert key={promptAlertKey(alert)} alert={alert} calls={calls} onAnswer={onAnswer} />
+      ? <PromptAlert key={promptAlertKey(alert)} alert={alert} calls={calls} onAnswer={onAnswer} served={served} />
       : <AnswerAlert key={alert.id} alert={alert} onAct={onAct} />
   const [first, ...rest] = alerts
   return (
@@ -143,18 +148,24 @@ const PromptAlert = ({
   alert,
   calls,
   onAnswer,
+  served,
 }: {
   readonly alert: Native.Attention
   readonly calls: readonly PendingCall[]
   readonly onAnswer?: Answer
+  readonly served: boolean
 }): React.ReactNode => {
   const prompt = promptAnswers(alert)
+  const presented = served ? servedPrompt({ presentation: { prompt: alert.presentation?.prompt === undefined
+    ? undefined : Schema.encodeSync(Native.AttentionPrompt)(alert.presentation.prompt) } }) : undefined
+  const available = presented?.calls ?? (served ? [] : calls)
   // Only the exact call the prompt asks about, when the daemon names it.
-  const shown = prompt === null ? calls : promptCalls(prompt, calls)
+  const shown = prompt === null ? available : promptCalls(prompt, available)
   const [chosen, setChosen] = React.useState<number[][]>([])
   const [status, setStatus] = React.useState<string>()
   const [sending, setSending] = React.useState(false)
-  const offered = prompt === null || onAnswer === undefined ? [] : offeredAnswers(prompt, calls)
+  const offered = prompt === null || onAnswer === undefined ? [] :
+    presented === undefined ? offeredAnswers(prompt, calls) : servedAnswers(prompt, presented)
   const questions = pendingQuestions(shown)
   const gated = prompt?.answers.find((answer) => answer === 'allow' || answer === 'approve' || answer === 'answer')
   const sendable = questions === null ? null : questionAnswer(questions, chosen)

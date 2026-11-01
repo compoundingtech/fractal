@@ -280,7 +280,7 @@ function parsedInput(args: unknown): unknown {
  * call it asks about; or why st serves none (it cannot read the conversation, or it is older).
  */
 export type ServedPrompt = { calls: PendingCall[]; allow: boolean } | { calls: null; allow: false; why: string };
-export function servedPrompt(item: { readonly presentation?: { readonly prompt?: AttentionPrompt } | null }): ServedPrompt {
+export function servedPrompt(item: { readonly presentation?: { readonly prompt?: { readonly allow: boolean; readonly unknown_reason?: string | null; readonly calls: readonly NonNullable<AttentionPrompt['calls']>[number][] | null } } | null }): ServedPrompt {
   const prompt = item.presentation?.prompt;
   if (!prompt) return { calls: null, allow: false, why: "This host's st is older and does not say which call the prompt asks about." };
   if (!prompt.calls) return { calls: null, allow: false, why: prompt.unknown_reason ?? "st cannot read the agent's conversation." };
