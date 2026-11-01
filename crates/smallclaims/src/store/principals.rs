@@ -2289,10 +2289,12 @@ mod paced_verdict_tests {
         }
         assert_eq!(store.claim_verdict(&first.id).unwrap(), Verdict::Verified);
         // A pass that leaves nothing pending does not wake the job again, so a steady trickle
-        // of passes and empty seals cannot loop it.
+        // of passes and empty seals cannot loop it, and leaves the tail no slice to run.
         store.judge_claims_slice(false).unwrap();
+        store.verdicts_due.store(false, Ordering::Release);
         store.seal_local_batches().unwrap();
         assert_eq!(wakes(), start + 1);
+        assert!(!store.verdicts_due.load(Ordering::Acquire));
         // The next claim sealed is handed off again.
         write("agent/studio.second");
         store.seal_local_batches().unwrap();
