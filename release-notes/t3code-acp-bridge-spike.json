@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add an opt-in t3code local ACP stdio bridge example that drives Fractal-managed agents without launching a second harness",
+  "replay": {"status": "none", "detail": "Example only; no daemon replay behavior changes."},
+  "schema": {"status": "none", "detail": "No core API or persisted schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest changes."},
+  "compatibility": {"status": "none", "detail": "Opt-in ACP v1 example; existing clients and daemon APIs are unchanged."},
+  "downtime": {"status": "none", "detail": "Nothing runs automatically at upgrade."},
+  "manual": {"status": "none", "detail": "No upgrade action; example setup is documented in its README."},
+  "recovery": {"status": "none", "detail": "Remove the local ACP provider registration to stop using the example."}
+}
