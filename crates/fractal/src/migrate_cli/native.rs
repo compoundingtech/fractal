@@ -105,6 +105,17 @@ fn linux_services(probe: impl FnMut(&str) -> Result<Unit>) -> Result<Services> {
     )
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_services(probe: impl FnMut(&str) -> Result<Unit>) -> Result<Services> {
+    inspect_services(
+        &["com.compoundingtech.st3", "org.nix-community.home.smalltalk"],
+        &[(&["com.compoundingtech.st3.replication", "org.nix-community.home.smalltalk-replication"], "com.compoundingtech.fractal.replication"),
+            (&["org.nix-community.home.smalltalk-apply"], "com.compoundingtech.fractal-apply")],
+        "com.compoundingtech.fractal",
+        probe,
+    )
+}
+
 fn inspect_services(
     legacy_daemons: &[&str],
     auxiliary: &[(&[&str], &str)],
@@ -152,12 +163,7 @@ impl Manager for Native {
         #[cfg(target_os = "macos")]
         {
             let base = home.join("Library/LaunchAgents");
-            inspect_services(
-                &["com.compoundingtech.st3", "org.nix-community.home.smalltalk"],
-                &[(&["com.compoundingtech.st3.replication"], "com.compoundingtech.fractal.replication"), (&["org.nix-community.home.smalltalk-apply"], "com.compoundingtech.fractal-apply")],
-                "com.compoundingtech.fractal",
-                |name| Self::launchd(name, &base),
-            )
+            macos_services(|name| Self::launchd(name, &base))
         }
     }
 
@@ -288,6 +294,60 @@ mod tests {
             running: running.contains(&name),
             enabled: installed.contains(&name) && !name.starts_with("fractal"),
         }))
+    }
+
+    fn macos_plan(installed: &[&str], running: &[&str]) -> Result<Services> {
+        macos_services(|name| Ok(Unit {
+            name: name.into(),
+            file: Path::new("/Users/example/Library/LaunchAgents").join(format!("{name}.plist")),
+            installed: installed.contains(&name),
+            running: running.contains(&name),
+            enabled: installed.contains(&name) && !name.starts_with("com.compoundingtech.fractal"),
+        }))
+    }
+
+    #[test]
+    fn discovers_both_replication_aliases_through_native_macos_plan() -> Result<()> {
+        for (daemon, worker) in [
+            ("org.nix-community.home.smalltalk", "org.nix-community.home.smalltalk-replication"),
+            ("com.compoundingtech.st3", "com.compoundingtech.st3.replication"),
+        ] {
+            let services = macos_plan(
+                &[daemon, worker, "com.compoundingtech.fractal", "com.compoundingtech.fractal.replication"],
+                &[daemon, worker],
+            )?;
+            assert_eq!(services.legacy.iter().map(|unit| unit.name.as_str()).collect::<Vec<_>>(), [daemon, worker]);
+            assert_eq!(services.target.iter().map(|unit| unit.name.as_str()).collect::<Vec<_>>(),
+                ["com.compoundingtech.fractal", "com.compoundingtech.fractal.replication"]);
+            assert!(services.legacy.iter().all(|unit| unit.running));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn installed_macos_replication_aliases_are_ambiguous_even_when_stopped() {
+        let error = macos_plan(
+            &["org.nix-community.home.smalltalk", "com.compoundingtech.st3.replication", "org.nix-community.home.smalltalk-replication"],
+            &[],
+        ).unwrap_err();
+        assert_eq!(error.to_string(),
+            "multiple legacy definitions exist for com.compoundingtech.fractal.replication; resolve which owns the worker before host cutover");
+    }
+
+    #[test]
+    fn running_macos_target_replication_is_retained_once_without_legacy_worker() -> Result<()> {
+        let services = macos_plan(&["org.nix-community.home.smalltalk", "com.compoundingtech.fractal.replication"],
+            &["com.compoundingtech.fractal.replication"])?;
+        assert_eq!(services.target.iter().filter(|unit| unit.name == "com.compoundingtech.fractal.replication").count(), 1);
+        assert!(services.target.iter().find(|unit| unit.name == "com.compoundingtech.fractal.replication").unwrap().running);
+        Ok(())
+    }
+
+    #[test]
+    fn both_macos_legacy_daemon_aliases_remain_a_hard_error() {
+        let error = macos_plan(&["com.compoundingtech.st3", "org.nix-community.home.smalltalk"], &[]).unwrap_err();
+        assert_eq!(error.to_string(),
+            "multiple legacy daemon definitions exist; resolve which owns the default state before host cutover");
     }
 
     #[test]
