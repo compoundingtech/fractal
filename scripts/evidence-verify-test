@@ -20,6 +20,17 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — preserve old fixtures; resolve live checkout reads.
+def root_config(name):
+    path = ROOT / '.fractal' / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return ROOT / '.st' / name
+    return path
+
 SCRIPT = ROOT / 'scripts/evidence-verify'
 loader = importlib.machinery.SourceFileLoader('evidence_verify', str(SCRIPT))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -506,8 +517,8 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests', 'rust-tests')
 # The checks a host or agent may sign (scripts/fractal-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
-HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests'})
-HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests'})
+HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests', 'linux-clippy', 'linux-fleet-compat'})
+HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests', 'linux-clippy', 'linux-fleet-compat'})
 
 
 def policy_text(**overrides):
@@ -791,6 +802,34 @@ class SkipPolicy(unittest.TestCase):
                                     '--policy-from', base)[0], 2)  # needs --repository
         self.assertEqual(self.f.cli('--tree', self.tree, '--check', 'unit', '--keys-from', base,
                                     '--repository', 'org/repo')[0], 2)  # only with --policy-from
+
+    def test_policy_and_keys_keep_independent_pins_across_layouts(self):
+        """arn:lmig:smalltalk:2026-10-27-dot-fractal-config — no candidate or legacy trust downgrade."""
+        self.observed()
+        (self.f.repo / '.st').mkdir(exist_ok=True)
+        (self.f.repo / '.st/evidence-keys').write_text(self.f.keys.read_text())
+        (self.f.repo / '.st/evidence-skip-policy.json').write_text(policy_text())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'old trusted keys and policy')
+        keys_base = self.f.git('rev-parse', 'HEAD')
+        (self.f.repo / '.fractal').mkdir()
+        (self.f.repo / '.fractal/evidence-skip-policy.json').write_text(policy_text())
+        (self.f.repo / '.fractal/evidence-keys').write_text('')
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'new policy and revoked keys')
+        policy_base = self.f.git('rev-parse', 'HEAD')
+        args = ('--tree', self.tree, '--check', 'unit', '--policy-from', policy_base, '--repository', 'org/repo')
+        code, out, _ = self.f.cli(*args, '--keys-from', keys_base)
+        self.assertEqual(code, 0, out)
+        code, out, _ = self.f.cli(*args, '--keys-from', policy_base)
+        self.assertEqual((code, json.loads(out)['reason']), (1, 'untrusted_signer'))
+        (self.f.repo / '.fractal/evidence-skip-policy.json').write_text('{broken')
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'malformed preferred policy')
+        code, out, _ = self.f.cli('--tree', self.tree, '--check', 'unit', '--policy-from', 'HEAD',
+                                  '--repository', 'org/repo', '--keys-from', keys_base)
+        self.assertNotEqual(code, 0, out)
+
 
 
 def two_check_policy(unit_require=None, other_require=None):
@@ -1326,15 +1365,15 @@ class CommittedPolicy(unittest.TestCase):
     """The policy file in this repository, parsed by the same code the gate runs."""
 
     def rules(self, check):
-        text = (ROOT / '.st/evidence-skip-policy.json').read_text()
+        text = root_config('evidence-skip-policy.json').read_text()
         return evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')
 
     def test_the_committed_lane_file_is_valid_exists_at_head_and_matches_what_st_test_runs(self):
-        text = (ROOT / '.st/required-lanes.json').read_text()
+        text = root_config('required-lanes.json').read_text()
         loader = importlib.machinery.SourceFileLoader('st_test_script', str(ROOT / 'scripts/st-test'))
         module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(module)
-        policy = (ROOT / '.st/evidence-skip-policy.json').read_text()
+        policy = root_config('evidence-skip-policy.json').read_text()
         for lane, command in module.LOCAL.items():
             rules = evidence_verify.lane_rules(text, lane)
             self.assertEqual(rules['argv'], command, lane)  # the lane is what the local producer runs
@@ -1347,7 +1386,7 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_every_absent_path_of_the_committed_lanes_is_refused_when_it_appears_in_a_tree(self):
         """The mutation control: add one file at each path a lane looks for and does not find; the lane must be refused for that tree."""
-        doc = json.loads((ROOT / '.st/required-lanes.json').read_text())
+        doc = json.loads(root_config('required-lanes.json').read_text())
         for lane, entry in doc['lanes'].items():
             f = Fixture()
             self.addCleanup(f.tmp.cleanup)
@@ -1375,11 +1414,11 @@ class CommittedPolicy(unittest.TestCase):
                 self.assertTrue(any(name == path or name.startswith(path + '/') for name in changed), (lane, path))
 
     def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
-        text = (ROOT / '.st/evidence-skip-policy.json').read_text()
+        text = root_config('evidence-skip-policy.json').read_text()
         modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')['require'] for check in json.loads(text)['checks']}
         self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'ci-script-tests': 'shadow', 'fractal-web': 'off',
-                                 'rust-tests': 'off'})
-        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+                                 'rust-tests': 'off', 'linux-clippy': 'off', 'linux-fleet-compat': 'off'})
+        lanes = json.loads(root_config('required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
             if mode != 'off':
                 self.assertIn(check, lanes, f'{check} requires a note, so the lane file must define its lane')
@@ -1388,7 +1427,7 @@ class CommittedPolicy(unittest.TestCase):
         # Written out here: changing what a check depends on is a reviewed change to the policy AND to this list.
         declared = {'ci-script-tests': sorted([
             # The self-tests that run in a sparse copy of exactly these (scripts/ci-script-tests): a read outside them fails the check.
-            '.config/daily-only.filterset', '.gitattributes', '.github', '.gitignore', '.st', 'apps/fractal-web/.gitignore', 'apps/fractal-web/src/changelog/seen.ts', 'crates/fractal/tests/daemon_load.rs', 'crates/fractal/tests/messaging_faults.rs', 'docs/st3/gate-evidence.md', 'flake.lock', 'flake.nix', 'megarepo.lock', 'nix', 'package.json', 'packages/fractal-ui/.gitignore', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts', 'src/main.rs']), 'linux-gate': sorted([
+            '.config/daily-only.filterset', '.fractal', '.gitattributes', '.github', '.gitignore', '.st', 'apps/fractal-web/.gitignore', 'apps/fractal-web/src/changelog/seen.ts', 'crates/fractal/tests/daemon_load.rs', 'crates/fractal/tests/messaging_faults.rs', 'docs/st3/gate-evidence.md', 'flake.lock', 'flake.nix', 'megarepo.lock', 'nix', 'package.json', 'packages/fractal-ui/.gitignore', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts', 'src/main.rs']), 'linux-gate': sorted([
             '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components', 'crates',
             'docs/st2', 'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
             'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/fractal-daemon/src/attach_image.rs
@@ -1418,9 +1457,14 @@ class CommittedPolicy(unittest.TestCase):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['inputs']) if rules['inputs'] else None, declared.get(check), check)
             for path in rules['inputs'] or ():
-                self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
+                # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — this reviewed pair projects either layout without requiring both.
+                if path in ('.st', '.fractal') and check == 'ci-script-tests':
+                    self.assertTrue(any((ROOT / layout).is_dir() for layout in ('.st', '.fractal')),
+                                    f'{check} declares the config layout pair, but neither exists')
+                else:
+                    self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
         for check in ('linux-gate', 'typescript-client', 'fractal-web'):
-            self.assertEqual(self.rules(check)['sample_one_in'], 1, check)  # no sampling on pull requests (Nathan, 2026-10-26)
+            self.assertEqual(self.rules(check)['sample_one_in'], 1, check)  # no sampling on pull requests (Ada, 2026-10-26)
 
     def test_the_fractal_web_inputs_cover_every_tracked_path_the_web_lane_detector_matches(self):
         # The detector decides whether the lane runs at all; a path it matches that the key left out would let a change to it reuse a
@@ -1469,15 +1513,14 @@ class CommittedPolicy(unittest.TestCase):
                 found.append(str(source.relative_to(ROOT)))
         self.assertEqual(found, [], 'a Rust source reads the whole tree: move that lint to scripts/ and run it from ci-genie-freshness')
 
-    def test_the_host_level_is_admitted_for_exactly_the_locally_signable_checks_wrapper_kind_and_pull_requests_only(self):
-        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
-        # Skipping is on for typescript-client only, and only for pull requests (the merge queue still tests the combined tree);
-        # every other check keeps enforce false until its own flip PR.
+    def test_host_and_agent_levels_admit_pr_and_queue_events_for_the_locally_signable_wrapper_checks(self):
+        policy = json.loads(root_config('evidence-skip-policy.json').read_text())
+        # Event eligibility does not enable queue reuse: the BASE gate mode remains off until post-merge proof is deployed.
         self.assertEqual({check: entry.get('enforce', False) for check, entry in policy['checks'].items()},
                          {check: check in ENFORCED for check in policy['checks']})
         for check in ENFORCED:
-            self.assertEqual(policy['checks'][check].get('events'), ['pull_request'], check)
-            # Our pull requests skip CI entirely (Nathan, 2026-10-26): no comparison sample; the merge queue's full run is the comparison.
+            self.assertEqual(policy['checks'][check].get('events'), ['pull_request', 'merge_group'], check)
+            # Sampling remains unchanged; queue reuse independently requires an exact signed tree.
             self.assertEqual(policy['checks'][check].get('sample_one_in', 1), 1, check)
         with_host = {}
         for check, entry in policy['checks'].items():
@@ -1496,13 +1539,13 @@ class CommittedPolicy(unittest.TestCase):
             override = dict(rule['by_level']['host'])
             # The first two checks admitted a host note unbound (cooperative machine trust); every check added since holds the host
             # to the lane as well (Factory, 2026-10-22); since 2026-10-26 to the lane as the signed tree defines it, so a tree that edits
-            # its own lane skips on a host note made with that edited definition (Nathan: our pull requests skip CI entirely).
+            # its own lane skips on a host note made with that edited definition (Ada: our pull requests skip CI entirely).
             self.assertEqual(override.pop('lane', False), 'tree' if check in HOST_LANE_BOUND else False, check)
             # The agent level: the host's rule exactly, with the lane binding.
             agent = dict(rule['by_level']['agent'])
             self.assertIs(agent.pop('lane'), True, check)
             self.assertEqual(agent, override, check)
-            self.assertEqual(override['events'], ['pull_request'], check)
+            self.assertEqual(override['events'], ['pull_request', 'merge_group'], check)
             # The queue level (a merge-queue signer's key): the host's command and inputs, held to the lane, for the merge queue only.
             queue = dict(rule['by_level']['queue'])
             self.assertIs(queue.pop('lane'), True, check)
@@ -1511,7 +1554,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(override['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
             self.assertEqual(policy['checks'][check].get('enforce', False), check in ENFORCED, check)
             rules = self.rules(check)
-            self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request'])
+            self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request', 'merge_group'])
         # The commands are the ones scripts/fractal-test records, so a local note can match.
         script = ROOT / 'scripts/st-test'
         if script.exists():
@@ -1522,10 +1565,9 @@ class CommittedPolicy(unittest.TestCase):
             for (check, kind), rule in with_host.items():
                 self.assertEqual(rule['by_level']['host']['command'], st_test.LOCAL[check], check)
 
-    def test_a_queue_note_never_covers_a_pull_request_and_covers_nothing_until_its_check_admits_the_merge_queue(self):
-        # Inert by construction: the level is limited to merge_group, and every check is still limited to pull requests, so the
-        # narrowed list is empty. A check's own flip (its events gaining merge_group) is what lets a queue note skip, one check at a time.
-        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+    def test_a_queue_note_never_covers_a_pull_request_and_requires_check_event_eligibility(self):
+        # Queue-level records stay merge-group-only, even though host and agent records also admit PR events.
+        policy = json.loads(root_config('evidence-skip-policy.json').read_text())
         with_queue = []
         for check, entry in policy['checks'].items():
             for kind, rule in entry['kinds'].items():
@@ -1539,7 +1581,7 @@ class CommittedPolicy(unittest.TestCase):
                 self.assertNotIn('pull_request', evidence_verify.narrowed_events(None, level['events']), check)
                 self.assertEqual(evidence_verify.narrowed_events(rules['events'], level['events']),
                                  ['merge_group'] if 'merge_group' in (rules['events'] or []) else [], check)
-                self.assertEqual(evidence_verify.narrowed_events(rules['events'], level['events']), [], f'{check}: not flipped yet')
+                self.assertEqual(evidence_verify.narrowed_events(['pull_request'], level['events']), [], check)
         self.assertEqual(sorted(with_queue), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
 
     def test_every_required_check_has_a_valid_entry_that_accepts_only_the_fleet_signer(self):
@@ -1741,6 +1783,74 @@ class CIInputs(unittest.TestCase):
         with self.assertRaises(evidence_verify.Failure) as raised:
             evidence_verify.lane_for(str(self.f.repo), self.tree, (text, base), 'gate', lane_base=point)
         self.assertEqual(raised.exception.reason, 'definition_changed')
+
+    def test_branch_point_lane_entry_prefers_new_layout_and_does_not_downgrade_errors(self):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — keep check-keyed comparison across layouts.
+        text = json.dumps(self.LANES)
+        self.commit({'.fractal/required-lanes.json': text})
+        point = self.f.git('rev-parse', 'HEAD')
+        lanes = json.loads(text)
+        lanes['lanes']['other']['argv'] = ['new-other-command']
+        self.commit({'.fractal/required-lanes.json': json.dumps(lanes)})
+        base = self.f.git('rev-parse', 'HEAD')
+        self.assertIsNotNone(evidence_verify.lane_for(str(self.f.repo), self.tree, (json.dumps(lanes), base),
+                                                    'gate', lane_base=point))
+        self.commit({'.fractal/required-lanes.json': '{broken'})
+        bad = self.f.git('rev-parse', 'HEAD')
+        with self.assertRaises(evidence_verify.Failure):
+            evidence_verify.lane_for(str(self.f.repo), self.tree, (text, bad), 'gate', lane_base=bad)
+        self.commit({'.fractal/required-lanes.json': text + '\n'})
+        missing = self.f.git('rev-parse', 'HEAD')
+        oid = self.f.git('rev-parse', f'{missing}:.fractal/required-lanes.json')
+        (self.f.repo / '.git/objects' / oid[:2] / oid[2:]).unlink()
+        with self.assertRaises(evidence_verify.Failure) as raised:
+            evidence_verify.lane_for(str(self.f.repo), self.tree, (text, missing), 'gate', lane_base=missing)
+        self.assertEqual(raised.exception.reason, 'error')
+
+    def test_config_selectors_bridge_pinned_layouts_and_hash_the_actual_selected_names(self):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — moving equal bytes changes the projection identity.
+        repo = str(self.f.repo)
+        old_item = '.st/required-lanes.json::lanes.gate'
+        new_item = '.fractal/required-lanes.json::lanes.gate'
+        old = self.tree
+        old_key = evidence_verify.project(repo, old, (old_item,))
+        both = self.commit({'.fractal/required-lanes.json': json.dumps(self.LANES)})
+        new_key = evidence_verify.project(repo, both, (old_item,))
+        self.assertNotEqual(old_key, new_key)
+        self.assertEqual(self.f.git('ls-tree', '-r', '--name-only', old_key), old_item)
+        self.assertEqual(self.f.git('ls-tree', '-r', '--name-only', new_key), new_item)
+        self.assertEqual(evidence_verify.project(repo, both, (old_item, new_item)), new_key)
+        self.f.git('rm', '-q', '.st/required-lanes.json')
+        self.f.git('commit', '-q', '-m', 'new layout only')
+        new = self.f.git('rev-parse', 'HEAD^{tree}')
+        for tree in (old, both, new):
+            for item in (old_item, new_item):
+                with self.subTest(tree=tree, item=item):
+                    self.assertEqual(evidence_verify.selected(repo, tree, item),
+                                     json.dumps(self.LANES['lanes']['gate'], sort_keys=True, separators=(',', ':')).encode())
+                    self.assertEqual(evidence_verify.unresolved_ci_inputs(repo, tree, (item,)), [])
+        self.assertEqual(evidence_verify.project(repo, new, (old_item,)), new_key)
+        self.assertEqual(evidence_verify.project(repo, old, (old_item,)), old_key, 'HEAD does not decide the layout')
+
+    def test_config_selectors_never_downgrade_selected_malformed_missing_entries_or_missing_objects(self):
+        repo = str(self.f.repo)
+        item = '.st/required-lanes.json::lanes.gate'
+        malformed = self.commit({'.fractal/required-lanes.json': '{broken'})
+        for operation in (evidence_verify.selected, lambda r, t, i: evidence_verify.project(r, t, (i,)),
+                          lambda r, t, i: evidence_verify.unresolved_ci_inputs(r, t, (i,))):
+            with self.subTest(operation=operation), self.assertRaises(evidence_verify.Failure):
+                operation(repo, malformed, item)
+        missing_entry = self.commit({'.fractal/required-lanes.json': '{"version": 1, "lanes": {}}'})
+        self.assertIsNone(evidence_verify.selected(repo, missing_entry, item))
+        self.assertEqual(evidence_verify.unresolved_ci_inputs(repo, missing_entry, (item,)), [item])
+        self.assertIsNone(evidence_verify.project(repo, missing_entry, (item,)))
+        missing_blob = self.commit({'.fractal/required-lanes.json': json.dumps(self.LANES) + '\n'})
+        oid = self.f.git('rev-parse', f'{missing_blob}:.fractal/required-lanes.json')
+        (self.f.repo / '.git/objects' / oid[:2] / oid[2:]).unlink()
+        for operation in (evidence_verify.selected, lambda r, t, i: evidence_verify.project(r, t, (i,)),
+                          lambda r, t, i: evidence_verify.unresolved_ci_inputs(r, t, (i,))):
+            with self.subTest(operation=operation), self.assertRaises(evidence_verify.Failure):
+                operation(repo, missing_blob, item)
 
 
 class PerCrateNotes(unittest.TestCase):
@@ -1957,6 +2067,57 @@ class ValueRules(unittest.TestCase):
         code, out, _ = self.f.cli(*common, '--run-input', 'kit_inputs')
         self.assertEqual(json.loads(out)['reason'], 'error', out)
 
+
+    def test_base_inputs_are_validated_strictly(self):
+        for bad in ({'base_inputs': ['clippy_base_baseline_sha256']}, {'base_inputs': {'': 'a.json'}},
+                    {'base_inputs': {'x': ''}}, {'base_inputs': {'x': '../a.json'}}, {'base_inputs': {'x': 3}}):
+            with self.assertRaises(evidence_verify.Failure, msg=repr(bad)) as caught:
+                self.policy(**bad)
+            self.assertEqual(caught.exception.reason, 'error', repr(bad))
+        self.assertEqual(self.policy()['kinds']['wrapper']['base_inputs'], {})
+
+    def test_a_base_input_is_the_digest_of_the_bases_file_computed_by_the_verifier_never_taken_from_the_caller(self):
+        """linux-clippy's ratchet reads the base's baseline: a note covers a run only while the base's file is the one it measured against."""
+        doc = json.loads(policy_text())
+        doc['checks']['unit']['kinds']['wrapper'] = {'command': ['make', 'test'],
+                                                     'base_inputs': {'clippy_base_baseline_sha256': '.github/clippy-baseline.json'}}
+        self.f.git('config', 'user.email', 't@example.invalid')
+        self.f.git('config', 'user.name', 't')
+
+        def commit_base(baseline):
+            policy = self.f.repo / '.st' / 'evidence-skip-policy.json'
+            policy.parent.mkdir(exist_ok=True)
+            policy.write_text(json.dumps(doc))
+            target = self.f.repo / '.github' / 'clippy-baseline.json'
+            if baseline is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.parent.mkdir(exist_ok=True)
+                target.write_text(baseline)
+            self.f.git('add', '-A', '.st', '.github')
+            self.f.git('commit', '-q', '-m', 'base')
+            return self.f.git('rev-parse', 'HEAD').strip()
+
+        def ask(base, *extra):
+            code, out, _ = self.f.cli('--tree', self.tree, '--check', 'unit', '--keys', str(self.f.keys), '--policy-from', base,
+                                      '--repository', 'org/repo', *extra)
+            return json.loads(out).get('reason') or 'satisfied'
+        base = commit_base('{"counts": {}}\n')
+        digest = hashlib.sha256(b'{"counts": {}}\n').hexdigest()
+        projected = json.loads(self.f.cli('--tree', self.tree, '--check', 'unit', '--project', '--policy-from', base,
+                                          '--repository', 'org/repo')[1])
+        self.assertEqual(projected['base_inputs'], {'clippy_base_baseline_sha256': digest}, 'a signer reads the value to record here')
+        self.assertEqual(ask(base), 'no_record')
+        self.note(clippy_base_baseline_sha256=digest)
+        self.assertEqual(ask(base), 'satisfied')
+        self.assertEqual(ask(base, '--run-input', 'clippy_base_baseline_sha256=' + 'f' * 64), 'satisfied', 'the caller cannot override it')
+        moved = commit_base('{"counts": {"a": 1}}\n')  # the base's baseline changed: the old measurement no longer counts
+        self.assertEqual(ask(moved), 'wrong_input')
+        self.assertEqual(ask(moved, '--run-input', 'clippy_base_baseline_sha256=' + digest), 'wrong_input')
+        gone = commit_base(None)
+        self.assertEqual(ask(gone), 'wrong_input')
+        self.note(clippy_base_baseline_sha256='absent')
+        self.assertEqual(ask(gone), 'satisfied', 'a base without the file has the value absent')
 
 class InputKeyed(unittest.TestCase):
     """A note of another tree counts when it carries the same key for the check's declared input paths."""
@@ -2186,6 +2347,81 @@ class InputKeyed(unittest.TestCase):
         self.assertEqual((code, result['record'], result['trust_level']), (0, newest, 'machine'))
         self.assertEqual(self.f.cli('--check', 'unit', '--revision', 'HEAD', '--members', '--prefer-levels', 'host',
                                     '--keys', str(self.f.keys))[0], 2)
+
+    # ---- which record decides (#4241): the newest pass that validates, unless a failure is dated after it ------------------------
+
+    THIS_LANE, OTHER_LANE = 'a' * 64, 'b' * 64
+
+    def host_rules(self):
+        return evidence_verify.policy_rules(policy_text(inputs=self.PATHS, trust_levels=['host']), 'unit', 'org/repo')
+
+    def host_note(self, commit, tree, key, lane, seconds, exit_code=0):
+        """A host pass (or failure) for this key, carrying the lane definition it was signed under, indexed under the key."""
+        if not hasattr(self, 'host'):
+            self.host = self.f.key('host', 'host/box')
+        record = self.f.note(commit, tree, self.host, 'host/box', runner=OBSERVED, seconds=seconds, exit_code=exit_code,
+                             inputs={'source_inputs': key, 'lane_definition_sha256': lane},
+                             command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'))
+        self.f.git('update-ref', f'refs/notes/evidence-input/unit/{key}/{record}', record)
+        return record
+
+    def verify_here(self, rules=None):
+        lane = {'sha256': self.THIS_LANE, 'tree_sha256': self.THIS_LANE, 'changed': []}
+        return self.f.verify(self.tree, rules=rules or self.host_rules(), lane=lane)
+
+    def test_1_a_newer_pass_from_a_level_no_kind_accepts_does_not_shadow_an_older_accepted_pass(self):
+        # CI's per-crate notes are signed at a level rust-tests does not accept; the newest of them hid an older host pass.
+        key = self.key(self.tree)
+        mine = self.host_note(self.commit, self.tree, key, self.THIS_LANE, -900)
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs'})
+        newer = [self.observed(later, other, key, seconds=s, inputs={'source_inputs': key, 'lane_definition_sha256': self.THIS_LANE})
+                 for s in (-600, 0)]
+        code, result = self.verify_here()
+        self.assertEqual((code, result['record'], result['decided_by'], result['signer']), (0, mine, mine, 'host/box'))
+        self.assertEqual(result['skipped_newer'], [f'{record} machine level_not_accepted' for record in reversed(newer)])
+
+    def test_2_a_newer_pass_signed_for_another_lane_definition_does_not_shadow_one_for_this_trees(self):
+        key = self.key(self.tree)
+        mine = self.host_note(self.commit, self.tree, key, self.THIS_LANE, -900)
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs, other lane scripts'})
+        theirs = self.host_note(later, other, key, self.OTHER_LANE, -300)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['decided_by']), (0, mine))
+        self.assertEqual(result['skipped_newer'], [f'{theirs} host wrong_definition'])
+
+    def test_3_a_failure_dated_after_the_satisfying_pass_refuses(self):
+        key = self.key(self.tree)
+        self.host_note(self.commit, self.tree, key, self.THIS_LANE, -900)
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs'})
+        failure = self.host_note(later, other, key, self.THIS_LANE, -300, exit_code=1)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'check_failed', failure))
+        # Even from a level no kind accepts: a failure is never passed over.
+        _, third = self.commit_files({'docs/readme.txt': 'yet another'})
+        fleet = self.observed(self.f.git('rev-parse', 'HEAD'), third, key, exit_code=1, seconds=0)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'check_failed', fleet))
+
+    def test_4_a_failure_signed_for_another_lane_definition_after_the_pass_still_refuses(self):
+        key = self.key(self.tree)
+        self.host_note(self.commit, self.tree, key, self.THIS_LANE, -900)
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs, other lane scripts'})
+        failure = self.host_note(later, other, key, self.OTHER_LANE, -300, exit_code=1)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'check_failed', failure))
+
+    def test_5_with_no_pass_that_validates_the_newest_record_is_refused_as_before(self):
+        key = self.key(self.tree)
+        self.observed(self.commit, self.tree, key, seconds=-600)
+        newest = self.observed(self.commit, self.tree, key, seconds=-300)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'untrusted_level', newest))
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs, other lane scripts'})
+        theirs = self.host_note(later, other, key, self.OTHER_LANE, 0)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'wrong_definition', theirs))
+    # (6) a weaker signer's newer imitation of another kind still refuses: scripts/ci-evidence-gate-test,
+    # test_a_weaker_local_signer_never_makes_the_gate_skip_on_an_observed_looking_record.
 
     def test_the_policy_validates_inputs_and_sampling(self):
         def reason(**overrides):
@@ -2491,6 +2727,65 @@ class Layouts(unittest.TestCase):
         self.f.git('update-ref', f'refs/notes/evidence/{self.tree}/{"1" * 40}', record)  # the suffix is not the commit
         self.assertEqual(self.f.verify(self.tree)[1]['reason'], 'no_record')
         self.assertEqual(self.f.verify(other_tree)[0], 0)
+
+
+class FleetCompatKey(unittest.TestCase):
+    """linux-fleet-compat's note is reused by every tree with the same key: the projection of its declared inputs. A key that missed an
+    input would let a note cover a tree it never measured, so each declared input, changed alone, must change the key, and a file the
+    stage does not read (a doc, an unrelated script, a crate outside fractal's closure, the root package) must leave it alone."""
+
+    CHECK = 'linux-fleet-compat'
+    # Files the fleet-compat stage does not read: none of them may move its key.
+    OUTSIDE = ('docs/ci.md', 'README.md', 'scripts/st-test', 'src/main.rs', 'tests/integration.rs', 'crates/fractal-e2e/src/lib.rs',
+               '.github/workflows/fleet.yml', '.github/messaging-compat-baseline.json', '.st/rust-test-inputs.json')
+
+    def setUp(self):
+        self.inputs = evidence_verify.policy_rules(root_config('evidence-skip-policy.json').read_text(), self.CHECK,
+                                                   'compoundingtech/fractal')['inputs']
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+
+    def file_for(self, path):
+        """One file the declared path covers: the path itself when it is a file here, else a file inside it (a directory, or a path
+        this checkout does not hold, such as the crates in ci-script-tests' sparse copy)."""
+        here = ROOT / path
+        return path if here.is_file() else f'{path}/key-probe'
+
+    def tree(self):
+        self.f.git('add', '-A')
+        return self.f.git('write-tree')
+
+    def key(self, tree):
+        return evidence_verify.project(self.f.repo, tree, self.inputs)
+
+    def test_the_stage_reads_its_baseline_and_crate_fractals_closure(self):
+        # crates/pty-launch-environment.rs and scripts/ci-test-paths.rs sit outside every crate: closure crates compile them in
+        # through #[path = ...], and the stage's dep-info check found the first one missing from an earlier key.
+        for path in ('.github/fleet-compat-baseline.json', 'scripts/compat-baseline', 'scripts/ci-linux', 'crates/fractal',
+                     'crates/fractal-daemon', 'Cargo.lock', 'flake.lock', 'crates/pty-launch-environment.rs', 'scripts/ci-test-paths.rs'):
+            self.assertTrue(any(path == item or path.startswith(item + '/') for item in self.inputs), path)
+        for path in self.OUTSIDE:
+            self.assertFalse(any(path == item or path.startswith(item + '/') for item in self.inputs), f'{path} is declared')
+
+    def test_each_declared_input_changed_alone_changes_the_key_and_no_other_file_does(self):
+        files = [self.file_for(path) for path in self.inputs]
+        for name in files + list(self.OUTSIDE):
+            target = self.f.repo / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f'{name}\n')
+        base = self.key(self.tree())
+        self.assertIsNotNone(base)
+        for name in files:
+            target = self.f.repo / name
+            target.write_text(f'{name} changed\n')
+            self.assertNotEqual(self.key(self.tree()), base, f'changing {name} must change the key')
+            target.write_text(f'{name}\n')
+        self.assertEqual(self.key(self.tree()), base)
+        for name in self.OUTSIDE:
+            target = self.f.repo / name
+            target.write_text(f'{name} changed\n')
+            self.assertEqual(self.key(self.tree()), base, f'{name} is not read by the stage and must not change the key')
+            target.write_text(f'{name}\n')
 
 
 if __name__ == '__main__':

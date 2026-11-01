@@ -14,6 +14,8 @@ pub mod model;
 mod inventory;
 mod terminal;
 pub mod tree;
+#[cfg(test)]
+mod revisioned_agents_tests;
 
 pub use terminal::{action_pair, terminal_fence, terminal_screen_fence};
 pub use inventory::{Inventories, Inventory};
@@ -28,7 +30,7 @@ use std::time::Duration;
 use tokio::sync::mpsc as channel;
 use tokio::time::Instant;
 
-/// How many current items each window holds. st sends at most 200.
+/// How many current items legacy windows hold. Revisioned agents rosters are complete.
 pub const WINDOW: usize = 200;
 
 /// How often the stream's own quiet time is looked at; nothing is sent to look.
@@ -82,6 +84,16 @@ fn retry_delay(failures: usize) -> Duration {
 const TERMINAL: &str = "terminal";
 /// The subscription ID of the open conversation.
 const CONVERSATION: &str = "conversation";
+
+/// A snapshot sequence stays private until every whole-row chunk has arrived.
+struct AgentsSequence {
+    publication: fractal_client::AgentsPublicationMetadata,
+    snapshot: String,
+    count: u64,
+    next: u64,
+    rows: BTreeMap<String, Resource>,
+    order: Vec<String>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Window {
@@ -562,6 +574,7 @@ async fn connected(
     // The summary exists only where st grants it; an older member has no such collection.
     let summary = supports("summary");
     let inventory_granted = supports("inventory-collections") && supports("collections");
+    let revisioned_agents = supports("collections.agents.revisioned.v1");
     if updates.send(Update::InventorySupport {
         granted: inventory_granted,
         member_build: capabilities.value.machine_version.clone(),
@@ -583,10 +596,12 @@ async fn connected(
         .chain(granted.then_some(Window::Glasses))
         .chain(summary.then_some(Window::Summary))
     {
-        if let Err(error) = stream
-            .subscribe(window.id(), window.id(), window.limit(), None, None)
-            .await
-        {
+        let result = if window == Window::Agents && revisioned_agents {
+            stream.subscribe_agents_publication(window.id()).await
+        } else {
+            stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
+        };
+        if let Err(error) = result {
             return Ended::Dropped(error.to_string());
         }
     }
@@ -605,6 +620,8 @@ async fn connected(
         }
     }
     let mut windows = BTreeMap::<Window, BTreeMap<String, Resource>>::new();
+    let mut agents_sequence: Option<AgentsSequence> = None;
+    let mut agents_publication: Option<fractal_client::AgentsPublicationMetadata> = None;
     // A window st stopped (its first read failed) is asked for again after a backoff, so a list
     // never stays stale under a live connection.
     let mut window_retries = WindowRetries::default();
@@ -659,6 +676,61 @@ async fn connected(
                 let received = std::time::Instant::now();
                 *failures = 0;
                 match event {
+                    CollectionEvent::AgentsSnapshotChunk { id, snapshot, publication, chunk_index, chunk_count, items, order, has_more, .. } => {
+                        if !revisioned_agents || id != Window::Agents.id() { continue; }
+                        if chunk_index == 0 {
+                            agents_sequence = Some(AgentsSequence { publication: publication.clone(),
+                                snapshot: snapshot.id.clone(), count: chunk_count, next: 0,
+                                rows: BTreeMap::new(), order: Vec::new() });
+                        }
+                        let Some(sequence) = agents_sequence.as_mut() else {
+                            return Ended::Dropped("agents snapshot started without its first chunk".into());
+                        };
+                        if sequence.publication != publication || sequence.snapshot != snapshot.id
+                            || sequence.count != chunk_count || sequence.next != chunk_index
+                            || chunk_count == 0 || chunk_index >= chunk_count || has_more
+                        {
+                            return Ended::Dropped("inconsistent agents snapshot sequence".into());
+                        }
+                        sequence.rows.extend(items.into_iter().map(|agent| {
+                            let item = Resource::Agent(agent);
+                            (item.header().id.clone(), item)
+                        }));
+                        sequence.order.extend(order);
+                        sequence.next += 1;
+                        if sequence.next == sequence.count {
+                            let sequence = agents_sequence.take().expect("complete sequence exists");
+                            agents_publication = Some(sequence.publication);
+                            let rows = windows.entry(Window::Agents).or_default();
+                            *rows = sequence.rows;
+                            window_retries.loaded(Window::Agents);
+                            pending_reports.cancel(Window::Agents);
+                            if !send_window(updates, received, Window::Agents, snapshot, rows, &sequence.order, false) {
+                                return Ended::Closed;
+                            }
+                        }
+                    }
+                    CollectionEvent::AgentsChanges { id, snapshot, publication, base_revision, upserts, removes, order, has_more, .. } => {
+                        if !revisioned_agents || id != Window::Agents.id() { continue; }
+                        if agents_sequence.is_some() || has_more || !agents_publication.as_ref().is_some_and(|base|
+                            base.node_epoch == publication.node_epoch && base.revision == base_revision
+                                && publication.revision > base_revision)
+                        {
+                            return Ended::Dropped("agents delta does not follow the held publication".into());
+                        }
+                        let rows = windows.entry(Window::Agents).or_default();
+                        for id in removes { rows.remove(&id); }
+                        rows.extend(upserts.into_iter().map(|agent| {
+                            let item = Resource::Agent(agent);
+                            (item.header().id.clone(), item)
+                        }));
+                        agents_publication = Some(publication);
+                        window_retries.loaded(Window::Agents);
+                        pending_reports.cancel(Window::Agents);
+                        if !send_window(updates, received, Window::Agents, snapshot, rows, &order, false) {
+                            return Ended::Closed;
+                        }
+                    }
                     CollectionEvent::Snapshot { id, snapshot, items, order, has_more, .. } => {
                         let Some(window) = Window::from_id(&id) else { continue };
                         // A frame already on its way when the window was left: the socket was
@@ -692,7 +764,7 @@ async fn connected(
                     }
                     // st keeps a conversation's subscription and retries it itself; it says why
                     // so the last copy shown can say it is stale (the owner's host is away).
-                    CollectionEvent::Resync { id, code, message: Some(message) } if id.starts_with(CONVERSATION) => {
+                    CollectionEvent::Resync { id, code, message: Some(message), .. } if id.starts_with(CONVERSATION) => {
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
                         if !current.failed_long(Instant::now()) { continue; }
                         let message = fractal_client::human_message(code.as_ref(), &message);
@@ -704,10 +776,22 @@ async fn connected(
                     // under it). Asked at once and again on every resync, that is a loop and, at an
                     // upgrade, a herd; so each is asked after a wait that grows and is jittered, and
                     // one good snapshot resets the wait.
-                    CollectionEvent::Resync { id, code, message } => {
+                    CollectionEvent::Resync { id, code, message, retryable, .. } => {
                         if let Some(window) = Window::from_id(&id)
                             && !(left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)))
                         {
+                            if window == Window::Agents && revisioned_agents && retryable == Some(false) {
+                                agents_sequence = None;
+                                agents_publication = None;
+                                window_retries.loaded(window);
+                                pending_reports.cancel(window);
+                                let message = fractal_client::human_message(code.as_ref(),
+                                    message.as_deref().unwrap_or("st refused the agents publication"));
+                                if updates.send(Update::WindowFailed(window, message)).is_err() {
+                                    return Ended::Closed;
+                                }
+                                continue;
+                            }
                             // An inventory too: st keeps reading it, but a read that then finds
                             // nothing new sends nothing, so unless it is asked for again its
                             // reason would stand until the list next changed.
@@ -722,7 +806,7 @@ async fn connected(
                             return Ended::Closed;
                         }
                     }
-                    CollectionEvent::Error { id, code, message } if id.starts_with(CONVERSATION) => {
+                    CollectionEvent::Error { id, code, message, .. } if id.starts_with(CONVERSATION) => {
                         let message = fractal_client::human_message(code.as_ref(), &message);
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
                         let permanent = !conversation_may_clear(code.as_ref());
@@ -737,9 +821,22 @@ async fn connected(
                             return Ended::Closed;
                         }
                     }
-                    CollectionEvent::Error { id, code, message } => {
+                    CollectionEvent::Error { id, code, message, retryable, .. } => {
                         if let Some(window) = Window::from_id(&id) {
                             if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
+                                continue;
+                            }
+                            if window == Window::Agents && revisioned_agents && retryable == Some(false) {
+                                // A permanent publication refusal (for example an oversized row)
+                                // cannot clear by preparing the same full roster again.
+                                agents_sequence = None;
+                                agents_publication = None;
+                                window_retries.loaded(window);
+                                pending_reports.cancel(window);
+                                let message = fractal_client::human_message(code.as_ref(), &message);
+                                if updates.send(Update::WindowFailed(window, message)).is_err() {
+                                    return Ended::Closed;
+                                }
                                 continue;
                             }
                             if matches!(window, Window::Inventory(_)) {
@@ -755,11 +852,13 @@ async fn connected(
                             return Ended::Dropped(error.to_string());
                         }
                     }
-                    CollectionEvent::Screen { id, screen } => {
+                    CollectionEvent::Screen { id, screen, .. } => {
                         if !terminal_screen(updates, following, &id, screen.value) {
                             return Ended::Closed;
                         }
                     }
+                    // The feed holds no ordered-membership window.
+                    CollectionEvent::MembershipSnapshot { .. } | CollectionEvent::MembershipChanges { .. } => {}
                 }
             }
             command = commands.recv() => match command {
@@ -885,6 +984,11 @@ async fn connected(
                         },
                         Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory) => continue,
                         Window::Inventory(inventory) => inventory.subscribe(stream).await,
+                        Window::Agents if revisioned_agents => {
+                            agents_sequence = None;
+                            agents_publication = None;
+                            stream.subscribe_agents_publication(window.id()).await
+                        },
                         _ => stream.subscribe(window.id(), window.id(), window.limit(), None, None).await,
                     };
                     if let Err(error) = result {

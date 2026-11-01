@@ -54,6 +54,8 @@ pub const EXCHANGE_PATH: &str = "/v1/peer/exchange";
 /// A page of a checkpoint's manifest, for a node that adopts a checkpoint it did not take part
 /// in. Older builds neither serve nor call it.
 pub const CHECKPOINT_PATH: &str = "/v1/peer/checkpoint";
+/// Where a member asks another for its answers per claim kind; see `crate::answers`.
+pub const ANSWERS_PATH: &str = "/v1/peer/answers";
 pub const JOIN_PATH: &str = "/v1/fleet/join";
 pub const MAX_JOIN_BYTES: usize = 4096;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
@@ -441,6 +443,12 @@ pub struct PeerResponse<T> {
 
 /// The version every signed peer answer carries.
 pub const PEER_API_VERSION: &str = "st3.v1";
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+/// Accepted peer envelope labels. Writers still emit `PEER_API_VERSION`;
+/// `st3.v1` remains a permanent read spelling, including after contraction.
+pub const ACCEPTED_PEER_API_VERSIONS: &[&str] = &[PEER_API_VERSION, "fractal.v1"];
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 
 impl<T> PeerResponse<T> {
     pub fn new(node: &str, store_index: u64, value: T) -> Self {

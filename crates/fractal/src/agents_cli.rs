@@ -280,6 +280,21 @@ pub(super) async fn run_agents(
         AgentsCommand::Handoff { command } => {
             run_handoff(&cli_client(endpoint), configured_person, command, json_output).await
         }
+        AgentsCommand::Lane { subject } => {
+            // The client returns the envelope's value, as `/v1/health` below reads `node` from it;
+            // client_v0_cli's agent_lane_cli test runs this against a daemon for both outputs.
+            let response: Value = cli_client(endpoint)
+                .get(&format!(
+                    "/v1/agents/lane?agent={}",
+                    urlencoding::encode(&normalize_agent_subject(&subject))
+                ))
+                .await?;
+            if json_output {
+                return print_value(&response, true);
+            }
+            println!("{}", response["slice"].as_str().unwrap_or_default());
+            Ok(())
+        }
         AgentsCommand::Workspace { subject } => {
             let response = generated_client(endpoint, None)?
                 .agent_workspace_get(&normalize_agent_subject(&subject))
@@ -433,8 +448,8 @@ pub(super) async fn run_agents(
         AgentsCommand::Retire(args) => {
             let subject = normalize_agent_subject(&args.subject);
             let client = generated_client(endpoint, Some(&args.actor))?;
-            let status = status_for(&cli_client(endpoint), &subject).await?;
-            let token = status
+            let token = status_for(&cli_client(endpoint), &subject)
+                .await?
                 .subjects
                 .first()
                 .and_then(|subject| subject.desired_token.clone())
@@ -451,12 +466,14 @@ pub(super) async fn run_agents(
                     ClientFence {
                         snapshot_id: snapshot,
                         runtime_desired_revision: Some(token),
+                        runtime_incarnation: args.expect_incarnation,
                         ..ClientFence::default()
                     },
                     fractal_client::AgentRetireParameters {
                         agent: subject.clone(),
                         reason: args.reason,
                         successor: args.successor.map(|value| normalize_agent_subject(&value)),
+                        expect_revision: args.expect_revision,
                     },
                 )
                 .await?;
@@ -684,7 +701,13 @@ pub(super) async fn run_agents(
                 completion::Matching::Exact,
             )
             .await?;
-            let kdl = publication_document(kdl_node("stop", [subject.as_str()]));
+            let mut stop = kdl_node("stop", [subject.as_str()]);
+            if let Some(reason) = &args.reason {
+                let mut children = KdlDocument::new();
+                children.nodes_mut().push(kdl_node("reason", [reason.as_str()]));
+                stop.set_children(children);
+            }
+            let kdl = publication_document(stop);
             if args.print_kdl {
                 print!("{kdl}");
                 return Ok(());
@@ -1214,6 +1237,7 @@ async fn run_agent_inspection(
         }
         AgentsCommand::New(_)
         | AgentsCommand::Workspace { .. }
+        | AgentsCommand::Lane { .. }
         | AgentsCommand::Handoff { .. }
         | AgentsCommand::Repos { .. }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da

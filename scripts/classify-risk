@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Name the risky classes a change belongs to (.st/risky-classes.json).
+"""Name the risky classes a change belongs to (.fractal/risky-classes.json, .st only if absent).
 
   classify-risk BASE HEAD     classes hit by git diff BASE...HEAD, with the paths or lines that hit
 
@@ -50,7 +50,7 @@ def classify(rules, paths, diff_lines):
         for content in rule.get("content", []):
             pattern = re.compile(content["pattern"])
             for path in sorted(paths):
-                if matches(content["globs"], path):
+                if matches(content["globs"], path) and not matches(content.get("exclude", []), path):
                     by_line += [f"{path}: {line.strip()}" for line in diff_lines.get(path, []) if pattern.search(line)]
         if by_path or by_line:
             hits.append({"name": rule["name"], "forces": rule.get("forces", []), "paths": by_path, "lines": by_line[:20]})
@@ -72,13 +72,23 @@ def read_diff(repo, base, head):
     return paths, lines
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config
+def config_path(root):
+    new = root / ".fractal/risky-classes.json"
+    try:
+        new.lstat()
+    except FileNotFoundError:
+        return root / RULES
+    return new
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("base")
     parser.add_argument("head")
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent.parent)
     args = parser.parse_args()
-    rules = json.loads((args.repo / RULES).read_text())
+    rules = json.loads(config_path(args.repo).read_text())
     if rules.get("version") != 1:
         raise SystemExit(f"{RULES}: unsupported version")
     paths, lines = read_diff(args.repo, args.base, args.head)

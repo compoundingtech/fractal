@@ -8,6 +8,8 @@ timeout or inconsistency is `decision=run`. It never fails the job.
 One exception to running: a pull request whose opener the accepted base lists in .st/evidence-signed-only.json (our own
 pull requests, all pre-signed) is never run in CI. For it every `run` of an enforced check becomes `decision=refuse`, and
 the check job fails with what to do instead (sign it with scripts/st-test --all --push origin). See `refusal`.
+For a pull_request run the accepted base is the first parent of the checked-out merge, which the workflow passes as BASE_SHA;
+the payload's base.sha comes as EVENT_BASE_SHA, and one outside that history refuses a signed-only opener (payload_base_outside).
 
 Outcomes (each has a fixed step name in the workflow so a collector can count them):
   satisfied    a trusted full-tier note from the central observer exists
@@ -43,7 +45,7 @@ VERIFIER_TIMEOUT = int(os.environ.get('GATE_VERIFIER_TIMEOUT', '30'))
 # A change that touches anything that decides a skip is not skipped on a note alone: those files are what a forged skip would
 # have to edit. Compared between the accepted base and this run's tree. One exception (decide): a pull_request run covered by a note
 # of one of OWN_LEVELS, our dev hosts, which ran the PR's own scripts. It is judged by THIS gate and verifier as the base has them
-# (the workflow fetches both from BASE_SHA), never the PR's copies, and the merge queue runs every check in full before it lands.
+# (the workflow fetches both from BASE_SHA), never the PR's copies. Merge groups reuse only exact-tree evidence enabled at BASE.
 PROTECTED = (
     'scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
     '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts', '.github/workflows/workspace-ci.ts',
@@ -59,13 +61,20 @@ PROTECTED = (
     '.st/evidence-log-key',
     # Whose pull requests are refused instead of run when unsigned (refusal).
     '.st/evidence-signed-only.json',
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — literal so the closure checker reads the same source of truth.
+    '.fractal/evidence-skip-policy.json', '.fractal/evidence-keys', '.fractal/evidence-authors.json',
+    '.fractal/required-lanes.json', '.fractal/evidence-log-key', '.fractal/evidence-signed-only.json',
 )
 # The protected files the gate and verifier only ever read at the accepted BASE when they judge a note: the signing keys (--keys-from),
 # the author list (check_authors, from the base's ci-evidence-signing) and the evidence log's key (--log-keys-from). The copy in a head
 # tree decides nothing, so main changing one after the branch point does not make a pull request fall back to the merge tree (a key
 # rotation on main voided every head signature made before it, 2026-10-26). A note the change distrusts, a dropped key say, is still
 # refused, by the lists as they are at the base. The branch's OWN edits to them still count as protected changes (choose_tree).
-BASE_READ = ('.st/evidence-keys', '.st/evidence-authors.json', '.st/evidence-log-key', '.st/evidence-signed-only.json')
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — keep the full base-only list literal for the closure checker.
+BASE_READ = (
+    '.st/evidence-keys', '.st/evidence-authors.json', '.st/evidence-log-key', '.st/evidence-signed-only.json',
+    '.fractal/evidence-keys', '.fractal/evidence-authors.json', '.fractal/evidence-log-key', '.fractal/evidence-signed-only.json',
+)
 
 # Staleness bound for a head-tree note (the stated policy, docs/st3/gate-evidence.md "How stale a head may be"): the branch point
 # may be at most this many first-parent commits of main behind the tip GitHub merged into. Further behind, the run asks about the
@@ -129,6 +138,16 @@ def run(*command, stdin=None, timeout=120, env=None):
                           env=dict(os.environ, **env) if env else None)
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for the individually extracted gate.
+def config_path(base, legacy):
+    preferred = legacy.replace('.st/', '.fractal/', 1)
+    listing = run('git', 'ls-tree', '-z', '--full-tree', base, '--', preferred, legacy)
+    if listing.returncode != 0:
+        raise Fallback(f'could not resolve configuration at {base}')
+    names = {entry.partition(b'\t')[2].decode() for entry in listing.stdout.split(b'\0') if entry}
+    return preferred if preferred in names else legacy if legacy in names else None
+
+
 def decide(context, outcome, result, tree):
     """(decision, why). Skip only if every single condition holds."""
     if outcome != 'satisfied' or not isinstance(result, dict):
@@ -139,6 +158,11 @@ def decide(context, outcome, result, tree):
         return 'run', 'event does not allow skipping'
     if context.get('tree_of') == 'head' and context['event'] != 'pull_request':
         return 'run', 'a head-tree note covers pull request runs only'
+    if context['event'] == 'merge_group':
+        if context.get('merge_group_mode') != 'same-tree':
+            return 'run', 'merge-group tree reuse is not enabled at the accepted base'
+        if result.get('match') != 'tree':
+            return 'run', 'merge groups require exact-tree evidence, not input-key reuse'
     protected = context.get('protected_changed')
     if protected != [] and not (own_pull_request(context, result) and isinstance(protected, list)
                                 and all(isinstance(p, str) and p and not p.startswith('<') for p in protected)):
@@ -171,35 +195,58 @@ def own_pull_request(context, result):
     return context['event'] == 'pull_request' and result.get('trust_level') in OWN_LEVELS
 
 
+def merge_group_mode(context):
+    """Queue reuse is opt-in at BASE; absent, malformed or unknown modes keep hosted CI running."""
+    path = config_path(context['base'], SIGNED_ONLY)
+    if path is None:
+        return None
+    shown = run('git', 'show', f"{context['base']}:{path}")
+    if shown.returncode != 0:
+        return None
+    try:
+        return json.loads(shown.stdout).get('merge_group')
+    except (ValueError, AttributeError):
+        return None
+
+
 def signed_only(context):
-    """True for a same-repository, non-draft pull_request run whose opener the accepted BASE lists in .st/evidence-signed-only.json
-    ('openers'). Read at the base, so a pull request cannot take itself off the list. No list, an unreadable one or any doubt about
-    the run: False, and the run is decided as before."""
+    """Whether this opener is signed-only, using the accepted base's selected layout.
+
+    An absent list preserves historical behavior; a selected list that cannot be read or decoded must refuse hosted execution."""
     if context['event'] != 'pull_request' or context['fork'] != 'false' or context['draft'] != 'false':
         return False
     base, opener = context['base'], context['pr_user']
     if not OID.match(base or '') or not opener:
         return False
-    shown = run('git', 'show', f'{base}:{SIGNED_ONLY}')
-    if shown.returncode != 0:
+    path = config_path(base, SIGNED_ONLY)
+    if path is None:
         return False
+    shown = run('git', 'show', f'{base}:{path}')
+    if shown.returncode != 0:
+        raise Fallback(f'could not read accepted configuration {path}')
     try:
         openers = json.loads(shown.stdout).get('openers')
-    except (ValueError, AttributeError):
-        return False
-    return isinstance(openers, list) and opener in [name for name in openers if isinstance(name, str) and name]
+    except (ValueError, AttributeError) as error:
+        raise Fallback(f'invalid accepted configuration {path}') from error
+    if not isinstance(openers, list) or not all(isinstance(name, str) and name for name in openers):
+        raise Fallback(f'invalid openers in accepted configuration {path}')
+    return opener in openers
 
 
 def enforced(context):
     """True when the base's skip policy turns skipping on for this check: only then can a signature cover it, so only then is an
-    unsigned run refused (a shadow check, rust-tests today, keeps running as its aggregate's part)."""
-    shown = run('git', 'show', f"{context['base']}:{POLICY}")
+    unsigned run refused (a shadow check keeps running as its aggregate's part)."""
+    path = config_path(context['base'], POLICY)
+    if path is None:
+        return False
+    shown = run('git', 'show', f"{context['base']}:{path}")
     if shown.returncode != 0:
-        return False
+        raise Fallback(f'could not read accepted configuration {path}')
     try:
-        entry = json.loads(shown.stdout)['checks'][context['check']]
-    except (ValueError, KeyError, TypeError):
-        return False
+        checks = json.loads(shown.stdout)['checks']
+        entry = checks.get(context['check'])
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        raise Fallback(f'invalid accepted configuration {path}') from error
     return isinstance(entry, dict) and entry.get('enforce') is True
 
 
@@ -289,7 +336,10 @@ def observe(context, revision='HEAD', protected=None):
     else:
         context['notes_fetch'] = 'failed'
     for name, path in (('policy_sha256', POLICY), ('keys_sha256', KEYS)):
-        shown = run('git', 'show', f'{base}:{path}')
+        selected = config_path(base, path)
+        shown = run('git', 'show', f'{base}:{selected or path}')
+        if selected is not None and shown.returncode != 0:
+            return 'unavailable', None, f'could not read accepted configuration {selected}', None
         context[name] = hashlib.sha256(shown.stdout).hexdigest()[:16] if shown.returncode == 0 else 'none'
     script = run('git', 'show', f'{base}:{VERIFIER}')
     if script.returncode != 0:
@@ -299,7 +349,7 @@ def observe(context, revision='HEAD', protected=None):
         path = os.path.join(scratch, 'evidence-verify')
         with open(path, 'wb') as handle:
             handle.write(script.stdout)
-        if run('git', 'cat-file', '-e', f'{base}:{KEYS}').returncode == 0:
+        if config_path(base, KEYS) is not None:
             keys = ['--keys-from', base]
         else:
             # No trusted keys yet: nothing signed can be trusted, but a degraded note can still be counted.
@@ -309,7 +359,7 @@ def observe(context, revision='HEAD', protected=None):
         # The evidence log's shadow view (docs/st3/gate-evidence.md, "The evidence log"), once the base pins the log key and its
         # verifier reads it: one ref, one commit deep. It is reported on the decision line and changes no decision.
         log = []
-        if b'--log-keys-from' in script.stdout and run('git', 'cat-file', '-e', f'{base}:{LOG_KEY}').returncode == 0:
+        if b'--log-keys-from' in script.stdout and config_path(base, LOG_KEY) is not None:
             fetched = run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{LOG_REF}:{LOG_REF}')
             context['log_fetch'] = 'ok' if fetched.returncode == 0 else 'failed'
             log = ['--log-keys-from', base]
@@ -360,8 +410,11 @@ def prefetch_manifests(revision, base):
         meta, _, name = entry.partition(b'\t')
         if name == b'Cargo.toml' or name.endswith(b'/Cargo.toml'):
             wanted.append(meta.split()[2].decode())
-    inputs = run('git', 'rev-parse', '--verify', '-q', f'{base}:{MEMBER_INPUTS}')
-    if inputs.returncode == 0:
+    selected = config_path(base, MEMBER_INPUTS)
+    if selected is not None:
+        inputs = run('git', 'rev-parse', '--verify', '-q', f'{base}:{selected}')
+        if inputs.returncode != 0:
+            return 'failed'
         wanted.append(inputs.stdout.decode().strip())
     missing = [oid for oid in wanted if OID.match(oid) and run('git', 'cat-file', '-e', oid, env={'GIT_NO_LAZY_FETCH': '1'}).returncode != 0]
     if not missing:
@@ -435,7 +488,7 @@ def line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sh
         ('members', result.get('members')), ('missing', len(result['missing']) if isinstance(result.get('missing'), (dict, list)) else None),
         ('manifests_fetch', context.get('manifests_fetch')), ('members_fetch', context.get('members_fetch')),
         ('head', context['head']),
-        ('base', context['base']), ('event', context['event']), ('pr', context['pr']),
+        ('base', context['base']), ('event_base', context.get('event_base')), ('event', context['event']), ('pr', context['pr']),
         ('repo', context['repository']), ('run', context['run']), ('attempt', context['attempt']),
         ('fork', context['fork']), ('verifier_sha256', verifier_sha), ('gate_sha256', gate_sha),
     ]
@@ -454,6 +507,8 @@ def context_from(environ):
         'attempt': environ.get('RUN_ATTEMPT', ''), 'fork': fork,
         'pr_head': environ.get('PR_HEAD_SHA', ''), 'pr_user': environ.get('PR_USER', ''), 'actor': environ.get('ACTOR', ''),
         'triggering_actor': environ.get('TRIGGERING_ACTOR', ''), 'draft': environ.get('PR_DRAFT', ''),
+        # The pull_request payload's base.sha; the workflow passes the merge's first parent as BASE_SHA (payload_base_outside).
+        'event_base': environ.get('EVENT_BASE_SHA', ''),
         'tree_of': 'merge', 'merge_tree': None, 'head_tree': '-', 'notes_fetch': '-', 'policy_sha256': '-', 'keys_sha256': '-',
         'run_inputs': run_inputs_from(environ.get('RUN_INPUTS', '')),
     }
@@ -529,7 +584,8 @@ def ci_inputs_kept(check, branch_point, base, current):
         return False
     try:
         verify = base_module(base, 'scripts/evidence-verify', 'base_evidence_verify')
-        lanes = run('git', 'show', f'{base}:.st/required-lanes.json')
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — authority and layout both belong to the accepted base.
+        lanes = run('git', 'show', f'{base}:{config_path(base, ".st/required-lanes.json")}')
         if lanes.returncode != 0 or not hasattr(verify, 'ci_inputs_unchanged'):
             return False
         ci = verify.lane_rules(lanes.stdout.decode(), check).get('ci_inputs')
@@ -538,6 +594,35 @@ def ci_inputs_kept(check, branch_point, base, current):
         return False
     except Exception:  # the base's verifier refused the lane file or the trees: not kept
         return False
+
+
+def payload_base_outside(context):
+    """Why this pull_request run's payload base (EVENT_BASE_SHA, GitHub's base.sha) is not an ancestor of, or equal to, the base tip the
+    checked-out merge was made on (its first parent), or None when it is or there is nothing to compare: another event, no payload base
+    passed, or a checkout that is not the merge of this head. The workflow takes this gate and BASE_SHA from that first parent, because
+    a reopen or a ready_for_review keeps the base.sha of the last open or push (on 2026-10-28 a reopen ran a gate from before
+    .st/evidence-signed-only.json existed, #4144). A stale payload base therefore decides nothing; one outside the merge's history (a
+    retargeted or rewritten base) is a doubt, which for a signed-only opener is a refusal (main), never a run."""
+    event_base = context.get('event_base')
+    if context['event'] != 'pull_request' or not event_base:
+        return None
+    if not OID.match(event_base):
+        return f'the payload base {event_base[:40]!r} is not an object id'
+    parents = [row.split()[1] for row in git_out('cat-file', '-p', 'HEAD').splitlines() if row.startswith('parent ')]
+    if len(parents) != 2 or parents[1] != context['pr_head']:
+        return None
+    first = parents[0]
+    if event_base == first:
+        return None
+    if git_out('rev-parse', '--is-shallow-repository') == 'true' and \
+            run('git', 'fetch', '--no-tags', '-q', '--filter=blob:none', '--unshallow', 'origin').returncode != 0:
+        return 'the history to compare the payload base with could not be fetched'
+    if run('git', 'cat-file', '-e', f'{event_base}^{{commit}}').returncode != 0 and \
+            run('git', 'fetch', '--no-tags', '-q', '--filter=blob:none', 'origin', event_base).returncode != 0:
+        return f'the payload base {event_base[:12]} could not be fetched'
+    if run('git', 'merge-base', '--is-ancestor', event_base, first).returncode != 0:
+        return f'the payload base {event_base[:12]} is not in the history of the base the merge was made on ({first[:12]})'
+    return None
 
 
 def branch_point_verdict(branch_point, head, base, current, context=None, check=None):
@@ -670,6 +755,8 @@ def main():
     except Exception:
         context['protected_changed'] = ['<comparison failed>']
     try:
+        if context['event'] == 'merge_group':
+            context['merge_group_mode'] = merge_group_mode(context)
         decision, why = decide(context, outcome, result, tree)
     except Exception:
         decision, why = 'run', 'decision error'
@@ -679,10 +766,25 @@ def main():
     if decision == 'run':
         try:
             refused = refusal(context, outcome, detail, why, tree)
-        except Exception:
-            refused = None  # a doubt about the list runs the check, as before
+        except Exception as error:
+            refused = f"{context['check']}: signed-only configuration could not be checked ({error}); hosted execution refused"
         if refused:
             decision = 'refuse'
+    try:
+        listed = signed_only(context) and enforced(context)
+    except Exception as error:
+        listed = False
+        decision = 'refuse'
+        refused = f"{context['check']}: signed-only configuration could not be checked ({error}); hosted execution refused"
+    if listed:
+        try:
+            outside = payload_base_outside(context)
+        except Exception as error:
+            outside = f'the payload base could not be compared ({type(error).__name__})'
+        if outside:
+            decision, detail = 'refuse', 'payload_base_outside_the_merge'
+            refused = (f"{context['check']}: {outside}. Our pull requests are judged against the base GitHub merged them into: push "
+                       f"again so GitHub records the current base, then re-run all jobs")
     with open(__file__, 'rb') as handle:
         gate_sha = hashlib.sha256(handle.read()).hexdigest()
     text = line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sha)

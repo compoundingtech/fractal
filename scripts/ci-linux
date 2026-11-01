@@ -10,15 +10,64 @@ logs="$RUNNER_TEMP/ci-logs"
 mkdir -p "$logs"
 
 fleet_compat() {
+  # Fleet runtime compatibility is separate from Fractal-to-Fractal replication.
+  # Exercise the deployed pty 0.13.0 record through the production mailbox bind handler,
+  # even when the devShell's newer pty writer would hide missing daemonBootId.
+  cargo test -p fractal-api-mailbox --locked --lib \
+    api::mailbox::tests::replay_native_tests::deployed_pty_0_13_0_record_without_boot_id_binds_mailbox \
+    -- --exact 2>&1 | tee "$logs/pty-mailbox-compat-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/pty-mailbox-compat-result.log" || return
   local baseline
   baseline=$(python3 scripts/compat-baseline fleet "$RUNNER_TEMP/baseline") || return
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   export FRACTAL_COMPAT_BIN="$baseline" ST3_COMPAT_BIN="$baseline"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   test -x "${FRACTAL_COMPAT_BIN-${ST3_COMPAT_BIN-}}" || return
+  # Every file that compile reads must be in linux-fleet-compat's input key, or its notes could cover a tree they never measured. Only
+  # linux-fleet-compat's own run names the skip policy (scripts/ci-fleet-compat-keyed, CI's linux-fleet-compat job): linux-gate runs this
+  # stage too and must not depend on the policy file, so without CI_KEYED_FLEET_COMPAT_POLICY the build keeps no messages and nothing is
+  # checked. --warn while linux-fleet-compat is in shadow (clippy's check fails).
+  if [ -n "${CI_KEYED_FLEET_COMPAT_POLICY:-}" ]; then
+    cargo test -p fractal --locked --test integration --no-run --message-format=json > "$logs/fleet-compat-build.jsonl" || return
+    local policy
+    policy=$(keyed_policy "$CI_KEYED_FLEET_COMPAT_POLICY") || return
+    python3 scripts/dep-info-check --logs "$logs" --check linux-fleet-compat --policy "$policy" --jsonl 'fleet-compat-*.jsonl' --warn || return
+  fi
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade 2>&1 | tee "$logs/compat-result.log" || return
-  grep -q "test result: ok. 1 passed" "$logs/compat-result.log"
+  grep -q "test result: ok. 1 passed" "$logs/compat-result.log" || return
+  # The GitHub plugin store beside an older poller, and that poller upgraded in place.
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade 2>&1 | tee "$logs/compat-plugin-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-plugin-result.log" || return
+  # A member of the previous release that depends on a repository keeps its item snapshots.
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::previous_release_dependent_keeps_item_snapshots_until_it_upgrades 2>&1 | tee "$logs/compat-compact-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-compact-result.log"
+}
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — checkout missing-only bridge.
+# Only an auto:PATH argument selects a layout; explicit paths are never rewritten.
+# The keyed caller supplies PATH: ordinary linux-gate/rust-tests must not declare a policy read.
+keyed_policy() {
+  local selected=$1
+  if [[ "$selected" != auto:* ]]; then
+    printf '%s\n' "$selected"
+    return
+  fi
+  python3 -I - "${selected#auto:}" <<'PY'
+import os
+import sys
+path = sys.argv[1]
+preferred = os.path.join('.fractal', os.path.basename(path))
+try:
+    os.lstat(preferred)
+except FileNotFoundError:
+    pass
+else:
+    path = preferred
+print(path)
+PY
 }
 
 clippy_and_codegen() {
@@ -39,7 +88,22 @@ clippy_and_codegen() {
     base_args=(--base-ref "$CLIPPY_BASE_SHA")
   fi
   python3 scripts/clippy_ratchet.py --logs "$logs" "${base_args[@]}" || return
-  cargo run --locked -p fractal-client-codegen -- --check
+  # Every file those compiles read must be in linux-clippy's input key, or its notes could cover a tree they never measured. CI's
+  # linux-clippy job names the skip policy (CI_KEYED_CLIPPY_POLICY) and checks it here. linux-gate runs this stage too and must not
+  # depend on the policy file (lane-definition-closure --check), so it never names it: a local run hands the stage's logs to
+  # scripts/ci-clippy-result instead (CI_CLIPPY_REPORT, below), which checks the same after the stage, outside linux-gate's command.
+  if [ -n "${CI_KEYED_CLIPPY_POLICY:-}" ]; then
+    local policy
+    policy=$(keyed_policy "$CI_KEYED_CLIPPY_POLICY") || return
+    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$policy" --jsonl 'clippy-*.jsonl' || return
+  fi
+  cargo run --locked -p fractal-client-codegen -- --check || return
+  # linux-clippy's note is signed from this stage (scripts/st-test): its cargo messages and metadata, and `passed` last, only when the
+  # whole stage passed, so a report without it says the stage did not.
+  if [ -n "${CI_CLIPPY_REPORT:-}" ]; then
+    mkdir -p "$CI_CLIPPY_REPORT" && cp "$logs"/clippy-*.jsonl "$logs/clippy-metadata.json" "$CI_CLIPPY_REPORT/" \
+      && : > "$CI_CLIPPY_REPORT/passed"
+  fi
 }
 
 conversation_model() {
@@ -51,6 +115,43 @@ conversation_model() {
     echo "the standalone conversation model must not depend on ratatui" >&2
     return 1
   fi
+}
+
+# Here and not a script of its own: a new file this stage runs would have to join .st/required-lanes.json, a trust file.
+nextest_timeout_check() {
+  # The ci profile, and any override, must kill a hung test within 600 s (slow-timeout's terminate-after)...
+  local terminate scratch status=0
+  terminate=$(python3 - <<'PY'
+import re, sys, tomllib
+profiles = tomllib.load(open('.config/nextest.toml', 'rb')).get('profile', {})
+def kill_after(setting):
+    period = re.fullmatch(r'(\d+)s', setting.get('period', '')) if isinstance(setting, dict) else None
+    count = setting.get('terminate-after') if period else None
+    return int(period.group(1)) * count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else None
+ci = profiles.get('ci', {}).get('slow-timeout')
+settings = [ci] + [o['slow-timeout'] for p in ('default', 'ci') for o in profiles.get(p, {}).get('overrides', []) if 'slow-timeout' in o]
+loose = [s for s in settings if (kill_after(s) or 601) > 600]
+if loose:
+    sys.exit(f'.config/nextest.toml must kill a hung test within 600 s (slow-timeout period in seconds, with terminate-after): {loose}')
+print(ci['terminate-after'])
+PY
+  ) || return
+  # ...and real nextest must kill one and fail it: a scratch crate whose test hangs, under that terminate-after with a 1 s period.
+  scratch=$(mktemp -d) || return
+  mkdir -p "$scratch/src" "$scratch/.config"
+  printf '[package]\nname = "hang"\nversion = "0.0.0"\nedition = "2021"\n\n[workspace]\n' > "$scratch/Cargo.toml"
+  printf '#[test]\nfn passes() {}\n\n#[test]\nfn hangs() {\n    loop {\n        std::thread::sleep(std::time::Duration::from_secs(1));\n    }\n}\n' > "$scratch/src/lib.rs"
+  printf '[profile.ci]\nretries = 0\nslow-timeout = { period = "1s", terminate-after = %s }\n\n[profile.ci.junit]\npath = "junit.xml"\n' \
+    "$terminate" > "$scratch/.config/nextest.toml"
+  (cd "$scratch" && unset RUSTC_WRAPPER CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR "${!NEXTEST_@}" \
+    && timeout 300 cargo nextest run --profile ci --offline --no-fail-fast) || status=$?
+  if [[ "$status" != 100 ]] || ! grep -q 'type="test timeout"' "$scratch/target/nextest/ci/junit.xml" 2>/dev/null; then
+    echo "nextest did not kill and fail a hung test (exit $status, want 100 and a 'test timeout' failure in its JUnit report)" >&2
+    rm -rf "$scratch"
+    return 1
+  fi
+  rm -rf "$scratch"
+  echo "nextest killed a hung test after terminate-after=$terminate and failed it"
 }
 
 # Guard current products before any stage can report success.
@@ -157,6 +258,8 @@ case "$stage" in
     # The standalone feature check is a separate cargo test of one package.
     if [[ -z "${CI_TEST_EXTRACTED:-}" && "${CI_TEST_PARTITION:-}" != hash:2/2 \
           && ( -z "${CI_TEST_PACKAGES:-}" || ",$CI_TEST_PACKAGES," == *,fractal-conversation-ui,* ) ]]; then conversation_model || exit $?; fi
+    # A hung test is killed and fails, not waited for: checked once per run (shard 1, or an unpartitioned local run).
+    if [[ "${CI_TEST_PARTITION:-}" != hash:2/2 && -z "${CI_TEST_PACKAGES:-}" ]]; then nextest_timeout_check || exit $?; fi
     scratch_diagnostic_start
     tests_status=0
     bash scripts/ci-nextest run --test-threads "${CI_TEST_THREADS:-${CI_LOCAL_TEST_THREADS:-$(nproc)}}" --status-level pass "${selected[@]}" || tests_status=$?

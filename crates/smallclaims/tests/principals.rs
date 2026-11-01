@@ -1755,6 +1755,151 @@ fn a_pending_large_revocation_never_authorizes_its_dependent_claim() {
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());
 }
 
+/// Whether `claim_id`'s page of a requeue is queued yet: it waits in the queue or its
+/// accumulator is dirty (both stay true until it is judged again).
+fn page_queued(connection: &rusqlite::Connection, claim_id: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM claim_verdict_queue WHERE claim_id=?1)
+                 OR EXISTS(SELECT 1 FROM claim_signature_judging WHERE claim_id=?1 AND dirty=1)",
+            [claim_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_removed_root_holds_its_dependents_before_their_requeue_page() {
+    use std::sync::Mutex;
+    let store = Arc::new(Store::open_memory("studio", Arc::new(Plain)).unwrap());
+    store.set_node_key(key()).unwrap();
+    let claims = (0..3)
+        .map(|i| note(&store, None, &format!("signed by the first node key {i}")))
+        .collect::<Vec<_>>();
+    seal(&store);
+    store.judge_claims(true).unwrap();
+    for claim in &claims {
+        assert_eq!(verdict(&store, claim), Verdict::Verified);
+    }
+    // A new node key: the old one is no longer a trust root.
+    store.set_node_key(key()).unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let record = reads.clone();
+    let weak = Arc::downgrade(&store);
+    let ids = claims.iter().map(|claim| claim.id.clone()).collect::<Vec<_>>();
+    let observer = store.observe_commits(move |connection| {
+        let Some(cursor) = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key='claim_candidate_requeue:root'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap()
+        else {
+            return;
+        };
+        let store = weak.upgrade().unwrap();
+        for id in &ids {
+            if *id > cursor && !page_queued(connection, id) {
+                record
+                    .lock()
+                    .unwrap()
+                    .push((id.clone(), store.claim_verdict(id).unwrap()));
+            }
+        }
+    });
+    store.judge_claims(true).unwrap();
+    drop(observer);
+    let reads = reads.lock().unwrap();
+    assert!(!reads.is_empty(), "a commit started the root requeue before queueing any page");
+    for (id, read) in reads.iter() {
+        assert!(matches!(read, Verdict::Held(_)), "{id} read {read:?} before its page");
+    }
+    for claim in &claims {
+        assert!(matches!(verdict(&store, claim), Verdict::Held(_)));
+    }
+    assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+}
+
+#[test]
+fn a_revoked_delegated_key_holds_dependents_past_its_first_requeue_page() {
+    let anchor = key();
+    let store = Store::open_memory("studio", Arc::new(Plain)).unwrap();
+    store.set_node_key(anchor.clone()).unwrap();
+    store.set_write_clock_at(100).unwrap();
+    let first = note(&store, Some("person/ada"), "first");
+    seal(&store);
+    // The key ada's delegation grants her device.
+    let device = store.claim_signature(&first.id).unwrap().unwrap();
+    store.set_write_clock_at(120).unwrap();
+    let revoked = append(
+        &store,
+        KEY_REVOKED,
+        "person/ada",
+        None,
+        json!({"key": device.key}),
+    );
+    let content = content_digest(
+        &revoked.subject,
+        &revoked.kind,
+        revoked.actor.as_deref(),
+        &revoked.body,
+    );
+    // The revocation first arrives with a broken signature, so it does not count yet.
+    let mut broken = ClaimSignature::sign(&anchor, &content, "host/studio", None, vec![], 120);
+    broken.signature = "broken-until-the-real-signature-arrives".into();
+    attach(&store, &revoked, &broken);
+    store.set_write_clock_at(130).unwrap();
+    // More dependents than one requeue page.
+    let after = (0..1100)
+        .map(|i| note(&store, Some("person/ada"), &format!("after {i}")))
+        .collect::<Vec<_>>();
+    seal(&store);
+    store.judge_claims(true).unwrap();
+    for claim in &after {
+        assert_eq!(verdict(&store, claim), Verdict::Verified);
+    }
+    // The real signature arrives: the revocation counts, and its requeue queues one page now.
+    attach(
+        &store,
+        &revoked,
+        &ClaimSignature::sign(&anchor, &content, "host/studio", None, vec![], 120),
+    );
+    let connection = store.readers.get();
+    let cursor: String = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [format!("claim_candidate_requeue:key:person/ada|{}", device.key)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let waiting = after
+        .iter()
+        .filter(|claim| claim.id > cursor && !page_queued(&connection, &claim.id))
+        .count();
+    drop(connection);
+    assert!(waiting > 0, "some dependents are past the first page");
+    for claim in &after {
+        assert!(
+            matches!(verdict(&store, claim), Verdict::Held(_)),
+            "{} read {:?} before its page",
+            claim.id,
+            verdict(&store, claim)
+        );
+    }
+    let counts = store.claim_verdict_counts().unwrap();
+    assert!(counts.get("held").copied().unwrap_or(0) >= after.len() as u64, "{counts:?}");
+    store.judge_claims(true).unwrap();
+    for claim in &after {
+        assert!(
+            matches!(verdict(&store, claim), Verdict::Invalid(reason) if reason.contains("revoked"))
+        );
+    }
+    assert_eq!(verdict(&store, &first), Verdict::Verified);
+    assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+}
+
 #[test]
 fn migration_commits_claim_offsets_inside_a_large_authenticated_envelope() {
     use smallclaims::replication::ReplicationInventory;
@@ -2059,7 +2204,7 @@ fn a_restart_keeps_the_keys_and_rebuilds_the_same_verdicts() {
 fn founding_does_not_rewrite_already_sealed_unsigned_delegations() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    let path = smallclaims::fleet::join::store_path(root);
+    let path = root.join("claims.sqlite3");
     let (existing, envelopes) = {
         let store = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
         store
@@ -2123,7 +2268,7 @@ fn founding_does_not_rewrite_already_sealed_unsigned_delegations() {
 fn a_populated_standalone_store_founds_a_fleet_without_losing_unsealed_delegations() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    let path = smallclaims::fleet::join::store_path(root);
+    let path = root.join("claims.sqlite3");
     let keys = smallclaims::fleet::join::key_directory(root);
     let node_key = Arc::new(smallclaims::fleet::join::standalone_node_key(root).unwrap());
     let existing = {

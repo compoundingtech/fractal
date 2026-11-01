@@ -89,7 +89,9 @@
     "docs/st3/client-v0/fixtures",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "docs/st3/client-v0/schemas/operations.json",
+    "fixtures/clients/arrangements-v1.json",
     "fixtures/clients/device-signing-v1.json",
+    "fixtures/clients/ordered-memberships-v2.json",
     "fixtures/clients/plain-errors-v1.json",
     "fixtures/clients/stream-sync/frames.json",
     "fixtures/scenarios",
@@ -188,6 +190,8 @@
   "fractal-feed": {
    "extra": [
     "README.md",
+    "docs/st3/client-v0/fixtures/agents-publication-chunk.json",
+    "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/fixtures/events.json",
     "docs/st3/client-v0/fixtures/resources.json",
     "docs/st3/client-v0/fixtures/terminal-screen.json"
@@ -221,6 +225,8 @@
    "extra": [
     ".config",
     ".github/workflows/fleet.yml",
+    ".fractal/evidence-policy.json",
+    ".st/evidence-policy.json",
     "crates/fractal-daemon/hooks/claude-observe.sh",
     "crates/fractal-daemon/hooks/claude-statusline.sh",
     "crates/fractal-daemon/hooks/omp-channel.ts",
@@ -374,6 +380,7 @@
   },
   "fractal-ui-model": {
    "extra": [
+    "clients/typescript/fractal-views/tests/fixtures/prompt-forms.json",
     "fixtures/clients/documents-v1.json",
     "fixtures/clients/sidebar-v2.json",
     "fixtures/clients/words.json",
@@ -390,7 +397,9 @@
    "extra": []
   },
   "smallclaims": {
-   "extra": []
+   "extra": [
+    "crates/fractal"
+   ]
   }
  },
  "no_tests": [

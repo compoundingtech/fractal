@@ -14,6 +14,22 @@ use crate::model::PlannerSpec;
 pub mod changes;
 mod client;
 
+/// The per-host switch for seat lanes.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lanes {
+    On,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkerIngressGenerationCheck {
+    #[default]
+    Observe,
+    Enforce,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -28,14 +44,30 @@ pub struct Config {
     /// Separate explicit opt-in for non-authorizing legacy topology observations. Off by default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_primary_ownership_observe: Option<bool>,
+    /// Worker socket-generation admission. Absent observes without refusing; restart to change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_ingress_generation_check: Option<WorkerIngressGenerationCheck>,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
+    /// Explicit placement for daemon-launched seats without a lane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
+    /// Optional Linux envelope admission policy. Absent means off without reading a state file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seat_admission: Option<fractal_runtime::seat_admission::Config>,
+    /// `on` caps each seat that declares `capacity` in its lane (docs/st3/seat-lanes.md). Absent
+    /// means `off`: such a seat starts without one. Seats without a declaration never change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<Lanes>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
     pub fleet_id: Option<String>,
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
+    /// SQLite database directory only; absent keeps the database in `state_dir`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_dir: Option<PathBuf>,
     pub pty_root: Option<PathBuf>,
     /// Owner-local catalog roots supplying declared private-notes carrier provenance.
     pub private_notes_catalogs: Vec<PathBuf>,
@@ -77,6 +109,10 @@ pub struct Config {
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
+    /// How long a person has to answer an ask that names no deadline. Written only when it
+    /// differs from the default.
+    #[serde(skip_serializing_if = "AsksConfig::is_default")]
+    pub asks: AsksConfig,
     /// The setup screen's "Let Codex work without asking" box. Unset and `true` give Codex the
     /// install's access mode; `false` makes Codex ask. Written only by the setup screen when Codex
     /// is found. A build that does not know the key rejects a config that has it, so a config
@@ -181,16 +217,36 @@ impl CheckpointConfig {
 /// then seals, verifies and adopts no checkpoint, and finishes only a trim it had already
 /// committed. Every participant must seal a checkpoint, so the old checkpoints stop on the
 /// other members until a person excuses this one. Off by default; nothing changes unless a
-/// member opts in.
+/// member opts in. `notify` names the agent that receives a fault when the daily answers check
+/// finds this member and a peer answering differently; without it the fleet's fault agent does.
+/// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
+/// that drops more goes on the next day where it stopped.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
     pub local: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_claims: Option<u64>,
 }
 
 impl TrimConfig {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.notify.as_deref().is_none_or(|agent| {
+                agent.starts_with("agent/")
+                    && agent.split('/').skip(1).all(|part| !part.is_empty())
+                    && !agent.chars().any(char::is_whitespace)
+            }),
+            "trim.notify names one agent/... subject"
+        );
+        anyhow::ensure!(self.daily_claims != Some(0), "trim.daily_claims is at least 1");
+        Ok(())
     }
 }
 
@@ -339,6 +395,47 @@ impl ReconcileConfig {
     }
 }
 
+/// The deadline an ask gets when it names none and `[asks] default_deadline` is not set.
+pub const DEFAULT_ASK_DEADLINE: &str = "24h";
+
+/// `[asks]`: with `deadlines` on, every ask a person gets has a deadline, at which it resolves
+/// by itself with its default answer. `default_deadline` is the deadline of an ask that names
+/// none.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AsksConfig {
+    /// Off by default. Deadlines add fields to replicated ask claims that a member on an older
+    /// build keeps as retryable and does not show, so they are turned on once every member runs
+    /// a build that reads them. While off, no ask records a deadline and none resolves by one.
+    pub deadlines: bool,
+    /// A duration such as `24h` or `3d`, at least `1m` and at most `30d`.
+    pub default_deadline: String,
+}
+
+impl Default for AsksConfig {
+    fn default() -> Self {
+        Self { deadlines: false, default_deadline: DEFAULT_ASK_DEADLINE.into() }
+    }
+}
+
+impl AsksConfig {
+    pub fn is_default(&self) -> bool { self == &Self::default() }
+
+    pub fn validate(&self) -> Result<()> {
+        self.default_deadline_ms().map(drop)
+    }
+
+    /// The default deadline in milliseconds.
+    pub fn default_deadline_ms(&self) -> Result<u64> {
+        let ms = parse_duration_ms(&self.default_deadline, "asks.default_deadline")?;
+        anyhow::ensure!(
+            (60_000..=30 * 24 * 60 * 60_000).contains(&ms),
+            "asks.default_deadline must be between 1m and 30d"
+        );
+        Ok(ms)
+    }
+}
+
 /// The default idle time before a nudge.
 pub const IDLE_NUDGE_AFTER_MS: u64 = 30 * 60_000;
 /// The default time a wait holds after it last woke its seat.
@@ -375,18 +472,19 @@ pub fn reload_daemon_limits() -> Option<Result<LimitsConfig>> {
 }
 
 /// Read both policies once on the existing two-minute reload loop, outside database work.
-pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig)>> {
+pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig, AsksConfig)>> {
     let path = DAEMON_CONFIG.get()?;
     Some(read_daemon_policies(path.as_deref()))
 }
 
-fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig)> {
+fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig, AsksConfig)> {
     let selected = path.map(Path::to_path_buf).unwrap_or_else(Config::default_path);
     anyhow::ensure!(selected.exists(), "st config {} is missing", selected.display());
     let config = Config::load_unvalidated(Some(&selected))?;
     config.limits.validate()?;
     config.reconcile.validate()?;
-    Ok((config.limits, config.reconcile))
+    config.asks.validate()?;
+    Ok((config.limits, config.reconcile, config.asks))
 }
 
 /// `[limits]` from a config file that must exist: a file that is missing for a moment must not
@@ -507,11 +605,16 @@ impl Default for Config {
             access_mode: None,
             claude_primary_ownership: None,
             claude_primary_ownership_observe: None,
+            worker_ingress_generation_check: None,
             seat_priority: None,
+            unlaned_seat: None,
+            seat_admission: None,
+            lanes: None,
             person: None,
             fleet_id: None,
             shared_secret_file: None,
             state_dir,
+            store_dir: None,
             pty_root: None,
             private_notes_catalogs: Vec::new(),
             socket,
@@ -528,13 +631,26 @@ impl Default for Config {
             trim: TrimConfig::default(),
             limits: LimitsConfig::default(),
             reconcile: ReconcileConfig::default(),
+            asks: AsksConfig::default(),
             codex_work_without_asking: None,
             fleet: None,
         }
     }
 }
 
+pub use fractal_client::product_dirs::STORE_DATABASE_FILES;
+
+/// Resolve only the SQLite directory, never the product's identity, keys or payload roots.
+pub fn store_dir(config: &Config) -> PathBuf {
+    config.store_dir.as_ref().unwrap_or(&config.state_dir).clone()
+}
+
 impl Config {
+    /// The configured database path; SQLite creates its WAL and SHM beside it.
+    pub fn store_path(&self) -> PathBuf {
+        store_dir(self).join(STORE_DATABASE_FILES[0])
+    }
+
     pub fn active_access_mode(&self) -> fractal_drivers::access::AccessMode {
         self.access_mode.unwrap_or_default()
     }
@@ -545,6 +661,10 @@ impl Config {
 
     pub fn active_seat_priority(&self) -> fractal_runtime::SeatPriority {
         self.seat_priority.unwrap_or_default()
+    }
+
+    pub fn lanes_enforced(&self) -> bool {
+        self.lanes == Some(Lanes::On)
     }
 
     /// Service installation writes a new config once, never upgrading a legacy missing mode.
@@ -717,7 +837,16 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(directory) = &self.store_dir {
+            anyhow::ensure!(directory.is_absolute(), "store_dir must be an absolute directory path");
+            anyhow::ensure!(
+                directory.is_dir(),
+                "configured store_dir {} is missing or is not a directory; create and populate it before starting",
+                directory.display()
+            );
+        }
         self.reconcile.validate()?;
+        self.asks.validate()?;
         self.github.validate()?;
         anyhow::ensure!(
             self.private_notes_catalogs.iter().all(|path| path.is_absolute()
@@ -764,6 +893,7 @@ impl Config {
             otlp.validate()?;
         }
         self.limits.validate()?;
+        self.trim.validate()?;
         anyhow::ensure!(
             self.person.as_deref().is_none_or(|person| {
                 person.starts_with("person/")
@@ -1026,6 +1156,41 @@ fn machine_host_name() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn store_directory_defaults_to_state_root_and_roundtrips_explicit_configuration() {
+        let state = tempfile::tempdir().unwrap();
+        let database = tempfile::tempdir().unwrap();
+        let mut config = super::Config {
+            state_dir: state.path().into(),
+            ..super::Config::default()
+        };
+        assert_eq!(super::store_dir(&config), state.path());
+        assert_eq!(config.store_path(), state.path().join("claims.sqlite3"));
+        assert!(!toml::to_string(&config).unwrap().contains("store_dir"));
+        config.store_dir = Some(database.path().into());
+        let restored: super::Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(super::store_dir(&restored), database.path());
+        assert_eq!(restored.store_path(), database.path().join(super::STORE_DATABASE_FILES[0]));
+        assert_eq!(restored.state_dir, state.path());
+        restored.validate().unwrap();
+    }
+
+    #[test]
+    fn store_directory_must_be_absolute_and_exist() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = super::Config {
+            store_dir: Some(root.path().join("missing")),
+            ..super::Config::default()
+        };
+        assert!(config.validate().unwrap_err().to_string().contains("store_dir"));
+        config.store_dir = Some("relative".into());
+        assert!(config.validate().unwrap_err().to_string().contains("absolute"));
+        let file = root.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        config.store_dir = Some(file);
+        assert!(config.validate().unwrap_err().to_string().contains("not a directory"));
+    }
+
+    #[test]
     fn github_app_root_is_operator_supplied_absolute_and_optional() {
         let mut config = super::GithubConfig::default();
         assert!(config.app_token_root.is_none());
@@ -1104,6 +1269,19 @@ mod tests {
     }
 
     #[test]
+    fn worker_ingress_generation_check_is_strict_and_defaults_to_observe() {
+        use super::WorkerIngressGenerationCheck::{Enforce, Observe};
+        for (text, expected) in [("", Observe),
+            ("worker_ingress_generation_check='observe'", Observe),
+            ("worker_ingress_generation_check='enforce'", Enforce)] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert_eq!(config.worker_ingress_generation_check.unwrap_or_default(), expected);
+        }
+        assert!(toml::from_str::<Config>("worker_ingress_generation_check='enfroce'").is_err());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("worker_ingress_generation_check"));
+    }
+
+    #[test]
     fn seat_priority_defaults_to_background_and_accepts_normal() {
         use fractal_runtime::SeatPriority;
         assert_eq!(Config::default().active_seat_priority(), SeatPriority::Background);
@@ -1113,6 +1291,33 @@ mod tests {
         assert_eq!(normal.active_seat_priority(), SeatPriority::Normal);
         assert!(toml::from_str::<Config>("seat_priority=\"high\"").is_err());
         assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_priority"));
+    }
+
+    #[test]
+    fn unlaned_seat_config_is_optional_and_strict() {
+        assert!(Config::default().unlaned_seat.is_none());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("unlaned_seat"));
+        let fields = "[unlaned_seat]\nslice = 'app-seats.slice'\nmemoryMax = 8589934592\nmemorySwapMax = 0\noomPolicy = 'kill'\n";
+        let configured: Config = toml::from_str(fields).unwrap();
+        assert!(configured.unlaned_seat.is_some());
+        let slice_only: Config = toml::from_str("[unlaned_seat]\nslice = 'app-seats.slice'\n").unwrap();
+        assert!(slice_only.unlaned_seat.is_some());
+        assert!(toml::from_str::<Config>("[unlaned_seat]\nmemoryMax = 1024\n").is_err());
+        assert!(toml::from_str::<Config>(&fields.replace("8589934592", "0")).is_err());
+        assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
+    }
+
+    #[test]
+    fn seat_admission_is_optional_and_strict() {
+        assert!(Config::default().seat_admission.is_none());
+        assert!(toml::from_str::<Config>("").unwrap().seat_admission.is_none());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_admission"));
+        let fields = "[seat_admission]\nstateFile = '/run/admission.state'\nbatchPausedMinSecs = 30\n";
+        let configured: Config = toml::from_str(fields).unwrap();
+        let encoded = toml::to_string(&configured).unwrap();
+        assert_eq!(toml::from_str::<Config>(&encoded).unwrap(), configured);
+        assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
+        assert!(toml::from_str::<Config>("[seat_admission]\nstateFile = 'state'\n").is_err());
     }
 
     #[test]
@@ -1170,7 +1375,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "").unwrap();
-        let (_, mut effective) = read_daemon_policies(Some(&path)).unwrap();
+        let (_, mut effective, _) = read_daemon_policies(Some(&path)).unwrap();
         assert_eq!(effective.max_passes_per_minute, None);
         assert_eq!(effective.max_passes_per_minute_or(DEFAULT_MAX_PASSES_PER_MINUTE), 30);
         std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=60\n").unwrap();
@@ -1428,6 +1633,9 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(config.trim.local);
         assert!(toml::to_string(&config).unwrap().contains("[trim]"));
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
+        let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
+        assert_eq!(config.trim.daily_claims, Some(5000));
+        assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 
     #[test]

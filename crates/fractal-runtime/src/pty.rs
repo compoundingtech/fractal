@@ -6,6 +6,8 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -23,6 +25,145 @@ mod producer;
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PTY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Copy, Debug)]
+enum PtyTeardownReason {
+    SpawnPrevious,
+    EndLeftovers,
+    Stop,
+    Kill,
+    Signal,
+    IncarnationCheck,
+}
+
+struct PtyTeardownEvidence<'a> {
+    runtime_id: &'a str,
+    reason: PtyTeardownReason,
+    operation_id: Option<&'a str>,
+    expected_incarnation: Option<&'a str>,
+    observed_incarnation: Option<String>,
+    status: Option<&'a str>,
+    pid: Option<i64>,
+    created_at: Option<&'a str>,
+    exit_code: Option<i64>,
+    recorded_scope: Option<&'a str>,
+    tagged_scope: Option<&'a str>,
+    scope: Option<&'a str>,
+    spawn_lock: &'a str,
+    guard_decision: &'a str,
+}
+
+impl PtyTeardownEvidence<'_> {
+    fn emit(&self, acting: bool) {
+        macro_rules! event {
+            ($level:ident) => {
+                tracing::$level!(
+                    caller = "pty",
+                    reason = ?self.reason,
+                    runtime_id = self.runtime_id,
+                    operation_id = self.operation_id,
+                    expected_incarnation = self.expected_incarnation,
+                    observed_incarnation = self.observed_incarnation.as_deref(),
+                    registry_status = self.status,
+                    registry_pid = self.pid,
+                    registry_created_at = self.created_at,
+                    registry_exit_code = self.exit_code,
+                    recorded_scope = self.recorded_scope,
+                    tagged_scope = self.tagged_scope,
+                    scope = self.scope,
+                    spawn_lock = self.spawn_lock,
+                    guard_decision = self.guard_decision,
+                    acting,
+                    "PTY teardown boundary"
+                );
+            };
+        }
+        if acting {
+            event!(info);
+        } else {
+            event!(debug);
+        }
+    }
+}
+
+// Keep one field schema for registry-backed control and recorded-scope cleanup.
+#[allow(clippy::too_many_arguments)]
+fn log_previous_teardown(
+    id: &str,
+    observed: Option<&PtyObservation>,
+    recorded_scope: Option<&str>,
+    tagged_scope: Option<&str>,
+    operation_id: Option<&str>,
+    expected_incarnation: Option<&str>,
+    reason: PtyTeardownReason,
+    spawn_lock: &str,
+    guard_decision: &str,
+    acting: bool,
+    scope: Option<&str>,
+) {
+    if !(tracing::enabled!(tracing::Level::DEBUG)
+        || acting && tracing::enabled!(tracing::Level::INFO))
+    {
+        return;
+    }
+    PtyTeardownEvidence {
+        runtime_id: id,
+        reason,
+        operation_id: operation_id.or_else(|| {
+            observed.and_then(|row| row.tags.get("st3.start-operation").map(String::as_str))
+        }),
+        expected_incarnation,
+        observed_incarnation: observed.and_then(observation_incarnation),
+        status: observed.map(|row| row.status.as_str()),
+        pid: observed.and_then(|row| row.pid.map(i64::from)),
+        created_at: observed.and_then(|row| row.created_at.as_deref()),
+        exit_code: observed.and_then(|row| row.exit_code),
+        recorded_scope,
+        scope,
+        tagged_scope: tagged_scope.or_else(|| {
+            observed.and_then(|row| row.tags.get("st3.scope-unit").map(String::as_str))
+        }),
+        spawn_lock,
+        guard_decision,
+    }
+    .emit(acting);
+}
+
+fn log_session_teardown(
+    session: &SessionInfo,
+    reason: PtyTeardownReason,
+    expected_incarnation: Option<&str>,
+    scope: Option<&str>,
+    guard_decision: &str,
+    acting: bool,
+) {
+    if !(tracing::enabled!(tracing::Level::DEBUG)
+        || acting && tracing::enabled!(tracing::Level::INFO))
+    {
+        return;
+    }
+    let metadata = session.metadata.as_ref();
+    PtyTeardownEvidence {
+        runtime_id: &session.name,
+        reason,
+        operation_id: metadata
+            .and_then(|row| row.tags.as_ref())
+            .and_then(|tags| tags.get("st3.start-operation"))
+            .map(String::as_str),
+        expected_incarnation,
+        observed_incarnation: session_incarnation(session),
+        status: Some(session.status.as_str()),
+        pid: session.pid.map(i64::from),
+        created_at: metadata.map(|row| row.created_at.as_str()),
+        exit_code: metadata.and_then(|row| row.exit_code.map(i64::from)),
+        recorded_scope: None,
+        tagged_scope: scope,
+        scope,
+        spawn_lock: "not_acquired",
+        guard_decision,
+    }
+    .emit(acting);
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PtySpawnTimeoutPhase {
@@ -126,6 +267,7 @@ pub struct PtyRuntime {
     spawn_timeout: Duration,
     command_timeout: Duration,
     command_environment: Option<BTreeMap<String, String>>,
+    unlaned_seat: Option<crate::UnlanedSeatPlacement>,
 }
 
 impl std::fmt::Debug for PtyRuntime {
@@ -148,7 +290,14 @@ impl PtyRuntime {
             spawn_timeout: SPAWN_PUBLICATION_TIMEOUT,
             command_timeout: PTY_COMMAND_TIMEOUT,
             command_environment: None,
+            unlaned_seat: None,
         }
+    }
+
+    /// Set only by the daemon's seat runtime, never inferred from ambient environment.
+    pub fn with_unlaned_seat(mut self, policy: Option<crate::UnlanedSeatPlacement>) -> Self {
+        self.unlaned_seat = policy;
+        self
     }
 
     pub fn with_binary(mut self, binary: impl Into<String>) -> Self {
@@ -356,6 +505,10 @@ impl PtyRuntime {
         guard: Option<&dyn Fn() -> Result<()>>,
         producer_entered: &mut bool,
     ) -> Result<()> {
+        // The lane is the scope's, never the harness's environment.
+        let mut env = env.clone();
+        let capacity = crate::lane::Capacity::take(&mut env);
+        let env = &env;
         let _spawn_lock = self.acquire_spawn_lock(id)?;
         let fence = self.spawn_state_path(id, "pending");
         let prior_pending = fence.try_exists()?;
@@ -413,6 +566,13 @@ impl PtyRuntime {
                 }
         }
         if before.as_ref().is_some_and(observation_is_live) {
+            log_previous_teardown(
+                id, before.as_ref(), None, None,
+                env.get("ST3_START_OPERATION").map(String::as_str),
+                cutover.map(|(predecessor, _)| predecessor),
+                PtyTeardownReason::SpawnPrevious, "acquired", "existing_live_incarnation",
+                false, None,
+            );
             anyhow::ensure!(
                 guard.is_none() || cutover.is_some(),
                 "guarded start cannot attribute an existing incarnation to a new launch"
@@ -421,7 +581,13 @@ impl PtyRuntime {
         }
         // What the previous incarnation left running ends before its replacement starts. Each
         // launch has a scope of its own, so this never reaches the replacement.
-        if let Err(error) = self.end_previous_scopes(id, before.as_ref()) {
+        if let Err(error) = self.end_previous_scopes(
+            id,
+            before.as_ref(),
+            PtyTeardownReason::SpawnPrevious,
+            env.get("ST3_START_OPERATION").map(String::as_str),
+            cutover.map(|(predecessor, _)| predecessor),
+        ) {
             eprintln!(
                 "st3: WARN what the last incarnation of {id} left running did not end: {error:#}"
             );
@@ -430,6 +596,7 @@ impl PtyRuntime {
             .filter(|operation| tags.get("st3.start-operation") == Some(*operation));
         let scope_identity = operation.map_or_else(|| id.to_owned(), |operation| format!("{id}-{operation}"));
         let unit = crate::scope_unit("st3", &scope_identity);
+        let lane = crate::lane::prepare(capacity, id)?;
         // An existing or unreadable ownership record may describe an earlier
         // entered producer. Refusing its replay is not a never-started witness.
         let previously_entered = *producer_entered;
@@ -469,6 +636,16 @@ impl PtyRuntime {
         terminal_env
             .entry("TERM".into())
             .or_insert_with(|| "xterm-256color".into());
+        // A lane's variables are the harness's own, forwarded by name like the seat's, not left to
+        // what the PTY server happens to inherit from the launcher.
+        if let Some(lane) = &lane {
+            let host = |key: &str| match &self.command_environment {
+                Some(base) => base.get(key).cloned(),
+                None => std::env::var(key).ok(),
+            };
+            let added = crate::lane::environment(lane, |key| terminal_env.get(key).cloned(), host);
+            terminal_env.extend(added.into_iter().map(|(key, value)| (key.to_owned(), value)));
+        }
         // Name-only `--env`: the pty launcher resolves each name against its
         // inherited environment (exported to it below), so no seat
         // environment value is ever placed on a command line that a service
@@ -541,6 +718,8 @@ impl PtyRuntime {
                 program.as_os_str(),
                 &argument_refs,
                 launcher_environment.as_ref(),
+                lane.as_ref(),
+                self.unlaned_seat.as_ref(),
             );
             if launcher_environment.is_none() {
                 command.envs(&terminal_env);
@@ -715,9 +894,17 @@ impl PtyRuntime {
             .metadata
             .as_ref()
             .and_then(|metadata| metadata.generation.as_deref());
+        log_session_teardown(
+            &session, PtyTeardownReason::Stop, expected_incarnation,
+            work_scope(&session), "generation_fenced_stop", true,
+        );
         let stopped =
             pty_client::stop_in(&self.root, id, generation).map_err(|error| match error {
                 StopError::GenerationChanged { .. } => {
+                    log_session_teardown(
+                        &session, PtyTeardownReason::Stop, expected_incarnation,
+                        work_scope(&session), "generation_changed_during_stop", false,
+                    );
                     anyhow::anyhow!("PTY `{id}` changed incarnation before the control action")
                 }
                 error => anyhow::anyhow!("stop PTY failed: {error}"),
@@ -727,6 +914,10 @@ impl PtyRuntime {
         // exited, or a process group started after the measurement, is still in the session's
         // work scope, and ends with it.
         if let Some(unit) = work_scope(&session) {
+            log_session_teardown(
+                &session, PtyTeardownReason::Stop, expected_incarnation,
+                Some(unit), "daemon_stopped_end_scope", true,
+            );
             crate::end_scope(unit, crate::SCOPE_GRACE)?;
         }
         if stopped.verified_empty() {
@@ -767,6 +958,13 @@ impl PtyRuntime {
             Some(unit) if self.server_apart(id, unit, Some(&observed))? => Some(unit),
             _ => None,
         };
+        log_previous_teardown(
+            id, Some(&observed), None,
+            observed.tags.get("st3.scope-unit").map(String::as_str),
+            None, expected_incarnation, PtyTeardownReason::Kill, "not_acquired",
+            if unit.is_some() { "server_apart_end_scope" } else { "no_scope_or_server_not_apart" },
+            unit.is_some(), unit,
+        );
         self.signal_if(id, expected_incarnation, libc::SIGKILL)?;
         if let Some(unit) = unit {
             crate::end_scope(unit, Duration::ZERO)?;
@@ -797,6 +995,12 @@ impl PtyRuntime {
         .map_err(|error| anyhow::anyhow!("read PTY process identity failed: {error}"))?;
         let stats: PtyStats =
             serde_json::from_str(&status).context("parse PTY process identity")?;
+        if stats.name != id || stats.daemon.pid != daemon_pid || !stats.process.alive {
+            log_session_teardown(
+                &session, PtyTeardownReason::Signal, expected_incarnation,
+                work_scope(&session), "terminal_identity_not_verified", false,
+            );
+        }
         anyhow::ensure!(
             stats.name == id,
             "PTY stats returned `{}` for `{id}`",
@@ -816,9 +1020,36 @@ impl PtyRuntime {
             .with_context(|| format!("PTY `{id}` has no terminal process identity"))?;
         // kill(2) reads 0, 1, a negative pid, and this process's own group as more than one
         // program.
+        let safe_pid = pid > 1 && pid != unsafe { libc::getpgrp() };
+        if !safe_pid {
+            log_session_teardown(
+                &session, PtyTeardownReason::Signal, expected_incarnation,
+                work_scope(&session), "unsafe_terminal_pid", false,
+            );
+        }
         anyhow::ensure!(
-            pid > 1 && pid != unsafe { libc::getpgrp() },
+            safe_pid,
             "PTY `{id}` reported the process identity {pid}, which cannot be signalled alone"
+        );
+        tracing::info!(
+            caller = "pty",
+            reason = ?PtyTeardownReason::Signal,
+            runtime_id = id,
+            operation_id = session.metadata.as_ref()
+                .and_then(|row| row.tags.as_ref())
+                .and_then(|tags| tags.get("st3.start-operation")).map(String::as_str),
+            expected_incarnation,
+            observed_incarnation = session_incarnation(&session).as_deref(),
+            registry_status = session.status.as_str(),
+            registry_pid = daemon_pid,
+            registry_created_at = session.metadata.as_ref().map(|row| row.created_at.as_str()),
+            registry_exit_code = session.metadata.as_ref().and_then(|row| row.exit_code),
+            recorded_scope = tracing::field::Empty,
+            tagged_scope = work_scope(&session),
+            spawn_lock = "not_acquired",
+            guard_decision = "daemon_and_terminal_identity_verified",
+            signal, terminal_pid = pid,
+            "PTY teardown boundary"
         );
         let group = unsafe { libc::kill(-pid, signal) };
         if group != 0 {
@@ -842,6 +1073,10 @@ impl PtyRuntime {
         if expected_incarnation
             .is_some_and(|expected| session_incarnation(&session).as_deref() != Some(expected))
         {
+            log_session_teardown(
+                &session, PtyTeardownReason::IncarnationCheck, expected_incarnation,
+                work_scope(&session), "incarnation_mismatch", false,
+            );
             anyhow::bail!("PTY `{id}` changed incarnation before the control action");
         }
         Ok(session)
@@ -911,6 +1146,10 @@ impl PtyRuntime {
         crate::procfs::require_matching_procfs()?;
         // A launch under way ends its predecessor's scope itself, and its own is no leftover.
         let Some(_lock) = self.try_spawn_lock(id)? else {
+            log_previous_teardown(
+                id, None, None, None, None, None, PtyTeardownReason::EndLeftovers,
+                "busy", "spawn_in_progress", false, None,
+            );
             return Ok(());
         };
         let session = self
@@ -924,15 +1163,25 @@ impl PtyRuntime {
             .as_ref()
             .is_some_and(|session| matches!(session.status.as_str(), "running" | "unknown"))
         {
+            log_previous_teardown(
+                id, session.as_ref(), None, None, None, None,
+                PtyTeardownReason::EndLeftovers, "acquired", "running_or_unknown", false, None,
+            );
             return Ok(());
         }
-        self.end_previous_scopes(id, session.as_ref())
+        self.end_previous_scopes(
+            id, session.as_ref(), PtyTeardownReason::EndLeftovers, None, None,
+        )
     }
 
     /// [`Self::end_leftovers`] on a background worker, when the last launch of `id` left a scope
     /// to end. Otherwise it costs one file lookup.
     pub fn end_leftovers_later(&self, id: &str) {
         if !self.spawn_state_path(id, "scope").is_file() {
+            log_previous_teardown(
+                id, None, None, None, None, None, PtyTeardownReason::EndLeftovers,
+                "not_acquired", "no_recorded_scope", false, None,
+            );
             return;
         }
         let (runtime, id) = (self.clone(), id.to_owned());
@@ -946,29 +1195,46 @@ impl PtyRuntime {
     /// Ends the work scopes of `id`'s last launch: the one spawn recorded and the one `ended`,
     /// its session if the record is still there, names. Then it forgets the recorded one. The
     /// caller holds the spawn lock.
-    fn end_previous_scopes(&self, id: &str, ended: Option<&PtyObservation>) -> Result<()> {
+    fn end_previous_scopes(
+        &self,
+        id: &str,
+        ended: Option<&PtyObservation>,
+        reason: PtyTeardownReason,
+        operation_id: Option<&str>,
+        expected_incarnation: Option<&str>,
+    ) -> Result<()> {
         crate::procfs::require_matching_procfs()?;
         let recorded = self.spawn_state_path(id, "scope");
-        let mut units = BTreeSet::new();
-        match std::fs::read_to_string(&recorded) {
-            Ok(unit) => {
-                units.insert(unit.trim().to_owned());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        let recorded_scope = match std::fs::read_to_string(&recorded) {
+            Ok(unit) => Some(unit),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("read PTY scope {}", recorded.display()));
             }
+        };
+        let tagged_scope = ended
+            .and_then(|session| session.tags.get("st3.scope-unit"))
+            .map(String::as_str);
+        let mut units = BTreeSet::new();
+        units.extend(recorded_scope.as_deref().map(str::trim));
+        units.extend(tagged_scope);
+        if units.is_empty() {
+            log_previous_teardown(
+                id, ended, None, tagged_scope, operation_id, expected_incarnation,
+                reason, "acquired", "no_scopes", false, None,
+            );
         }
-        units.extend(
-            ended
-                .and_then(|session| session.tags.get("st3.scope-unit"))
-                .cloned(),
-        );
         // A server that wrote its exit record can still be shutting down.
         let mut done = true;
         for unit in &units {
-            if self.server_apart(id, unit, ended)? {
+            let apart = self.server_apart(id, unit, ended)?;
+            log_previous_teardown(
+                id, ended, recorded_scope.as_deref().map(str::trim), tagged_scope, operation_id,
+                expected_incarnation, reason, "acquired",
+                if apart { "server_apart_end_scope" } else { "server_not_apart" }, apart, Some(unit),
+            );
+            if apart {
                 crate::end_scope(unit, crate::SCOPE_GRACE)?;
             } else {
                 done = false;
@@ -1199,6 +1465,36 @@ fn observation_is_live(observation: &PtyObservation) -> bool {
     })
 }
 
+static MAILBOX_LEGACY_ADMISSIONS: AtomicU64 = AtomicU64::new(0);
+static MAILBOX_LEGACY_LAST_LOG: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Successful start-token-only admissions, including repeated observations of the same PTY.
+/// Sampled by the daemon's process-wide OpenTelemetry observable counter.
+pub fn mailbox_legacy_admissions_total() -> u64 {
+    MAILBOX_LEGACY_ADMISSIONS.load(Ordering::Relaxed)
+}
+
+fn record_mailbox_legacy_admission(session: &SessionInfo) {
+    MAILBOX_LEGACY_ADMISSIONS.fetch_add(1, Ordering::Relaxed);
+    // Bound both journal volume and memory: at most one legacy admission log per minute
+    // across the process. The counter still records every admission.
+    let mut last = MAILBOX_LEGACY_LAST_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    if last.is_some_and(|previous| now.duration_since(previous) < Duration::from_secs(60)) {
+        return;
+    }
+    *last = Some(now);
+    drop(last);
+    let seat = session.metadata.as_ref()
+        .and_then(|metadata| metadata.tags.as_ref())
+        .and_then(|tags| tags.get("st3.agent"));
+    tracing::warn!(
+        fractal_pty_id = %session.name,
+        fractal_seat = seat.map_or("<unattributed>", String::as_str),
+        "Fractal mailbox admitted legacy PTY identity without daemonBootId"
+    );
+}
+
 // LEGACY(remove after host pty writes daemonBootId; tracked by the st→fractal migration).
 // Authorized 2026-10-28: keyed mailbox authority must also admit older host PTY writers.
 fn keyed_daemon_identity(session: &SessionInfo) -> DaemonIdentityCheck {
@@ -1224,7 +1520,10 @@ fn keyed_daemon_identity(session: &SessionInfo) -> DaemonIdentityCheck {
         return session.identity;
     };
     match pty_core::registry::read_process_start_token(pid) {
-        Some(live) if live == expected => DaemonIdentityCheck::Match,
+        Some(live) if live == expected => {
+            record_mailbox_legacy_admission(session);
+            DaemonIdentityCheck::Match
+        }
         Some(_) => DaemonIdentityCheck::Mismatch,
         None => session.identity,
     }
@@ -1291,6 +1590,15 @@ fn session_incarnation(session: &SessionInfo) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_pty_runtime_has_no_unlaned_seat_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(root.path().join("pty"));
+        assert!(runtime.unlaned_seat.is_none());
+        let configured = runtime.with_unlaned_seat(Some(crate::seat_placement::tests::policy()));
+        assert!(configured.unlaned_seat.is_some());
+    }
     use std::fs;
     use std::io::{Read as _, Write as _};
     use std::os::unix::net::UnixListener;
@@ -1318,16 +1626,34 @@ mod tests {
 
     #[test]
     fn legacy_keyed_identity_accepts_a_matching_live_start_token() {
+        // Isolate the process-wide counter from other runtime tests running in parallel.
+        const CHILD: &str = "FRACTAL_LEGACY_ADMISSION_COUNTER_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pty::tests::legacy_keyed_identity_accepts_a_matching_live_start_token", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
         let pid = i32::try_from(std::process::id()).unwrap();
         let token = pty_core::registry::read_process_start_token(pid).unwrap();
         let mut record = legacy_identity_record(pid, token);
+        let before = mailbox_legacy_admissions_total();
+        record.identity = DaemonIdentityCheck::Match;
         assert_eq!(keyed_daemon_identity(&record), DaemonIdentityCheck::Match);
+        assert_eq!(mailbox_legacy_admissions_total(), before);
+        record.identity = DaemonIdentityCheck::Unknown;
+        assert_eq!(keyed_daemon_identity(&record), DaemonIdentityCheck::Match);
+        assert_eq!(mailbox_legacy_admissions_total(), before + 1);
 
         // Even unknown boot evidence must not use the legacy path when a boot ID exists.
         record.metadata.as_mut().unwrap().daemon_boot_id = Some("other-boot".into());
         assert_eq!(keyed_daemon_identity(&record), DaemonIdentityCheck::Unknown);
         record.identity = DaemonIdentityCheck::Mismatch;
         assert_eq!(keyed_daemon_identity(&record), DaemonIdentityCheck::Mismatch);
+        assert_eq!(mailbox_legacy_admissions_total(), before + 1);
     }
 
     #[test]
@@ -2473,7 +2799,10 @@ exit 0
                 runtime.kill_if(id, observation_incarnation(&observed).as_deref()).unwrap();
             } else {
                 let _lock = runtime.acquire_spawn_lock(id).unwrap();
-                runtime.end_previous_scopes(id, Some(&observed)).unwrap();
+                runtime.end_previous_scopes(
+                    id, Some(&observed), PtyTeardownReason::SpawnPrevious,
+                    Some(&operation), observation_incarnation(&observed).as_deref(),
+                ).unwrap();
             }
             assert_eq!(cgroup_leaf(server), crate::server_unit(id, server));
             assert!(process_runs(server).unwrap(), "the supporting server must still be live");
@@ -2481,6 +2810,88 @@ exit 0
                 "only the server scope should remain populated");
             assert!(!runtime.start_operation_closed(id, &operation).unwrap(),
                 "an unrecorded live server would incorrectly certify closure");
+        }
+    }
+
+    /// A terminal seat's lane holds its harness (docs/st3/seat-lanes.md): each launch runs in a
+    /// scope inside the seat's capped slice, the harness never sees the lane's launch key and keeps
+    /// its builds in place, stopping the session ends its scope but keeps the lane for a restart,
+    /// and ending the lane removes it.
+    #[test]
+    fn a_laned_harness_runs_in_its_seats_capped_slice_until_the_lane_ends() {
+        let Some(pty) = scoped_pty() else {
+            eprintln!("skipped: no systemd user scopes or no pty binary");
+            return;
+        };
+        if !crate::isolate::systemd_254() {
+            eprintln!("skipped: lanes need systemd 254");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(root.path().join("r")).with_binary(pty.to_string_lossy());
+        let pid_file = root.path().join("harness.pid");
+        // No other test run on this host shares the lane.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+        let id = format!("laned-{}-{nanos}", std::process::id());
+        let slice_name = crate::lane::seat_slice(&id);
+        struct EndLane(String);
+        impl Drop for EndLane {
+            fn drop(&mut self) {
+                for verb in ["stop", "revert"] {
+                    let _ = std::process::Command::new("systemctl").args(["--user", verb, &self.0]).output();
+                }
+            }
+        }
+        let _lane = EndLane(slice_name.clone());
+        let lane = crate::lane::Capacity { cores: 1, memory: 256 << 20 };
+        let environment = BTreeMap::from([
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+            (crate::lane::CAPACITY_ENV.into(), lane.to_string()),
+        ]);
+        let harness = Launch::Argv(vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "echo \"${{BUILDS_SLICE_ACTIVE:-unset}} ${{FRACTAL_SEAT_CAPACITY:-unset}} $FRACTAL_LANE_SLICE\" > '{}'; \
+                 echo $$ > '{}'; exec sleep 60",
+                pid_file.with_extension("env").display(),
+                pid_file.display(),
+            ),
+        ]);
+        let switch = crate::lane::TEST_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::lane::set_enforced(true);
+        let spawned = runtime.spawn(&id, &harness, root.path(), &environment, None, &BTreeMap::new(), None);
+        crate::lane::set_enforced(false);
+        drop(switch);
+        spawned.unwrap();
+        let harness = read_pid(&pid_file);
+
+        let work_unit = runtime.session(&id).map(observation).unwrap().unwrap().tags["st3.scope-unit"].clone();
+        assert_eq!(cgroup_leaf(harness), work_unit);
+        let cgroup = fs::read_to_string(format!("/proc/{harness}/cgroup")).unwrap();
+        let cgroup = Path::new("/sys/fs/cgroup")
+            .join(cgroup.lines().find_map(|line| line.strip_prefix("0::")).unwrap().trim_start_matches('/'));
+        let slice = cgroup.parent().unwrap().to_path_buf();
+        assert!(slice.ends_with(format!("app.slice/app-lanes.slice/{slice_name}")), "{}", slice.display());
+        assert_eq!(fs::read_to_string(slice.join("cpu.max")).unwrap().trim(), "100000 100000");
+        assert_eq!(fs::read_to_string(slice.join("memory.max")).unwrap().trim(), (256u64 << 20).to_string());
+        assert_eq!(
+            fs::read_to_string(pid_file.with_extension("env")).unwrap().trim(),
+            format!("1 unset {slice_name}")
+        );
+
+        runtime.stop(&id).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cgroup.exists() {
+            assert!(Instant::now() < deadline, "the harness scope {work_unit} outlived its stopped session");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(slice.exists(), "a stopped session keeps its seat's lane for a restart");
+        crate::lane::end(&id);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while slice.exists() {
+            assert!(Instant::now() < deadline, "the lane {slice_name} outlived its end");
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# linux-fleet-compat's lane (docs/keyed-clippy.md, section 3): the fleet-compat stage alone, with every file its compile reads checked
+# against linux-fleet-compat's input key in the skip policy (scripts/dep-info-check, which scripts/ci-linux runs when
+# CI_KEYED_FLEET_COMPAT_POLICY names the policy). linux-gate runs the same stage without it, so linux-gate never depends on the policy file.
+set -euo pipefail
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — resolve only the default; explicit paths/empty remain explicit.
+export CI_KEYED_FLEET_COMPAT_POLICY=${CI_KEYED_FLEET_COMPAT_POLICY-auto:.st/evidence-skip-policy.json}
+exec bash scripts/ci-local fleet-compat "$@"

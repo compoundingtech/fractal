@@ -1,12 +1,13 @@
 {
   "version": 1,
+  "_config_dir_bridge": "arn:lmig:smalltalk:2026-10-27-dot-fractal-config",
   "rule": "A change that matches a class always runs that class's full test set; the module graph does not narrow it. Globs match changed paths (** crosses directories). A content pattern matches an added or removed diff line of a file under its globs. See docs/st3/change-impact.md.",
   "classes": [
     {
       "name": "schema",
       "globs": ["crates/smallclaims/src/store.rs", "crates/smallclaims/src/**/migrat*", "crates/fractal-schema/**", "crates/fractal-storage-version/**", "crates/fractal-migrate/**", "crates/fractal-store/src/store/checkpoint_rules.rs", "docs/st3/schema.md"],
       "content": [
-        {"globs": ["crates/fractal-store/src/store.rs", "crates/fractal-store/src/store/**", "crates/smallclaims/src/**"], "pattern": "(?i)\\b(CREATE\\s+(UNIQUE\\s+)?(TABLE|INDEX|TRIGGER|VIEW)|ALTER\\s+TABLE|DROP\\s+(TABLE|INDEX|TRIGGER|VIEW)|PRAGMA\\s+user_version|user_version\\s*=)"}
+        {"globs": ["crates/fractal-store/src/store.rs", "crates/fractal-store/src/store/**", "crates/smallclaims/src/**"], "exclude": ["**/tests/**", "**/tests.rs", "**/*_tests.rs", "**/*_test.rs"], "pattern": "(?i)\\b(CREATE\\s+(UNIQUE\\s+)?(TABLE|INDEX|TRIGGER|VIEW)|ALTER\\s+TABLE|DROP\\s+(TABLE|INDEX|TRIGGER|VIEW)|PRAGMA\\s+user_version|user_version\\s*=)"}
       ],
       "forces": ["integration", "store and smallclaims suites", "release-notes upgrade fragment"]
     },
@@ -25,7 +26,7 @@
     },
     {
       "name": "authorization",
-      "globs": ["crates/fractal-api-core/src/api/client_v0*", "crates/fractal-api-client-v0/src/api/client_v0*", "crates/fractal-api-core/src/api/client_web*", "crates/fractal-secrets/src/sekrets/**", "crates/fractal-secrets/src/sekrets.rs", "crates/fractal-kernel/src/accounts.rs", "crates/fractal-store/src/store/accounts.rs", "crates/fractal-store/src/store/roster_admission.rs", "crates/fractal-store/src/store/delegation.rs", "docs/st3/device-signing.md", ".st/**"],
+      "globs": ["crates/fractal-api-core/src/api/client_v0*", "crates/fractal-api-client-v0/src/api/client_v0*", "crates/fractal-api-core/src/api/client_web*", "crates/fractal-secrets/src/sekrets/**", "crates/fractal-secrets/src/sekrets.rs", "crates/fractal-kernel/src/accounts.rs", "crates/fractal-store/src/store/accounts.rs", "crates/fractal-store/src/store/roster_admission.rs", "crates/fractal-store/src/store/delegation.rs", "docs/st3/device-signing.md", ".st/**", ".fractal/**"],
       "content": [
         {"globs": ["crates/**"], "pattern": "(?i)\\b(trusted[_ ]keys?|pairing|device[_ ]key|signing[_ ]key|verify_signature)\\b"}
       ],

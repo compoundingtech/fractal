@@ -21,13 +21,13 @@ The current download installer prefers `fractal-*` and falls back to `smalltalk-
 only on HTTP 404 (for retained tags); checksum or other download failures fail closed.
 The byte-pinned v0.3.17 compatibility baseline and installer fixture are unchanged.
 
-Each archive has `bin/st3`, `bin/fractal` and `bin/st` (relative symlinks to `st3`), `bin/pty`, plus `install.sh`, `install-macos.py`, `BUILD.json`, and this guide. Native builds pin Rust1.97.0 in `scripts/release-rust-version`; the workflow and local builder use that same version. PTY is built from the exact
+Each archive has the physical `bin/fractal`, temporary `bin/st3` and `bin/st` relative symlinks to `fractal`, `bin/pty`, plus `install.sh`, `install-macos.py`, `BUILD.json`, and this guide. Native builds pin Rust1.97.0 in `scripts/release-rust-version`; the workflow and local builder use that same version. PTY is built from the exact
 `flake.lock` runtime revision; this is distinct from the `pty-core` library dependency. Linux builds link against glibc 2.35 with pinned Zig 0.15.2, so optional newer
 libc functions do not add GLIBC_2.39 requirements or loader noise. These
 archives need neither Nix nor Rust installed. Harness CLIs and their logins remain separate.
 
 The embedded web UI ships in `share/fractal-web` in both release archives and
-the Nix `st3` package. The archive installer preserves that tree at
+the complete Nix `fractal` package (also selected by transitional `st3` package attributes). The archive installer preserves that tree at
 `../share/fractal-web` relative to the chosen bin directory, including upgrade
 rollback. On macOS it also seals a copy inside `SmallTalk.app/Contents/share/fractal-web`
 before signing, so the app's real executable can resolve its own assets.
@@ -36,6 +36,33 @@ Release builders on both Linux and macOS require Nix to build those immutable
 assets; the release workflow provisions it on both platforms.
 Release staging and installers make copied assets owner-writable; Nix-store
 permissions must not prevent extraction cleanup, upgrades, or rollback.
+
+### Offline web embed
+
+The Fractal website owns the embed release job and the downstream version/checksum
+pin. Fractal release maintainers retain ownership of the native release pipeline.
+
+The release workflow also builds `fractal-web-embed-<full-source-SHA>.tar.gz`
+and its `.sha256` sidecar. The archive root contains `embed.html`, all assets,
+four `poster-{light,dark}-{wide,narrow}.webp` images, and `provenance.json`.
+Provenance records the exact source, flake lock digest, Node/pnpm/browser versions,
+capture viewports and per-file SHA-256 hashes.
+
+Every main build publishes these files under the durable prerelease
+`embed-<full-source-SHA>`; native versioned releases also carry them. Unlike the
+rolling `edge` release, source-addressed embed releases are never replaced by the
+workflow: creation refuses existing releases, and uploads never use `--clobber`.
+Repository maintainers must preserve these releases and their tags. Consumers pin
+both that full version and the archive SHA-256, not `edge`, `latest`, or a temporary
+Actions artifact.
+
+To produce the archive locally, apply the pinned workspace member with `mr apply`,
+then run `nix develop .#web --command node scripts/release-fractal-embed.mjs dist`.
+The web shell stages effect-utils; the builder installs frozen workspace
+dependencies, generates the changelog registry, bundles the offline app and captures
+the real `#web` and `#web-narrow` fixtures with the pinned Chromium. No Cargo build
+or live daemon is involved. Existing output archives are not overwritten.
+
 
 Home Manager enables the daemon's web listener at `127.0.0.1:7410` by default.
 Set `services.smalltalk.webListen = null;` to disable it, or set an explicit
@@ -75,29 +102,40 @@ sh install.sh --edge --no-run
 
 An extracted archive can also be installed with `./install.sh --bin-dir
 "$HOME/.local/bin"`; add `--quiet` to suppress installer notices. The archive's
-command payload is `st3`, the relative `fractal` and `st` links, and `pty`. The source migration
+command payload is physical `fractal`, relative `st3` and `st` reverse aliases, and `pty`. The source migration
 tool remains available as the separate `fractal-migrate` Cargo package.
 
-The opt-in `fractal` alias opens the same terminal interface; `st ui` opens it explicitly, and
-`st web` opens the web interface. Other arguments behave like `st`. Release and
-source installers add `fractal -> st3` only when the destination is free or already
-links to this installation's `st3`. They leave foreign files, directories and links
-intact, and do not introduce the alias when a foreign `fractal` exists elsewhere on
-`PATH`; collision guidance stays visible even with `--quiet`. Use `st` in that case,
-or move the foreign command and reinstall. Named instances place the alias in their
-own `~/.st-instance/NAME/bin`, not the default command directory. Default Nix and
-Home Manager installations do not expose `fractal`; those paths require explicit opt-in.
+The physical `fractal` executable opens the terminal interface; `fractal tui` opens
+it explicitly, and `fractal web` opens the web interface. `st` and `st3` are temporary
+reverse aliases, not separate executables or evidence that legacy callers migrated.
+Release and source installers refuse foreign `fractal` destinations and foreign
+commands elsewhere on `PATH` before replacement; move the conflicting command
+before installing. Named instances install below `~/.st-instance/NAME/bin`.
+Native `fractal setup` applies the same positive alias-layout check before copying
+any executable or replacing aliases: a physical canonical upgrade requires both
+owned `st` and `st3` reverse links; historical exact `fractal -> st3` links can
+converge. It does not adopt arbitrary standalone files. Setup invoked through an
+already managed executable preserves that installation, including an app-style
+canonical link. Signed macOS app upgrades belong to the macOS installer; setup
+from a different source build conservatively refuses that app link rather than
+replacing or modifying the signed bundle.
+The Nix `fractal` package is the complete product, including web assets, PTY and
+canonical shell completions. Home Manager installs a physical stable `bin/fractal`;
+the former `programs.smalltalk.fractalBinary.enable` opt-in is removed, requiring
+consumer configuration removal in the same adoption as the package pin.
 
-Bare `fractal` follows bare `st`'s first-run setup and terminal/agent guards;
-The alias also forwards explicit UI commands. Setup records an owned `fractal` symlink
-in its uninstall manifest. Uninstall also discovers that alias beside a recorded
-`st3` when upgrading an older manifest, and preserves a foreign replacement of
-`fractal`, including inside a named instance. The ownership check applies only to
-identified executable aliases; state, config and data directories named `fractal`
-remain subject to normal uninstall removal and remaining-file reporting.
+Bare `fractal` retains first-run setup and terminal/agent guards. Setup records the
+canonical executable and reverse aliases in its uninstall manifest. Historical
+manifests still discover exact installer-owned aliases, while foreign replacements
+remain protected. Canonical executable removal requires identity with the running
+image: Linux uses `/proc/self/exe`; macOS queries the mapped executable vnode,
+never metadata of its replaceable pathname. Uninstall from a different source
+build conservatively keeps an unverified canonical file. The macOS ABI and native
+replacement/unlink proofs must pass before this candidate can be adopted.
+State, config and data directory ownership is unchanged.
 
 Put the chosen bin directory on `PATH`. The installer serializes installations in that directory,
-stages both tools and the `st` link, preserves the previous files, then replaces each by atomic
+stages both tools and the reverse aliases, preserves the previous files, then replaces each by atomic
 rename. A handled failure or signal restores the previous command set. This is a series of atomic
 file replacements, not a simultaneous switch of all paths; existing processes retain their old
 executable. If restoration itself fails, the error names the retained transaction directory and

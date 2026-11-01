@@ -5,7 +5,7 @@
   scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... --check            exit 1 if a lane's file misses one
   scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... --write            set definition_paths to it
 
-`.st/required-lanes.json` gives each lane an `argv` and the `definition_paths` whose bytes decide what that argv does: a tree that
+`required-lanes.json` (.fractal first, .st only if absent) gives each lane an `argv` and the `definition_paths` whose bytes decide what that argv does: a tree that
 changes one is a lane edit, which is never signed locally (scripts/evidence-wrap refuses it; CI runs the check). A lane's definition is
 what defines its verdict: the files it executes, plus the data that sets the bar (baselines, splits, budgets, allowlists), declared as
 verdict data (VERDICT_DATA). A file a test merely checks for consistency is part of the tree under test, and the signed run tested it.
@@ -85,6 +85,13 @@ VERDICT_DATA = {
         '.github/fleet-compat-baseline.json': 'the release the fleet-compat stage runs against (scripts/compat-baseline)',
         '.github/messaging-compat-baseline.json': 'the release the messaging compatibility tests run against (scripts/ci-local)',
     },
+    'linux-clippy': {
+        '.github/clippy-baseline.json': 'the warnings clippy may still report (scripts/clippy_ratchet.py)',
+        '.github/clippy-splits.json': 'how the clippy stage splits the workspace (scripts/clippy_ratchet.py)',
+    },
+    'linux-fleet-compat': {
+        '.github/fleet-compat-baseline.json': 'the release the fleet-compat stage runs against (scripts/compat-baseline)',
+    },
     'rust-tests': {
         '.config/daily-only.filterset': 'the tests the PR run leaves to the daily run (scripts/ci-nextest)',
         '.github/messaging-compat-baseline.json': 'the release the messaging compatibility tests run against (scripts/ci-local)',
@@ -105,6 +112,9 @@ EXTRA = {
     # The recorded argv only reads one crate's result out of a JUnit report; the report is made by the tests stage that
     # scripts/fractal-test runs for the crates without a note (RUN_TESTS), so that stage is part of what a rust-tests note says.
     'rust-tests': {'argv': [['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']]},
+    # The same for linux-clippy: the recorded argv (scripts/ci-clippy-result) reads a clippy stage's report, made by the stage scripts/st-test
+    # runs alone when linux-gate does not run (RUN_CLIPPY), or by linux-gate's own run of it, already in linux-gate's closure.
+    'linux-clippy': {'argv': [['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'clippy']]},
 }
 # The tree under test: what the lanes build and test (the Rust workspace, the pnpm workspace packages), their `tree_inputs`. A script
 # that reads a file here (a lint over the crates, a test that copies a build script into a fixture) reads the subject of the check,
@@ -795,10 +805,21 @@ class Closure:
         return sorted(self.files - self.executed)
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — select once for reads and --write.
+def config_path(root, path):
+    new = os.path.join(root, path.replace('.st/', '.fractal/', 1))
+    try:
+        os.lstat(new)
+    except FileNotFoundError:
+        return os.path.join(root, path)
+    return new
+
+
 def sparse_inputs(repo, lane):
     """The paths of the copy a SPARSE lane's tests run in: its skip-policy entry's inputs."""
     try:
-        return json.loads(repo.read(SKIP_POLICY))['checks'][lane]['inputs']
+        path = os.path.relpath(config_path(repo.root, SKIP_POLICY), repo.root)
+        return json.loads(repo.read(path))['checks'][lane]['inputs']
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise ValueError(f'{lane} runs in a sparse copy of {SKIP_POLICY} checks.{lane}.inputs, which cannot be read: {error}')
 
@@ -851,6 +872,10 @@ def unresolved_ci(repo, ci_inputs):
         path, selector = item.partition('::')[::2]
         if item.startswith('!') or item == '.':
             continue
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — selectors read the selected checkout config.
+        if selector and path.startswith(('.st/', '.fractal/')):
+            legacy = path.replace('.fractal/', '.st/', 1)
+            path = os.path.relpath(config_path(repo.root, legacy), repo.root).replace(os.sep, '/')
         if path not in repo.files and (selector or path not in repo.dirs):
             found.append((item, f'{path} is not in the tree'))
             continue
@@ -869,7 +894,7 @@ def unresolved_ci(repo, ci_inputs):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--root', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-    parser.add_argument('--lanes', help=f'the lane file (default: ROOT/{LANES})')
+    parser.add_argument('--lanes', help='explicit lane file (default: ROOT/.fractal/required-lanes.json, .st only if absent)')
     parser.add_argument('--lane', action='append', default=[], help='only this lane (repeatable)')
     parser.add_argument('--json', action='store_true', help='print {lane: [paths]}: what each lane executes plus its verdict data')
     parser.add_argument('--why', action='store_true', help='print, for each path, the file that names it, and what the lane only reads')
@@ -881,7 +906,7 @@ def main(argv):
     if sum((args.json, args.why, args.check, args.write)) > 1:
         parser.error('--json, --why, --check and --write are exclusive')
     repo = Repo(args.root)
-    lane_file = args.lanes or os.path.join(repo.root, LANES)
+    lane_file = args.lanes or config_path(repo.root, LANES)
     try:
         with open(lane_file) as handle:
             document = json.load(handle)

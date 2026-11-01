@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.dont_write_bytecode = True
@@ -54,7 +55,8 @@ def in_shadow(path, text):
     return text
 
 
-SHADOW = {path: in_shadow(path, (ROOT / path).read_text()) for path in (flip.POLICY, flip.DOC, *(path for path, _ in flip.TEST_LISTS))}
+SHADOW = {path: in_shadow(path, (ROOT / (flip.config_path(ROOT, path) if path == flip.POLICY else path)).read_text())
+          for path in (flip.POLICY, flip.DOC, *(path for path, _ in flip.TEST_LISTS))}
 TEMPLATE = ('2026-10-22T05:58:31.4Z git show "$BASE_SHA:scripts/ci-evidence-gate" || { echo "evidence-decision v1 check=$CHECK '
             'decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID"; }')
 
@@ -141,15 +143,32 @@ def git(cwd, *args):
     return subprocess.run(['git', '-C', str(cwd), *args], capture_output=True, check=True).stdout.decode()
 
 
+def remove_tree(tmp, attempts=5):
+    """TemporaryDirectory cleanup that outlasts a writer still finishing inside it: a few short retries, then the error as before."""
+    for attempt in range(attempts):
+        try:
+            return tmp.cleanup()
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+
+
 class FlipReady(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(remove_tree, self.tmp)
         tmp = Path(self.tmp.name)
         # A copy of the files the flip edits, committed and pushed to a local origin: --propose pushes there.
         self.origin, self.repo = tmp / 'origin.git', tmp / 'repo'
         subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.origin)], check=True)
         subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.repo)], check=True)
+        # These disposable repositories have no maintenance lifecycle. A detached Git writer (auto gc or maintenance after a commit,
+        # or receive-pack's auto gc on the origin) can outlive its command and race the cleanup: 'Directory not empty' on repo/.git.
+        for repo in (self.origin, self.repo):
+            git(repo, 'config', 'maintenance.auto', 'false')
+            git(repo, 'config', 'gc.auto', '0')
+        git(self.origin, 'config', 'receive.autogc', 'false')
         for path in (flip.POLICY, flip.DOC, flip.WORKFLOW, *(path for path, _ in flip.TEST_LISTS)):
             (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
             (self.repo / path).write_text(SHADOW[path]) if path in SHADOW else shutil.copyfile(ROOT / path, self.repo / path)
@@ -189,7 +208,7 @@ class FlipReady(unittest.TestCase):
         self.assertEqual((code, result['window_s'], result['as_of']), (0, 86400, '2026-10-22T12:00:00Z'))
         entry = result['checks'][CHECK]
         self.assertEqual(entry, {'enforce': False, 'lines': 29, 'satisfied_log_ok': 29, 'log_missing': 0, 'unlogged_pass_unexplained': 0,
-                                 'hidden_red': [], 'visible_red': [], 'log_window_start': stamp(at(25)), 'old_base_lines': {}, 'superseded_red': [], 'ready': False,
+                                 'hidden_red': [], 'visible_red': [], 'log_window_start': stamp(at(25)), 'old_base_lines': {}, 'cancelled_runs': [], 'ready': False,
                                  'why_not': ['29 satisfied lines with log=ok, fewer than 30']})  # the first run is in the lookback, not the window
         self.gh.run(2000, at(1), [decision()], real='success')
         self.assertEqual(self.check()['why_not'], [])
@@ -391,9 +410,9 @@ class FlipReady(unittest.TestCase):
         entry = self.check_of('linux-gate')
         self.assertEqual((entry['hidden_red'], entry['visible_red'], trigger_reasons(entry)), ([6000, 6001], [], ['2 runs with a hidden red']))
 
-    def test_a_wrapper_red_from_a_run_a_newer_push_cancelled_is_superseded_and_a_timeout_or_failure_is_not(self):
+    def test_a_wrapper_red_from_a_cancelled_run_is_no_evidence_and_a_failed_execution_or_a_failed_run_is_not(self):
         # Run 39882080994: a push of a new head cancelled the run; fractal-web-execution was cancelled, so the wrapper failed.
-        def superseded_run(execution='cancelled', conclusion='cancelled', newer=-60, newer_sha='b' * 40):
+        def cancelled_run(execution='cancelled', conclusion='cancelled', newer=-60, newer_sha='b' * 40):
             self.gh = FakeGitHub()
             self.ready_history(count=40, check='fractal-web')
             self.gh.run(7000, at(5), [decision(check='fractal-web')], real='failure', check='fractal-web', conclusion=conclusion,
@@ -403,19 +422,46 @@ class FlipReady(unittest.TestCase):
                 self.gh.run(7001, at(5, newer), [decision(check='fractal-web')], real='success', check='fractal-web', branch='x',
                             sha=newer_sha)
             return self.check_of('fractal-web')
-        entry = superseded_run()
-        self.assertEqual((entry['superseded_red'], entry['hidden_red'], entry['visible_red'], trigger_reasons(entry)), ([7000], [], [], []))
-        for name, kwargs in (('no newer run: a timeout or a manual cancel', {'newer': None}),
-                             ('the newer run came after the cancel', {'newer': -600}),
-                             ('the execution job failed', {'execution': 'failure'}),
-                             ('a re-run of the same head', {'newer_sha': 'a' * 40}),
-                             ('the run did not conclude cancelled', {'conclusion': 'failure'})):
+        # Whatever stopped it: a newer push, a manual cancel with no newer run, a newer run after the cancel, a duplicate of the same head.
+        for name, kwargs in (('a newer push', {}), ('no newer run', {'newer': None}), ('the newer run came after the cancel', {'newer': -600}),
+                             ('a run of the same head', {'newer_sha': 'a' * 40})):
             with self.subTest(name):
-                entry = superseded_run(**kwargs)
-                self.assertEqual((entry['superseded_red'], entry['hidden_red'], trigger_reasons(entry)), ([], [7000], ['1 runs with a hidden red']))
+                entry = cancelled_run(**kwargs)
+                self.assertEqual((entry['cancelled_runs'], entry['hidden_red'], entry['visible_red'], trigger_reasons(entry)), ([7000], [], [], []))
+        for name, kwargs in (('the execution job failed', {'execution': 'failure'}),
+                             ('the run did not conclude cancelled, as a timeout does not', {'conclusion': 'failure'})):
+            with self.subTest(name):
+                entry = cancelled_run(**kwargs)
+                self.assertEqual((entry['cancelled_runs'], entry['hidden_red'], trigger_reasons(entry)), ([], [7000], ['1 runs with a hidden red']))
+
+    def test_a_cancelled_run_and_a_real_red_of_the_same_head_leave_only_the_real_red(self):
+        # Run 41016722904 (#4303, 2026-10-30): a duplicate run of one head was cancelled; its fractal-web gate failed on the cancelled
+        # execution and read as a hidden red. It is no evidence: not red, and its ok line does not count toward the trigger.
+        self.ready_history(count=40, check='fractal-web')
+        before = self.check_of('fractal-web')['satisfied_log_ok']
+        self.gh.run(7100, at(3), [decision(check='fractal-web')], real='failure', check='fractal-web', conclusion='cancelled',
+                    branch='w', sha='9' * 40, ended=at(3, -120), members={'fractal-web-execution': 'cancelled'})
+        entry = self.check_of('fractal-web')
+        self.assertEqual((entry['cancelled_runs'], entry['hidden_red'], entry['satisfied_log_ok'], entry['lines'], trigger_reasons(entry)),
+                         ([7100], [], before, 40, []))
+        self.gh.run(7101, at(2), [decision(check='fractal-web')], real='failure', check='fractal-web', conclusion='failure',
+                    branch='w', sha='9' * 40, ended=at(2, -120), members={'fractal-web-execution': 'failure'})
+        entry = self.check_of('fractal-web')
+        self.assertEqual((entry['cancelled_runs'], entry['hidden_red'], entry['visible_red'], trigger_reasons(entry)),
+                         ([7100], [7101], [], ['1 runs with a hidden red']))
+
+    def test_a_cancelled_run_of_a_check_with_a_job_of_its_own_is_no_evidence_unless_that_job_failed(self):
+        self.ready_history(count=40)
+        before = self.check()['satisfied_log_ok']
+        self.gh.run(7200, at(3), [decision()], real='cancelled', conclusion='cancelled')
+        entry = self.check()
+        self.assertEqual((entry['cancelled_runs'], entry['hidden_red'], entry['satisfied_log_ok']), ([7200], [], before))
+        self.gh.run(7201, at(2), [decision()], real='failure', conclusion='cancelled')  # it failed before the run was cancelled
+        entry = self.check()  # counted like any red: its line is a satisfied one, and the hidden red blocks
+        self.assertEqual((entry['cancelled_runs'], entry['hidden_red'], entry['satisfied_log_ok']), ([7200], [7201], before + 1))
 
     def test_an_aggregates_members_are_the_jobs_that_read_its_skip_output_and_one_with_none_is_unreadable(self):
-        policy = json.loads((ROOT / flip.POLICY).read_text())['checks']
+        policy = json.loads((ROOT / flip.config_path(ROOT, flip.POLICY)).read_text())['checks']
         members = flip.skipped_members((ROOT / flip.WORKFLOW).read_text(), policy)
         # the checks whose wrapper command is an aggregate, and rust-tests, which has no job of its own
         self.assertEqual(sorted(members), ['fractal-web', 'linux-gate', 'rust-tests'])
@@ -428,7 +474,7 @@ class FlipReady(unittest.TestCase):
             flip.skipped_members('jobs:\n  linux-gate:\n    steps: []\n', policy)
 
     def test_a_check_without_a_job_of_its_own_is_judged_by_the_jobs_whose_if_reads_its_skip(self):
-        policy = json.loads((ROOT / flip.POLICY).read_text())['checks']
+        policy = json.loads((ROOT / flip.config_path(ROOT, flip.POLICY)).read_text())['checks']
         members = flip.skipped_members((ROOT / flip.WORKFLOW).read_text(), policy)
         # linux-gate's test jobs skip on rust-tests; the linux-gate verdict reads it in a step only, so it is not a member.
         self.assertEqual(members['rust-tests'], ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3',
@@ -524,14 +570,14 @@ class FlipReady(unittest.TestCase):
             self.gh.run(9001, at(5, -60), [decision(check='fractal-web')], real='success', check='fractal-web', branch='z', sha='f' * 40)
             return self.check_of('fractal-web')
         entry = run(['cancelled', 'cancelled'])
-        self.assertEqual((entry['superseded_red'], entry['hidden_red']), ([9000], []))
+        self.assertEqual((entry['cancelled_runs'], entry['hidden_red']), ([9000], []))
         entry = run(['cancelled', 'failure'])  # a failed shard: hidden
-        self.assertEqual((entry['superseded_red'], entry['hidden_red']), ([], [9000]))
-        entry = run(['success', 'failure'], conclusion='failure')  # not superseded, and the shard's red is a member red
-        self.assertEqual((entry['superseded_red'], entry['hidden_red'], entry['visible_red']), ([], [9000], []))
+        self.assertEqual((entry['cancelled_runs'], entry['hidden_red']), ([], [9000]))
+        entry = run(['success', 'failure'], conclusion='failure')  # not cancelled, and the shard's red is a member red
+        self.assertEqual((entry['cancelled_runs'], entry['hidden_red'], entry['visible_red']), ([], [9000], []))
         self.assertFalse(flip.member_of('fractal-web-execution-extra', ('fractal-web-execution',)))
 
-    def test_a_superseded_aggregate_with_a_failed_member_stays_hidden_and_an_unrelated_red_does_not_block(self):
+    def test_a_cancelled_aggregate_with_a_failed_member_stays_hidden_and_an_unrelated_red_does_not_block(self):
         def run(members):
             self.gh = FakeGitHub()
             self.ready_history(count=40, check='linux-gate')
@@ -540,9 +586,9 @@ class FlipReady(unittest.TestCase):
             self.gh.run(8001, at(5, -60), [decision(check='linux-gate')], real='success', check='linux-gate', branch='y', sha='d' * 40)
             return self.check_of('linux-gate')
         entry = run({'linux-tests': 'cancelled', 'upgrade-impact': 'failure'})  # the unrelated red does not block
-        self.assertEqual((entry['superseded_red'], entry['hidden_red'], trigger_reasons(entry)), ([8000], [], []))
+        self.assertEqual((entry['cancelled_runs'], entry['hidden_red'], trigger_reasons(entry)), ([8000], [], []))
         entry = run({'linux-tests': 'cancelled', 'linux-clippy': 'failure'})  # a member the skip would skip failed
-        self.assertEqual((entry['superseded_red'], entry['hidden_red'], trigger_reasons(entry)), ([], [8000], ['1 runs with a hidden red']))
+        self.assertEqual((entry['cancelled_runs'], entry['hidden_red'], trigger_reasons(entry)), ([], [8000], ['1 runs with a hidden red']))
 
     def test_a_cancelled_gate_job_without_a_log_has_no_decision_and_any_other_missing_log_is_unreadable(self):
         # Run 39919725399: a push replaced the run while its gates were starting; GitHub answers 404 for those cancelled jobs' logs.
@@ -707,6 +753,21 @@ class FlipReady(unittest.TestCase):
         self.assertEqual((entry['sample_one_in'], json.loads(new)['checks']['linux-gate']['sample_one_in']), (1, 1))
         with self.assertRaises(ValueError):
             flip.flip_policy(text, 'typescript-client')  # already enforced
+
+
+class LayoutBridge(unittest.TestCase):
+    def test_flip_writes_selected_new_policy_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            tree = Path(folder)
+            for path, text in SHADOW.items():
+                (tree / path).parent.mkdir(parents=True, exist_ok=True)
+                (tree / path).write_text(text)
+            new = tree / '.fractal/evidence-skip-policy.json'
+            new.parent.mkdir()
+            new.write_text(SHADOW[flip.POLICY])
+            flip.flip(tree, CHECK, '2026-10-27')
+            self.assertEqual((tree / flip.POLICY).read_text(), SHADOW[flip.POLICY])
+            self.assertTrue(json.loads(new.read_text())['checks'][CHECK]['enforce'])
 
 
 if __name__ == '__main__':

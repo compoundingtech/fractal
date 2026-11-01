@@ -21,8 +21,8 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use super::{
-    Backend, CHECKPOINT_PATH, DEFLATE_MIN_BYTES, EXCHANGE_ENCODING, EXCHANGE_PATH, FleetAuth,
-    HEADER_SIGNATURE, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES, PEER_API_VERSION,
+    ACCEPTED_PEER_API_VERSIONS, Backend, CHECKPOINT_PATH, DEFLATE_MIN_BYTES, EXCHANGE_ENCODING,
+    EXCHANGE_PATH, FleetAuth, HEADER_SIGNATURE, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES,
     PeerResponse, accepts_deflate, deflate, deflated, inflate,
 };
 use crate::fleet::transport::{
@@ -210,6 +210,9 @@ impl Default for ExchangeJobs {
 
 use crate::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
 
+mod answers_check;
+pub use answers_check::{daily_cut, fetch_answers};
+
 fn exchange_failure(
     error: anyhow::Error,
     phase: ReplicationFailurePhase,
@@ -228,6 +231,13 @@ type ExchangeAnswer = Result<crate::replication::ReplicationExportResponse, Repl
 struct ExchangeJob {
     digest: String,
     answer: watch::Receiver<Option<ExchangeAnswer>>,
+}
+
+/// Only the store an exchange names, read before the whole exchange is decoded.
+#[derive(serde::Deserialize)]
+struct ExchangeShard {
+    #[serde(default)]
+    shard_id: Option<String>,
 }
 
 const REPLICATION_WAKE_COALESCE: Duration = Duration::from_secs(1);
@@ -250,6 +260,9 @@ pub struct PeerState<B> {
     auth: FleetAuth,
     fleet: FleetContext,
     outbound_notify: watch::Sender<u64>,
+    /// The named shards this node holds, by shard ID. An exchange that names one is answered
+    /// from its store; one naming any other shard reaches `backend`, which refuses it.
+    shards: Arc<BTreeMap<String, B>>,
 }
 
 impl<B> PeerState<B> {
@@ -260,7 +273,14 @@ impl<B> PeerState<B> {
             auth,
             fleet,
             outbound_notify: watch::channel(0).0,
+            shards: Arc::default(),
         }
+    }
+
+    /// Answer exchanges for these named shards from their own stores.
+    pub fn with_shards(mut self, shards: BTreeMap<String, B>) -> Self {
+        self.shards = Arc::new(shards);
+        self
     }
 
     pub fn backend(&self) -> &B {
@@ -607,6 +627,29 @@ pub async fn run<B: Backend>(
     wake: watch::Sender<u64>,
     routes: Router<PeerState<B>>,
 ) -> Result<()> {
+    run_with_shards(config, backend, wake, routes, Vec::new()).await
+}
+
+/// One named shard this node holds and replicates beside its default store.
+pub struct ShardSync<B> {
+    pub id: crate::shards::ShardId,
+    pub backend: B,
+    /// The peers to dial for this shard: those that advertise holding it. A peer without it
+    /// answers for its default store or refuses the shard, so it is never dialed for it.
+    pub peers: watch::Receiver<BTreeSet<String>>,
+    /// Bumped when the shard has something new to send.
+    pub wake: watch::Sender<u64>,
+}
+
+/// `run`, also answering and dialing each named shard. Shards share the listener, fleet
+/// authentication and membership; each has its own store, jobs and dialers.
+pub async fn run_with_shards<B: Backend>(
+    config: WorkerConfig,
+    backend: B,
+    wake: watch::Sender<u64>,
+    routes: Router<PeerState<B>>,
+    shards: Vec<ShardSync<B>>,
+) -> Result<()> {
     let (_leave_reservation, leave_listener) = bind_leave_state_socket(&config.state_dir)?;
     let mut settings_tasks = tokio::task::JoinSet::new();
     let fleet_id = config.fleet_id.as_str();
@@ -728,6 +771,12 @@ pub async fn run<B: Backend>(
         auth: auth.clone(),
         fleet: fleet.clone(),
         outbound_notify: notify.clone(),
+        shards: Arc::new(
+            shards
+                .iter()
+                .map(|shard| (shard.id.as_str().to_owned(), shard.backend.clone()))
+                .collect(),
+        ),
     };
     let fleet_transports = fleet.transports.clone();
     let notify_for_transports = notify.clone();
@@ -747,6 +796,17 @@ pub async fn run<B: Backend>(
             },
         ));
     }
+    for shard in shards {
+        start_outbound(
+            shard.backend,
+            config.node.clone(),
+            config.peers.clone(),
+            auth.clone(),
+            fleet.clone(),
+            shard.wake,
+            Some(shard.peers),
+        );
+    }
     start_outbound(
         backend.clone(),
         config.node.clone(),
@@ -754,6 +814,7 @@ pub async fn run<B: Backend>(
         auth,
         fleet.clone(),
         notify,
+        None,
     );
     let endpoints = Endpoints::default();
     let app = peer_router(state.clone(), routes);
@@ -1522,6 +1583,10 @@ pub fn peer_router<B: Backend>(state: PeerState<B>, routes: Router<PeerState<B>>
             post(receive_checkpoint_request).layer(DefaultBodyLimit::max(16_384)),
         )
         .route(
+            super::ANSWERS_PATH,
+            post(answers_check::receive_answers_request).layer(DefaultBodyLimit::max(16_384)),
+        )
+        .route(
             JOIN_PATH,
             post(receive_join).layer(DefaultBodyLimit::max(MAX_JOIN_BYTES)),
         )
@@ -1540,9 +1605,11 @@ fn start_outbound<B: Backend>(
     auth: FleetAuth,
     fleet: FleetContext,
     notify: watch::Sender<u64>,
+    mut only: Option<watch::Receiver<BTreeSet<String>>>,
 ) {
     // One dialer per target. Targets follow membership: a new listening member gets a dialer,
-    // and a member that ends or turns dial-out loses its dialer.
+    // and a member that ends or turns dial-out loses its dialer. A shard dials only the members
+    // in `only`, and gains or loses dialers as that set changes.
     tokio::spawn(crate::task_cpu::account(
         "replication.outbound",
         async move {
@@ -1561,6 +1628,10 @@ fn start_outbound<B: Backend>(
                         targets
                             .entry(sponsor.clone())
                             .or_insert_with(|| routes.clone());
+                    }
+                    if let Some(only) = &only {
+                        let only = only.borrow();
+                        targets.retain(|name, _| only.contains(name));
                     }
                     targets
                 };
@@ -1593,6 +1664,12 @@ fn start_outbound<B: Backend>(
                     ));
                     dialers.insert(name, (routes, task));
                 }
+                let only_changed = async {
+                    match only.as_mut() {
+                        Some(only) => only.changed().await.is_ok(),
+                        None => std::future::pending().await,
+                    }
+                };
                 tokio::select! {
                     changed = view_changes.changed() => {
                         if changed.is_err() {
@@ -1600,6 +1677,11 @@ fn start_outbound<B: Backend>(
                         }
                     }
                     _ = transport_changes.changed() => {}
+                    open = only_changed => {
+                        if !open {
+                            return;
+                        }
+                    }
                     _ = tokio::time::sleep(worker_interval(Duration::from_secs(30))) => {}
                 }
             }
@@ -1822,6 +1904,8 @@ async fn dial_peer<B: Backend>(
                     notify.borrow_and_update();
                     moving = true;
                 } else {
+                    // Nothing moved, so both hold what the other wrote before today's cut.
+                    answers_check::check_answers(&http, &backend, &node, &peer, &auth, &fleet).await;
                     // A busy harness can write several observations while one exchange is in
                     // flight. Keep the first exchange immediate, then coalesce the resulting
                     // wake burst without disabling the 30-second retry path. The window stays
@@ -2646,6 +2730,17 @@ async fn receive_exchange_inner<B: Backend>(
     // Authentication proves the connection returned before inventory processing finishes.
     state.fleet.note_activity(&sender.name);
     let relay = sender.name;
+    // A named shard this node holds answers from its own store, with its own job per peer, and
+    // leaves the default store's per-peer state alone. Any other shard name reaches the default
+    // store, which refuses it before storing anything.
+    let shard = serde_json::from_slice::<ExchangeShard>(&body)
+        .ok()
+        .and_then(|scope| scope.shard_id)
+        .filter(|shard| state.shards.contains_key(shard));
+    let job_key = match &shard {
+        Some(shard) => format!("{relay}\n{shard}"),
+        None => relay.clone(),
+    };
     let mut answer = {
         let mut jobs = state
             .fleet
@@ -2654,19 +2749,19 @@ async fn receive_exchange_inner<B: Backend>(
             .lock()
             .expect("exchange jobs lock poisoned");
         if jobs
-            .get(&relay)
+            .get(&job_key)
             .is_some_and(|job| job.answer.has_changed().is_err() && job.answer.borrow().is_none())
         {
-            jobs.remove(&relay);
+            jobs.remove(&job_key);
         }
-        if let Some(job) = jobs.get(&relay)
+        if let Some(job) = jobs.get(&job_key)
             && job.digest != request_digest
             && job.answer.borrow().is_none()
         {
             return signed_overload(&state, &request_digest);
         }
         let reuse = jobs
-            .get(&relay)
+            .get(&job_key)
             .is_some_and(|job| job.digest == request_digest);
         if !reuse {
             let Ok(permit) = state
@@ -2698,7 +2793,7 @@ async fn receive_exchange_inner<B: Backend>(
             }
             let (done, answer) = watch::channel(None);
             jobs.insert(
-                relay.clone(),
+                job_key.clone(),
                 ExchangeJob {
                     digest: request_digest.clone(),
                     answer,
@@ -2706,12 +2801,37 @@ async fn receive_exchange_inner<B: Backend>(
             );
             let state = state.clone();
             let relay = relay.clone();
+            let shard = shard.clone();
             let backend_timing = Arc::clone(timing);
             tokio::spawn(crate::task_cpu::account(
                 "replication.exchange",
                 async move {
                     let _permit = permit;
                     let started = std::time::Instant::now();
+                    if let Some(backend) = shard.as_ref().and_then(|shard| state.shards.get(shard)) {
+                        // A shard carries no fleet claims, so none of the default store's
+                        // membership or leave bookkeeping applies to its exchanges.
+                        let result = async {
+                            let received = backend
+                                .receive(&relay, state.auth.fleet_id(), &request, None, Default::default())
+                                .await
+                                .map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
+                            if received.changed {
+                                backend.changed().await;
+                            }
+                            backend
+                                .export(state.auth.fleet_id(), &request.inventory, false, &request.signature_requests)
+                                .await
+                                .map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, started, None))
+                        }
+                        .await
+                        .map_err(|error| ReplicationExchangeFailure::from_error(
+                            &error, ReplicationFailurePhase::LocalReceive, started.elapsed(), None,
+                        ));
+                        backend_timing.record("backend-done");
+                        done.send_replace(Some(result));
+                        return;
+                    }
                     let result = async {
                         let received = receive_from_peer(
                             &state.backend,
@@ -2752,7 +2872,7 @@ async fn receive_exchange_inner<B: Backend>(
                 },
             ));
         }
-        jobs.get(&relay).unwrap().answer.clone()
+        jobs.get(&job_key).unwrap().answer.clone()
     };
     let ready = tokio::time::timeout(EXCHANGE_RESPONSE_BUDGET, async {
         loop {
@@ -2772,7 +2892,7 @@ async fn receive_exchange_inner<B: Backend>(
     }
     match ready {
         Ok(Some(Ok(export))) => {
-            finish_exchange_job(&state.fleet, &relay, &answer);
+            finish_exchange_job(&state.fleet, &job_key, &answer);
             let authority_digest = export.exchange.authority_digest.clone();
             let response =
                 match signed_response(&state, &request_digest, export.store_index, export.exchange)
@@ -2780,6 +2900,12 @@ async fn receive_exchange_inner<B: Backend>(
                     Ok(response) => response,
                     Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
                 };
+            if shard.is_some() {
+                // Inbound activity and authority describe the peer's default store.
+                return deflate_response(response, accepts_deflate(&headers))
+                    .await
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
             state
                 .fleet
                 .inbound_authority
@@ -2802,7 +2928,7 @@ async fn receive_exchange_inner<B: Backend>(
         }
         Ok(Some(Err(failure))) => {
             // Let the next request retry a failed job. Reporting failure must never delay headers.
-            finish_exchange_job(&state.fleet, &relay, &answer);
+            finish_exchange_job(&state.fleet, &job_key, &answer);
             let response = signed_response(&state, &request_digest, 0, serde_json::json!({
                 "code": failure.code,
                 "failure": failure,
@@ -2813,7 +2939,7 @@ async fn receive_exchange_inner<B: Backend>(
             }).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(None) => {
-            finish_exchange_job(&state.fleet, &relay, &answer);
+            finish_exchange_job(&state.fleet, &job_key, &answer);
             signed_error_response(
                 &state,
                 &request_digest,
@@ -2998,7 +3124,7 @@ async fn fetch_checkpoint_manifest_page(
     let response: PeerResponse<CheckpointManifestPage> =
         serde_json::from_slice(&bytes).context("decode the signed checkpoint page")?;
     anyhow::ensure!(
-        response.api_version == PEER_API_VERSION,
+        ACCEPTED_PEER_API_VERSIONS.contains(&response.api_version.as_str()),
         "the peer API version differs"
     );
     fleet.note_activity(&peer.name);
@@ -3258,15 +3384,24 @@ struct PeerShardMismatch {
     peer: String,
     expected: Option<String>,
     actual: Option<String>,
+    /// The peer's own refusal, when its store refused the exchange's shard before answering.
+    refused: Option<String>,
 }
 
 impl std::fmt::Display for PeerShardMismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "peer {} answered for shard {:?}, expected {:?}",
-            self.peer, self.actual, self.expected
-        )
+        match &self.refused {
+            Some(message) => write!(
+                f,
+                "peer {} refused the exchange's shard: {message}",
+                self.peer
+            ),
+            None => write!(
+                f,
+                "peer {} answered for shard {:?}, expected {:?}",
+                self.peer, self.actual, self.expected
+            ),
+        }
     }
 }
 
@@ -3282,6 +3417,7 @@ fn ensure_peer_exchange_shard(
             peer: peer.into(),
             expected: sent.shard_id.clone(),
             actual: answer.shard_id.clone(),
+            refused: None,
         }
         .into());
     }
@@ -3470,7 +3606,7 @@ async fn exchange_inner<B: Backend>(
     let mut progressed = pulled || pulled_follow_up || pushed || adopted;
     // Walking differing claim ranges is the lowest-priority sync work: it runs only once
     // envelope transport has nothing left to move.
-    if let Some(comparison) = claim_ranges.filter(|comparison| !comparison.same && !progressed) {
+    if let Some(comparison) = claim_ranges.filter(|comparison| !all_same(comparison) && !progressed) {
         progressed = walk_claim_ranges(
             http, backend, node, peer, auth, fleet, telemetry, carrier, attempt, &query, &comparison,
         )
@@ -3487,11 +3623,19 @@ static CLAIM_WALKS: std::sync::LazyLock<std::sync::Mutex<BTreeMap<(String, Strin
 /// the next exchange.
 const CLAIM_WALK_ROUND_TRIPS: usize = 4;
 
+/// Whether a comparison found both the retained claims and, where compared, the retired claim
+/// IDs the same.
+fn all_same(comparison: &crate::replication::ClaimRangeComparison) -> bool {
+    comparison.same && comparison.retired.as_ref().is_none_or(|retired| retired.same)
+}
+
 /// One walk over the claim ranges that differ between this node and a peer, for one pair of
 /// whole-set digests: the tops, then the leaves of differing tops, then the IDs of differing
 /// leaves, then the claims this node lacks. A walk that finishes is not repeated until either
 /// side's claims change, so claims this node retired, or holds that the peer lacks, cost one
-/// walk, not one per exchange.
+/// walk, not one per exchange. Between members that trim locally, a second walk over the
+/// retired claim IDs rides in the same queries; what it finds missing is recorded as retired
+/// when the answer is received, so it fetches nothing.
 #[derive(Debug, Default)]
 pub(crate) struct ClaimWalk {
     pair: String,
@@ -3499,6 +3643,7 @@ pub(crate) struct ClaimWalk {
     tops: std::collections::VecDeque<u32>,
     leaves: std::collections::VecDeque<u32>,
     missing: BTreeSet<String>,
+    retired: Option<Box<ClaimWalk>>,
 }
 
 impl ClaimWalk {
@@ -3506,8 +3651,36 @@ impl ClaimWalk {
         Self { pair: pair.to_owned(), ..Default::default() }
     }
 
-    /// The next question for the peer: fetch what was found missing first, then descend.
+    /// Start, continue or drop the retired walk for a comparison's retired part. Recording what
+    /// it finds changes this node's retired digest, so an unfinished walk continues under the
+    /// new pair rather than starting again from the tops.
+    pub(crate) fn follow_retired(&mut self, comparison: &crate::replication::ClaimRangeComparison) {
+        self.retired = match comparison.retired.as_deref() {
+            Some(retired) if !retired.same => Some(
+                self.retired
+                    .take()
+                    .filter(|walk| walk.pair == retired.pair || walk.unfinished())
+                    .unwrap_or_else(|| Box::new(ClaimWalk::new(&retired.pair))),
+            ),
+            _ => None,
+        };
+    }
+
+    fn unfinished(&self) -> bool {
+        !self.asked_tops || !self.tops.is_empty() || !self.leaves.is_empty() || !self.missing.is_empty()
+    }
+
+    /// The next question for the peer: this walk's step, with the retired walk's step beside it.
     pub(crate) fn next_query(&mut self) -> Option<crate::replication::ClaimRangeQuery> {
+        let mut query = self.next_step();
+        if let Some(retired) = self.retired.as_mut().and_then(|walk| walk.next_step()) {
+            query.get_or_insert_with(Default::default).retired = Some(Box::new(retired));
+        }
+        query
+    }
+
+    /// This walk's next question: fetch what was found missing first, then descend.
+    fn next_step(&mut self) -> Option<crate::replication::ClaimRangeQuery> {
         use crate::replication::*;
         let mut query = ClaimRangeQuery::default();
         if !self.missing.is_empty() {
@@ -3535,9 +3708,19 @@ impl ClaimWalk {
         Self { pair: pair.to_owned(), asked_tops: true, ..Default::default() }
     }
 
+    fn finish(&mut self) {
+        self.asked_tops = true;
+        self.tops.clear();
+        self.leaves.clear();
+        self.missing.clear();
+    }
+
     /// Ask `query` again later: an index was still folding claims in, so the answer showed
     /// nothing.
     pub(crate) fn retry(&mut self, query: crate::replication::ClaimRangeQuery) {
+        if let (Some(walk), Some(retired)) = (self.retired.as_mut(), query.retired) {
+            walk.retry(*retired);
+        }
         self.asked_tops &= !query.tops;
         for top in query.leaves_of.into_iter().rev() {
             self.tops.push_front(top);
@@ -3548,11 +3731,33 @@ impl ClaimWalk {
         self.missing.extend(query.claims);
     }
 
-    /// Take in what one answer showed.
-    pub(crate) fn absorb(&mut self, comparison: &crate::replication::ClaimRangeComparison) {
-        self.tops.extend(&comparison.tops);
-        self.leaves.extend(&comparison.leaves);
-        self.missing.extend(comparison.missing.iter().cloned());
+    /// Take in what the answer to `query` showed. A retired step the answer left out, because
+    /// the peer's retired ranges were still folding, is asked again.
+    pub(crate) fn absorb(
+        &mut self,
+        query: crate::replication::ClaimRangeQuery,
+        comparison: &crate::replication::ClaimRangeComparison,
+    ) {
+        if comparison.same {
+            self.finish();
+        } else {
+            self.tops.extend(&comparison.tops);
+            self.leaves.extend(&comparison.leaves);
+            self.missing.extend(comparison.missing.iter().cloned());
+        }
+        match (self.retired.as_mut(), comparison.retired.as_deref()) {
+            (Some(walk), Some(retired)) if retired.same => walk.finish(),
+            (Some(walk), Some(retired)) => {
+                walk.tops.extend(&retired.tops);
+                walk.leaves.extend(&retired.leaves);
+            }
+            (Some(walk), None) => {
+                if let Some(asked) = query.retired {
+                    walk.retry(*asked);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -3579,7 +3784,10 @@ async fn walk_claim_ranges<B: Backend>(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&key)
         .filter(|walk| walk.pair == comparison.pair)
-        .unwrap_or_else(|| ClaimWalk::new(&comparison.pair));
+        .unwrap_or_else(|| {
+            if comparison.same { ClaimWalk::finished(&comparison.pair) } else { ClaimWalk::new(&comparison.pair) }
+        });
+    walk.follow_retired(comparison);
     let mut fetched = false;
     let mut result = Ok(());
     for _ in 0..CLAIM_WALK_ROUND_TRIPS {
@@ -3619,11 +3827,7 @@ async fn walk_claim_ranges<B: Backend>(
                 walk.retry(query);
                 break;
             }
-            Some(comparison) if comparison.same => {
-                walk = ClaimWalk::finished(&walk.pair);
-                break;
-            }
-            Some(comparison) => walk.absorb(comparison),
+            Some(comparison) => walk.absorb(query, comparison),
         }
     }
     CLAIM_WALKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, walk);
@@ -4046,6 +4250,18 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
                 Duration::from_millis(millis), started, Some(status.as_u16()),
             ));
         }
+        if path == EXCHANGE_PATH && code == "shard-mismatch" {
+            // A peer that does not hold the exchange's store refuses it before storing
+            // anything. Retrying cannot change that, so the route parks like an answer
+            // for the wrong store does.
+            return Err(PeerShardMismatch {
+                peer: peer.name.clone(),
+                expected: None,
+                actual: None,
+                refused: Some("shard-mismatch".to_owned()),
+            }
+            .into());
+        }
         let about_us = refusal
             .as_ref()
             .and_then(|value| value["member_key"].as_str())
@@ -4128,7 +4344,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
     let response: PeerResponse<R> =
         serde_json::from_slice(&bytes).context("decode the signed peer response")
             .map_err(|error| exchange_failure(error, ReplicationFailurePhase::Verify, started, Some(status)))?;
-    if response.api_version != PEER_API_VERSION {
+    if !ACCEPTED_PEER_API_VERSIONS.contains(&response.api_version.as_str()) {
         return Err(exchange_failure(
             anyhow::anyhow!("the peer API version differs"),
             ReplicationFailurePhase::Verify, started, Some(status),
@@ -4137,6 +4353,10 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
     fleet.note_activity(&peer.name);
     Ok((response.value, accepts_deflate(&headers)))
 }
+
+#[cfg(test)]
+#[path = "peer_envelope_version_tests.rs"]
+mod peer_envelope_version_tests;
 
 #[cfg(test)]
 #[path = "worker_tests.rs"]

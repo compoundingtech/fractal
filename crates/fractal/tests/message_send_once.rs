@@ -24,20 +24,30 @@ const LEAD: &str = "agent/example/lead";
 /// An in-process daemon on its own socket, and the store behind it.
 async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
-    let state = AppState { owning_person: None,
-    store: Arc::new(Store::open_memory("message-send-once").unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "message-send-once".into(),
-    state_dir: root.to_path_buf(),
-    pty_root: root.join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: Arc::new(Store::open_memory("message-send-once").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "message-send-once".into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let store = state.store.clone();
+    let intent = fractal_daemon::parse_intent(
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/lead\" { workspace \"/tmp\"; command \"true\" }",
+        store.origin(),
+    ).unwrap();
+    store.apply_internal(&intent, "fixture-recipients").unwrap();
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
@@ -67,6 +77,8 @@ struct Losses {
     page_reads: AtomicBool,
     /// Whether page reads go unanswered once a send has been answered.
     page_reads_after_a_send: AtomicBool,
+    blob_uploads: AtomicUsize,
+    recipient_route_missing: AtomicBool,
 }
 
 /// Forward every request on `front` to the daemon on `back`, and close the connection without a
@@ -84,11 +96,20 @@ async fn lossy_proxy(
             let losses = losses.clone();
             tokio::spawn(async move {
                 let request = read_request(&mut caller).await;
+                let line = String::from_utf8_lossy(&request[..request.len().min(64)]).to_string();
+                if line.starts_with("POST /v1/client/blobs ") {
+                    losses.blob_uploads.fetch_add(1, Ordering::SeqCst);
+                }
+                if line.starts_with("GET /v1/messages/recipient?")
+                    && losses.recipient_route_missing.load(Ordering::SeqCst)
+                {
+                    caller.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                    return;
+                }
                 let mut daemon = UnixStream::connect(&back).await.unwrap();
                 daemon.write_all(&request).await.unwrap();
                 let mut answer = Vec::new();
                 daemon.read_to_end(&mut answer).await.unwrap();
-                let line = String::from_utf8_lossy(&request[..request.len().min(64)]).to_string();
                 let lose = if line.starts_with("POST /v1/messages ") {
                     let lose = losses
                         .sends
@@ -584,5 +605,163 @@ async fn a_send_or_reply_to_a_person_is_refused_and_writes_nothing() {
         assert!(text.contains("work ask") && text.contains("work update"), "{text}");
     }
     assert_eq!(message_count(&store), 1, "a refused message was written");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_agent_recipient_is_refused_unless_explicitly_allowed() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let send = [
+        "--json", "conversations", "send", "agent/ada/tester",
+        "--from", PERSON, "--subject", "Check", "--body", "Please check.",
+    ];
+    let refused = st(&socket, &[], &send).await;
+    assert!(!refused.status.success());
+    let text = stderr(&refused);
+    assert!(text.contains("unknown-recipient") && text.contains("agent/ada/tester"), "{text}");
+    assert!(text.contains("fleet replication") && text.contains("--allow-undeclared-recipient"), "{text}");
+    assert!(text.contains("Nothing was sent"), "{text}");
+    assert_eq!(message_count(&store), 0);
+
+    let mut allowed = send.to_vec();
+    allowed.push("--allow-undeclared-recipient");
+    let sent = value(&st(&socket, &[], &allowed).await);
+    assert!(sent["sent_at"].is_string(), "{sent}");
+    assert_eq!(message_count(&store), 1);
+    // The override is per call; an earlier override cannot make an unknown seat known.
+    assert!(!st(&socket, &[], &send).await.status.success());
+    assert_eq!(message_count(&store), 1);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_to_a_historical_agent_uses_the_original_message_without_a_roster_lookup() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let parent = value(&st(&socket, &[], &[
+        "--json", "conversations", "send", WORKER,
+        "--from", "agent/ada/tester", "--body", "Check.",
+    ]).await);
+    let reply = value(&st(&socket, &[], &[
+        "--json", "conversations", "reply", parent["subject"].as_str().unwrap(),
+        "--from", WORKER, "--body", "Checked.",
+    ]).await);
+    assert_eq!(reply["requested_recipient"], "agent/ada/tester");
+    assert_eq!(message_count(&store), 2);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replicated_remote_stopped_agent_is_a_known_recipient() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let remote = Store::open_memory("operator").unwrap();
+    let intent = fractal_daemon::parse_intent(
+        "version 2\nagent \"alex/tester\" { host \"operator\"; workspace \"/tmp\"; command \"true\" }",
+        remote.origin(),
+    ).unwrap();
+    remote.apply_internal(&intent, "remote-fixture-recipient").unwrap();
+    let exchange = remote.export_replication_exchange(
+        "recipient-fixture", &store.replication_inventory().unwrap(),
+    ).unwrap();
+    store.receive_replication_exchange("operator", "recipient-fixture", &exchange).unwrap();
+    let admission = store.validate_replication_backlog().unwrap();
+    assert_eq!((admission.invalid, admission.unknown), (0, 0));
+    store.apply_replication_repairs().unwrap();
+    store.project_replication_backlog().unwrap();
+    let sent = value(&st(&socket, &[], &[
+        "--json", "conversations", "send", "agent/alex/tester",
+        "--from", PERSON, "--body", "Please check.",
+    ]).await);
+    assert_eq!(sent["requested_recipient"], "agent/alex/tester");
+    assert_eq!(message_count(&store), 1);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_evidence_without_a_declaration_keeps_running_and_stopped_recipients_known() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    for (recipient, status) in [("agent/alex/tester", "running"), ("agent/alex/reviewer", "stopped")] {
+        store.append_claim(&fractal_daemon::model::ClaimInput {
+            subject: recipient.into(), kind: "runtime.observed".into(),
+            actor: Some(recipient.into()),
+            fields: serde_json::from_value(serde_json::json!({
+                "status": status, "runtime_id": recipient, "incarnation_id": "fixture",
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let sent = value(&st(&socket, &[], &[
+            "--json", "conversations", "send", recipient,
+            "--from", PERSON, "--body", "Please check.",
+        ]).await);
+        assert_eq!(sent["requested_recipient"], recipient);
+    }
+    assert_eq!(message_count(&store), 2);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_recipient_with_an_attachment_writes_no_blobs_or_claims() {
+    let root = tempfile::tempdir().unwrap();
+    let (back, store, server) = daemon(root.path()).await;
+    let front = root.path().join("front.sock");
+    let requests = Arc::new(Losses::default());
+    let proxy = lossy_proxy(front.clone(), back, requests.clone()).await;
+    let image = root.path().join("fixture.png");
+    image::RgbaImage::new(1, 1).save(&image).unwrap();
+    let before = store.index().unwrap();
+    let refused = st(&front, &[], &[
+        "--json", "conversations", "send", "agent/ada/tester",
+        "--from", PERSON, "--body", "Check.", "--attach", image.to_str().unwrap(),
+    ]).await;
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("unknown-recipient"), "{}", stderr(&refused));
+    assert_eq!(requests.blob_uploads.load(Ordering::SeqCst), 0);
+    assert_eq!(store.index().unwrap(), before, "refusal wrote durable claims");
+    assert_eq!(message_count(&store), 0);
+    proxy.abort();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_older_daemon_without_recipient_preflight_still_sends_with_one_notice() {
+    let root = tempfile::tempdir().unwrap();
+    let (back, store, server) = daemon(root.path()).await;
+    let front = root.path().join("front.sock");
+    let responses = Arc::new(Losses::default());
+    responses.recipient_route_missing.store(true, Ordering::SeqCst);
+    let proxy = lossy_proxy(front.clone(), back, responses).await;
+    let sent = st(&front, &[], &[
+        "--json", "conversations", "send", "agent/ada/tester",
+        "--from", PERSON, "--body", "Check.",
+    ]).await;
+    value(&sent);
+    assert_eq!(stderr(&sent).matches("this daemon has no recipient preflight").count(), 1);
+    assert_eq!(message_count(&store), 1);
+    proxy.abort();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recipient_preflight_resolves_renamed_agent_aliases_before_sending() {
+    use fractal_daemon::store::identities::{IdentityKind, IdentityStore, RenameRequest};
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    store.rename_identity(IdentityKind::Agent, &RenameRequest {
+        from: WORKER.into(), to: "agent/alex/tester".into(), actor: PERSON.into(),
+        reason: "Clarify fixture responsibility".into(), expected_naming_revision: None,
+        expected_declaration: None, idempotency_key: "rename-fixture-recipient".into(),
+    }, &[]).unwrap();
+    for recipient in [WORKER, "agent/alex/tester"] {
+        let sent = value(&st(&socket, &[], &[
+            "--json", "conversations", "send", recipient,
+            "--from", PERSON, "--body", "Check.",
+        ]).await);
+        assert_eq!(sent["recipient"], "agent/alex/tester");
+        assert_eq!(sent["recipient_identity"], WORKER);
+    }
+    assert_eq!(message_count(&store), 2);
     server.abort();
 }

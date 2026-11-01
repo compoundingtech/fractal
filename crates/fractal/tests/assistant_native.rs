@@ -58,13 +58,15 @@ impl Harness {
         // surfaces; pair() explicitly refreshes them before reading the summary.
         store.start_attention_list_refresher().unwrap();
         store.start_agent_roster_refresher().unwrap();
-        let state = AppState { owning_person: Some(OWNER.into()), store,
-        notify: Arc::new(tokio::sync::Notify::new()),
-        event_notify: tokio::sync::watch::channel(0).0,
-        node: "assistant-native".into(), state_dir: root.path().into(),
-        pty_root: root.path().join("pty"), pty_binary: PathBuf::from("pty"),
-        fleet_id: None, configured_peers: vec![], client_relay: None,
-        native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = AppState {
+            owning_person: Some(OWNER.into()), store,
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0).0,
+            node: "assistant-native".into(), state_dir: root.path().into(),
+            pty_root: root.path().join("pty"), pty_binary: PathBuf::from("pty"),
+            fleet_id: None, configured_peers: vec![], client_relay: None,
+            native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
+        };
         Self { local: fractal_daemon::api::router(state.clone()), fabric: fractal_daemon::api::fabric_router(state.clone()), root, state }
     }
 
@@ -146,6 +148,8 @@ impl Harness {
 
     fn ask(&self, key: &str, title: &str) -> String {
         self.state.store.ask_person(&PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None, person: OWNER.into(), title: title.into(), reason: "Owner must choose".into(),
             actor: AGENT.into(), step: None, new_run: Some(key.into()), incarnation: None,
             request: Some(json!({"version":1,"type":"choice","question":"Which option?","why_person":"Owner chooses.","answers":[{"id":"yes","label":"Yes","consequence":"Record yes."},{"id":"no","label":"No","consequence":"Record no."}]})),
