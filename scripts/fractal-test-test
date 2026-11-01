@@ -915,8 +915,15 @@ class StTest(unittest.TestCase):
         (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': rev}}}}))
         command = st_test.members_command(directory)
         step = (ROOT / '.github/workflows/workspace-ci.ts').read_text().split('export const megarepoApplyStep', 1)[1].split('} as const', 1)[0]
-        ci = step.replace('$(jq -r \'.nodes["effect-utils"].locked.rev\' flake.lock)', rev)
-        self.assertIn(f'nix run "{command[2]}" {" ".join(command[3:])}', ci)
+        self.assertIn('python3 scripts/prepare-pnpm-source-inputs.py apply', step)
+        # CI delegates to the shared preparer. Compare its actual argv, not the old inline shell spelling.
+        import ast
+        source = ast.parse((ROOT / 'scripts/prepare-pnpm-source-inputs.py').read_text())
+        apply = next(node for node in ast.walk(source) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                     and node.func.value.id == 'subprocess' and node.func.attr == 'run')
+        ci = eval(compile(ast.Expression(apply.args[0]), '<megarepo argv>', 'eval'), {'revision': rev})
+        self.assertEqual(ci, ['nix', *command[1:], '--lock-sync', 'off'])
         (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': 'main; rm -rf /'}}}}))
         with self.assertRaises(ValueError):
             st_test.members_command(directory)

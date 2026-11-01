@@ -1060,7 +1060,8 @@
         "scripts/ci-typescript-client",
         "scripts/ci-web-shell",
         "scripts/ci-web-shell-inputs.jq",
-        "scripts/ci-web-shell-test"
+        "scripts/ci-web-shell-test",
+        "scripts/prepare-pnpm-source-inputs.py"
       ],
       "kinds": {
         "wrapper": {
