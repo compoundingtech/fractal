@@ -5711,8 +5711,13 @@ mod tests {
                 ui.frame.borrow_mut().hits.clear();
                 let shown = tab_badge_strip(&ui, width);
                 assert!(!shown.contains("?2"), "{width}: {shown}");
-                if current > 0 { assert!(shown.contains('‹'), "{width}: {shown}"); }
-                if current < 4 { assert!(shown.contains('›'), "{width}: {shown}"); }
+                assert_marker_counts(&ui, &tab_strip_row(&ui, width), 5);
+                if width == 18 && current == 0 {
+                    assert!(shown.contains('›'), "hidden tabs after: {shown}");
+                }
+                if width == 18 && current == 4 {
+                    assert!(shown.contains('‹'), "hidden tabs before: {shown}");
+                }
                 for (rect, hit) in &ui.frame.borrow().hits {
                     if matches!(hit, Hit::GlassTabMore(..) | Hit::GlassTab(..)) {
                         assert!(rect.right() <= width, "{width}: {hit:?} {rect:?}");
