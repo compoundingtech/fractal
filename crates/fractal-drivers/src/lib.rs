@@ -87,6 +87,7 @@ mod native_channel;
 pub mod omp_session;
 pub mod opencode_session;
 pub mod park;
+mod process;
 pub mod pi_channel;
 /// The launch body shared by the pi-family wrappers; crate-internal, reached through
 /// `pi_session::run` and `omp_session::run`.
