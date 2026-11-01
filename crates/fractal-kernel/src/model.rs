@@ -1627,6 +1627,9 @@ pub struct StatusResponse {
     pub store_index: u64,
     pub subjects: Vec<SubjectStatus>,
     pub pending_actions: Vec<PlannedAction>,
+    /// Current controller-host admission observation; absent on historical/store-only reads.
+    #[serde(default, rename = "seatAdmission", skip_serializing_if = "Option::is_none")]
+    pub seat_admission: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
