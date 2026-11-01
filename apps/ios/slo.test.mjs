@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { bars, forecastOf, landed, leftText, ownedBy, safeLink, secondLine, sloGroups, spanText } from './slo.ts';
+import { bars, forecastOf, landed, leftText, ownedBy, safeLink, secondLine, sloGroups, spanText, toneOf } from './slo.ts';
 
 // The same words the Fractal terminal UI uses (crates/fractal-tui/src/ui/objectives.rs).
 assert.equal(leftText({ remaining_percent: 5.6 }), '6% left');
@@ -66,3 +66,6 @@ assert.equal(safeLink(undefined), null);
   state = landed(state, b, b, empty, value => ({ ...value, issue: 'Could not read objectives and budgets: down' }));
   assert.deepEqual(ownedBy(state, b, empty), { list: null, issue: 'Could not read objectives and budgets: down' });
 }
+
+// A tone this phone does not know (a later daemon may add one), or none, is quiet.
+assert.deepEqual(['red', 'green', 'yellow', 'quiet', 'blue', undefined].map(tone => toneOf({ tone })), ['red', 'green', 'yellow', 'quiet', 'quiet', 'quiet']);

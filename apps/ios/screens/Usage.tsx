@@ -9,7 +9,7 @@ import { Banners, StatusLine, useMissionsOnFocus } from '../chrome';
 import type { StackParams } from '../navigation';
 import { useStore } from '../store';
 import { theme } from '../theme';
-import { bars, landed, leftText, ownedBy, safeLink, secondLine, forecastOf, sloGroups, type Owned, type SloTone } from '../slo';
+import { bars, landed, leftText, ownedBy, safeLink, secondLine, forecastOf, sloGroups, toneOf, type Owned, type SloTone } from '../slo';
 import { accounts, byOf, cost, creditsLine, groups, label, limitLine, nextBy, PERIODS, periodName, tokens, totalOf, type By, type Names, type Tone } from '../usage';
 import { Button, ListRow, Note, Screen, SectionHeader, T } from '../ui';
 
@@ -76,7 +76,7 @@ export function useSlo() {
       keep({ list: (await client.sloList()).value, issue: '' });
     } catch (error) {
       const text = plainError(error);
-      const issue = /404|not-found|it is gone/i.test(text) ? 'This Fractal version does not serve objectives and budgets yet; it needs an update.' : `Could not read objectives and budgets: ${text}`;
+      const issue = /404|not-found|it is gone/i.test(text) ? 'The Fractal on this computer needs an update to show objectives and budgets.' : `Could not read objectives and budgets: ${text}`;
       // The last read of this member stays under the issue; another member's never does.
       setRead(state => landed(state, current.current, client, noSlo, value => ({ ...value, issue })));
     }
@@ -111,7 +111,7 @@ function SloSection({ list, issue }: { list: SloList | null; issue: string }) {
     {sloGroups(list.rows).map(group => <View key={group.kind}>
       <SectionHeader title={group.title} count={group.rows.length} />
       {group.rows.map(row => {
-        const color = sloTone[row.tone ?? 'quiet'];
+        const color = sloTone[toneOf(row)];
         const line = secondLine(row, now);
         const chart = history[row.id];
         const forecast = forecastOf(row, now);

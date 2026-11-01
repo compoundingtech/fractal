@@ -7,6 +7,9 @@ import type { SloHistory, SloRow } from '../../clients/typescript/fractal-client
 
 export type SloTone = 'red' | 'green' | 'yellow' | 'quiet';
 
+/** The row's tone; a word this phone does not know (a later daemon may add one), or none from an older daemon, is quiet. */
+export const toneOf = (row: Pick<SloRow, 'tone'>): SloTone => row.tone === 'red' || row.tone === 'green' || row.tone === 'yellow' ? row.tone : 'quiet';
+
 /** What is left of a row's allowance or error budget, or that nothing was measured. */
 export const leftText = (row: Pick<SloRow, 'remaining_percent'>) => row.remaining_percent == null ? 'no data' : `${Math.round(row.remaining_percent)}% left`;
 
