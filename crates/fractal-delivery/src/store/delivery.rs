@@ -499,7 +499,7 @@ impl DeliveryStore for Store {
              WHERE sent.kind='message.sent'
                AND json_extract(sent.body, '$.fields.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2)
                AND sent.store_index>?3 AND sent.store_index<=?4
-               AND instr(sent.body, 'st3-work:')>0
+               AND (instr(sent.body, 'st3-work:')>0 OR instr(sent.body, 'fractal-work:')>0)
              ORDER BY created_index, sent.subject",
         )?;
         let added = statement
@@ -548,7 +548,11 @@ impl DeliveryStore for Store {
                     }
                 };
                 if message.to == recipient
-                    && message.tags.iter().any(|tag| tag.starts_with("st3-work:"))
+                    && crate::silent::message_tag_value(
+                        message.tags.iter().map(String::as_str),
+                        "work:",
+                    )
+                    .is_some()
                 {
                     messages.push(message);
                 }
@@ -1187,7 +1191,7 @@ impl DeliveryStore for Store {
                      AND NOT EXISTS (
                        SELECT 1 FROM claims sent
                        WHERE sent.subject=claims.subject AND sent.kind='message.sent'
-                         AND instr(sent.body, 'st3-work:')>0
+                         AND (instr(sent.body, 'st3-work:')>0 OR instr(sent.body, 'fractal-work:')>0)
                      )
                    )
              )

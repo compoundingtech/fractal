@@ -5943,10 +5943,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut attempts = messages
                 .iter()
                 .filter(|message| {
-                    !message
-                        .tags
-                        .iter()
-                        .any(|tag| tag == "st3-wake-source:manual")
+                    crate::silent::message_tag_value(
+                        message.tags.iter().map(String::as_str),
+                        "wake-source:",
+                    ) != Some("manual")
                 })
                 .filter(|message| {
                     work_message_target(message).is_some_and(
@@ -15079,7 +15079,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         // Held mail waits for the seat's next turn, not for this seat.
                         && !crate::silent::waits_for_turn(&message)
                         && !message.tags.iter().any(|tag| {
-                            tag.starts_with("st3-work:") || tag.starts_with("st3-wake-source:")
+                            crate::silent::strip_message_tag_prefix(tag, "work:").is_some()
+                                || crate::silent::strip_message_tag_prefix(tag, "wake-source:").is_some()
                         })
                 });
             Ok(if unread {
@@ -19686,14 +19687,34 @@ fn nested_under_work(step: &StepRunView, work: &[StepRunView]) -> bool {
 }
 
 fn work_message_target(message: &crate::model::MessageView) -> Option<(&str, u32, u32, &str)> {
-    message.tags.iter().find_map(|tag| {
-        let mut parts = tag.strip_prefix("st3-work:")?.rsplitn(4, '@');
-        let incarnation = parts.next()?;
-        let readiness_epoch = parts.next()?.parse::<u32>().ok()?;
-        let attempt = parts.next()?.parse::<u32>().ok()?;
-        let step_subject = parts.next()?;
-        Some((step_subject, attempt, readiness_epoch, incarnation))
-    })
+    let value = crate::silent::message_tag_value(message.tags.iter().map(String::as_str), "work:")?;
+    let mut parts = value.rsplitn(4, '@');
+    let incarnation = parts.next()?;
+    let readiness_epoch = parts.next()?.parse::<u32>().ok()?;
+    let attempt = parts.next()?.parse::<u32>().ok()?;
+    let step_subject = parts.next()?;
+    Some((step_subject, attempt, readiness_epoch, incarnation))
+}
+
+#[test]
+fn work_message_target_accepts_fractal_and_prefers_old() {
+    let mut message: crate::model::MessageView = serde_json::from_value(serde_json::json!({
+        "subject": "message/test", "from": "daemon/runtime", "to": "agent/worker",
+        "content": "", "status": "sent", "tags": [], "in_reply_to": null, "created_index": 0
+    }))
+    .unwrap();
+    for prefix in ["st3-", "fractal-"] {
+        message.tags = vec![format!("{prefix}work:step-run/r/s@2@3@inc")];
+        assert_eq!(
+            work_message_target(&message),
+            Some(("step-run/r/s", 2, 3, "inc"))
+        );
+    }
+    message.tags = vec![
+        "fractal-work:other@9@8@new".into(),
+        "st3-work:old@1@2@old".into(),
+    ];
+    assert_eq!(work_message_target(&message), Some(("old", 1, 2, "old")));
 }
 
 fn work_message_should_close(

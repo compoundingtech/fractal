@@ -19447,7 +19447,7 @@ pub fn enrich_step_wake_at(
         hex::encode(Sha256::digest(current_incarnation_id.as_bytes()))[..12].to_owned();
     let mut attempts = Vec::new();
     let wake_tag_prefix = format!(
-        "st3-work:{}@{}@{}@",
+        "{}@{}@{}@",
         view.subject, view.attempt, view.readiness_epoch
     );
     let bare_assignee = assignee
@@ -19470,7 +19470,7 @@ pub fn enrich_step_wake_at(
                          AND staged.accepted_at_unix_ms<=?1)
          FROM claims INDEXED BY claims_message_to_index
          WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
-           AND instr(claims.body, ?2)>0
+           AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
            AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
          ORDER BY CANONICAL_ASC(claims)",
     ))?;
@@ -19499,8 +19499,10 @@ pub fn enrich_step_wake_at(
             .get("tags")
             .and_then(Value::as_array)
             .is_some_and(|tags| {
-                tags.iter()
-                    .any(|tag| tag.as_str() == Some("st3-wake-source:manual"))
+                crate::silent::message_tag_value(
+                    tags.iter().filter_map(Value::as_str),
+                    "wake-source:",
+                ) == Some("manual")
             })
         {
             continue;
@@ -19510,8 +19512,9 @@ pub fn enrich_step_wake_at(
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(Value::as_str)
-            .find_map(|tag| {
+            .filter_map(Value::as_str);
+        let matching_incarnation = crate::silent::message_tag_value(matching_incarnation, "work:")
+            .and_then(|tag| {
                 work_wake_tag_incarnation(tag, &view.subject, view.attempt, view.readiness_epoch)
                     .map(str::to_owned)
             });
@@ -19629,13 +19632,31 @@ pub fn enrich_step_wake_at(
     Ok(())
 }
 
+#[test]
+fn work_wake_incarnation_accepts_both_prefixes_without_merging() {
+    for tags in [
+        vec!["st3-work:step-run/r/s@2@3@old"],
+        vec!["fractal-work:step-run/r/s@2@3@old"],
+        vec![
+            "fractal-work:step-run/r/s@9@8@new",
+            "st3-work:step-run/r/s@2@3@old",
+        ],
+    ] {
+        let value = crate::silent::message_tag_value(tags.into_iter(), "work:").unwrap();
+        assert_eq!(
+            work_wake_tag_incarnation(value, "step-run/r/s", 2, 3),
+            Some("old")
+        );
+    }
+}
+
 fn work_wake_tag_incarnation<'a>(
     tag: &'a str,
     step_subject: &str,
     attempt: u32,
     readiness_epoch: u32,
 ) -> Option<&'a str> {
-    let tag = tag.strip_prefix("st3-work:")?;
+    // The caller selects one complete work-tag value with legacy-first precedence.
     let mut parts = tag.rsplitn(4, '@');
     let incarnation = parts.next()?;
     (parts.next().and_then(|value| value.parse::<u32>().ok()) == Some(readiness_epoch)
