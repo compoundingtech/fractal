@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory() as d:
     payload = root / 'fractal-x86_64-unknown-linux-gnu'; (payload / 'bin').mkdir(parents=True)
     for name in ['fractal', 'pty']:
         p = payload / 'bin' / name
-        p.write_text('#!/bin/sh\nif [ "${1:-}" = setup ]; then exec python3 "' + str(repo / 'scripts/fixtures/install-receipt-cli') + '" "$@"; fi\nif [ "${1:-}" = --version ]; then [ "${FAIL_RECEIPT:-}" != version ] || exit 1; printf \'{"machine_version":"0.3.17+abcdef123","commit":"abcdef123"}\\n\'; else printf "' + name + '-fixture\\n"; fi\n'); p.chmod(0o755)
+        p.write_text('#!/bin/sh\nif [ "${1:-}" = setup ]; then exec python3 "' + str(repo / 'scripts/fixtures/install-receipt-cli') + '" "$0" "$@"; fi\nif [ "${1:-}" = --version ]; then [ "${FAIL_RECEIPT:-}" != version ] || exit 1; printf \'{"machine_version":"0.3.17+abcdef123","commit":"abcdef123"}\\n\'; else printf "' + name + '-fixture\\n"; fi\n'); p.chmod(0o755)
     (payload / 'bin/st').symlink_to('fractal')
     (payload / 'bin/st3').symlink_to('fractal')
     (payload / 'share/fractal-web').mkdir(parents=True)
@@ -80,6 +80,13 @@ exec "{real}" "$@"
     assert receipt['tag'] == 'v0.3.18' and receipt['commit'] == 'abcdef123', receipt
     assert receipt['target'] == 'x86_64-unknown-linux-gnu' and receipt['installed_at'].endswith('Z'), receipt
     assert (installed.parent / 'share/fractal-web/index.html').read_text() == '<!doctype html><title>Fractal</title>'
+    # The documented downloader must upgrade receipt-only installs before aliases return.
+    (installed / 'st').unlink()
+    (installed / 'st3').unlink()
+    result = install('--no-run')
+    assert result.returncode == 0 and result.stderr == '', result
+    assert (installed / 'st').readlink() == Path('fractal')
+    assert (installed / 'st3').readlink() == Path('fractal')
     result = install('--tag', 'v0.3.18')
     assert result.returncode == 0 and result.stdout.endswith('fractal-fixture\n') and result.stderr == '', result
     assert 'Upgrading Fractal' in result.stdout and 'Installed CLI:' in result.stdout, result

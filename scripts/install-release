@@ -121,8 +121,8 @@ fi
 # Historical aliases and a digest-bound receipt independently establish ownership.
 refuse_foreign_fractal() {
   local canonical="$bin_dir/fractal" target name directory candidate destination_directory="$bin_dir"
-  local receipt="$bin_dir/.fractal-install.json" receipt_owned=false
-  if [[ -e $receipt || -L $receipt ]]; then
+  local receipt="$bin_dir/.fractal-install.json" pending="$bin_dir/.fractal-install.json.pending" receipt_owned=false
+  if [[ -e $receipt || -L $receipt || -e $pending || -L $pending ]]; then
     "$receipt_source" setup --receipt-verify "$bin_dir" || return 1
     receipt_owned=true
   fi
@@ -209,7 +209,7 @@ for binary in "${binaries[@]}"; do
 done
 web_source="$source_dir/../share/fractal-web"
 [[ -f $web_source/index.html ]] || { echo "missing web assets: share/fractal-web/index.html" >&2; exit 1; }
-for name in "${binaries[@]}" st st3 stui .fractal-install.json; do
+for name in "${binaries[@]}" st st3 stui .fractal-install.json .fractal-install.json.pending; do
   [[ ! -d $bin_dir/$name ]] || { echo "refusing to replace directory: $name" >&2; exit 1; }
 done
 mkdir -p "$bin_dir"
@@ -253,7 +253,7 @@ cleanup() {
     fi
     if $restore_bins; then
       mkdir -p "$stage/restore" || restored=false
-      for name in "${binaries[@]}" st st3 stui .fractal-install.json; do
+      for name in "${binaries[@]}" st st3 stui .fractal-install.json .fractal-install.json.pending; do
         if [[ -e $stage/previous/$name || -L $stage/previous/$name ]]; then
           previous_entry_is_unchanged "$stage/previous/$name" "$bin_dir/$name" && continue
           # Keep backups intact; hard links need no executable-sized allocation.
@@ -302,7 +302,7 @@ take_lock "$bin_dir/.smalltalk-install.lock"
 locked=true
 stage=$(mktemp -d "$bin_dir/.smalltalk-install.XXXXXX")
 mkdir "$stage/previous"
-for name in "${binaries[@]}" st st3 stui .fractal-install.json; do
+for name in "${binaries[@]}" st st3 stui .fractal-install.json .fractal-install.json.pending; do
   if [[ -e $bin_dir/$name || -L $bin_dir/$name ]]; then
     ln -P "$bin_dir/$name" "$stage/previous/$name"
   fi
@@ -354,6 +354,9 @@ if [[ $(uname -s) == Darwin ]]; then
   macos=true
 fi
 rollback_ready=true
+if ! $macos; then
+  "$receipt_source" setup --receipt-prepare "$bin_dir" --receipt-installer script
+fi
 mkdir -p "$(dirname "$web_dir")"
 if [[ -e $web_dir || -L $web_dir ]]; then
   if [[ -d $web_dir && ! -L $web_dir ]]; then
@@ -367,7 +370,7 @@ for name in "${binaries[@]}" st st3; do
   if [[ $macos == true && ( $name == fractal || $name == st || $name == st3 ) ]]; then continue; fi
   mv -f "$stage/$name" "$bin_dir/$name"
   if [[ $name == fractal ]]; then
-    "$receipt_source" setup --receipt-write "$bin_dir" --receipt-installer script
+    "$receipt_source" setup --receipt-write "$bin_dir"
   fi
 done
 # Retire the old executable; no alias or shim remains.

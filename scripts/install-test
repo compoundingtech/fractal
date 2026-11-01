@@ -24,7 +24,7 @@ build() {
   local dir=$1 version=$2 binary
   mkdir -p "$dir"
   for binary in fractal st3-migrate; do
-    printf '#!/bin/sh\nif [ "${1:-}" = setup ]; then exec python3 "%s/scripts/fixtures/install-receipt-cli" "$@"; fi\necho "%s %s"\n' "$repo" "$binary" "$version" > "$dir/$binary"
+    printf '#!/bin/sh\nif [ "${1:-}" = setup ]; then exec python3 "%s/scripts/fixtures/install-receipt-cli" "$0" "$@"; fi\necho "%s %s"\n' "$repo" "$binary" "$version" > "$dir/$binary"
     chmod 0755 "$dir/$binary"
   done
 }
@@ -82,6 +82,21 @@ for kind in receipt-aliases receipt-only aliases-only tampered symlink; do
     bash "$install" --from "$work/two" --bin-dir "$bin" > /dev/null
     check "$bin" 2
   fi
+done
+
+# Simulate interruption after preparing intent and publishing bytes, before finalization.
+for kind in fresh stale-receipt; do
+  bin="$work/crash-$kind"
+  mkdir -p "$bin"
+  if [[ $kind == stale-receipt ]]; then
+    bash "$install" --from "$work/one" --bin-dir "$bin" > /dev/null
+    rm "$bin/st" "$bin/st3"
+  fi
+  "$work/two/fractal" setup --receipt-prepare "$bin" --receipt-installer script
+  cp "$work/two/fractal" "$bin/fractal"
+  bash "$install" --from "$work/two" --bin-dir "$bin" > /dev/null
+  check "$bin" 2
+  [[ ! -e $bin/.fractal-install.json.pending ]] || fail "pending intent survived retry"
 done
 
 # Named instances keep the inherited default login command and its exact entries.

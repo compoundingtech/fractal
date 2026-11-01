@@ -4,26 +4,44 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 
-_, mode, directory, *options = sys.argv[1:]
+incoming, _, mode, directory, *options = sys.argv[1:]
 root = Path(directory)
 receipt = root / '.fractal-install.json'
+pending = root / '.fractal-install.json.pending'
+
+def load(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as stream:
+        assert stat.S_ISREG(os.fstat(stream.fileno()).st_mode)
+        value = json.load(stream)
+    assert value['schema'] == 1 and value['name'] == 'fractal'
+    return value
+
 try:
-    digest = hashlib.sha256((root / 'fractal').read_bytes()).hexdigest()
-    if mode == '--receipt-verify':
-        assert not receipt.is_symlink() and receipt.is_file()
-        value = json.loads(receipt.read_text())
-        assert value['schema'] == 1 and value['name'] == 'fractal' and value['sha256'] == digest
-    elif mode == '--receipt-write':
+    if mode == '--receipt-prepare':
         installer = options[options.index('--receipt-installer') + 1]
-        value = dict(schema=1, name='fractal', sha256=digest, installer=installer,
-                     version='0.1.0+abcdef123', commit='abcdef123')
+        value = dict(schema=1, name='fractal',
+                     sha256=hashlib.sha256(Path(incoming).read_bytes()).hexdigest(),
+                     installer=installer, version='0.1.0+abcdef123', commit='abcdef123')
         fd, temporary = tempfile.mkstemp(dir=root, prefix='.receipt-')
         with os.fdopen(fd, 'w') as stream:
             json.dump(value, stream)
-        os.replace(temporary, receipt)
+        os.replace(temporary, pending)
+    elif mode in ('--receipt-verify', '--receipt-write'):
+        values = [load(path) for path in (receipt, pending) if path.exists() or path.is_symlink()]
+        target = root / 'fractal'
+        if mode == '--receipt-verify' and not target.exists() and not target.is_symlink() and not receipt.exists():
+            assert load(pending)
+            sys.exit(0)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        assert values and any(value['sha256'] == digest for value in values)
+        if mode == '--receipt-write':
+            assert load(pending)['sha256'] == digest
+            os.replace(pending, receipt)
     else:
         raise ValueError(mode)
 except Exception as error:

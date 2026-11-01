@@ -43,7 +43,7 @@ printf 'new-web\n' > "$work/package/share/fractal-web/index.html"
 printf 'new-script\n' > "$work/package/share/fractal-web/assets/main.js"
 cp "${INSTALL_RELEASE_TEST_SCRIPT:-$repo/scripts/install-release}" "$work/package/install.sh"
 for binary in fractal pty; do
-  printf '#!/bin/sh\nif [ "${1:-}" = setup ]; then exec python3 "%s/scripts/fixtures/install-receipt-cli" "$@"; fi\necho new-%s\n' "$repo" "$binary" > "$work/package/bin/$binary"
+  printf '#!/bin/sh\nif [ "${1:-}" = setup ]; then exec python3 "%s/scripts/fixtures/install-receipt-cli" "$0" "$@"; fi\necho new-%s\n' "$repo" "$binary" > "$work/package/bin/$binary"
   chmod +x "$work/package/bin/$binary"
   printf 'old\n' > "$work/installed/${binary/fractal/st3}"
 done
@@ -96,6 +96,23 @@ for kind in receipt-aliases receipt-only aliases-only tampered symlink; do
     "$work/package/bin/fractal" setup --receipt-verify "$bin"
   fi
 done
+# Exercise the crash window with neither aliases nor a matching finalized receipt.
+cp "$work/package/bin/fractal" "$work/crash-original"
+for kind in fresh stale-receipt; do
+  bin="$work/crash-$kind/bin"
+  mkdir -p "$bin"
+  if [[ $kind == stale-receipt ]]; then
+    install_fixture --bin-dir "$bin" --quiet
+    rm "$bin/st" "$bin/st3"
+    printf '\n# incoming upgrade\n' >> "$work/package/bin/fractal"
+  fi
+  "$work/package/bin/fractal" setup --receipt-prepare "$bin" --receipt-installer script
+  cp "$work/package/bin/fractal" "$bin/fractal"
+  install_fixture --bin-dir "$bin" --quiet
+  "$work/package/bin/fractal" setup --receipt-verify "$bin"
+  test ! -e "$bin/.fractal-install.json.pending"
+done
+cp "$work/crash-original" "$work/package/bin/fractal"
 # Fresh installs do not claim to upgrade or restart a daemon.
 install_fixture --bin-dir "$work/fresh-notice/bin" > "$work/fresh.out" 2> "$work/fresh.err"
 grep -q 'Installed fractal' "$work/fresh.out"
