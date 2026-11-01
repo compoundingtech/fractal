@@ -2,9 +2,9 @@
   "version": 1,
   "summary": "Perf-slot receipts retain the originating commit and tree when CI runs a synthetic sparse checkout",
   "replay": {"status": "none", "detail": "No claim or replay changes."},
-  "schema": {"status": "none", "detail": "Diagnostic receipts gain origin_head, origin_tree and sparse_head fields; source_head remains the current-checkout alias."},
-  "rules": {"status": "none", "detail": "ci-sparse-tree writes versioned origin metadata under its private git directory, outside tracked inputs. Perf-slot receipts read that metadata, reject a stale synthetic HEAD or malformed origin identity, and retain both origin and sparse identities after checkout cleanup. Ordinary checkouts use their own commit and tree as the origin."},
-  "compatibility": {"status": "none", "detail": "Receipt validation checks origin identity and the sparse/source alias when origin_head is present. Older receipts without origin fields remain supported. Sparse inputs, the synthetic commit tree and fixture resource limits are unchanged."},
+  "schema": {"status": "none", "detail": "Diagnostic receipts gain origin_head, origin_tree, sparse_head, sparse_tree, retained commit objects and sparse path/digest fields; source_head remains the current-checkout alias."},
+  "rules": {"status": "none", "detail": "ci-sparse-tree writes owner-only versioned metadata under its private git directory. Origin tree identity is read from the origin commit, and synthetic commit trailers bind that identity and the selected-path digest. Offline receipt validation verifies retained Git commit hashes, tree headers, path digest and derivation trailers. Metadata reads refuse symlinks, non-regular files, wrong owners and group/world write permission."},
+  "compatibility": {"status": "none", "detail": "Use --validate-receipt PATH --require-origin to refuse legacy receipts lacking origin attribution. Without that option, legacy receipts remain supported; any present origin attribution is fully validated. Ordinary checkouts retain their own commit/tree without sparse derivation. Sparse file selection and fixture resource limits are unchanged."},
   "downtime": {"status": "none", "detail": "No service interruption."},
   "manual": {"status": "none", "detail": "No required operator step."},
   "recovery": {"status": "none", "detail": "Revert to retain only the synthetic checkout identity in diagnostic receipts."}

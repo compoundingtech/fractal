@@ -15,6 +15,7 @@ import hashlib
 import socket
 import stat
 from unittest import TestCase
+import base64
 
 
 def utc():
@@ -36,27 +37,58 @@ def require(condition, detail="invalid perf-slot receipt"):
         raise ValueError(detail)
 
 
+def validate_origin(identity):
+    require(identity["source_head"] == identity["sparse_head"], "inconsistent sparse_head")
+    messages = {}
+    for kind in ("origin", "sparse"):
+        head, tree = identity[kind + "_head"], identity[kind + "_tree"]
+        require(all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) for value in (head, tree)))
+        raw = base64.b64decode(identity[kind + "_commit"], validate=True)
+        require(hashlib.sha1(b"commit " + str(len(raw)).encode() + b"\0" + raw).hexdigest() == head, "commit hash mismatch")
+        require(raw.split(b"\n", 1)[0] == b"tree " + tree.encode(), "commit/tree mismatch")
+        messages[kind] = raw.split(b"\n\n", 1)[1].decode("utf-8", errors="replace").splitlines()
+    if "paths" in identity:
+        paths = identity["paths"]
+        require(isinstance(paths, list) and paths and all(isinstance(path, str) for path in paths))
+        require(paths == sorted(set(paths)) and all(not Path(path).is_absolute() and ".." not in Path(path).parts for path in paths))
+        digest = hashlib.sha256(json.dumps(paths, separators=(",", ":")).encode()).hexdigest()
+        require(digest == identity["paths_sha256"], "sparse paths digest mismatch")
+        for label, value in (("Origin-Head", identity["origin_head"]), ("Origin-Tree", identity["origin_tree"]), ("Sparse-Paths-SHA256", digest)):
+            require(f"{label}: {value}" in messages["sparse"], "sparse derivation mismatch")
+    else:
+        require(identity["sparse_head"] == identity["origin_head"], "missing sparse derivation")
+        require(not any(line.startswith("Sparse-Paths-SHA256: ") for line in messages["sparse"]), "missing sparse derivation")
+
+
 def source_identity(git):
     head = git("rev-parse", "HEAD")
-    metadata = Path(git("rev-parse", "--path-format=absolute", "--git-path", "ci-sparse-origin.json"))
+    metadata = Path(git("rev-parse", "--absolute-git-dir")) / "ci-sparse-origin.json"
     try:
-        origin = json.loads(metadata.read_text())
+        fd = os.open(metadata, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        origin = {"version": 1, "sparse_head": head, "origin_head": head, "origin_tree": git("rev-parse", f"{head}^{{tree}}")}
-    require(origin["version"] == 1 and origin["sparse_head"] == head, "stale sparse origin metadata")
-    require(all(re.fullmatch(r"[0-9a-f]{40}", origin[key]) for key in ("origin_head", "origin_tree")), "invalid sparse origin identity")
-    return {"source_head": head, "sparse_head": head, "origin_head": origin["origin_head"], "origin_tree": origin["origin_tree"]}
+        tree = git("rev-parse", f"{head}^{{tree}}")
+        commit = base64.b64encode(git("cat-file", "commit", head, raw=True)).decode()
+        origin = dict(origin_head=head, sparse_head=head, origin_tree=tree, sparse_tree=tree, origin_commit=commit, sparse_commit=commit)
+    else:
+        with os.fdopen(fd) as stream:
+            info = os.fstat(stream.fileno())
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o022, "unsafe sparse origin metadata")
+            origin = json.load(stream)
+        require(origin.pop("version") == 2 and origin["sparse_head"] == head, "stale sparse origin metadata")
+        require(origin["sparse_tree"] == git("rev-parse", f"{head}^{{tree}}"), "sparse tree mismatch")
+    origin["source_head"] = head
+    validate_origin(origin)
+    return origin
 
 
-def validate_receipt(receipt):
+def validate_receipt(receipt, require_origin=False):
     require(receipt["status"] == "final" and receipt["outcome"] == "success")
     for field in ("caller_pid", "caller_starttime", "gate_slot", "invocation", "source_head", "source_sha256",
                   "hostname", "started_utc", "ended_utc"):
         require(receipt[field], f"missing attribution: {field}")
+    require(not require_origin or "origin_head" in receipt, "origin attribution required")
     if "origin_head" in receipt:
-        require(isinstance(receipt["origin_head"], str) and re.fullmatch(r"[0-9a-f]{40}", receipt["origin_head"]), "invalid origin_head")
-        require(re.fullmatch(r"[0-9a-f]{40}", receipt["origin_tree"]), "invalid origin_tree")
-        require(receipt["source_head"] == receipt["sparse_head"], "inconsistent sparse_head")
+        validate_origin(receipt)
     require({"unit", "cgroup"} <= receipt["gate_slot"].keys())
     require(receipt["remaining_units"] == receipt["remaining_cgroups"] == 0)
     if receipt.get("skip") == "no-user-manager":
@@ -146,7 +178,9 @@ def receipt_sink(path):
         return
     source = Path(__file__).resolve()
     git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    git = lambda *args: subprocess.check_output(["git", "-C", str(source.parent), *args], env=git_env, text=True, timeout=15).strip()
+    def git(*args, raw=False):
+        value = subprocess.check_output(["git", "-C", str(source.parent), *args], env=git_env, text=not raw, timeout=15)
+        return value if raw else value.strip()
     # Mirror st-test's default roots; st-test supplies its resolved configured roots before scrubbing ST_*.
     roots = [git("rev-parse", "--show-toplevel"), os.getcwd(), str(Path.home() / ".cache/st-test"),
              os.environ.get("ST_TEST_POOL", str(Path.home() / ".cache/st-test")),
@@ -312,8 +346,8 @@ def kernel_limits(group):
 
 
 if sys.argv[1:2] == ["--validate-receipt"]:
-    require(len(sys.argv) == 3, "expected --validate-receipt PATH")
-    validate_receipt(json.loads(Path(sys.argv[2]).read_text()))
+    require(len(sys.argv) == 3 or (len(sys.argv) == 4 and sys.argv[3] == "--require-origin"), "expected --validate-receipt PATH [--require-origin]")
+    validate_receipt(json.loads(Path(sys.argv[2]).read_text()), require_origin=len(sys.argv) == 4)
     print("passed: ci-perf-slot receipt")
     sys.exit(0)
 
@@ -415,11 +449,17 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
             launched.assert_not_called()
         link.unlink()
     sink.chmod(0o700)
+    raw_commit = b"tree " + b"f" * 40 + b"\n\nfixture\n"
+    fixture_head = hashlib.sha1(b"commit " + str(len(raw_commit)).encode() + b"\0" + raw_commit).hexdigest()
+    encoded = base64.b64encode(raw_commit).decode()
+    fixture_origin = dict(source_head=fixture_head, origin_head=fixture_head, sparse_head=fixture_head,
+                          origin_tree="f" * 40, sparse_tree="f" * 40, origin_commit=encoded, sparse_commit=encoded)
     for outcome in ("success", "failure", "interrupted", "write-error"):
         for existing in sink.iterdir():
             existing.unlink()
         with patch.dict(os.environ, {"GATE_SLOT_SCOPE_UNIT": ""}), patch.object(
                 sys.modules[__name__], "receipt_directory", side_effect=lambda path, roots: real_directory(path, [])), \
+                patch.object(sys.modules[__name__], "source_identity", return_value=fixture_origin), \
                 patch.object(subprocess, "check_output", return_value="f" * 40), contextlib.ExitStack() as stack:
             try:
                 with receipt_sink(sink) as saved:
@@ -457,9 +497,10 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
     complete = dict(good, skip=None, fixtures=fixtures, gate_slot={"unit": "gate.scope", "cgroup": f"{parent}/gate.scope"},
                     caller_cgroup=f"{parent}/gate.scope/child", scanned_roots=[parent, f"{manager}/app.slice", f"{manager}/builds.slice"])
     validate_receipt(complete)
-    validate_receipt({key: value for key, value in complete.items() if key not in ("origin_head", "origin_tree", "sparse_head")})
+    legacy = {key: value for key, value in complete.items() if key not in fixture_origin or key == "source_head"}
+    validate_receipt(legacy)
     wrong = dict(complete, gate_slot={"unit": "gate.scope", "cgroup": "/other.slice/gate.scope"})
-    for candidate, accepted in ((complete, True), (wrong, False), (dict(complete, outcome="failure"), False),
+    for candidate, accepted in ((complete, True), (legacy, True), (wrong, False), (dict(complete, outcome="failure"), False),
                                 (dict(complete, origin_head="short"), False), (dict(complete, origin_head=None), False),
                                 (dict(complete, origin_tree="invalid"), False), (dict(complete, sparse_head="different"), False),
                                 (dict(complete, gate_slot={"unit": None, "cgroup": None}), False),
@@ -469,8 +510,9 @@ with tempfile.TemporaryDirectory() as receipt_tmp:
                                       scanned_roots=["/other/ci.slice"]), False),
                                 (dict(complete, scanned_roots=[]), False)):
         (sink / "cli.json").write_text(json.dumps(candidate))
-        result = subprocess.run([sys.executable, "-O", str(Path(__file__).resolve()), "--validate-receipt", str(sink / "cli.json")], capture_output=True)
-        assert (result.returncode == 0) == accepted, result.stderr.decode()
+        for flags in ([], ["--require-origin"]):
+            result = subprocess.run([sys.executable, "-O", str(Path(__file__).resolve()), "--validate-receipt", str(sink / "cli.json"), *flags], capture_output=True)
+            assert (result.returncode == 0) == (accepted and (not flags or "origin_head" in candidate)), result.stderr.decode()
     for change in ({"drain": "not confirmed"}, *({"peak_final_lifecycle": value} for value in (None, -1, "unknown")),
                    *({"manager": dict(fixtures[1]["manager"], **{field: value})}
                      for field, value in (("ControlGroup", "/wrong"), ("Slice", "wrong.slice"), ("RuntimeMaxUSec", "1s")))):
