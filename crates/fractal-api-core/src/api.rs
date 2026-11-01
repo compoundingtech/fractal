@@ -975,10 +975,13 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         );
     // Tests reach the messages shard before anything in the product writes to it.
     #[cfg(feature = "test-support")]
-    let app = app.route(
-        "/v1/internal/test/messages-shard",
-        get(replication::test_shard_items).post(replication::test_shard_append),
-    );
+    let app = app
+        .route(
+            "/v1/internal/test/messages-shard",
+            get(replication::test_shard_items).post(replication::test_shard_append),
+        )
+        // The worker-only peers route refuses a test caller; this reads the same answer.
+        .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(

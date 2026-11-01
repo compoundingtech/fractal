@@ -6016,7 +6016,7 @@ async fn stream_items(node: &Node, subject: &str) -> usize {
 async fn stream_peers(node: &Node) -> BTreeSet<String> {
     let peers: Value = node
         .client()
-        .get("/v1/internal/replication/shard/messages/peers")
+        .get("/v1/internal/test/messages-shard/peers")
         .await
         .unwrap();
     serde_json::from_value(peers["peers"].clone()).unwrap()

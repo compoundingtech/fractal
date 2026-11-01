@@ -632,3 +632,9 @@ pub async fn test_shard_items(
     let subject = query.get("subject").cloned().unwrap_or_default();
     Ok(Json(blocking_store(move || store.claims_for(&subject, None)).await?))
 }
+
+/// Test support: the members this daemon dials for the messages shard, as the worker reads them.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_peers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    shard_replication_peers(State(state), AxumPath(crate::store::messages_shard::SHARD_ID.to_owned())).await
+}
