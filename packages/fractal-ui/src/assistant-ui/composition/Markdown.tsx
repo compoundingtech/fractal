@@ -139,6 +139,10 @@ const syntaxTheme: Highlights.Theme = {
     'diff.minus': '#000006',
   } },
 }
+const syntaxKinds: Readonly<Record<string, string>> = {
+  '#000001': 'comment', '#000002': 'keyword', '#000003': 'string', '#000004': 'number',
+  '#000005': 'function', '#000006': 'deleted', '#000007': 'boolean', '#000008': 'constant',
+}
 let highlightsRequest: Promise<typeof Highlights> | undefined
 const loadHighlights = () => highlightsRequest ??= new Promise<typeof Highlights>((resolve, reject) => {
   // Importing the published entry compiles embedded WASM synchronously. Defer that
@@ -161,19 +165,21 @@ export function HighlightedSource({ code, language }: { code: string; language: 
   const lines = React.useMemo(() => highlights?.isSupportedLanguage(canonical)
     ? highlights.codeToTokens(code, { lang: canonical, theme: syntaxTheme }).tokens
     : undefined, [code, canonical, highlights])
-  return lines === undefined ? code : <>{lines.map((line, lineIndex) => <React.Fragment key={lineIndex}>
-    {lineIndex > 0 ? '\n' : ''}{line.map((token, index) => <span key={index} data-syntax-token={token.color === undefined ? undefined : ({
-      '#000001': 'comment', '#000002': 'keyword', '#000003': 'string',
-      '#000004': 'number', '#000005': 'function', '#000006': 'deleted', '#000007': 'boolean', '#000008': 'constant',
-    }[token.color])} {...stylex.props(
+  if (lines === undefined) return code
+  let sourceOffset = 0
+  return <>{lines.map((line, lineIndex) => <React.Fragment key={lineIndex}>{line.map((token, index) => {
+    // Reinsert the exact source gaps, including CRLF and trailing empty lines.
+    const gap = code.slice(sourceOffset, token.offset)
+    sourceOffset = token.offset + token.content.length
+    return <React.Fragment key={index}>{gap}<span data-syntax-token={token.color === undefined ? undefined : syntaxKinds[token.color]} {...stylex.props(
       token.color === '#000001' && styles.syntaxComment,
       token.color === '#000002' && styles.syntaxKeyword,
       token.color === '#000003' && styles.syntaxString,
       (token.color === '#000004' || token.color === '#000007' || token.color === '#000008') && styles.syntaxLiteral,
       token.color === '#000005' && styles.syntaxFunction,
       token.color === '#000006' && styles.syntaxDeleted,
-    )}>{token.content}</span>)}
-  </React.Fragment>)}</>
+    )}>{token.content}</span></React.Fragment>
+  })}</React.Fragment>)}{code.slice(sourceOffset)}</>
 }
 
 const CodeBlock = React.memo(function CodeBlock({ code, language }: { code: string; language: string }) {

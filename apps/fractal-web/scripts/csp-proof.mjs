@@ -70,6 +70,9 @@ const prove = async (url, enforced, mode) => {
   const output = await run(['run-code', `async (page) => {
     const context = page.context()
     const testPage = await context.newPage()
+    const cdp = await context.newCDPSession(testPage)
+    await cdp.send('Network.enable')
+    await cdp.send('Network.setCacheDisabled', { cacheDisabled: true })
     const remote = 'https://example.invalid/x.png'
     let imageAttempts = 0
     const errors = []
@@ -77,6 +80,24 @@ const prove = async (url, enforced, mode) => {
     await testPage.addInitScript(() => {
       globalThis.__cspProofViolations = []
       globalThis.__cspProofImageOpens = []
+      globalThis.__cspHighlighting = {}
+      const observer = new MutationObserver(() => {
+        const code = document.querySelector('[data-testid="markdown-code"]')
+        if (!code) return
+        const timing = globalThis.__cspHighlighting
+        if (timing.sourceMs === undefined) {
+          timing.sourceMs = performance.now()
+          timing.plainTextFirst = !code.querySelector('[data-syntax-token]')
+          timing.initialHeight = code.getBoundingClientRect().height
+          requestAnimationFrame(() => setTimeout(() => { timing.firstPaintMs = performance.now() }, 0))
+        }
+        if (code.querySelector('[data-syntax-token]')) {
+          timing.highlightedMs = performance.now()
+          timing.highlightedHeight = code.getBoundingClientRect().height
+          observer.disconnect()
+        }
+      })
+      observer.observe(document, { childList: true, subtree: true })
       window.open = (...args) => { globalThis.__cspProofImageOpens.push(args); return null }
       document.addEventListener('securitypolicyviolation', (event) => globalThis.__cspProofViolations.push({
         directive: event.effectiveDirective, blockedURI: event.blockedURI, disposition: event.disposition,
@@ -128,7 +149,8 @@ const prove = async (url, enforced, mode) => {
     await testPage.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)))
     const violations = await testPage.evaluate(() => [...globalThis.__cspProofViolations])
     const result = { mode: ${JSON.stringify(mode)}, enforced: ${enforced}, rendered: true,
-      policy: response.headers()['content-security-policy'] ?? null, imageBinding, imageAttempts, bootViolations, violations, errors }
+      policy: response.headers()['content-security-policy'] ?? null, highlighting: await testPage.evaluate(() => globalThis.__cspHighlighting),
+      imageBinding, imageAttempts, bootViolations, violations, errors }
     await testPage.close()
     return 'CSP_PROOF ' + JSON.stringify(result)
   }`])
