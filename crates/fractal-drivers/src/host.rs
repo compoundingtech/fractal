@@ -46,4 +46,3 @@ pub fn detect_host() -> String {
     }
     "localhost".to_string()
 }
-
