@@ -511,7 +511,7 @@ async fn every_harness_reading_exports_while_the_graph_keeps_current_values() {
     state("working", start + 420_000);
     assert_eq!(graph(), 7, "the transition replicates; the re-stamp the fleet hears through its host stays local");
 
-    let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None }, "node-a").unwrap();
+    let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None, ui_url: None }, "node-a").unwrap();
     exporter.export_once(&store).await.unwrap();
     assert_eq!(graph(), 7, "exporting writes nothing to the graph");
     let requests = collector.requests.lock().unwrap();
@@ -571,7 +571,7 @@ async fn stored_claims_are_counted_when_stored_even_if_deleted_before_export() {
         expected_subject: None,
         idempotency_key: None,
     };
-    let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None }, "node-a").unwrap();
+    let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None, ui_url: None }, "node-a").unwrap();
     let stored = ["inc-1", "inc-2", "inc-3"].map(|incarnation| store.append_claim(&claim(incarnation)).unwrap());
     let superseded = stored[0].id.clone();
     store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h69066a2ded6a owner=fractal_daemon::telemetry_tests::otlp TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&superseded]).unwrap();
@@ -653,7 +653,7 @@ async fn the_limits_gauge_keeps_the_newest_measured_reading() {
         )
         .unwrap();
     };
-    let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None }, "node-a").unwrap();
+    let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None, ui_url: None }, "node-a").unwrap();
     let gauges = || {
         collector
             .requests
