@@ -394,6 +394,8 @@ pub(super) async fn run_message(
             Ok(())
         }
         MessageCommand::Reply(args) => {
+            // The body is read and checked first, so a refused one writes nothing.
+            let body = read_message_body(Some(args.body), None, std::io::stdin().lock())?;
             let original = read_message(client, &args.reference).await?;
             let recipient = message_reply_recipient(&original, &args.from)?;
             fractal_daemon::model::refuse_person_recipient(&normalize_message_subject(&recipient))
@@ -409,7 +411,7 @@ pub(super) async fn run_message(
                 MessageSendArgs {
                     to: recipient,
                     attach: Vec::new(),
-                    body: Some(read_message_body(Some(args.body), None, std::io::stdin().lock())?),
+                    body: Some(body),
                     body_file: None,
                     subject: args
                         .subject

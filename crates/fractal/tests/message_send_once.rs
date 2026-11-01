@@ -705,6 +705,9 @@ async fn a_dash_body_reads_stdin_and_an_empty_body_sends_nothing() {
     ]).await);
     assert_eq!(content(&sent["subject"]), text);
     let written = message_count(&store);
+    let image = root.path().join("fixture.png");
+    image::RgbaImage::new(1, 1).save(&image).unwrap();
+    let before = store.index().unwrap();
 
     for (input, args) in [
         ("", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "-"]),
@@ -712,12 +715,14 @@ async fn a_dash_body_reads_stdin_and_an_empty_body_sends_nothing() {
         ("", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "  "]),
         ("", vec!["conversations", "send", LEAD, "--from", WORKER, "--body", "-"]),
         ("", vec!["conversations", "send", LEAD, "--from", WORKER, "--body", ""]),
+        ("", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "-", "--attach", image.to_str().unwrap()]),
     ] {
         let refused = st_with_stdin(&socket, input, &args).await;
         assert!(!refused.status.success(), "{args:?}");
         assert!(stderr(&refused).contains("the message body is empty or only whitespace"), "{}", stderr(&refused));
     }
     assert_eq!(message_count(&store), written, "an empty body was sent");
+    assert_eq!(store.index().unwrap(), before, "a refused body wrote durable claims");
     server.abort();
 }
 
