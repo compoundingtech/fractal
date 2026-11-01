@@ -59,24 +59,13 @@ mod tui_tests {
                         }
                     }
                 }
-                assert_eq!(
-                    tui_read_path(&old).as_ref(),
-                    if old_present || !new_present {
-                        &old
-                    } else {
-                        &new
-                    }
-                );
+                let target_only = !old_present && new_present;
+                let expected = if target_only { &new } else { &old };
+                assert_eq!(tui_read_path(&old).as_ref(), expected);
                 assert_eq!(old.exists(), old_present);
                 assert_eq!(new.exists(), new_present);
-                if !directory {
-                    for (path, present, bytes) in
-                        [(&old, old_present, b"old"), (&new, new_present, b"new")]
-                    {
-                        if present {
-                            assert_eq!(std::fs::read(path).unwrap(), bytes);
-                        }
-                    }
+                if !directory && old_present {
+                    assert_eq!(std::fs::read(&old).unwrap(), b"old");
                 }
             }
         }

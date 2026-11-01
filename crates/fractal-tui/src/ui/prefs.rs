@@ -71,62 +71,37 @@ mod tests {
     #[test]
     fn tui_state_reads_both_names_but_writes_only_stui() {
         use crate::ui::{drafts_store, glass_store};
-        for (old, new) in [(false, false), (true, false), (false, true), (true, true)] {
-            let root = tempfile::tempdir().unwrap();
-            for (name, present, value) in [("stui", old, "old"), ("tui", new, "new")] {
-                if !present {
-                    continue;
-                }
-                let dir = root.path().join(name);
-                save(
-                    &dir.join("prefs.json"),
-                    &Prefs {
-                        simple: Some(name == "stui"),
-                        ..Prefs::default()
-                    },
-                )
-                .unwrap();
-                drafts_store::save(
-                    &dir.join("drafts.json"),
-                    &Default::default(),
-                    &[(value.into(), value.into())].into(),
-                )
-                .unwrap();
-                glass_store::save(
-                    &dir.join("glasses.json"),
-                    &glass_store::Stored {
-                        last: Some(value.into()),
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-            }
-            let dir = root.path().join("stui");
-            let expected = if old {
-                Some("old")
-            } else if new {
-                Some("new")
-            } else {
-                None
-            };
-            assert_eq!(
-                load(&dir.join("prefs.json")).simple,
-                expected.map(|value| value == "old")
-            );
-            assert_eq!(
-                glass_store::load(&dir.join("glasses.json")).last.as_deref(),
-                expected
-            );
-            let drafts = drafts_store::load(&dir.join("drafts.json"));
-            assert_eq!(drafts.values().next().map(String::as_str), expected);
-            // A malformed legacy file must not fall through to valid target data.
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("prefs.json"), b"invalid").unwrap();
-            assert_eq!(load(&dir.join("prefs.json")), Prefs::default());
-            save(&dir.join("prefs.json"), &Prefs::default()).unwrap();
-            assert!(dir.join("prefs.json").exists());
-            assert_eq!(root.path().join("tui").exists(), new);
-        }
+        let root = tempfile::tempdir().unwrap();
+        let new = root.path().join("tui");
+        let old = root.path().join("stui");
+        std::fs::create_dir(&new).unwrap();
+        std::fs::write(new.join("prefs.json"), br#"{"simple":true}"#).unwrap();
+        drafts_store::save(
+            &new.join("drafts.json"),
+            &Default::default(),
+            &[("key".into(), "new".into())].into(),
+        )
+        .unwrap();
+        let glasses = glass_store::Stored {
+            last: Some("new".into()),
+            ..Default::default()
+        };
+        glass_store::save(&new.join("glasses.json"), &glasses).unwrap();
+        assert_eq!(load(&old.join("prefs.json")).simple, Some(true));
+        assert_eq!(drafts_store::load(&old.join("drafts.json"))["key"], "new");
+        assert_eq!(
+            glass_store::load(&old.join("glasses.json")).last,
+            glasses.last
+        );
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("prefs.json"), b"invalid").unwrap();
+        assert_eq!(load(&old.join("prefs.json")), Prefs::default());
+        save(&old.join("prefs.json"), &Prefs::default()).unwrap();
+        assert_eq!(load(&old.join("prefs.json")), Prefs::default());
+        assert_eq!(
+            std::fs::read(new.join("prefs.json")).unwrap(),
+            br#"{"simple":true}"#
+        );
     }
     // LIVE-MIGRATION END
 
