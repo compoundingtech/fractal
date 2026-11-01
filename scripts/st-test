@@ -1479,13 +1479,20 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
 
 
 def tree_users(directory, proc='/proc'):
-    """Same-uid processes whose exe, cwd or argv names a path in this tree. Never match sibling path prefixes or this process."""
+    """Same-uid tree users, excluding this process and its ancestors. Normalize path operands before testing the tree boundary."""
     base = os.path.realpath(directory)
-    argument = re.compile(r'(?<![A-Za-z0-9_./-])' + re.escape(base) + r'(?:/|$)')
+    ancestors, pid = set(), os.getpid()
+    while pid > 0 and pid not in ancestors:
+        ancestors.add(pid)
+        try:
+            status = Path(proc, str(pid), 'status').read_text()
+            pid = int(next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:')))
+        except (OSError, StopIteration, ValueError, IndexError):
+            break
     found = []
     with contextlib.suppress(FileNotFoundError):
         for entry in os.scandir(proc):
-            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            if not entry.name.isdigit() or int(entry.name) in ancestors:
                 continue
             try:
                 if entry.stat().st_uid != os.getuid():
@@ -1497,8 +1504,10 @@ def tree_users(directory, proc='/proc'):
                 with contextlib.suppress(OSError):
                     paths.append(os.readlink(Path(entry.path, name)).removesuffix(' (deleted)'))
             with contextlib.suppress(OSError):
-                paths.extend(Path(entry.path, 'cmdline').read_text(errors='surrogateescape').split('\0'))
-            if any(argument.search(path) for path in paths):
+                argv = Path(entry.path, 'cmdline').read_text(errors='surrogateescape').split('\0')
+                paths.extend(arg.split('=', 1)[1] if arg.startswith('--') and '=' in arg else arg for arg in argv)
+            normalized = (os.path.normpath(path) for path in paths if os.path.isabs(path))
+            if any(path == base or path.startswith(base + os.sep) for path in normalized):
                 found.append(int(entry.name))
     return sorted(found)
 

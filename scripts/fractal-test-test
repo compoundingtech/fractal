@@ -266,13 +266,14 @@ class TreeOrphansTest(unittest.TestCase):
         self.proc.mkdir()
         self.tree = Path(self.tmp.name, 'tree-0')
 
-    def process(self, pid, cwd=None, exe=None, argv=()):
+    def process(self, pid, cwd=None, exe=None, argv=(), ppid=0):
         entry = self.proc / str(pid)
         entry.mkdir()
         for name, path in (('cwd', cwd), ('exe', exe)):
             if path is not None:
                 (entry / name).symlink_to(path)
         (entry / 'cmdline').write_text('\0'.join(map(str, argv)))
+        (entry / 'status').write_text(f'PPid:\t{ppid}\n')
         return entry
 
     def test_detection_uses_exe_cwd_and_argv_with_uid_and_path_boundaries(self):
@@ -283,10 +284,25 @@ class TreeOrphansTest(unittest.TestCase):
         self.process(105, argv=[self.tree])
         self.process(os.getpid(), cwd=self.tree)
         self.process(106)  # exiting process with unreadable links and empty argv
+        self.process(107, argv=[f'{self.tree}/../tree-1/driver'])
+        self.process(108, argv=[f'--file={self.tree}/../tree-1/driver'])
         self.assertEqual(st_test.tree_users(self.tree, self.proc), [101, 102, 103, 105])
         with mock.patch.object(st_test.os, 'getuid', return_value=os.getuid() + 1):
             self.assertEqual(st_test.tree_users(self.tree, self.proc), [])
         self.assertEqual(st_test.tree_users(self.tree, self.proc / 'missing'), [])
+
+    def test_ancestors_referencing_the_tree_are_never_pinned_or_signalled(self):
+        self.process(os.getpid(), cwd=self.tree, ppid=101)
+        self.process(101, cwd=self.tree, ppid=102)
+        self.process(102, argv=[f'--tree={self.tree}'], ppid=1)
+        self.process(1, cwd=self.tree)
+        real_users = st_test.tree_users
+        with mock.patch.object(st_test, 'tree_users', lambda tree: real_users(tree, self.proc)), \
+                mock.patch.object(st_test.os, 'pidfd_open') as opened, \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
+            st_test.clear_tree_orphans(self.tree, grace=0)
+        opened.assert_not_called()
+        sent.assert_not_called()
 
     def test_termination_escalates_only_survivors_and_refuses_dirty_tree(self):
         for exits_on in (st_test.signal.SIGTERM, st_test.signal.SIGKILL, None):
