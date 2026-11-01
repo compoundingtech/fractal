@@ -17,8 +17,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         let (Some(_), Some(base)) = (self.seat_admission.lanes, member.capacity) else {
             return Ok(());
         };
-        let wanted = self.wanted_lane(agent, base, work)?;
+        let mut wanted = self.wanted_lane(agent, base, work)?;
         let status = &self.seat_admission.status;
+        let applied = status.state().lane_applied.get(agent).cloned();
+        // Lowering a lane under what it holds would reclaim or kill inside it, the jobs a step
+        // left running included: it comes down once the lane holds less than it will allow.
+        if let Some((_, lane)) = applied.as_ref().filter(|(at, _)| at == incarnation)
+            && wanted.memory < lane.memory
+            && self.runtime.lane_held_memory(&member.runtime_id).is_some_and(|held| held > wanted.memory)
+        {
+            wanted = Capacity { cores: wanted.cores, memory: lane.memory };
+            smallclaims::touched::note_due(now_ms() + 30_000);
+        }
         {
             let mut state = status.state();
             if wanted == base {
@@ -29,7 +39,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         // Each launch starts the slice at the seat's own lane, so what was set before belongs to
         // the incarnation it was set for.
-        let applied = status.state().lane_applied.get(agent).cloned();
         if applied.as_ref().is_some_and(|(at, lane)| at == incarnation && *lane == wanted) {
             return Ok(());
         }
@@ -37,10 +46,19 @@ impl<R: RuntimeControl> Reconciler<R> {
             status.state().lane_applied.insert(agent.to_owned(), (incarnation.to_owned(), wanted));
             return Ok(());
         }
-        if self.runtime.resize_lane(&member.runtime_id, wanted)? {
-            eprintln!("st3: {agent}'s lane is now {wanted} for the steps it holds");
+        match self.runtime.resize_lane(&member.runtime_id, wanted) {
+            Ok(changed) => {
+                if changed {
+                    eprintln!("st3: {agent}'s lane is now {wanted} for the steps it holds");
+                }
+                status.state().lane_applied.insert(agent.to_owned(), (incarnation.to_owned(), wanted));
+            }
+            // The seat's wakes go on; the next pass tries the lane again.
+            Err(error) => {
+                eprintln!("st3: WARN resizing {agent}'s lane to {wanted}: {error:#}");
+                smallclaims::touched::note_due(now_ms() + 30_000);
+            }
         }
-        status.state().lane_applied.insert(agent.to_owned(), (incarnation.to_owned(), wanted));
         Ok(())
     }
 
@@ -75,6 +93,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         let outside = (host.outside)().unwrap_or(0);
         let free = room.memory.saturating_sub(held).saturating_sub(outside);
         if lane.memory <= free {
+            // Counted at once, so another step judged in this pass does not take the same room.
+            let mut state = self.seat_admission.status.state();
+            let raised = state.lane_raised.get(agent).copied().unwrap_or(base);
+            state.lane_raised.insert(agent.to_owned(), Capacity {
+                cores: raised.cores.max(lane.cores),
+                memory: raised.memory.max(lane.memory),
+            });
             return Ok(None);
         }
         smallclaims::touched::note_due(now_ms() + 30_000);

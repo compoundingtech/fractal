@@ -1,11 +1,32 @@
 {
   "version": 1,
   "summary": "A step's capacity raises its seat's lane while the seat holds the step, and a step whose raised lane does not fit its host waits blocked with why",
-  "replay": {"status": "none", "detail": "No claim or projection changes. A waiting step uses the existing blocked state and reason."},
-  "schema": {"status": "none", "detail": "No stored data changes."},
-  "rules": {"status": "changed", "detail": "Where lanes are on, a ready step that declares a capacity and is assigned to one of this host's laned seats becomes ready only when the raised lane fits the host's room for lanes (the same accounting as a seat start); until then it is blocked with a reason starting `step lane`, tried again each pass. A step whose capacity would lower the lane of a seat declared outside its publication waits with that reason too. While a laned seat holds such a step (assigned and ready, or claimed), its live slice is raised with systemctl --user set-property --runtime, and set back when it no longer does; admission counts the raised lane."},
-  "compatibility": {"status": "none", "detail": "Local to each daemon. An older member runs a declared step in its seat's own lane, and an older run owner does not hold it for room."},
-  "downtime": {"status": "none", "detail": "Takes effect when the daemon runs this build on a host with lanes on."},
-  "manual": {"status": "none", "detail": "Nothing to configure."},
-  "recovery": {"status": "none", "detail": "Reverting stops raising lanes for steps; a slice raised at the time keeps its raise until its seat's next launch."}
+  "replay": {
+    "status": "none",
+    "detail": "No claim or projection changes. A waiting step uses the existing blocked state and reason."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored data changes."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Where lanes are on, a ready step that declares a capacity and is assigned to one of this host's laned seats becomes ready only when the raised lane fits the host's room for lanes (the same accounting as a seat start); until then it is blocked with a reason starting `step lane`, tried again each pass. A step whose capacity would lower the lane of a seat declared outside its publication waits with that reason too. While a laned seat holds such a step (assigned and ready, or claimed), its live slice is raised with systemctl --user set-property --runtime, and set back when it no longer does: cores at once, memory once the lane holds less than the seat's own lane allows. Admission counts the raised lane, and counts a raise it admits at once, so two steps judged in one pass do not take the same room."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Local to each daemon. An older member runs a declared step in its seat's own lane. A step this build blocks with a `step lane` reason is tried again by any build that has #4616 (which ships that retry first), so on such a build it is delivered as before, without a raise. A run owner rolled back below #4616 leaves such a step blocked until it upgrades again."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Takes effect when the daemon runs this build on a host with lanes on."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Nothing to configure."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting this change stops raising lanes for steps; a build with #4616 still tries again a step blocked for room, which then becomes ready without a raise. A slice raised at the time keeps its raise until its seat's next launch. Rolling a run owner back below #4616 leaves a step blocked with a `step lane` reason until that host upgrades."
+  }
 }

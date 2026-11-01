@@ -345,6 +345,13 @@ pub fn resize(capacity: Capacity, runtime_id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// What `runtime_id`'s lane holds that the kernel cannot take back (anonymous and kernel memory),
+/// or `None` when it has no lane here to read.
+pub fn held_memory(runtime_id: &str) -> Option<u64> {
+    let stat = std::fs::read_to_string(slice_cgroup(&seat_slice(runtime_id))?.join("memory.stat")).ok()?;
+    Some(crate::host::unreclaimable(&stat))
+}
+
 /// Ends the lane of `runtime_id`, when it has one: everything still running in its slice, the jobs
 /// the seat started included, then the slice's limits. In the background, since the units in it
 /// get their own stop timeouts. For a seat that stopped for good; a restart keeps its lane, and a

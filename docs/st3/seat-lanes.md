@@ -51,7 +51,10 @@ seat's start is: until then it is `blocked` with a reason that starts `step lane
 and is tried again on every pass and at least every 30 seconds. Once delivered, the seat's live
 slice is raised (`systemctl --user set-property --runtime`) while the seat holds the step, ready for
 it or claimed, and set back to the seat's own lane when it no longer does; admission counts the seat
-at the raised lane meanwhile. A relaunch of the harness starts the slice at the seat's own lane, so
+at the raised lane meanwhile. Its cores come back at once, but its memory only once the lane holds
+less than the seat's own lane allows (anonymous and kernel memory), so a job the step left running
+is not reclaimed or killed by the lowering; until then the lane, and what admission counts for it,
+stays up. A resize that fails is logged and tried again on the next pass; the seat's wakes go on. A relaunch of the harness starts the slice at the seat's own lane, so
 the raise is set again for the new launch. A seat that declares no capacity has no slice to raise:
 its steps' capacity is not applied. A step offered to several seats (`available-to`) is not held for
 room, since no one seat holds it until it is claimed; its claimant's lane is raised once it claims it. The

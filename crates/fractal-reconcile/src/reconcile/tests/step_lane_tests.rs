@@ -62,8 +62,16 @@ mission "orchid" state="ready" {
     // A relaunch starts the slice at the seat's own lane, so the raise is set again for it.
     reconciler.hold_step_lanes(&builder, "builder-2", &member, &store.work_for_reconcile(&builder).unwrap()).unwrap();
     assert_eq!(runtime.lanes_resized.lock().unwrap().len(), 2);
-    // Done with the step, the seat goes back to its own lane.
+    // Done with the step, the lane stays up while it still holds more than the seat's own lane
+    // allows (a job the step left running), then goes back to the seat's own.
     store.set_step_state(&build.subject, "completed", None).unwrap();
+    *runtime.lane_held.lock().unwrap() = Some(10 * G);
+    reconciler.hold_step_lanes(&builder, "builder-2", &member, &store.work_for_reconcile(&builder).unwrap()).unwrap();
+    // Its cores come back at once; CPU time is not taken from anything by lowering a quota.
+    let held = Capacity { cores: 2, memory: 16 * G };
+    assert_eq!(runtime.lanes_resized.lock().unwrap().last(), Some(&(member.runtime_id.clone(), held)));
+    assert_eq!(reconciler.seat_admission.status.state().lane_raised.get(&builder), Some(&held));
+    *runtime.lane_held.lock().unwrap() = Some(G);
     reconciler.hold_step_lanes(&builder, "builder-2", &member, &store.work_for_reconcile(&builder).unwrap()).unwrap();
     assert_eq!(runtime.lanes_resized.lock().unwrap().last(), Some(&(member.runtime_id.clone(), member.capacity.unwrap())));
     assert!(reconciler.seat_admission.status.state().lane_raised.get(&builder).is_none());
@@ -129,4 +137,44 @@ mission "orchid" state="ready" {
     assert_eq!(build.status, "blocked");
     assert_eq!(build.blocked_reason.as_deref(),
         Some("step lane for agent/node.builder: a step may only raise its seat's lane: cores=2 is below its 4"));
+}
+
+#[test]
+fn two_steps_judged_in_one_pass_do_not_take_the_same_room() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+    apply_source(&store, r#"version 2
+agent "amber" { workspace "/tmp"; command "true"; capacity cores=2 memory="4G" }
+agent "birch" { workspace "/tmp"; command "true"; capacity cores=2 memory="4G" }"#, "seats");
+    observe(&store, "agent/node.amber", "running");
+    observe(&store, "agent/node.birch", "running");
+    // 54G less 2G outside and each seat's own 4G: room for one 30G raise, not two.
+    let first = reconciler.step_lane_wait(Some(fractal_runtime::Raise { cores: None, memory: Some(30 * G) }), Some("agent/node.amber")).unwrap();
+    assert_eq!(first, None);
+    let second = reconciler.step_lane_wait(Some(fractal_runtime::Raise { cores: None, memory: Some(30 * G) }), Some("agent/node.birch")).unwrap();
+    assert!(second.as_deref().is_some_and(|reason| reason.starts_with("step lane 2 cores/30.0G for agent/node.birch does not fit: 22.0G free")), "{second:?}");
+}
+
+#[test]
+fn the_wake_stage_of_a_seat_raises_its_lane_for_the_step_it_holds() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+    let run = run(&store, r#"version 2
+mission "orchid" state="ready" {
+  goal "Build."
+  completion { when "all-steps-exhausted" }
+  agent "builder" { workspace "/tmp"; command "true"; capacity cores=2 memory="4G" }
+  step "build" { assigned-to "agent/${ST_MISSION_RUN}/builder"; capacity cores=8 memory="16G" }
+}"#);
+    for _ in 0..4 {
+        reconciler.reconcile_once().unwrap();
+    }
+    let builder = format!("agent/{}/builder", run.id);
+    let member = store.desired_subject_with_writer(&builder).unwrap().unwrap().0.member.unwrap();
+    // The stage each pass runs for a live seat, before its wakes.
+    reconciler.reconcile_work_messages(&builder, "builder-1", Some(&member)).unwrap();
+    assert_eq!(*runtime.lanes_resized.lock().unwrap(), [(member.runtime_id.clone(), Capacity { cores: 8, memory: 16 * G })]);
 }
