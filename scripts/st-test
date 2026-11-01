@@ -1387,7 +1387,7 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
     if ticket is None:
         ticket = queue / f'{priority_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
     write_ticket(ticket)
-    waited, told, handing = False, set(), False
+    waited, handing = False, False
     began = time.monotonic() - (time.time_ns() - int(ticket.name.split('.')[1])) / 1e9  # since the ticket was taken, by this copy or the one before
     slot_waited, slot_seen, slot_told = 0.0, None, False
     free_since = {}  # tree number -> when this waiter first saw it free (not the head's, so only watched)
@@ -1416,35 +1416,31 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                     except BlockingIOError:
                         lock.close()
                         continue
-                    # A lease ends with the run that held it, not with every process it started (2026-10-28: a seat restart killed runs
-                    # whose children went on). A free tree that still has processes at work in it is busy: never two writers in one tree.
-                    users = tree_users(root / f'tree-{n}')
-                    if not users and slot_ready is None:
-                        return taken(n, lock)
-                    if not users:
-                        ready, why = slot_ready()
-                        now = time.monotonic()
-                        if slot_seen is not None:
-                            slot_waited += now - slot_seen
-                        if ready or slot_waited >= TREE_SLOT_WAIT_LIMIT:
-                            if not ready:
-                                print(f'fractal-test: taking tree-{n} after {round(slot_waited)}s without a free build slot ({why}; '
-                                      f'TREE_SLOT_WAIT_LIMIT): its build waits for one in the tree', file=sys.stderr, flush=True)
-                            elif slot_told:
-                                print(f'fractal-test: a build slot is free ({why}): taking tree-{n} after {round(slot_waited)}s', file=sys.stderr, flush=True)
-                            return taken(n, lock)
+                    try:
+                        clear_tree_orphans(root / f'tree-{n}')
+                    except BaseException:
                         lock.close()
-                        slot_seen, free_tree = now, True
-                        if not slot_told:
-                            slot_told = True
-                            print(f'fractal-test: tree-{n} is free, but a build started now would wait for a slot ({why}); waiting for one '
-                                  f'without holding a tree (at most {TREE_SLOT_WAIT_LIMIT}s)', file=sys.stderr, flush=True)
-                        break  # every free tree would wait for the same slot
+                        raise
+                    if slot_ready is None:
+                        return taken(n, lock)
+                    ready, why = slot_ready()
+                    now = time.monotonic()
+                    if slot_seen is not None:
+                        slot_waited += now - slot_seen
+                    if ready or slot_waited >= TREE_SLOT_WAIT_LIMIT:
+                        if not ready:
+                            print(f'fractal-test: taking tree-{n} after {round(slot_waited)}s without a free build slot ({why}; '
+                                  f'TREE_SLOT_WAIT_LIMIT): its build waits for one in the tree', file=sys.stderr, flush=True)
+                        elif slot_told:
+                            print(f'fractal-test: a build slot is free ({why}): taking tree-{n} after {round(slot_waited)}s', file=sys.stderr, flush=True)
+                        return taken(n, lock)
                     lock.close()
-                    if n not in told:
-                        told.add(n)
-                        print(f'fractal-test: pool tree tree-{n} is free, but processes {", ".join(map(str, users))} still work in it (left by '
-                              'a run that lost the tree); it is skipped until they end', file=sys.stderr)
+                    slot_seen, free_tree = now, True
+                    if not slot_told:
+                        slot_told = True
+                        print(f'fractal-test: tree-{n} is free, but a build started now would wait for a slot ({why}); waiting for one '
+                              f'without holding a tree (at most {TREE_SLOT_WAIT_LIMIT}s)', file=sys.stderr, flush=True)
+                    break  # every free tree would wait for the same slot
             elif trees:
                 # Not the head of this waiter's order. Normally it leaves free trees to the head. But another waiter may run an older or newer copy of this
                 # order and defer to this one while this one defers to it (an old copy's overdue rank-50 ticket and a new copy's rank-3 one), so nobody
@@ -1458,10 +1454,11 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                         lock.close()
                         free_since.pop(n, None)
                         continue
-                    if tree_users(root / f'tree-{n}'):
+                    try:
+                        clear_tree_orphans(root / f'tree-{n}')
+                    except BaseException:
                         lock.close()
-                        free_since.pop(n, None)
-                        continue
+                        raise
                     now = time.monotonic()
                     seen = free_since.setdefault(n, now)
                     if now - seen >= TREE_FREE_FALLBACK_SECONDS and (slot_ready is None or slot_ready()[0]):
@@ -1481,22 +1478,70 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                 ticket.unlink()
 
 
-def tree_users(directory):
-    """The live processes other than this one whose working directory is in the pool tree `directory`: work a run left there when it lost
-    the tree's lease (its children, a lane's build in a scope of its own). Read from /proc; where there is none, nothing can be seen."""
+def tree_users(directory, proc='/proc'):
+    """Same-uid processes whose exe, cwd or argv names a path in this tree. Never match sibling path prefixes or this process."""
     base = os.path.realpath(directory)
+    argument = re.compile(r'(?<![A-Za-z0-9_./-])' + re.escape(base) + r'(?:/|$)')
     found = []
-    with contextlib.suppress(OSError):
-        for entry in os.scandir('/proc'):
+    with contextlib.suppress(FileNotFoundError):
+        for entry in os.scandir(proc):
             if not entry.name.isdigit() or int(entry.name) == os.getpid():
                 continue
             try:
-                cwd = os.readlink(f'/proc/{entry.name}/cwd')
-            except OSError:
-                continue  # gone, or not ours to read
-            if cwd == base or cwd.startswith(base + os.sep):
+                if entry.stat().st_uid != os.getuid():
+                    continue
+            except FileNotFoundError:
+                continue
+            paths = []
+            for name in ('cwd', 'exe'):
+                with contextlib.suppress(OSError):
+                    paths.append(os.readlink(Path(entry.path, name)).removesuffix(' (deleted)'))
+            with contextlib.suppress(OSError):
+                paths.extend(Path(entry.path, 'cmdline').read_text(errors='surrogateescape').split('\0'))
+            if any(argument.search(path) for path in paths):
                 found.append(int(entry.name))
     return sorted(found)
+
+
+def clear_tree_orphans(directory, grace=2.0):
+    """Called only with the tree flock held: no live run owns processes still using it. Pin identities with pidfds before signalling."""
+    users = tree_users(directory)
+    if not users:
+        return
+    print(f'fractal-test: terminating {len(users)} orphan process(es) in pool tree {directory}', file=sys.stderr, flush=True)
+    handles = {}
+    try:
+        for pid in users:
+            try:
+                fd = os.pidfd_open(pid)
+            except ProcessLookupError:
+                continue
+            handles[pid] = fd
+            # Recheck after pinning: a reused PID must still belong to this tree.
+            if pid not in tree_users(directory):
+                del handles[pid]
+                os.close(fd)
+                continue
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+        deadline = time.monotonic() + grace
+        while tree_users(directory) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        for pid in tree_users(directory):
+            if pid in handles:
+                with contextlib.suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(handles[pid], signal.SIGKILL)
+        deadline = time.monotonic() + grace
+        while tree_users(directory) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        remaining = tree_users(directory)
+        if remaining:
+            raise Failure(f'pool tree {directory} still has orphan processes {remaining} after SIGKILL; refusing to use it')
+    except OSError as error:
+        raise Failure(f'cannot clear orphan processes in pool tree {directory}: {error}; refusing to use it') from error
+    finally:
+        for fd in handles.values():
+            os.close(fd)
 
 
 def clear_stale_index_lock(directory):
