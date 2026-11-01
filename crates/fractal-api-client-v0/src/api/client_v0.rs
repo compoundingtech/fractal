@@ -18861,6 +18861,42 @@ mission "example/zero-run" state="ready" {
         assert_eq!(position.stream_position, 0);
     }
 
+    /// A stream item whose accepted time does not parse shows when it arrived here, not 1970.
+    #[tokio::test]
+    async fn a_stream_item_whose_accepted_time_does_not_parse_shows_when_it_arrived() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "stream-arrived");
+        let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+        let owner = "agent/stream-arrived";
+        let incarnation = "stream-arrived-runtime:i1";
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+            fields: serde_json::from_value(json!({"status":"running", "runtime_id":"stream-arrived-runtime", "incarnation_id":incarnation})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session_id = managed_session_id(owner, incarnation);
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        // Written at a fixed time, so a time read from the claim would show it.
+        shard.set_write_clock_at(1_790_000_000_000).unwrap();
+        let subject = "message/00000000000000e1";
+        shard.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "message.sent".into(), actor: Some("agent/birch".into()),
+            fields: serde_json::from_value(json!({"from":"agent/birch", "to":owner, "session_id":session_id,
+                "status":"sent", "title":"late", "content":"late"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        shard.connection.write()
+            .execute("UPDATE claims SET accepted_at_unix_ms='not-a-time' WHERE subject=?1", [subject])
+            .unwrap();
+        crate::store::messages_shard::stream_reads::record_arrivals(&state.store).unwrap();
+        let (_, page) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
+        let item = page["items"].as_array().unwrap().iter()
+            .find(|item| item["type"] == "message" && item["body"]["message_id"] == subject)
+            .unwrap_or_else(|| panic!("{page}"));
+        let shown = item["timestamp"].as_str().unwrap();
+        assert!(!shown.starts_with("1970") && shown > "2026-09-22", "shown at {shown}, not when it arrived");
+    }
+
     /// Two stream items that arrive at the same graph index in the same millisecond share
     /// sequences. Their shown times differ, so each item's message and content entries sort
     /// together and a phone that pairs a message with the next content entry pairs them right.
