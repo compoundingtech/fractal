@@ -870,14 +870,14 @@ Swift has `usagePeriod(sinceMS:untilMS:)` and TypeScript `usagePeriod({ since_ms
 ### Objectives and budgets
 
 `GET /v1/client/slo` lists every objective and budget, the rows `st slo ls` prints. It requires
-`read.projections`. The value is `SloList { as_of_unix_ms, rows }`. An objective is a target with
+`read.projections`. The value is `SloList { as_of_unix_ms, otel_ui_url?, rows }`; `otel_ui_url` is where a person reads the exported observation history, present only when the daemon's `[observations.otlp]` sets `ui_url` (an http or https address; an older daemon rejects the key, so set it once every member runs this build), and a client shows it as a link beside the rows. An objective is a target with
 windows and an error budget (the daemon's latency, store, CPU and database targets and a paired
 phone's live-share target); a budget is an allowance that resets (each account's weekly and 5-hour
 limit, from the readings `usage.period` reports in `limits`). Every `SloRow` has `id`, `kind`
 (`objective` or `budget`), `about`, `target`, `current`, `window`, `remaining_percent` (what is
 left of the error budget or allowance; null when nothing was measured), `status` (`met`, `missed`,
 `no-data` or `stale`, the last meaning the newest reading is not recent) and `explain`, the row in
-plain words. A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`, and, when the local history
+plain words, and `tone` (`red`, `green`, `yellow` or `quiet`, a string: a client treats a word it does not know as `quiet`; red when an objective missed or a budget has 10% or less left, the one rule the terminal UI colors by; absent from an older daemon). A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`, and, when the local history
 has enough recent readings since its last reset, a forecast: `forecast_used_percent` (its projected use
 when it resets, at the rate of its recent past, at most 100), `forecast_basis_minutes` (how much history
 the rate was fitted to) and, only when the allowance would run out first, `runs_out_at_unix_ms`;
