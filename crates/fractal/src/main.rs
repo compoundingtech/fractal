@@ -4989,7 +4989,31 @@ fn checkpoint_space_gate_capabilities_request(arguments: &[std::ffi::OsString]) 
         .then(|| arguments.len() == 2 && arguments[1] == FLAG)
 }
 
+// arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
+fn deprecated_binary_name(
+    argv0: Option<&std::ffi::OsStr>,
+    suppression: Option<&std::ffi::OsStr>,
+) -> Option<&'static str> {
+    if suppression == Some(std::ffi::OsStr::new("1")) {
+        return None;
+    }
+    match std::path::Path::new(argv0?).file_name()?.to_str()? {
+        "st" => Some("st"),
+        "st3" => Some("st3"),
+        _ => None,
+    }
+}
+
 fn main() -> ExitCode {
+    // CompleteEnv's dynamic callback uses COMPLETE; empty and "0" disable it.
+    let completing = std::env::var_os("COMPLETE")
+        .is_some_and(|value| !value.is_empty() && value != "0");
+    if !completing && let Some(name) = deprecated_binary_name(
+        std::env::args_os().next().as_deref(),
+        std::env::var_os("FRACTAL_SUPPRESS_DEPRECATION").as_deref(),
+    ) {
+        eprintln!("warning: '{name}' is deprecated; use 'fractal' instead. '{name}' will be removed on 2026-11-16.");
+    }
     // Before anything reads the version: clap's `--version`, telemetry, the API, hook receipts, stui.
     use fractal_build_stamp::{CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL};
     fractal_drivers::version::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);

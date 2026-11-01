@@ -7,6 +7,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/st3/message-soak.env
+Environment=FRACTAL_SUPPRESS_DEPRECATION=1
 ExecStart=/usr/bin/bash %h/.local/bin/st3-message-soak
 Restart=always
 RestartSec=10s
