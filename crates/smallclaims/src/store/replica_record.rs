@@ -1,10 +1,39 @@
-//! A single retained record diagnostic, addressed by its primary key.
+//! Retained record diagnostics and narrowly scoped receipt recovery.
 
 use super::*;
 
 const POINT_SQL: &str = "SELECT record_ref, writer, sequence, envelope_hash, position, state, claim_id,
                                subject_hint, kind_hint, error_code, error_message, replacement_claim_id
                         FROM replica_records WHERE record_ref=?1";
+
+/// Requeue retained receipts rejected by the old publication-pending trigger collision once.
+/// Keep diagnostics (including repaired records) intact: ordinary admission remains responsible
+/// for validation, membership, repair and retired-envelope exclusions.
+pub(super) fn recover_publication_pending_collision(connection: &Connection) -> Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    let done: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='publication_pending_collision_requeued')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !done {
+        transaction.execute(
+            "UPDATE replica_envelopes SET receipt_state='pending'
+             WHERE (writer, sequence, envelope_hash) IN (
+                 SELECT writer, sequence, envelope_hash FROM replica_records
+                 WHERE state='invalid' AND error_code='internal'
+                   AND error_message='UNIQUE constraint failed: local_publication_pending.claim_id'
+             ) AND receipt_state<>'pending'",
+            [],
+        )?;
+        transaction.execute(
+            "INSERT INTO meta(key,value) VALUES('publication_pending_collision_requeued','1')",
+            [],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
 
 // Keep the point response identical to the same row in the collection response.
 pub(super) fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReplicaRecordView> {
@@ -51,6 +80,85 @@ mod tests {
                 details.then_some("example.note"), details.then_some("fixture-error"),
                 details.then_some("retained diagnostic"), details.then_some("claim/replacement")],
         ).unwrap();
+    }
+
+    #[test]
+    fn publication_collision_recovery_is_exact_retained_and_one_time_on_reopen() {
+        const COLLISION: &str = "UNIQUE constraint failed: local_publication_pending.claim_id";
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite");
+        {
+            let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
+            let connection = store.connection.write();
+            connection.execute(
+                "DELETE FROM meta WHERE key='publication_pending_collision_requeued'",
+                [],
+            ).unwrap();
+            for (sequence, state, code, message) in [
+                (1, "invalid", "internal", COLLISION),
+                (2, "invalid", "internal", "other internal failure"),
+                (3, "invalid", "internal", "UNIQUE constraint failed: claims.id"),
+                (4, "invalid", "invalid-replicated-claim", COLLISION),
+                (5, "repaired", "internal", COLLISION),
+                (6, "unknown", "internal", COLLISION),
+                (7, "invalid", "internal", "UNIQUE constraint failed: local_publication_pending.claim_id "),
+                (8, "valid", "internal", COLLISION),
+                (9, "invalid", "internal", COLLISION),
+            ] {
+                insert(&connection, &format!("record/{sequence}"), sequence, state, false);
+                connection.execute(
+                    "UPDATE replica_records SET error_code=?1,error_message=?2 WHERE sequence=?3",
+                    params![code, message, sequence],
+                ).unwrap();
+                // Matching diagnostics without a retained envelope cannot resurrect source.
+                if sequence == 9 {
+                    continue;
+                }
+                connection.execute(
+                    "INSERT INTO replica_envelopes(writer,sequence,envelope_hash,
+                         accepted_at_unix_ms,payload,relay,receipt_state,validation_error,
+                         received_at_unix_ms)
+                     VALUES('alder',?1,'envelope','0',X'','relay','degraded','retained error','0')",
+                    [sequence],
+                ).unwrap();
+            }
+        }
+        {
+            let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
+            let connection = store.connection.write();
+            let pending = connection.prepare(
+                "SELECT sequence FROM replica_envelopes WHERE receipt_state='pending' ORDER BY sequence",
+            ).unwrap().query_map([], |row| row.get::<_, i64>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(pending, vec![1]);
+            assert_eq!(
+                connection.query_row("SELECT COUNT(*) FROM replica_envelopes", [], |row| row.get::<_, i64>(0)).unwrap(),
+                8,
+            );
+            let diagnostic = store.replica_record("record/1").unwrap().unwrap();
+            assert_eq!(diagnostic.state, "invalid");
+            assert_eq!(diagnostic.error_message.as_deref(), Some(COLLISION));
+            assert_eq!(store.replica_record("record/5").unwrap().unwrap().state, "repaired");
+            // A later admission failure, even with the same text, must not become an
+            // unlimited internal-error retry on every open.
+            connection.execute(
+                "UPDATE replica_envelopes SET receipt_state='degraded' WHERE sequence=1",
+                [],
+            ).unwrap();
+            connection.execute(
+                "UPDATE replica_records SET error_message=?1 WHERE sequence=2",
+                [COLLISION],
+            ).unwrap();
+        }
+        let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
+        assert_eq!(
+            store.readers.get().query_row(
+                "SELECT COUNT(*) FROM replica_envelopes WHERE receipt_state='pending'",
+                [],
+                |row| row.get::<_, i64>(0),
+            ).unwrap(),
+            0,
+        );
     }
 
     #[test]

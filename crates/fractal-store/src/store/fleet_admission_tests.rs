@@ -313,6 +313,102 @@ fn mixed_builds_keep_signed_unknown_claims_and_project_them_after_upgrade() {
 }
 
 #[test]
+fn unknown_runtime_admission_commits_publication_evidence_after_trigger_upgrade() {
+    for mode in ["registry", "reopen", "recovery"] {
+        let anchor_key = key();
+        let receiver_key = key();
+        let source = node("source", Some(&anchor_key), Some(&anchor_key));
+        admit(&source, "source", &anchor_key, "anchor", None);
+        admit(&source, "receiver", &receiver_key, "invite", None);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receiver.sqlite3");
+        let receiver = Store::open(&path, "receiver").unwrap();
+        receiver.bind_fleet(FLEET).unwrap();
+        receiver.pin_fleet_anchor(anchor_key.public()).unwrap();
+        receiver.set_member_key(Some(receiver_key.clone())).unwrap();
+        sync(&source, &receiver);
+        let mut registry = fractal_schema::registry().clone();
+        registry.claims.remove("runtime.observed").unwrap();
+        receiver.set_claim_registry(registry);
+        let claim = source.append_as_older_build_for_test(
+            &crate::store::publication_facts_tests_shared::input("runtime.observed", "one"),
+        ).unwrap();
+        let admission = sync(&source, &receiver);
+        assert_eq!((admission.unknown, admission.invalid, admission.held), (1, 0, 0));
+        assert!(!admitted(&receiver, &claim));
+        assert_eq!(receiver.readers.get().query_row(
+            "SELECT state FROM replica_records WHERE claim_id=?1",
+            [&claim.id], |row| row.get::<_, String>(0),
+        ).unwrap(), "unknown");
+
+        let receiver = if mode != "registry" {
+            // Reproduce a persisted pre-fix trigger, not just a fresh schema.
+            receiver.connection.write().execute_batch(
+                "DELETE FROM meta WHERE key='publication_pending_conflict_safe_v1';
+                 DROP TRIGGER publication_record_update;
+                 CREATE TRIGGER publication_record_update
+                 AFTER UPDATE OF claim_id,position,state ON replica_records BEGIN
+                     INSERT OR IGNORE INTO local_publication_pending
+                     SELECT id FROM claims WHERE id IN (OLD.claim_id,NEW.claim_id)
+                       AND kind IN ('runtime.observed','runtime.action.succeeded');
+                 END;",
+            ).unwrap();
+            if mode == "recovery" {
+                let connection = receiver.connection.write();
+                connection.execute(
+                    "UPDATE replica_envelopes SET receipt_state='degraded'
+                     WHERE (writer,sequence,envelope_hash) IN
+                       (SELECT writer,sequence,envelope_hash FROM replica_records WHERE claim_id=?1)",
+                    [&claim.id],
+                ).unwrap();
+                connection.execute(
+                    "UPDATE replica_records SET state='invalid',error_code='internal',
+                       error_message='UNIQUE constraint failed: local_publication_pending.claim_id'
+                     WHERE claim_id=?1",
+                    [&claim.id],
+                ).unwrap();
+                connection.execute(
+                    "DELETE FROM meta WHERE key='publication_pending_collision_requeued'", [],
+                ).unwrap();
+            }
+            drop(receiver);
+            let upgraded = Store::open(&path, "receiver").unwrap();
+            upgraded.set_member_key(Some(receiver_key)).unwrap();
+            upgraded
+        } else {
+            receiver.set_claim_registry(fractal_schema::registry().clone());
+            receiver
+        };
+
+        let admission = receiver.validate_replication_backlog().unwrap();
+        assert!(admission.changed);
+        assert_eq!((admission.unknown, admission.invalid, admission.held), (0, 0, 0));
+        assert_eq!(receiver.claim_by_id(&claim.id).unwrap().unwrap().body, claim.body);
+        let committed = || receiver.readers.get().query_row(
+            "SELECT records.state,envelopes.receipt_state,publication.incarnation,
+                    length(publication.sort_key),
+                    (SELECT COUNT(*) FROM local_publication_pending WHERE claim_id=?1)
+             FROM replica_records AS records
+             JOIN replica_envelopes AS envelopes
+               USING(writer,sequence,envelope_hash)
+             JOIN local_publication_claims AS publication ON publication.claim_id=records.claim_id
+             WHERE records.claim_id=?1",
+            [&claim.id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, usize>(3)?, row.get::<_, usize>(4)?)),
+        ).unwrap();
+        let evidence = committed();
+        assert_eq!((&*evidence.0, &*evidence.1, &*evidence.2), ("valid", "validated", "one"));
+        assert!(evidence.3 > 0);
+        assert_eq!(evidence.4, 0);
+        let repeated = receiver.validate_replication_backlog().unwrap();
+        assert!(!repeated.changed);
+        assert_eq!((repeated.unknown, repeated.invalid, repeated.held), (0, 0, 0));
+        assert_eq!(committed(), evidence);
+    }
+}
+
+#[test]
 fn a_member_leaves_once_and_a_second_leave_writes_nothing() {
     let anchor_key = key();
     let laptop_key = key();

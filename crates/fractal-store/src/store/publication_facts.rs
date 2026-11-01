@@ -72,7 +72,8 @@ AFTER UPDATE OF subject,kind,body ON claims WHEN OLD.kind='intent.desired' BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS publication_claim_insert AFTER INSERT ON claims
 WHEN NEW.kind IN ('runtime.observed','runtime.action.succeeded') BEGIN
-    INSERT OR IGNORE INTO local_publication_pending VALUES(NEW.id);
+    INSERT INTO local_publication_pending SELECT NEW.id
+    WHERE NOT EXISTS(SELECT 1 FROM local_publication_pending WHERE claim_id=NEW.id);
 END;
 CREATE TRIGGER IF NOT EXISTS publication_claim_delete AFTER DELETE ON claims BEGIN
     DELETE FROM local_publication_claims WHERE claim_id=OLD.id;
@@ -86,7 +87,8 @@ AFTER UPDATE OF subject,kind,origin,body,accepted_at_unix_ms,batch_id,store_inde
 WHEN OLD.kind IN ('runtime.observed','runtime.action.succeeded')
   OR NEW.kind IN ('runtime.observed','runtime.action.succeeded') BEGIN
     DELETE FROM local_publication_claims WHERE claim_id=OLD.id;
-    INSERT OR IGNORE INTO local_publication_pending VALUES(NEW.id);
+    INSERT INTO local_publication_pending SELECT NEW.id
+    WHERE NOT EXISTS(SELECT 1 FROM local_publication_pending WHERE claim_id=NEW.id);
 END;
 CREATE TRIGGER IF NOT EXISTS publication_local_insert AFTER INSERT ON local_observations
 WHEN NEW.kind='runtime.action.succeeded' AND json_extract(NEW.body,'$.fields.action')='start' BEGIN
@@ -105,22 +107,26 @@ AFTER UPDATE OF subject,kind,body ON local_observations BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS publication_batch_update
 AFTER UPDATE OF origin,replica_sequence ON batches BEGIN
-    INSERT OR IGNORE INTO local_publication_pending
+    INSERT INTO local_publication_pending
     SELECT id FROM claims INDEXED BY claims_batch_index WHERE batch_id=NEW.id
-      AND kind IN ('runtime.observed','runtime.action.succeeded');
+      AND kind IN ('runtime.observed','runtime.action.succeeded')
+      AND NOT EXISTS(SELECT 1 FROM local_publication_pending WHERE claim_id=claims.id);
 END;
 CREATE TRIGGER IF NOT EXISTS publication_record_insert AFTER INSERT ON replica_records BEGIN
-    INSERT OR IGNORE INTO local_publication_pending SELECT id FROM claims WHERE id=NEW.claim_id
-      AND kind IN ('runtime.observed','runtime.action.succeeded');
+    INSERT INTO local_publication_pending SELECT id FROM claims WHERE id=NEW.claim_id
+      AND kind IN ('runtime.observed','runtime.action.succeeded')
+      AND NOT EXISTS(SELECT 1 FROM local_publication_pending WHERE claim_id=claims.id);
 END;
 CREATE TRIGGER IF NOT EXISTS publication_record_delete AFTER DELETE ON replica_records BEGIN
-    INSERT OR IGNORE INTO local_publication_pending SELECT id FROM claims WHERE id=OLD.claim_id
-      AND kind IN ('runtime.observed','runtime.action.succeeded');
+    INSERT INTO local_publication_pending SELECT id FROM claims WHERE id=OLD.claim_id
+      AND kind IN ('runtime.observed','runtime.action.succeeded')
+      AND NOT EXISTS(SELECT 1 FROM local_publication_pending WHERE claim_id=claims.id);
 END;
 CREATE TRIGGER IF NOT EXISTS publication_record_update
 AFTER UPDATE OF claim_id,position,state ON replica_records BEGIN
-    INSERT OR IGNORE INTO local_publication_pending SELECT id FROM claims WHERE id IN (OLD.claim_id,NEW.claim_id)
-      AND kind IN ('runtime.observed','runtime.action.succeeded');
+    INSERT INTO local_publication_pending SELECT id FROM claims WHERE id IN (OLD.claim_id,NEW.claim_id)
+      AND kind IN ('runtime.observed','runtime.action.succeeded')
+      AND NOT EXISTS(SELECT 1 FROM local_publication_pending WHERE claim_id=claims.id);
 END;
 
 "#;
@@ -133,19 +139,43 @@ CREATE TRIGGER IF NOT EXISTS publication_repair_insert AFTER INSERT ON projectio
     WHERE EXISTS(SELECT 1 FROM claims WHERE id=NEW.id AND kind='intent.desired');
 END;
 CREATE TRIGGER IF NOT EXISTS publication_repair_delete AFTER DELETE ON projection_digest_repaired_claims BEGIN
-    INSERT OR IGNORE INTO local_publication_pending SELECT id FROM claims WHERE id=OLD.id
-      AND kind IN ('runtime.observed','runtime.action.succeeded');
+    INSERT INTO local_publication_pending SELECT id FROM claims WHERE id=OLD.id
+      AND kind IN ('runtime.observed','runtime.action.succeeded')
+      AND NOT EXISTS(SELECT 1 FROM local_publication_pending WHERE claim_id=claims.id);
     UPDATE local_publication_launch_epoch SET generation=generation+1
     WHERE EXISTS(SELECT 1 FROM claims WHERE id=OLD.id AND kind='intent.desired');
 END;
 "#;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
+    const TRIGGER_MARKER: &str = "publication_pending_conflict_safe_v1";
+    let installed: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
+        [TRIGGER_MARKER],
+        |row| row.get(0),
+    )?;
+    if !installed {
+        // An outer UPSERT's ABORT policy overrides a trigger's OR IGNORE.
+        // Upgrade persisted triggers once; prevent duplicates before inserting.
+        connection.execute_batch(
+            "DROP TRIGGER IF EXISTS publication_claim_insert;
+             DROP TRIGGER IF EXISTS publication_claim_update;
+             DROP TRIGGER IF EXISTS publication_batch_update;
+             DROP TRIGGER IF EXISTS publication_record_insert;
+             DROP TRIGGER IF EXISTS publication_record_delete;
+             DROP TRIGGER IF EXISTS publication_record_update;
+             DROP TRIGGER IF EXISTS publication_repair_delete;",
+        )?;
+    }
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h59314c13323c owner=fractal_store::store::publication_facts TODO=trace-statement-and-value-representation */ SCHEMA)?;
     let repairs:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='projection_digest_repaired_claims' AND type='table')",[],|row|row.get(0))?;
     if repairs {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h304a1348e3e8 owner=fractal_store::store::publication_facts TODO=trace-statement-and-value-representation */ REPAIR_SCHEMA)?;
     }
+    connection.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES(?1,'1')",
+        [TRIGGER_MARKER],
+    )?;
     Ok(())
 }
 
