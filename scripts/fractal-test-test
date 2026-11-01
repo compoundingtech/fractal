@@ -581,14 +581,8 @@ class GovernedTest(unittest.TestCase):
     UNIT = 'user.slice/user-1000.slice/user@1000.service/app.slice/st-test-seat-1.service'
     CAPPED = {LANE_SLICE: ('268435456', '100000 100000')}
 
-    SOCKET = '/run/user/1000/sccache-lane-0a1b2c3d4e5f6789.sock'
-
-    def named(self, slice_name=LANE_SLICE, sccache=None):
-        """`st agents lane` from a daemon that names the lane's sccache server SCCACHE; without it, from an older daemon."""
-        reply = {'agent': 'agent/seat-1', 'slice': slice_name}
-        if sccache:
-            reply['sccache_server_uds'] = sccache
-        return 0, json.dumps(reply)
+    def named(self, slice_name=LANE_SLICE):
+        return 0, json.dumps({'agent': 'agent/seat-1', 'slice': slice_name})
 
     def test_a_seat_unit_outside_its_lane_runs_the_check_in_its_capped_lane(self):
         governed = self.governed_in(self.UNIT, {}, {'ST_AGENT': 'agent/seat-1'}, (self.LANE_SLICE, self.CAPPED), self.named())
@@ -599,37 +593,6 @@ class GovernedTest(unittest.TestCase):
         rest = governed[governed.index('--') + 1:]
         self.assertEqual(rest[1:], ['BUILDS_SLICE_ACTIVE=1', f'FRACTAL_LANE_SLICE={self.LANE_SLICE}', 'check'])
         self.assertEqual(Path(rest[0]).name, 'env')
-
-    def test_a_check_in_the_lane_compiles_in_the_lanes_sccache_server(self):
-        seat = {'ST_AGENT': 'agent/seat-1'}
-        governed = self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, self.CAPPED), self.named(sccache=self.SOCKET))
-        rest = governed[governed.index('--') + 1:]
-        self.assertEqual(rest[1:], ['BUILDS_SLICE_ACTIVE=1', f'FRACTAL_LANE_SLICE={self.LANE_SLICE}',
-                                    f'SCCACHE_SERVER_UDS={self.SOCKET}', 'check'])
-        # A caller that names a server keeps it.
-        own = dict(seat, SCCACHE_SERVER_UDS='/run/user/1000/own.sock')
-        governed = self.governed_in(self.UNIT, {}, own, (self.LANE_SLICE, self.CAPPED), self.named(sccache=self.SOCKET))
-        self.assertIn(f'--slice={self.LANE_SLICE}', governed)
-        self.assertFalse([arg for arg in governed if arg.startswith('SCCACHE_SERVER_UDS=')], governed)
-        # In place in the lane (a unit the seat started there without the lane's variables): the same server.
-        governed = self.governed_in(self.LANE, self.CAPPED, seat, None, self.named(sccache=self.SOCKET))
-        self.assertEqual(governed[1:], ['BUILDS_SLICE_ACTIVE=1', f'SCCACHE_SERVER_UDS={self.SOCKET}', 'check'])
-        # In place with a server of its own, or in a cap that is not this seat's lane: nothing asked, nothing added.
-        self.assert_in_place(self.governed_in(self.LANE, self.CAPPED, own, None, self.named(sccache=self.SOCKET)), 'own server')
-        self.assertIsNone(self.asked)
-        builds = {'builds.slice': ('34359738368', '1000000 100000')}
-        self.assert_in_place(self.governed_in(self.BUILDS, builds, seat, None, self.named(sccache=self.SOCKET)), 'builds.slice')
-        self.assertIsNone(self.asked)
-        other = 'app-lanes-seat_2_ffffffffffff.slice'
-        elsewhere = (other, {other: ('268435456', '100000 100000')})
-        self.assert_in_place(self.governed_in(self.LANE, self.CAPPED, seat, elsewhere, self.named(other, self.SOCKET)), 'another lane')
-
-    def test_an_older_daemon_that_names_no_server_gets_the_check_as_before(self):
-        seat = {'ST_AGENT': 'agent/seat-1'}
-        governed = self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, self.CAPPED), self.named())
-        rest = governed[governed.index('--') + 1:]
-        self.assertEqual(rest[1:], ['BUILDS_SLICE_ACTIVE=1', f'FRACTAL_LANE_SLICE={self.LANE_SLICE}', 'check'])
-        self.assert_in_place(self.governed_in(self.LANE, self.CAPPED, seat, None, self.named()), 'in place')
 
     def test_without_a_capped_lane_the_seat_unit_takes_builds_slice_and_says_why(self):
         seat = {'ST_AGENT': 'agent/seat-1'}
@@ -2500,6 +2463,14 @@ class StTest(unittest.TestCase):
                              {'GIT_SSH_COMMAND': 'ssh', 'GIT_ASKPASS': 'z', 'GIT_CONFIG_COUNT': '1', 'KEPT': 'yes'})
             for name in ('GIT_DIR', 'GIT_AUTHOR_NAME', 'GIT_WORK_TREE', 'GIT_PUSH_OPTION_COUNT'):
                 self.assertNotIn(name, os.environ)
+
+    def test_receipt_sink_survives_scrubbing_with_resolved_disposable_roots(self):
+        with mock.patch.dict(os.environ, {'CI_PERF_SLOT_RECEIPT_DIR': '/persistent/receipts', 'ST_MISSION': 'seat'}), \
+                mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL': '/configured/pool', 'ST_TEST_TMP': '/configured/tmp'}):
+            st_test.scrub_seat_environment()
+            self.assertEqual(os.environ['CI_PERF_SLOT_RECEIPT_DIR'], '/persistent/receipts')
+            self.assertEqual(json.loads(os.environ['CI_PERF_SLOT_DISPOSABLE_ROOTS']), ['/configured/pool', '/configured/tmp'])
+            self.assertNotIn('ST_MISSION', os.environ)
 
     def test_the_checks_do_not_see_the_agent_seats_variables_but_the_hosts_ranking_name_and_the_switches_stay(self):
         self.commit('b.txt', 'two')

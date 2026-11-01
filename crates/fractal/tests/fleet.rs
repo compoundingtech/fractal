@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use fractal_daemon::client::Client;
-use fractal_daemon::model::ClaimInput;
+use fractal_daemon::model::{ClaimInput, MessagePage, MessageView};
 
 fn st3() -> &'static str {
     test_env!("CARGO_BIN_EXE_fractal-fixture")
@@ -6080,6 +6080,198 @@ async fn members_that_advertise_the_messages_shard_replicate_it_beside_the_graph
     );
 }
 
+/// A member's readers merge what the stream holds with the graph's mail: the recipient's page
+/// and the message read find a stream item that replicated in, and its recipient records it read
+/// on its own member with an offset receipt, writing no lifecycle claim to the graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn readers_find_stream_items_and_record_their_lifecycle_on_the_member() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "8c7b6a5d-4e3f-4210-9a8b-7c6d5e4f3a2b";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut n1 = Node::new(root.path(), "n1");
+    let mut n2 = Node::new(root.path(), "n2");
+    n1.legacy_config(fleet_id, &secret, &[("n2", n2.port)]);
+    n2.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    for node in [&mut n1, &mut n2] {
+        node.start().await;
+    }
+    wait_for_stream_peers(&n1, &["n2"], 60).await;
+    let subject = "message/0000000000000c01";
+    append_stream_item(&n1, subject).await;
+    wait_for_stream_item(&n2, subject, 60).await;
+
+    let page: MessagePage =
+        n2.client().get("/v1/messages/page?to=agent/fleet-reader").await.unwrap();
+    let listed = page.items.iter().find(|item| item.subject == subject)
+        .expect("the page lists the stream item");
+    assert_eq!(listed.content, "through the stream");
+    let read: MessageView =
+        n2.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(read.from, "agent/fleet-sender");
+
+    let _: Value = n2
+        .client()
+        .post(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "delivered", "actor": "agent/fleet-reader", "idempotency_key": "fleet-delivered"}),
+        )
+        .await
+        .unwrap();
+    let receipt: Value = n2
+        .client()
+        .post(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "read", "actor": "agent/fleet-reader", "idempotency_key": "fleet-read"}),
+        )
+        .await
+        .unwrap();
+    assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{receipt}");
+    let read: MessageView =
+        n2.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(read.status, "read");
+    let refused = n2
+        .client()
+        .post::<_, Value>(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "read", "actor": "agent/someone-else", "idempotency_key": "fleet-read-other"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("wrong-message-recipient"), "{refused}");
+    assert!(
+        n2.claims().await.iter().all(|claim| claim["subject"] != subject),
+        "a stream item's lifecycle reached the graph"
+    );
+    // The sender's member keeps its own record: the reader's receipt is not replicated.
+    let sent: MessageView =
+        n1.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(sent.status, "sent");
+}
+
+/// Mail the previous release wrote is read the same after an upgrade in place, and pages list it
+/// before the member's stream items. Rolling back to the release keeps every graph receipt either
+/// build wrote and leaves the stream's local records for the next upgrade.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    // A single-node install, as most upgrades are.
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    let send = |node: &Node, key: &str| {
+        let client = node.client();
+        let key = key.to_owned();
+        async move {
+            let receipt: Value = client
+                .post("/v1/messages", &json!({
+                    "idempotency_key": key, "from": PERSON, "to": "agent/fleet-reader",
+                    "content": format!("graph mail {key}"),
+                }))
+                .await
+                .unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    let read = |node: &Node, subject: &str, key: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+        let key = key.to_owned();
+        async move {
+            // Graph mail is read only once it was delivered.
+            let mut receipt = Value::Null;
+            for lifecycle in ["delivered", "read"] {
+                receipt = client
+                    .post(&path, &json!({
+                        "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                        "idempotency_key": format!("{key}-{lifecycle}"),
+                    }))
+                    .await
+                    .unwrap();
+            }
+            receipt
+        }
+    };
+    let listed = |node: &Node| {
+        let client = node.client();
+        async move {
+            let page: MessagePage = client
+                .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true")
+                .await
+                .unwrap();
+            page.items.into_iter().map(|item| (item.subject, item.status)).collect::<Vec<_>>()
+        }
+    };
+    // The release's own mail: one read, one not.
+    let first = send(&o, "release-first").await;
+    let second = send(&o, "release-second").await;
+    read(&o, &first, "release-read").await;
+    let before = listed(&o).await;
+    assert_eq!(
+        before,
+        [(first.clone(), "read".to_owned()), (second.clone(), "sent".to_owned())]
+    );
+
+    // Upgrade in place: the release's mail reads the same, and a stream item follows it.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+    assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
+    let stream = "message/0000000000000d01";
+    append_stream_item(&o, stream).await;
+    let mut merged = before.clone();
+    merged.push((stream.to_owned(), "sent".to_owned()));
+    assert_eq!(listed(&o).await, merged);
+    // Graph mail keeps its graph receipts; the stream item's receipt stays on the member.
+    let graph_receipt = read(&o, &second, "upgraded-read").await;
+    assert!(!graph_receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{graph_receipt}");
+    let stream_receipt = read(&o, stream, "stream-read").await;
+    assert!(stream_receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{stream_receipt}");
+    merged[1].1 = "read".into();
+    merged[2].1 = "read".into();
+    assert_eq!(listed(&o).await, merged);
+    assert!(o.claims().await.iter().all(|claim| claim["subject"] != stream));
+
+    // Roll back: the release reads every graph receipt and ignores the shard beside it.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    assert_eq!(listed(&o).await, merged[..2]);
+    let third = send(&o, "rolled-back").await;
+    assert_eq!(listed(&o).await.last(), Some(&(third.clone(), "sent".to_owned())));
+
+    // Upgrade again: the stream item kept its local receipt and follows the newer graph mail.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    merged.insert(2, (third, "sent".to_owned()));
+    assert_eq!(listed(&o).await, merged);
+    // Pages by sender, and without a recipient, list the release's mail before the stream's.
+    let page = |query: &'static str| {
+        let client = o.client();
+        async move {
+            let page: MessagePage = client.get(&format!("/v1/messages/page?{query}")).await.unwrap();
+            page.items.into_iter().map(|item| item.subject).collect::<Vec<_>>()
+        }
+    };
+    let subjects = merged.iter().map(|(subject, _)| subject.clone()).collect::<Vec<_>>();
+    assert_eq!(page("include_closed=true").await, subjects);
+    assert_eq!(page("from=agent/fleet-sender&include_closed=true").await, [stream]);
+    assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
+}
+
 /// The previous release never holds the messages shard: it is never dialed for it, and its
 /// graph sync with new members runs as before in both directions. Upgrading it in place opens
 /// the shard and it starts receiving stream items; rolling it back to the release leaves the
@@ -6256,18 +6448,21 @@ async fn wait_for_mirror(node: &Node, what: &str) {
     }
 }
 
-/// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
-/// repository.
+/// Declare a watching seat of `node`'s own, `agent/example/watch-NODE`, and watch fixture/app#12
+/// as it, so `node` polls the repository. Each node's seat is its own: one seat declared on two
+/// nodes is one subscription, which the other node's copy can change while this one plans it.
 fn watch_fixture_app(node: &Node) {
+    let seat = format!("example/watch-{}", node.name);
+    let agent = format!("agent/{seat}");
     let file = node.root.join("seat.kdl");
     fs::write(&file, format!(
-        "version 2\nagent \"example/watch\" {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        "version 2\nagent {seat:?} {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
         node.name, node.root,
     )).unwrap();
     node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
     let output = node
-        .command(&["gh", "watch", "fixture/app#12", "--as", "agent/example/watch"])
-        .env("ST_AGENT", "agent/example/watch")
+        .command(&["gh", "watch", "fixture/app#12", "--as", &agent])
+        .env("ST_AGENT", &agent)
         .output()
         .unwrap();
     assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stderr), node.logs());

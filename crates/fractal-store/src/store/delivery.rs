@@ -120,7 +120,7 @@ impl Store {
         let mut all = Vec::new();
         loop {
             let (items, next) =
-                self.messages_page_inner(recipient, include_closed, after, through, 200, delivery)?;
+                self.messages_page_from(recipient, include_closed, after, through, 200, delivery, false)?;
             all.extend(items);
             match next {
                 Some(cursor) => after = Some(cursor),
@@ -144,9 +144,53 @@ impl Store {
             [subject],
             |row| row.get::<_, Option<u64>>(0),
         )?;
-        created_index
-            .map(|index| self.message_view_cached(&connection, subject, index))
-            .transpose()
+        match created_index {
+            Some(index) => self.message_view_cached(&connection, subject, index).map(Some),
+            // A message the graph has never seen may be a stream item in the messages shard.
+            None if subject.starts_with("message/") => super::messages_shard::message_view(self, subject),
+            None => Ok(None),
+        }
+    }
+
+    /// The stream items a page lists after `after`, in shard order: those whose row matches
+    /// `recipients` and `senders` by any of their names (every item, for a party left out) and
+    /// that `keep` keeps, at most `limit` of them, and whether another follows them. A stream
+    /// item's index is past every graph index, so a page lists the graph's messages first, then
+    /// the stream's. The shard only grows, so a page that has reached the stream misses none
+    /// that arrive.
+    pub fn stream_page_after(
+        &self,
+        recipients: Option<&[String]>,
+        senders: Option<&[String]>,
+        after: u64,
+        limit: usize,
+        mut keep: impl FnMut(&MessageView) -> bool,
+    ) -> Result<(Vec<MessageView>, bool)> {
+        let mut after = after.saturating_sub(super::messages_shard::STREAM_INDEX_BASE);
+        // Filters can drop most rows, so a batch never shrinks to the page: a full graph page
+        // asks only whether one more item follows, and that must not cost a query per row.
+        let batch = limit.saturating_add(1).max(64);
+        let mut output = Vec::new();
+        loop {
+            let rows = super::messages_shard::page(self, recipients, senders, after, batch)?;
+            let exhausted = rows.len() < batch;
+            for (subject, index) in rows {
+                after = index;
+                let Some(message) = super::messages_shard::message_view(self, &subject)? else {
+                    continue;
+                };
+                if !keep(&message) {
+                    continue;
+                }
+                if output.len() == limit {
+                    return Ok((output, true));
+                }
+                output.push(message);
+            }
+            if exhausted {
+                return Ok((output, false));
+            }
+        }
     }
 
     pub fn message_view_cached(
@@ -220,6 +264,11 @@ impl Store {
         Ok(view)
     }
 
+    /// A page of a mailbox, or of every message without a recipient. A page outside delivery
+    /// continues into the messages shard once the graph's messages are listed; delivery pages
+    /// and the unpaged readers, which order and hold graph mail, stay on the graph until they
+    /// learn stream items.
+    /// A cursor past the graph is only good for its own `through`: a new listing starts over.
     pub fn messages_page_inner(
         &self,
         recipient: Option<&str>,
@@ -228,6 +277,20 @@ impl Store {
         through: u64,
         limit: usize,
         delivery: bool,
+    ) -> Result<(Vec<MessageView>, Option<u64>)> {
+        self.messages_page_from(recipient, include_closed, after, through, limit, delivery, !delivery)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn messages_page_from(
+        &self,
+        recipient: Option<&str>,
+        include_closed: bool,
+        after: Option<u64>,
+        through: u64,
+        limit: usize,
+        delivery: bool,
+        stream: bool,
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
         let connection = self.readers.get();
         let recipient = recipient.map(|recipient|
@@ -320,6 +383,8 @@ impl Store {
                 .then(|| subjects.last().map(|(_, index, _)| *index))
                 .flatten();
             let mut output = Vec::new();
+            let listed = subjects.len();
+            let last_listed = subjects.last().map(|(_, index, _)| *index);
             for (subject, created_index, remaining) in subjects {
                 let mut message = self.message_view_cached(&connection, &subject, created_index)?;
                 if message.to == recipient && (include_closed || message.status != "closed") {
@@ -331,7 +396,23 @@ impl Store {
                     output.push(message);
                 }
             }
-            return Ok((output, next_after));
+            // A member without a messages shard pages the graph alone, as before.
+            if has_more || !stream || super::messages_shard::shard(self).is_none() {
+                return Ok((output, next_after));
+            }
+            // The graph's messages are all listed; the page goes on into the stream. A page the
+            // graph filled ends at its last graph message, and the next page starts the stream.
+            let names = recipient_names(&connection, recipient, bare_recipient)?;
+            let (stream, more) = self.stream_page_after(
+                Some(&names),
+                None,
+                after.unwrap_or(0),
+                limit - listed,
+                |message| message.to == recipient && (include_closed || message.status != "closed"),
+            )?;
+            output.extend(stream);
+            let next = stream_cursor(more, &output, last_listed);
+            return Ok((output, next));
         }
         // Every recipient took the indexed path above. Without one, the message index lists the
         // open messages, or all of them, without reading their lifecycle claims.
@@ -358,6 +439,8 @@ impl Store {
         let next_after = has_more
             .then(|| subjects.last().map(|(_, index)| *index))
             .flatten();
+        let listed = subjects.len();
+        let last_listed = subjects.last().map(|(_, index)| *index);
         let mut output = Vec::new();
         for (subject, created_index) in subjects {
             let message = self.message_view_cached(&connection, &subject, created_index)?;
@@ -369,7 +452,20 @@ impl Store {
                 output.push(message);
             }
         }
-        Ok((output, next_after))
+        if has_more || !stream || super::messages_shard::shard(self).is_none() {
+            return Ok((output, next_after));
+        }
+        // Every message, as the graph's are listed: the page goes on into the whole stream.
+        let (stream, more) = self.stream_page_after(
+            None,
+            None,
+            after.unwrap_or(0),
+            limit - listed,
+            |message| include_closed || message.status != "closed",
+        )?;
+        output.extend(stream);
+        let next = stream_cursor(more, &output, last_listed);
+        Ok((output, next))
     }
 
     pub fn subscription_fault_items(&self, as_of: u128) -> Result<Vec<AttentionItemView>> {
@@ -463,6 +559,31 @@ fn subscription_failure_is_current_tx(
     failure: &ClaimRecord,
 ) -> Result<bool> {
     Ok(declaration_stopped_tx(connection, &failure.subject)?.is_none())
+}
+
+/// Where the page after one that went on into the stream starts: past its last listed message,
+/// or past the last graph message it read when it listed none, if another stream item follows.
+pub fn stream_cursor(more: bool, output: &[MessageView], last_graph: Option<u64>) -> Option<u64> {
+    more.then(|| output.last().map(|message| message.created_index).max(last_graph))
+        .flatten()
+}
+
+/// Every name a stream item may address `recipient` by: its identity's names, the name itself,
+/// and its bare form, as a graph message's recipient match accepts them. A sender goes by the
+/// same names.
+pub fn recipient_names(
+    connection: &rusqlite::Connection,
+    recipient: &str,
+    bare_recipient: &str,
+) -> Result<Vec<String>> {
+    let mut names = connection
+        .prepare_cached("SELECT name FROM identity_names WHERE identity=?1")?
+        .query_map([recipient], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    names.extend([recipient.to_owned(), bare_recipient.to_owned()]);
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
 
 #[cfg(test)]

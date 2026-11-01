@@ -188,6 +188,38 @@ async fn st(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
     .unwrap()
 }
 
+/// Run the st CLI as [`st`] does, with `input` on its stdin.
+async fn st_with_stdin(socket: &Path, input: &str, args: &[&str]) -> Output {
+    let binary = test_bin!("fractal-fixture").to_path_buf();
+    let socket = socket.to_path_buf();
+    let input = input.to_owned();
+    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let mut command = fractal_daemon::test_support::command(binary);
+        for (name, _) in std::env::vars_os() {
+            let name = name.to_string_lossy();
+            if name.starts_with("ST_") || name.starts_with("ST3_") {
+                command.env_remove(name.as_ref());
+            }
+        }
+        let mut child = command
+            .arg("--endpoint")
+            .arg(socket)
+            .args(["--daemon-wait", "0"])
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    })
+    .await
+    .unwrap()
+}
+
 fn value(output: &Output) -> Value {
     assert!(
         output.status.success(),
@@ -643,6 +675,54 @@ async fn a_landed_send_succeeds_when_the_projection_cannot_be_refreshed() {
     assert!(warning.contains(&subject), "{warning}");
     assert!(warning.contains("st3-message:v1:"), "{warning}");
     proxy.abort();
+    server.abort();
+}
+
+/// `--body -` reads a reply's text from stdin, as it does a send's, and a body that is empty or
+/// only whitespace is refused before anything is written (#4585).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dash_body_reads_stdin_and_an_empty_body_sends_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let original = value(&st(&socket, &[], &[
+        "--json", "conversations", "send", LEAD, "--from", WORKER, "--body", "Shall I start?",
+    ]).await);
+    let parent = original["subject"].as_str().unwrap();
+    let content = |subject: &Value| store.messages(None, true).unwrap().into_iter()
+        .find(|message| message.subject == subject.as_str().unwrap())
+        .unwrap().content;
+
+    let text = "Long reply\nwith `code` and a second line\n";
+    for (flag, key) in [("--body", "long-flag"), ("-m", "short-flag")] {
+        let reply = value(&st_with_stdin(&socket, text, &[
+            "--json", "conversations", "reply", parent, "--from", LEAD, flag, "-",
+            "--idempotency-key", key,
+        ]).await);
+        assert_eq!(content(&reply["subject"]), text, "{flag}");
+    }
+    let sent = value(&st_with_stdin(&socket, text, &[
+        "--json", "conversations", "send", LEAD, "--from", WORKER, "--body", "-", "--subject", "From stdin",
+    ]).await);
+    assert_eq!(content(&sent["subject"]), text);
+    let written = message_count(&store);
+    let image = root.path().join("fixture.png");
+    image::RgbaImage::new(1, 1).save(&image).unwrap();
+    let before = store.index().unwrap();
+
+    for (input, args) in [
+        ("", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "-"]),
+        (" \n\t\n", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "-"]),
+        ("", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "  "]),
+        ("", vec!["conversations", "send", LEAD, "--from", WORKER, "--body", "-"]),
+        ("", vec!["conversations", "send", LEAD, "--from", WORKER, "--body", ""]),
+        ("", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "-", "--attach", image.to_str().unwrap()]),
+    ] {
+        let refused = st_with_stdin(&socket, input, &args).await;
+        assert!(!refused.status.success(), "{args:?}");
+        assert!(stderr(&refused).contains("the message body is empty or only whitespace"), "{}", stderr(&refused));
+    }
+    assert_eq!(message_count(&store), written, "an empty body was sent");
+    assert_eq!(store.index().unwrap(), before, "a refused body wrote durable claims");
     server.abort();
 }
 

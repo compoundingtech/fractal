@@ -4616,6 +4616,7 @@ struct MessageReadArgs {
 struct MessageReplyArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Message)))]
     reference: String,
+    /// Reply text, or - to read UTF-8 from stdin without trimming.
     #[arg(short = 'm', long)]
     body: String,
     #[arg(long)]
@@ -20123,7 +20124,12 @@ async fn build_transport_observation_index(store: Arc<Store>) {
 /// Background inventory/judgment gets one quiet unit per unit of page wall time.
 /// This bounds duty to 50%.
 const SIGNATURE_BOOTSTRAP_QUIET_PER_WORK: u32 = 1;
-const SIGNATURE_BOOTSTRAP_RETRY: Duration = Duration::from_secs(30);
+/// A test build's in-memory store shares one SQLite cache, where an ordinary read beside the job
+/// is such a transient lock error; there the job tries again after a second, not half a minute.
+const SIGNATURE_BOOTSTRAP_RETRY: Duration =
+    if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(30) };
+/// A verdict drain at least this large is logged; smaller ones are ordinary sealing work.
+const SIGNATURE_BACKLOG_REPORTED: usize = 1_000;
 
 async fn migrate_signature_candidates(store: Arc<Store>) {
     let mut reported_fault = None;
@@ -20161,8 +20167,9 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                     }
                     // A resume or a trust-root change can leave a large verdict backlog. Ordinary
                     // passes take only a slice of it; this job drains the rest at the same duty.
+                    // Each seal hands its claims here too, so a drain of a few verdicts is
+                    // ordinary work: only a backlog worth reporting is logged.
                     if worker.verdicts_pending()? {
-                        stderr_message("st3", format_args!("signature verdict backlog draining"));
                         let drain_started = std::time::Instant::now();
                         let mut judged = 0;
                         while worker.verdicts_pending()? {
@@ -20171,7 +20178,9 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                             if let Some(fault) = worker.signature_migration()?.fault { return Ok(Some(fault)); }
                             std::thread::sleep(loan_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
                         }
-                        stderr_message("st3", format_args!("signature verdict backlog drained: {judged} verdicts in {:.0}s", drain_started.elapsed().as_secs_f64()));
+                        if judged >= SIGNATURE_BACKLOG_REPORTED || drain_started.elapsed() >= Duration::from_secs(5) {
+                            stderr_message("st3", format_args!("signature verdict backlog drained: {judged} verdicts in {:.0}s", drain_started.elapsed().as_secs_f64()));
+                        }
                     }
                     return Ok(None);
                 }
