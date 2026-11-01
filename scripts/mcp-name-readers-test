@@ -3,7 +3,7 @@ import ast
 import pathlib
 import unittest
 
-SCRIPTS = pathlib.Path(__file__).resolve().parents[1]
+SCRIPTS = pathlib.Path(__file__).resolve().parent
 
 
 class McpNameReadersTest(unittest.TestCase):
