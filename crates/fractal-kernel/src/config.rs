@@ -805,17 +805,22 @@ impl Config {
         Ok((config, unknown))
     }
 
-    /// Resolve the daemon's published endpoint when this client lacks its runtime directory.
-    /// Following the link itself would exceed the Unix socket address limit for long state paths.
+    /// Resolve the daemon's published endpoint when this client lacks its runtime directory, or
+    /// when nothing answers at the runtime default and the published link leads to a daemon that
+    /// does (one started with `--socket` elsewhere). Following the link itself would exceed the
+    /// Unix socket address limit for long state paths.
     pub fn client_socket(&self) -> PathBuf {
-        if env::var_os("XDG_RUNTIME_DIR").is_none() && self.socket == state_socket(&self.state_dir)
-        {
-            return fs::read_link(&self.socket)
+        let published = state_socket(&self.state_dir);
+        match env::var_os("XDG_RUNTIME_DIR") {
+            None if self.socket == published => fs::read_link(&self.socket)
                 .ok()
                 .filter(|target| target.is_absolute())
-                .unwrap_or_else(|| self.socket.clone());
+                .unwrap_or_else(|| self.socket.clone()),
+            Some(runtime) if self.socket == Path::new(&runtime).join("st3.sock") => {
+                fractal_client::runtime_or_published_socket(&self.socket, &published)
+            }
+            _ => self.socket.clone(),
         }
-        self.socket.clone()
     }
 
     /// Merge `STATE/fleet/fleet.toml` from the effective state directory. Call it after

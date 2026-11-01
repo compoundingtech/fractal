@@ -52,6 +52,19 @@ Failed measurement records include the failed phase, elapsed time, exit versus t
 exit code when available, stderr tail, and error detail; these diagnostics are also logged
 when the probe runs or a failed record is reused. A changed probe implementation has a new
 cache identity, so deploying a repaired probe does not reuse its predecessor's failed record.
+Early admission errors, including a version timeout before any measurement record exists,
+are retained before scratch cleanup in the agent directory's `driver-diagnostic` file.
+Its optional `attempt` contains the runtime incarnation, phase, outcome, elapsed milliseconds,
+deadline duration, available exit code/signal, sanitized stderr tail (at most 4096 bytes), and
+error chain (at most 2048 bytes). A cache hit that refuses admission is labeled `cachedFailure`;
+it is not described as a newly failed contract child. Diagnostic write failures are logged and
+never change admission's result.
+The current incarnation's detail is carried in the existing `harness.diagnostic` reason and,
+when the driver reports exit before a physical observation is available, in the failed restart
+reason. Legacy diagnostics without an attempt and diagnostics for another incarnation cannot
+be rebound as this launch's error. Older readers ignore the optional local field; upgrade the
+driver and its runtime owner to get the detailed graph/restart reason. Admission deadlines,
+cache lookup order, and exact-build overrides are unchanged.
 A producer that bootstraps missing packages in its empty scratch cache can fail offline even when
 its normal installation works. A person can explicitly allow the exact installed build, on the
 host and as the operating-system user owning the seats, outside an agent seat:

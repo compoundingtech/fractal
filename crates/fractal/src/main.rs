@@ -11781,6 +11781,12 @@ async fn run_doctor(
         }
         print!("{}", render_performance(&report.performance));
     }
+    let timed_out = doctor_cli::timed_out(&report.checks);
+    anyhow::ensure!(
+        timed_out.is_empty(),
+        "fractal doctor could not finish {} in time; the checks that finished are printed",
+        timed_out.join(", ")
+    );
     anyhow::ensure!(report.status != "fail", "fractal doctor found a failed check");
     anyhow::ensure!(
         !args.strict || report.status == "pass",
@@ -14890,6 +14896,23 @@ async fn send_message(
     reject_foreign_agent_actor(&args.from)?;
     let from = normalize_message_subject(&args.from);
     let mut args = args;
+    args.in_reply_to = args
+        .in_reply_to
+        .take()
+        .map(|reference| {
+            // Canonical subjects already belong to the server's validation boundary.
+            if reference.starts_with("message/") {
+                return Ok(reference);
+            }
+            let subject = format!("message/{}", normalize_message_reference(&reference));
+            fractal_schema::registry()
+                .validate_subject(&subject)
+                .with_context(|| {
+                    format!("invalid reply reference {reference:?}; expected message/<id>")
+                })?;
+            Ok::<_, anyhow::Error>(subject)
+        })
+        .transpose()?;
     let body = args.body.take().context("message body is required")?;
     if !args.wake.silent() && args.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG) {
         anyhow::bail!("wake messages cannot carry the silent delivery tag; use --kind silent");
@@ -18069,8 +18092,11 @@ fn admission_diagnostic(
     if failure.stage != Stage::VersionGate {
         return None;
     }
+    // Pre-admission refusals have no provider session claim. Only the diagnostic captured by
+    // this exact runtime can be rebound to its graph incarnation; legacy/unfenced files cannot.
+    let detail = failure.attempt.as_ref()?.explanation(incarnation)?;
     let reason = format!(
-        "{} {} admission failed at {}; native delivery is unavailable. {}",
+        "{} {} admission failed at {}; native delivery is unavailable. {detail}. {}",
         failure.driver.as_str(),
         failure
             .producer_version

@@ -8928,16 +8928,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("restart blocked: {error:#}"),
             );
         }
-        if attempted.is_some() {
+        if let Some(attempt) = attempted.as_ref() {
+            let diagnostic = self.restart_admission_error(&subject.subject, attempt, previous)?;
             return self.fail_requested_restart(
                 subject,
                 member,
                 &request,
-                if channel_recovery::automatic_request(&request) {
+                diagnostic.as_deref().unwrap_or_else(|| if channel_recovery::automatic_request(&request) {
                     "the automatic Claude channel recovery launch was interrupted before its result was recorded"
                 } else {
                     "the explicit launch attempt was interrupted before its result was recorded"
-                },
+                }),
             );
         }
         if request.body["fields"]["fresh_session"] == true {
@@ -8984,6 +8985,44 @@ impl<R: RuntimeControl> Reconciler<R> {
         // that exit at startup after the physical launcher accepted the attempt.
         self.signal_changed();
         Ok(true)
+    }
+
+    /// A driver may publish its refusal and exit before the physical observation arrives.
+    /// Read only this attempt's successor report; an old same-code diagnostic is not its cause.
+    fn restart_admission_error(
+        &self,
+        subject: &str,
+        attempt: &crate::model::ClaimRecord,
+        previous: &str,
+    ) -> Result<Option<String>> {
+        let order = crate::store::claim_log_order;
+        let reports = self.store.claims_for(subject, Some("runtime.observed"))?;
+        let report = reports.iter().rev().find(|claim| {
+            claim.actor.as_deref() == Some(subject)
+                && order(claim) > order(attempt)
+                && claim.body["fields"]["incarnation_id"]
+                    .as_str()
+                    .is_some_and(|inc| !inc.is_empty() && inc != previous)
+        });
+        let Some(report) = report.filter(|claim| claim.body["fields"]["status"] == "exited") else {
+            return Ok(None);
+        };
+        let incarnation = &report.body["fields"]["incarnation_id"];
+        Ok(self
+            .store
+            .harness_diagnostics(subject)?
+            .iter()
+            .rev()
+            .find(|claim| {
+                order(claim) > order(attempt)
+                    && order(claim) < order(report)
+                    && claim.actor.as_deref() == Some(subject)
+                    && claim.body["fields"]["incarnation_id"] == *incarnation
+                    && claim.body["fields"]["code"] == "harness-admission-failed"
+                    && claim.body["fields"]["status"] == "failed"
+            })
+            .and_then(|claim| claim.body["fields"]["reason"].as_str())
+            .map(str::to_owned))
     }
 
     fn fail_requested_restart(
@@ -20082,12 +20121,17 @@ fn observed_field_value(actual: &Value, subject: &str, path: &str) -> Option<Val
             .and_then(|content| serde_json::from_str::<Value>(content).ok())
             .and_then(|content| owned_field(content, path))
     } else {
-        let actual = if subject.starts_with("resource/") {
-            actual.get("facts").unwrap_or(actual)
-        } else {
-            actual
-        };
-        actual_field(actual, path).cloned()
+        // A pinned resource's value is its claim body, an unpinned one's its folded actual.
+        // Either reads a path in its facts first, then in the whole observation, so `state` and
+        // `facts.state` read the same on both (#4557).
+        let facts = subject
+            .starts_with("resource/")
+            .then(|| actual.get("fields").unwrap_or(actual).get("facts"))
+            .flatten();
+        facts
+            .and_then(|facts| actual_field(facts, path))
+            .or_else(|| actual_field(actual, path))
+            .cloned()
     }
 }
 
@@ -20462,6 +20506,7 @@ pub mod tests {
         }
     }
 
+    mod admission_attempt_tests;
     mod channel_recovery;
     mod differential;
     mod fault_dismiss_tests;
@@ -21598,6 +21643,65 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         tokio::time::timeout(Duration::from_secs(10), notify.notified())
             .await
             .expect("a long gate still gets a pass every minute");
+    }
+
+    /// A field gate on a GitHub item reads `state` and `facts.state` alike, whether its subject
+    /// is pinned to a full observation, pinned to a compact item state, or not pinned (#4557).
+    #[test]
+    fn a_field_gate_on_an_item_reads_one_path_pinned_or_not() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        let item = "resource/github/acme/garden/pull-request/12";
+        let facts = serde_json::json!({"number": 12, "state": "closed", "merged": true, "title": "Moss"});
+        let append = |kind: &str, fields: Value| store.append_claim(&ClaimInput {
+            subject: item.into(),
+            kind: kind.into(),
+            actor: None,
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap().id;
+        let observed = append("resource.observed", serde_json::json!({
+            "kind": "vcs.pull-request", "facts": facts, "observer": "observer/repo",
+            "baseline": false, "changed_fields": ["state"],
+        }));
+        let state = append(
+            fractal_schema::github_plugin::ITEM_STATE,
+            Value::Object(fractal_schema::github_plugin::compact_item_state(
+                "vcs.pull-request", "observer/repo", facts.as_object().unwrap(),
+            ).unwrap()),
+        );
+        let stage = GateContext {
+            subject: "step-run/garden/wait".into(),
+            name: "wait".into(),
+            started_at_unix_ms: 0,
+            attempt: 1,
+            run: "mission-run/garden".into(),
+            generation: "run-generation/garden".into(),
+            eval: false,
+        };
+        let outcome = |subject: &str, path: &str| {
+            let gate = GateSpec::Field {
+                name: "closed".into(),
+                path: path.into(),
+                subject: subject.into(),
+                operator: "is".into(),
+                value: serde_json::json!("closed"),
+            };
+            match reconciler.evaluate_gate(&stage, &gate).unwrap() {
+                GateOutcome::Pass => "pass",
+                GateOutcome::Pending => "pending",
+                _ => "other",
+            }
+        };
+        for subject in [item.to_owned(), format!("{item}@{observed}"), format!("{item}@{state}")] {
+            assert_eq!(outcome(&subject, "state"), "pass", "{subject}");
+            assert_eq!(outcome(&subject, "facts.state"), "pass", "{subject}");
+            assert_eq!(outcome(&subject, "status"), "pending", "{subject}");
+        }
     }
 
     #[test]
@@ -41257,9 +41361,18 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4b").await;
         assert_eq!((count("resource.observed"), count("vcs.item.state")), (snapshots, states), "an unchanged look records nothing");
 
+        // A new title alone leaves the compact state as it was, but the issues subscription
+        // delivers it: the message gets a state of its own rather than sharing the close's, and
+        // the observer stays healthy (#4553).
+        poll(plugin.clone(), listing("closed", "Orchid, renamed again", &[1]), "c4c").await;
+        assert_eq!(delivered(), after_close + 1, "a new title is delivered");
+        assert_eq!((count("resource.observed"), count("vcs.item.state")), (snapshots, states + 1));
+        assert_eq!(store.latest_actual_value("observer/repo").unwrap().unwrap()["state"], "healthy");
+        let after_close = delivered();
+
         // Polling moves to a member with no mirror. Its first look finds the title the graph
         // never recorded: that is a baseline, and nothing is delivered twice.
-        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed", &[1]), "c5").await;
+        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed again", &[1]), "c5").await;
         assert_eq!(delivered(), after_close, "a move after compact-only changes delivers nothing twice");
 
         // A filled mirror that missed a look, as when its write failed after the graph write, is
@@ -41267,18 +41380,104 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         let spec = crate::graph::observer_spec(
             &store.desired_subjects_named(&["observer/repo".into()]).unwrap()[0].desired,
         ).unwrap();
-        let facts = listing("closed", "Orchid, renamed", &[1]);
-        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c4b")).is_some());
+        let facts = listing("closed", "Orchid, renamed again", &[1]);
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c4c")).is_some());
         assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c9")).is_none(), "behind the cursor");
 
         // The graph moves on while this mirror and its cursor stay at the earlier look, as when
         // the daemon stops between the graph write and the mirror write. The look from that
         // cursor sees a comment the graph already delivered: it is not delivered again.
         let comments = delivered();
-        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed", &[1, 2]), "c6").await;
+        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed again", &[1, 2]), "c6").await;
         assert_eq!(delivered(), comments + 1, "the second comment is delivered");
-        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1, 2]), "c7").await;
+        poll(plugin.clone(), listing("closed", "Orchid, renamed again", &[1, 2]), "c7").await;
         assert_eq!(delivered(), comments + 1, "a mirror behind the graph delivers it nothing twice");
+    }
+
+    /// In compact mode a look that changes only facts outside the compact state, such as an
+    /// issue's title or a pull request's per-check list, records nothing for an item no
+    /// subscription delivers: its stored state compares equal to the new one (#4553).
+    #[tokio::test]
+    async fn compact_mode_records_no_state_for_an_undelivered_change_outside_it() {
+        struct OnePoll {
+            facts: Value,
+            cursor: String,
+        }
+        impl ResourceProvider for OnePoll {
+            fn observe(&self, _: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts: self.facts.clone(),
+                    cursor: Some(self.cursor.clone()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "pull_requests"; field "comments"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "comments" { observer "observer/repo"; on "comments"; to "agent/example.reader"; delivery "message" }"#,
+            "compact-undelivered",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let listing = |title: &str, checks: &[&str]| serde_json::json!({
+            "repository_id": 7,
+            "issues": [{
+                "node_id": "I_fern", "number": 1, "state": "open", "title": title,
+                "url": "https://github.com/acme/garden/issues/1",
+            }],
+            "pull_requests": [{
+                "node_id": "PR_moss", "number": 2, "state": "open", "title": "Moss", "draft": false,
+                "head": "a1b2c3", "url": "https://github.com/acme/garden/pull/2",
+                "required_checks": {
+                    "state": "pass", "source": "rollup",
+                    "checks": checks.iter().map(|name| serde_json::json!({"name": name, "state": "pass"})).collect::<Vec<_>>(),
+                },
+            }],
+        });
+        let poll = |plugin: Arc<github_plugin_store::GithubPluginStore>, facts: Value, cursor: &str| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
+            .with_resource_provider(Arc::new(OnePoll { facts, cursor: cursor.to_owned() }));
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            let cursor = cursor.to_owned();
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                // A bound for a loaded machine, not an expected duration.
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while plugin.cursor("observer/repo").unwrap() != Some(Some(cursor.clone())) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll keeps its cursor");
+            }
+        };
+        let recorded = || ["resource/repo/issue/1", "resource/repo/pull-request/2"].map(|item| {
+            store.claims_for(item, None).unwrap().into_iter()
+                .filter(|claim| matches!(claim.kind.as_str(), "resource.observed" | "vcs.item.state"))
+                .count()
+        });
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+
+        poll(plugin.clone(), listing("Fern", &["lint"]), "c1").await;
+        let baseline = recorded();
+        assert!(baseline.iter().all(|claims| *claims > 0), "{baseline:?}");
+
+        // A new title and a new passing check: neither item's compact state moved.
+        poll(plugin.clone(), listing("Fern, renamed", &["lint", "fmt"]), "c2").await;
+        assert_eq!(recorded(), baseline, "a change outside the compact state records nothing");
+        assert!(store.messages(Some("agent/example.reader"), true).unwrap().is_empty());
+        assert_eq!(plugin.item("resource/repo", 1).unwrap().unwrap()["facts"]["title"], "Fern, renamed");
     }
 
     /// A mirror refilled from GitHub keeps the comments the graph recorded on each item, which
