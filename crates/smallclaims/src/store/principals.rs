@@ -1041,6 +1041,32 @@ fn advance_requeue_tx(connection: &Connection) -> Result<bool> {
     requeue_pending(connection)
 }
 
+/// The claims with more than 32 candidates, which verdict counts read as held: a handful on any
+/// store, found without reading every count row. Built when the store opens, before it serves:
+/// the build reads every count row, 9.5 s cold on a store of 2.9 million signed claims, and must
+/// not hold the writer under traffic. A build older than this one keeps the index and ignores it.
+pub(crate) fn initialize_held_index(connection: &Connection, fresh: bool) -> Result<()> {
+    let built: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='claim_signature_counts_held_index')",
+        [],
+        |row| row.get(0),
+    )?;
+    if built {
+        return Ok(());
+    }
+    let started = std::time::Instant::now();
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hff57048bd6a3 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claim_signature_counts_held_index ON claim_signature_counts(candidates,claim_id) WHERE candidates>32",
+    )?;
+    if !fresh {
+        eprintln!(
+            "st3: built the index of claims with many signature candidates in {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
 fn requeue_pending(connection: &Connection) -> Result<bool> {
     Ok(connection
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM meta WHERE key>=?1 AND key<?2)")?
@@ -1058,10 +1084,11 @@ fn held_verdict_counts(connection: &Connection) -> Result<BTreeMap<String, u64>>
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
     let held = connection
         .prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h73a97b7132fa owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ "WITH held(claim_id) AS (
+            /* sqlite-large-value: allow-for-now lv-hc03851889cc8 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ "WITH held(claim_id) AS (
                  SELECT claim_id FROM claim_signature_judging WHERE complete=0 OR dirty=1 OR blocked=1
                  UNION
-                 SELECT c.claim_id FROM claim_signature_counts c WHERE c.candidates>32 AND NOT EXISTS(
+                 SELECT c.claim_id FROM claim_signature_counts c INDEXED BY claim_signature_counts_held_index
+                 WHERE c.candidates>32 AND NOT EXISTS(
                      SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=c.claim_id
                      AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates))
              SELECT v.verdict, COUNT(*) FROM held CROSS JOIN claim_verdicts v ON v.claim_id=held.claim_id
@@ -1858,7 +1885,7 @@ impl Store {
         let pending_uncached: u64 = if serving_legacy {
             0
         } else {
-            connection.query_row("SELECT COUNT(*) FROM claim_signature_counts c JOIN claims ON claims.id=c.claim_id LEFT JOIN claim_verdicts v USING(claim_id) WHERE v.claim_id IS NULL AND c.candidates>32",[],|row|row.get(0))?
+            connection.query_row("SELECT COUNT(*) FROM claim_signature_counts c INDEXED BY claim_signature_counts_held_index JOIN claims ON claims.id=c.claim_id LEFT JOIN claim_verdicts v USING(claim_id) WHERE v.claim_id IS NULL AND c.candidates>32",[],|row|row.get(0))?
         };
         if pending_uncached != 0 {
             *counts.entry("held".into()).or_default() += pending_uncached;
@@ -2151,6 +2178,59 @@ pub(crate) fn envelope_signature(
         legacy::stored_signature(connection, claim_id)
     } else {
         stored_signature(connection, claim_id)
+    }
+}
+
+#[cfg(test)]
+mod held_index_tests {
+    use super::*;
+    use rusqlite::StatementStatus;
+
+    /// The held count finds claims with many candidates through their own index: a store whose
+    /// every claim has a count row does not read them all to find the few that are held.
+    #[test]
+    fn held_counts_read_only_the_claims_with_many_candidates() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for i in 0..10_000 {
+                let claim = format!("ordinary/{i:05}");
+                tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,32)", [&claim]).unwrap();
+                tx.execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES (?1,'verified','node')", [&claim]).unwrap();
+            }
+            tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES ('many/1',33),('many/2',40)", []).unwrap();
+            tx.execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES ('many/1','verified','node'),('many/2','rejected','node')", []).unwrap();
+            tx.commit().unwrap();
+        }
+        let connection = store.readers.get();
+        assert_eq!(held_verdict_counts(&connection).unwrap(),
+            BTreeMap::from([("verified".into(), 10_000), ("held".into(), 2)]));
+        let mut statement = connection.prepare(
+            "SELECT COUNT(*) FROM claim_signature_counts c INDEXED BY claim_signature_counts_held_index WHERE c.candidates>32",
+        ).unwrap();
+        assert_eq!(statement.query_row([], |row| row.get::<_, u64>(0)).unwrap(), 2);
+        assert_eq!(statement.get_status(StatementStatus::FullscanStep), 0);
+        assert!(statement.get_status(StatementStatus::VmStep) < 100, "the ordinary claims were read");
+    }
+
+    /// A store opened by a build without the index gets it when this build opens it.
+    #[test]
+    fn a_store_without_the_held_index_gets_it_when_it_opens() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("claims.sqlite3");
+        let exists = |store: &Store| store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='claim_signature_counts_held_index')",
+            [], |row| row.get::<_, bool>(0)).unwrap();
+        {
+            let store = Store::open(&path, "studio", Arc::new(runtime::Plain)).unwrap();
+            assert!(exists(&store));
+            store.connection.write().execute_batch("DROP INDEX claim_signature_counts_held_index").unwrap();
+            assert!(!exists(&store));
+        }
+        let store = Store::open(&path, "studio", Arc::new(runtime::Plain)).unwrap();
+        assert!(exists(&store));
+        store.claim_verdict_counts().unwrap();
     }
 }
 

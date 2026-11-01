@@ -7934,6 +7934,94 @@ pub(crate) fn doctor_timeout(name: &str, elapsed: Duration) -> DoctorCheck {
     }
 }
 
+/// How many of doctor's checks read at once: a third of the read admission limit, at most 4, so
+/// a doctor run never takes the readers a busy daemon's requests need.
+pub(crate) fn doctor_workers(read_limit: usize) -> usize {
+    (read_limit / 3).clamp(1, 4)
+}
+
+type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
+
+/// Doctor's checks in report order. Store checks run together on up to `doctor_workers`
+/// threads, each under its own deadline from the clock, so a slow check costs its own time and
+/// not the time of the checks after it. A worker past the first reads on a reader it is
+/// admitted for, and when the pool admits none the checks run on the caller's thread.
+#[derive(Default)]
+pub(crate) struct DoctorChecks<'a> {
+    slots: Vec<DoctorSlot<'a>>,
+}
+
+enum DoctorSlot<'a> {
+    Done(Vec<DoctorCheck>),
+    Due(&'static str, DoctorWork<'a>),
+}
+
+impl<'a> DoctorChecks<'a> {
+    /// A check whose answer needs no store read.
+    pub(crate) fn push(&mut self, check: DoctorCheck) {
+        self.slots.push(DoctorSlot::Done(vec![check]));
+    }
+
+    /// A store check, run under its own deadline.
+    pub(crate) fn check(
+        &mut self,
+        name: &'static str,
+        work: impl FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a,
+    ) {
+        self.slots.push(DoctorSlot::Due(name, Box::new(work)));
+    }
+
+    pub(crate) fn run(
+        self,
+        clock: &DoctorClock,
+        readers: &smallclaims::sqlite::ReadPool,
+        workers: usize,
+    ) -> Vec<DoctorCheck> {
+        let mut done = Vec::with_capacity(self.slots.len());
+        let mut due = std::collections::VecDeque::new();
+        for (position, slot) in self.slots.into_iter().enumerate() {
+            match slot {
+                DoctorSlot::Done(checks) => done.push(Some(checks)),
+                DoctorSlot::Due(name, work) => {
+                    done.push(None);
+                    due.push_back((position, name, work));
+                }
+            }
+        }
+        let extra = workers.saturating_sub(1).min(due.len().saturating_sub(1));
+        let due = std::sync::Mutex::new(due);
+        let done = std::sync::Mutex::new(done);
+        let drain = &|| loop {
+            let Some((position, name, work)) =
+                due.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop_front()
+            else {
+                return;
+            };
+            let checks = clock.checks(name, work);
+            done.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[position] = Some(checks);
+        };
+        std::thread::scope(|scope| {
+            for _ in 0..extra {
+                let Some(permit) = readers.try_admit_read() else { break };
+                let total = clock.total.clone();
+                scope.spawn(move || {
+                    smallclaims::read_budget::with(Some(total), || {
+                        // A refused loan leaves this worker's checks to the others.
+                        let _ = readers.request_read_with_permit(permit, drain);
+                    })
+                });
+            }
+            drain();
+        });
+        done.into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect()
+    }
+}
+
 /// A timed-out check could not say the daemon is healthy, so it fails the report as a failed
 /// check does.
 pub(crate) fn doctor_status(checks: &[DoctorCheck]) -> &'static str {
@@ -7963,7 +8051,7 @@ fn doctor_report_within(
     clock: &DoctorClock,
     drift: Option<&anyhow::Result<Vec<String>>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
-    let mut checks = Vec::new();
+    let mut checks = DoctorChecks::default();
     let admission = state.seat_admission.snapshot(admission_now());
     checks.push(DoctorCheck {
         name: "seat-admission".into(),
@@ -7973,7 +8061,7 @@ fn doctor_report_within(
             admission["reason"].as_str().unwrap_or("unknown"),
             admission["pendingCount"], admission["oldestPendingAgeSecs"]),
     });
-    checks.extend(clock.checks("harness-access-mode", || {
+    checks.check("harness-access-mode", || {
         let mut checks = Vec::new();
         let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
             .map_err(ApiError::internal)?
@@ -7984,9 +8072,9 @@ fn doctor_report_within(
             message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
         });
         Ok(checks)
-    }));
+    });
 
-    checks.extend(clock.checks("claim-store", || {
+    checks.check("claim-store", || {
         let mut checks = Vec::new();
         match state.store.index() {
             Ok(index) => checks.push(DoctorCheck {
@@ -8001,8 +8089,8 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("claim-signatures", || {
+    });
+    checks.check("claim-signatures", || {
         let mut checks = Vec::new();
         for fault in state.store.signature_state_faults().map_err(ApiError::internal)? {
             checks.push(DoctorCheck {
@@ -8020,8 +8108,8 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("operation-projection", || {
+    });
+    checks.check("operation-projection", || {
         let mut checks = Vec::new();
         let scanned;
         let drift = match drift {
@@ -8049,13 +8137,13 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("operational-repair", || {
+    });
+    checks.check("operational-repair", || {
         Ok(vec![operations::operational_repair_check(
             operations::owner_operational_repair_plan(state),
         )?])
-    }));
-    checks.extend(clock.checks("terminal-exec-gates", || {
+    });
+    checks.check("terminal-exec-gates", || {
         let mut checks = Vec::new();
         checks.push(
             terminal_exec_gates_check(&state.store).unwrap_or_else(|error| DoctorCheck {
@@ -8065,8 +8153,8 @@ fn doctor_report_within(
             }),
         );
         Ok(checks)
-    }));
-    checks.extend(clock.checks("account-limits", || {
+    });
+    checks.check("account-limits", || {
         let mut checks = Vec::new();
         checks.push(
             state
@@ -8079,7 +8167,7 @@ fn doctor_report_within(
                 }),
         );
         Ok(checks)
-    }));
+    });
     match tempfile::Builder::new()
         .prefix(".st3-doctor-")
         .tempfile_in(&state.state_dir)
@@ -8114,15 +8202,15 @@ fn doctor_report_within(
             ),
         },
     });
-    checks.extend(clock.checks("graph-references", || {
+    checks.check("graph-references", || {
         Ok(vec![graph_references_check(
             &state
                 .store
                 .unresolved_graph_references()
                 .map_err(ApiError::bad)?,
         )])
-    }));
-    checks.extend(clock.checks("member-runtimes", || {
+    });
+    checks.check("member-runtimes", || {
         let mut checks = Vec::new();
         let desired = state.store.desired_subjects().map_err(ApiError::internal)?;
         for subject in &desired {
@@ -8383,8 +8471,8 @@ fn doctor_report_within(
             },
         });
         Ok(checks)
-    }));
-    checks.extend(clock.checks("replication", || {
+    });
+    checks.check("replication", || {
         let mut checks = Vec::new();
         match state.store.replication_status_sealed(
             state.fleet_id.is_some(),
@@ -8611,17 +8699,17 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("first-readiness", || {
+    });
+    checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
-    }));
+    });
     if state.fleet_id.is_some() {
         checks.push(crate::replication_worker_build::check(
             &state.state_dir,
             fractal_drivers::version::build_commit(),
         ));
     }
-    checks.extend(clock.checks("idempotency-keys", || {
+    checks.check("idempotency-keys", || {
         let mut checks = Vec::new();
         match state.store.idempotency_conflicts(5) {
             Ok((0, _)) => checks.push(DoctorCheck {
@@ -8655,14 +8743,14 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
+    });
     let (recording, message) = crate::recorder::health(&state.state_dir);
     checks.push(DoctorCheck {
         name: "command-recorder".into(),
         status: if recording { "pass" } else { "warn" }.into(),
         message,
     });
-    checks.extend(clock.checks("message-delivery", || {
+    checks.check("message-delivery", || {
         let mut checks = Vec::new();
         match (
             client_agent_resources(
@@ -8724,8 +8812,8 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("mail-backlog", || {
+    });
+    checks.check("mail-backlog", || {
         let mut checks = Vec::new();
         match mail_backlog::report(&state.store, client_now_ms()) {
             Ok(backlog) => checks.push(DoctorCheck {
@@ -8736,14 +8824,14 @@ fn doctor_report_within(
             Err(error) => checks.push(DoctorCheck { name: "mail-backlog".into(), status: "warn".into(), message: error.to_string() }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("publication-evidence", || {
+    });
+    checks.check("publication-evidence", || {
         Ok(vec![publication_evidence_check(&state.store)])
-    }));
-    checks.extend(clock.checks("held-mail", || {
+    });
+    checks.check("held-mail", || {
         Ok(vec![held_mail_check(&state.store, client_now_ms())])
-    }));
-    checks.extend(clock.checks("delivery-probes", || {
+    });
+    checks.check("delivery-probes", || {
         let mut checks = Vec::new();
         match delivery_probes::check(
             &state.store,
@@ -8759,8 +8847,8 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("fleet-admission", || {
+    });
+    checks.check("fleet-admission", || {
         let mut checks = Vec::new();
         // Once a node pins a fleet anchor, membership decides admission. Report what waits for a
         // signature, what is fenced, and what was admitted before this node knew better.
@@ -8809,8 +8897,8 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("attention", || {
+    });
+    checks.check("attention", || {
         let mut checks = Vec::new();
         let attention_now = client_now_ms();
         let attention = doctor_attention_items(&state.store, attention_now).map_err(ApiError::internal)?;
@@ -8820,7 +8908,8 @@ fn doctor_report_within(
         );
         checks.push(stale_attention_check(&attention, attention_now));
         Ok(checks)
-    }));
+    });
+    let checks = checks.run(clock, &state.store.readers, doctor_workers(smallclaims::sqlite::max_read_workers()));
     let report_status = doctor_status(&checks);
     let mut performance = crate::performance::snapshot();
     performance["seatAdmission"] = admission;
