@@ -26,6 +26,16 @@ def fail(message):
 def option(name, default=None):
     return args[args.index(name) + 1] if name in args else default
 state['calls'].append(args)
+# Scripted GitHub failures: each matches the start of a call, fails it `times` times, and fails
+# either before the call takes effect or after, as a 504 that GitHub answers once it did the work.
+late = None
+for failure in state.get('fail', []):
+    if args[:len(failure['match'])] == failure['match'] and failure['times'] > 0:
+        failure['times'] -= 1
+        if not failure['after']:
+            save(); fail(failure['message'])
+        late = failure['message']
+        break
 if args[:2] == ['release', 'view']:
     if state['release'] is None: fail('release not found')
     print(json.dumps({'assets': [{'name': n} for n in state['release']['assets']]}))
@@ -55,6 +65,8 @@ elif args[0] == 'api':
 else:
     fail('unexpected gh call: %r' % args)
 save()
+if late:
+    fail(late)
 '''
 
 
@@ -103,7 +115,7 @@ with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
     checkout = root / 'checkout'
     (checkout / 'scripts').mkdir(parents=True)
-    for name in ('release-fractal-edge', 'release-fractal-manifest.py'):
+    for name in ('release-fractal-edge', 'release-fractal-manifest.py', 'release_gh.py'):
         shutil.copy(repo / 'scripts' / name, checkout / 'scripts' / name)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
     # Fixture history must not depend on the account's interactive signing agent.
@@ -123,7 +135,8 @@ with tempfile.TemporaryDirectory() as temporary:
     (tools / 'gh').chmod(0o755)
     state = root / 'state.json'
     state.write_text(json.dumps({'release': None, 'tag': None, 'calls': []}))
-    env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', FAKE_GH_STATE=str(state), GH_REPO='example/project')
+    env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', FAKE_GH_STATE=str(state), GH_REPO='example/project',
+               RELEASE_GH_RETRY_DELAYS='0,0,0')
 
     def publish(source, marker, *extra):
         dist = root / f'dist-{marker}'
@@ -213,4 +226,38 @@ with tempfile.TemporaryDirectory() as temporary:
     checkout_tags()
     done = publish(commits[2], 'dry', '--dry-run')
     assert done.returncode == 0 and 'dry run' in done.stdout and len(current()['calls']) == calls, done
-print('Edge release creation, replacement, ordering, stale assets and verification passed')
+
+    # GitHub answers 504 or times out now and then (#4606). Each case starts from no edge release.
+    timeout = 'HTTP 504: We couldn\'t respond to your request in time. (https://api.github.com/repos/example/project/releases)'
+    def from_scratch(*failures, release=None, tag=None):
+        state.write_text(json.dumps({'release': release, 'tag': tag, 'calls': [], 'fail': [
+            {'match': match, 'after': after, 'times': times, 'message': message}
+            for match, after, times, message in failures]}))
+        return publish(commits[2], f'retry-{len(list(root.glob("dist-retry-*")))}')
+    def calls(prefix):
+        return sum(1 for call in current()['calls'] if call[:len(prefix)] == prefix)
+    def complete():
+        release = current()
+        return release['tag'] == commits[2] and len(release['release']['assets']) == 10
+
+    # A create that made the release and then timed out continues from it, never "already exists".
+    done = from_scratch((['release', 'create'], True, 1, timeout))
+    assert done.returncode == 0 and complete() and calls(['release', 'create']) == 1, (done, current())
+    assert 'took effect before it failed' in done.stderr, done.stderr
+    # A create that timed out before it took effect is made again.
+    done = from_scratch((['release', 'create'], False, 1, timeout))
+    assert done.returncode == 0 and complete() and calls(['release', 'create']) == 2, (done, current())
+    # A read that times out is read again, not taken for "no release".
+    done = from_scratch((['release', 'view'], False, 1, 'Get "https://api.github.com/...": net/http: TLS handshake timeout'))
+    assert done.returncode == 0 and complete(), (done, current())
+    # A tag move that took effect and then timed out is not repeated.
+    older = {'assets': {}, 'prerelease': True, 'latest': False, 'notes': '', 'title': 'older'}
+    done = from_scratch((['api', '--method', 'PATCH'], True, 1, timeout), release=older, tag=commits[1])
+    assert done.returncode == 0 and complete() and calls(['api', '--method', 'PATCH']) == 1, (done, current())
+    # Anything but a 5xx or a timeout fails at once.
+    done = from_scratch((['release', 'edit'], False, 1, 'HTTP 422: Validation Failed'))
+    assert done.returncode != 0 and calls(['release', 'edit']) == 1 and '422' in done.stderr, (done, current())
+    # A 504 that does not clear fails after the retries: one call and three more.
+    done = from_scratch((['release', 'edit'], False, 99, timeout))
+    assert done.returncode != 0 and calls(['release', 'edit']) == 4 and '504' in done.stderr, (done, current())
+print('Edge release creation, replacement, ordering, stale assets, retries and verification passed')

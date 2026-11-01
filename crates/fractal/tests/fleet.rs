@@ -6411,10 +6411,11 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     assert_eq!(this_build["message"]["subject"], last, "this build's CLI on the release reads the graph: {this_build}");
 }
 
-/// The previous release never holds the messages shard: it is never dialed for it, and its
-/// graph sync with new members runs as before in both directions. Upgrading it in place opens
-/// the shard and it starts receiving stream items; rolling it back to the release leaves the
-/// shard file in place, keeps graph sync working, and new members stop dialing it.
+/// When the previous release predates the messages shard, it is never dialed for it.
+/// Upgrading it in place opens the shard; rolling it back leaves the shard file in place
+/// and new members stop dialing it. If the release already opens the shard, only these
+/// transition-specific expectations are skipped. Both baselines must retain history,
+/// receive stream items after upgrade, and keep graph sync working without invalid records.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place() {
@@ -6447,8 +6448,15 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
     for node in [&o, &n1] {
         wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
     }
-    assert!(!o.state_dir().join("shards").exists(), "the release opens no shard");
-    assert!(stream_peers(&n1).await.is_empty(), "the release does not advertise the shard");
+    let release_opens_shard = o.state_dir().join("shards").exists();
+    if release_opens_shard {
+        eprintln!(
+            "baseline release already opens shards/: the messages-shard transition is behind \
+             this fleet; skipping only the no-shard/no-advertisement and rollback transition assertions"
+        );
+    } else {
+        assert!(stream_peers(&n1).await.is_empty(), "the release does not advertise the shard");
+    }
     append_stream_item(&n1, "message/0000000000000b01").await;
     o.note("o-mixed").await;
     n1.note("n1-mixed").await;
@@ -6469,12 +6477,14 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
     wait_for_stream_peers(&n1, &["o"], 90).await;
     wait_for_stream_item(&o, "message/0000000000000b01", 90).await;
 
-    // Roll it back to the release: the shard file stays, and the release ignores it.
+    // Roll back in place; a release predating the shard leaves it alone and stops advertising it.
     o.stop();
     o.binary = old;
     o.start().await;
-    assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
-    wait_for_stream_peers(&n1, &[], 90).await;
+    if !release_opens_shard {
+        assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+        wait_for_stream_peers(&n1, &[], 90).await;
+    }
     o.note("o-rolled-back").await;
     n1.note("n1-after-rollback").await;
     expected.extend([

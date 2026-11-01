@@ -20,6 +20,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from release_gh import gh as gh_call, missing  # noqa: E402
+
 TAG = 'edge'
 SHA = re.compile(r'[0-9a-f]{40}')
 LISTED = 30
@@ -34,6 +37,11 @@ def run(*cmd, cwd=None, check=True):
 
 def say(message):
     print(f'release-fractal-edge: {message}', flush=True)
+
+
+def gh(*args, **options):
+    """A GitHub call that survives a 5xx or a timeout (scripts/release_gh.py)."""
+    return gh_call(*args, step='release-fractal-edge', **options)
 
 
 def current_edge(repo):
@@ -83,20 +91,26 @@ def assets_in(dist):
 
 
 def release_assets(repository):
-    done = run('gh', 'release', 'view', TAG, '--repo', repository, '--json', 'assets', check=False)
-    if done.returncode != 0:
+    """The edge release's asset names, or None when there is no edge release. Any other failure,
+    after retries, ends the step: an unreadable release is not an absent one."""
+    done = gh('release', 'view', TAG, '--repo', repository, '--json', 'assets', check=False)
+    if missing(done):
         return None
+    if done.returncode != 0:
+        raise SystemExit(f'release-fractal-edge: reading the {TAG} release failed: {done.stderr.strip()}')
     return {a['name'] for a in json.loads(done.stdout)['assets']}
 
 
 def tag_commit(repository):
-    done = run('gh', 'api', f'repos/{repository}/git/ref/tags/{TAG}', check=False)
-    if done.returncode != 0:
+    done = gh('api', f'repos/{repository}/git/ref/tags/{TAG}', check=False)
+    if missing(done):
         return None
+    if done.returncode != 0:
+        raise SystemExit(f'release-fractal-edge: reading the {TAG} tag failed: {done.stderr.strip()}')
     ref = json.loads(done.stdout)['object']
     if ref['type'] == 'commit':
         return ref['sha']
-    return json.loads(run('gh', 'api', f'repos/{repository}/git/tags/{ref["sha"]}').stdout)['object']['sha']
+    return json.loads(gh('api', f'repos/{repository}/git/tags/{ref["sha"]}').stdout)['object']['sha']
 
 
 def main():
@@ -133,19 +147,26 @@ def main():
     title = f'Fractal edge ({args.source[:9]})'
     existing = release_assets(repository)
     if existing is None:
-        run('gh', 'release', 'create', TAG, '--repo', repository, '--target', args.source, '--prerelease',
-            '--latest=false', '--title', title, '--notes-file', str(notes_file), *files)
+        # A create that timed out may still have made the release, with some of its assets.
+        gh('release', 'create', TAG, '--repo', repository, '--target', args.source, '--prerelease',
+           '--latest=false', '--title', title, '--notes-file', str(notes_file), *files,
+           done=lambda: release_assets(repository) is not None)
         say(f'created the {TAG} pre-release')
+        present = release_assets(repository) or set()
+        lacking = [str(dist / n) for n in names if n not in present]
+        if lacking:
+            gh('release', 'upload', TAG, '--repo', repository, '--clobber', *lacking)
     else:
         # Same names replace in place; anything else is a leftover of an older build.
-        run('gh', 'release', 'upload', TAG, '--repo', repository, '--clobber', *files)
+        gh('release', 'upload', TAG, '--repo', repository, '--clobber', *files)
         for stale in sorted(existing - set(names)):
-            run('gh', 'release', 'delete-asset', TAG, stale, '--repo', repository, '--yes')
+            gh('release', 'delete-asset', TAG, stale, '--repo', repository, '--yes',
+               done=lambda stale=stale: stale not in (release_assets(repository) or set()))
     if tag_commit(repository) != args.source:
-        run('gh', 'api', '--method', 'PATCH', f'repos/{repository}/git/refs/tags/{TAG}',
-            '-f', f'sha={args.source}', '-F', 'force=true')
-    run('gh', 'release', 'edit', TAG, '--repo', repository, '--prerelease', '--latest=false', '--title', title,
-        '--notes-file', str(notes_file))
+        gh('api', '--method', 'PATCH', f'repos/{repository}/git/refs/tags/{TAG}',
+           '-f', f'sha={args.source}', '-F', 'force=true', done=lambda: tag_commit(repository) == args.source)
+    gh('release', 'edit', TAG, '--repo', repository, '--prerelease', '--latest=false', '--title', title,
+       '--notes-file', str(notes_file))
 
     final = tag_commit(repository)
     published = release_assets(repository)
