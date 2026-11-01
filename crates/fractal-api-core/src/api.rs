@@ -7945,7 +7945,8 @@ type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + S
 /// Doctor's checks in report order. Store checks run together on up to `doctor_workers`
 /// threads, each under its own deadline from the clock, so a slow check costs its own time and
 /// not the time of the checks after it. A worker past the first reads on a reader it is
-/// admitted for, and when the pool admits none the checks run on the caller's thread.
+/// admitted for, and when the pool admits none the checks run on the caller's thread. A check
+/// therefore must not need the Tokio runtime or the caller's thread-locals beyond its read budget.
 #[derive(Default)]
 pub(crate) struct DoctorChecks<'a> {
     slots: Vec<DoctorSlot<'a>>,

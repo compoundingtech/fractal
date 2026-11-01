@@ -1045,6 +1045,8 @@ fn advance_requeue_tx(connection: &Connection) -> Result<bool> {
 /// store, found without reading every count row. Built when the store opens, before it serves:
 /// the build reads every count row, 9.5 s cold on a store of 2.9 million signed claims, and must
 /// not hold the writer under traffic. A build older than this one keeps the index and ignores it.
+/// The held counts name it (`INDEXED BY`), so a connection to a store this build never opened
+/// fails to count rather than falling back to reading every row.
 pub(crate) fn initialize_held_index(connection: &Connection, fresh: bool) -> Result<()> {
     let built: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='claim_signature_counts_held_index')",
