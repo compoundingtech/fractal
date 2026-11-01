@@ -24,7 +24,7 @@ export const recordedWorld = (script: RecordingScript, rows: readonly RecordingR
     narrative: 'Scratch recorder transport fidelity proof.', seed: 1,
     cast: { project: script.agent.split('/')[2] ?? 'example', agents: [{ key: 'builder', role: 'builder' }], hosts: 1, people: 1, missions: [] },
     slices: () => imported.slices, recording: imported.recording,
-  }, { roster: {}, details: {}, attention: {}, conversation: {}, terminal: {}, sync: {} }, now)
+  }, { roster: {}, details: {}, attention: {}, conversation: {}, terminal: {}, sync: {}, objectives: {} }, now)
 }
 
 export const loadRecordedWorld = (name: string, now = ANCHOR_MS): RecordedProof => {

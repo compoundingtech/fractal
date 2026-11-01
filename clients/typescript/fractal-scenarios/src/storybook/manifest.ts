@@ -174,5 +174,11 @@ export const defaultVariants: Readonly<Record<SliceKind, readonly string[]>> = {
     "page-cursor-expired",
     "evicted",
     "progress-absent"
+  ],
+  "objectives": [
+    "default",
+    "none",
+    "loading",
+    "unsafe-link"
   ]
 }

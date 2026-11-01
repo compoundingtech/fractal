@@ -58,7 +58,7 @@ describe('rebase', () => {
         ok(typeof before === 'number')
         return { pointer, codec, before }
       })
-      return { id, kind, file, instants }
+      return { id, kind, file, instants, anchoredObjectives: world.slices.objectives.state }
     })
   })
 
@@ -67,10 +67,25 @@ describe('rebase', () => {
 
   const checkRebase = (now: number) => {
     const worlds = new Map(ordinaryCatalog.map(({ id }) => [id, loadWorld(id, { now })]))
-    for (const { id, kind, file, instants } of files) {
+    for (const { id, kind, file, instants, anchoredObjectives } of files) {
       const rebased = rebase({ state: file.state, timeline: file.timeline }, file.times, ANCHOR, now)
       const direct = worlds.get(id)!.slices[kind]
-      deepStrictEqual(rebased, { state: direct.state, timeline: direct.timeline })
+      if (kind === 'objectives') {
+        // Native SLO/usage numbers have no time codecs in the served schema. Readers must
+        // preserve opaque wire fields; TS regeneration still uses the requested world's clock.
+        deepStrictEqual(file.times, [])
+        deepStrictEqual(rebased, { state: file.state, timeline: file.timeline })
+        const generated = worlds.get(id)!.slices.objectives.state
+        strictEqual(generated.list.as_of_unix_ms - anchoredObjectives.list.as_of_unix_ms, now - ANCHOR_MS)
+        strictEqual(generated.usage.since_ms - anchoredObjectives.usage.since_ms, now - ANCHOR_MS)
+        strictEqual(generated.usage.until_ms - anchoredObjectives.usage.until_ms, now - ANCHOR_MS)
+        generated.histories.forEach((history, index) => {
+          strictEqual(history.since_ms - anchoredObjectives.histories[index]!.since_ms, now - ANCHOR_MS)
+          strictEqual(history.until_ms - anchoredObjectives.histories[index]!.until_ms, now - ANCHOR_MS)
+        })
+      } else {
+        deepStrictEqual(rebased, { state: direct.state, timeline: direct.timeline })
+      }
       for (const { pointer, codec, before } of instants) {
         const after = read(rebased, pointer)
         if (codec === 'timestamp') {

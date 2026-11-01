@@ -50,6 +50,7 @@
         "attention": "fleet-mid-refactor/attention.json",
         "conversation": "fleet-mid-refactor/conversation.json",
         "details": "fleet-mid-refactor/details.json",
+        "objectives": "fleet-mid-refactor/objectives.json",
         "roster": "fleet-mid-refactor/roster.json",
         "sync": "fleet-mid-refactor/sync.json",
         "terminal": "fleet-mid-refactor/terminal.json"
@@ -84,6 +85,7 @@
         "attention": "ci-failing-fix/attention.json",
         "conversation": "ci-failing-fix/conversation.json",
         "details": "ci-failing-fix/details.json",
+        "objectives": "ci-failing-fix/objectives.json",
         "roster": "ci-failing-fix/roster.json",
         "sync": "ci-failing-fix/sync.json",
         "terminal": "ci-failing-fix/terminal.json"
@@ -118,6 +120,7 @@
         "attention": "long-debug-rabbit-hole/attention.json",
         "conversation": "long-debug-rabbit-hole/conversation.json",
         "details": "long-debug-rabbit-hole/details.json",
+        "objectives": "long-debug-rabbit-hole/objectives.json",
         "roster": "long-debug-rabbit-hole/roster.json",
         "sync": "long-debug-rabbit-hole/sync.json",
         "terminal": "long-debug-rabbit-hole/terminal.json"
@@ -152,6 +155,7 @@
         "attention": "first-run-onboarding/attention.json",
         "conversation": "first-run-onboarding/conversation.json",
         "details": "first-run-onboarding/details.json",
+        "objectives": "first-run-onboarding/objectives.json",
         "roster": "first-run-onboarding/roster.json",
         "sync": "first-run-onboarding/sync.json",
         "terminal": "first-run-onboarding/terminal.json"
@@ -190,6 +194,7 @@
         "attention": "merge-conflict-standoff/attention.json",
         "conversation": "merge-conflict-standoff/conversation.json",
         "details": "merge-conflict-standoff/details.json",
+        "objectives": "merge-conflict-standoff/objectives.json",
         "roster": "merge-conflict-standoff/roster.json",
         "sync": "merge-conflict-standoff/sync.json",
         "terminal": "merge-conflict-standoff/terminal.json"
@@ -232,6 +237,7 @@
         "attention": "offline-reconnect-storm/attention.json",
         "conversation": "offline-reconnect-storm/conversation.json",
         "details": "offline-reconnect-storm/details.json",
+        "objectives": "offline-reconnect-storm/objectives.json",
         "roster": "offline-reconnect-storm/roster.json",
         "sync": "offline-reconnect-storm/sync.json",
         "terminal": "offline-reconnect-storm/terminal.json"
@@ -278,6 +284,7 @@
         "attention": "release-candidate-polish/attention.json",
         "conversation": "release-candidate-polish/conversation.json",
         "details": "release-candidate-polish/details.json",
+        "objectives": "release-candidate-polish/objectives.json",
         "roster": "release-candidate-polish/roster.json",
         "sync": "release-candidate-polish/sync.json",
         "terminal": "release-candidate-polish/terminal.json"
@@ -312,6 +319,7 @@
         "attention": "transcript-families/attention.json",
         "conversation": "transcript-families/conversation.json",
         "details": "transcript-families/details.json",
+        "objectives": "transcript-families/objectives.json",
         "roster": "transcript-families/roster.json",
         "sync": "transcript-families/sync.json",
         "terminal": "transcript-families/terminal.json"
@@ -366,6 +374,7 @@
         "attention": "empty/attention.json",
         "conversation": "empty/conversation.json",
         "details": "empty/details.json",
+        "objectives": "empty/objectives.json",
         "roster": "empty/roster.json",
         "sync": "empty/sync.json",
         "terminal": "empty/terminal.json"
@@ -420,6 +429,7 @@
         "attention": "loading/attention.json",
         "conversation": "loading/conversation.json",
         "details": "loading/details.json",
+        "objectives": "loading/objectives.json",
         "roster": "loading/roster.json",
         "sync": "loading/sync.json",
         "terminal": "loading/terminal.json"
@@ -462,6 +472,7 @@
         "attention": "unknown-fields/attention.json",
         "conversation": "unknown-fields/conversation.json",
         "details": "unknown-fields/details.json",
+        "objectives": "unknown-fields/objectives.json",
         "roster": "unknown-fields/roster.json",
         "sync": "unknown-fields/sync.json",
         "terminal": "unknown-fields/terminal.json"
@@ -516,6 +527,7 @@
         "attention": "failed-sync-socket-dropped/attention.json",
         "conversation": "failed-sync-socket-dropped/conversation.json",
         "details": "failed-sync-socket-dropped/details.json",
+        "objectives": "failed-sync-socket-dropped/objectives.json",
         "roster": "failed-sync-socket-dropped/roster.json",
         "sync": "failed-sync-socket-dropped/sync.json",
         "terminal": "failed-sync-socket-dropped/terminal.json"
@@ -570,6 +582,7 @@
         "attention": "failed-sync-open-fail/attention.json",
         "conversation": "failed-sync-open-fail/conversation.json",
         "details": "failed-sync-open-fail/details.json",
+        "objectives": "failed-sync-open-fail/objectives.json",
         "roster": "failed-sync-open-fail/roster.json",
         "sync": "failed-sync-open-fail/sync.json",
         "terminal": "failed-sync-open-fail/terminal.json"
@@ -624,6 +637,7 @@
         "attention": "failed-sync-resync-coded/attention.json",
         "conversation": "failed-sync-resync-coded/conversation.json",
         "details": "failed-sync-resync-coded/details.json",
+        "objectives": "failed-sync-resync-coded/objectives.json",
         "roster": "failed-sync-resync-coded/roster.json",
         "sync": "failed-sync-resync-coded/sync.json",
         "terminal": "failed-sync-resync-coded/terminal.json"
@@ -678,6 +692,7 @@
         "attention": "failed-sync-forbidden/attention.json",
         "conversation": "failed-sync-forbidden/conversation.json",
         "details": "failed-sync-forbidden/details.json",
+        "objectives": "failed-sync-forbidden/objectives.json",
         "roster": "failed-sync-forbidden/roster.json",
         "sync": "failed-sync-forbidden/sync.json",
         "terminal": "failed-sync-forbidden/terminal.json"
@@ -732,6 +747,7 @@
         "attention": "failed-sync-non-client-response/attention.json",
         "conversation": "failed-sync-non-client-response/conversation.json",
         "details": "failed-sync-non-client-response/details.json",
+        "objectives": "failed-sync-non-client-response/objectives.json",
         "roster": "failed-sync-non-client-response/roster.json",
         "sync": "failed-sync-non-client-response/sync.json",
         "terminal": "failed-sync-non-client-response/terminal.json"
@@ -786,6 +802,7 @@
         "attention": "failed-sync-subscription-error/attention.json",
         "conversation": "failed-sync-subscription-error/conversation.json",
         "details": "failed-sync-subscription-error/details.json",
+        "objectives": "failed-sync-subscription-error/objectives.json",
         "roster": "failed-sync-subscription-error/roster.json",
         "sync": "failed-sync-subscription-error/sync.json",
         "terminal": "failed-sync-subscription-error/terminal.json"
@@ -840,6 +857,7 @@
         "attention": "failed-sync-subscription-limit-legacy/attention.json",
         "conversation": "failed-sync-subscription-limit-legacy/conversation.json",
         "details": "failed-sync-subscription-limit-legacy/details.json",
+        "objectives": "failed-sync-subscription-limit-legacy/objectives.json",
         "roster": "failed-sync-subscription-limit-legacy/roster.json",
         "sync": "failed-sync-subscription-limit-legacy/sync.json",
         "terminal": "failed-sync-subscription-limit-legacy/terminal.json"
@@ -894,6 +912,7 @@
         "attention": "failed-sync-capability-absent/attention.json",
         "conversation": "failed-sync-capability-absent/conversation.json",
         "details": "failed-sync-capability-absent/details.json",
+        "objectives": "failed-sync-capability-absent/objectives.json",
         "roster": "failed-sync-capability-absent/roster.json",
         "sync": "failed-sync-capability-absent/sync.json",
         "terminal": "failed-sync-capability-absent/terminal.json"
@@ -948,6 +967,7 @@
         "attention": "failed-sync-arrangements-absent/attention.json",
         "conversation": "failed-sync-arrangements-absent/conversation.json",
         "details": "failed-sync-arrangements-absent/details.json",
+        "objectives": "failed-sync-arrangements-absent/objectives.json",
         "roster": "failed-sync-arrangements-absent/roster.json",
         "sync": "failed-sync-arrangements-absent/sync.json",
         "terminal": "failed-sync-arrangements-absent/terminal.json"
@@ -1002,6 +1022,7 @@
         "attention": "failed-sync-rate-limited/attention.json",
         "conversation": "failed-sync-rate-limited/conversation.json",
         "details": "failed-sync-rate-limited/details.json",
+        "objectives": "failed-sync-rate-limited/objectives.json",
         "roster": "failed-sync-rate-limited/roster.json",
         "sync": "failed-sync-rate-limited/sync.json",
         "terminal": "failed-sync-rate-limited/terminal.json"
@@ -1056,6 +1077,7 @@
         "attention": "failed-sync-cursor-gap/attention.json",
         "conversation": "failed-sync-cursor-gap/conversation.json",
         "details": "failed-sync-cursor-gap/details.json",
+        "objectives": "failed-sync-cursor-gap/objectives.json",
         "roster": "failed-sync-cursor-gap/roster.json",
         "sync": "failed-sync-cursor-gap/sync.json",
         "terminal": "failed-sync-cursor-gap/terminal.json"
@@ -1110,6 +1132,7 @@
         "attention": "failed-sync-page-cursor-expired/attention.json",
         "conversation": "failed-sync-page-cursor-expired/conversation.json",
         "details": "failed-sync-page-cursor-expired/details.json",
+        "objectives": "failed-sync-page-cursor-expired/objectives.json",
         "roster": "failed-sync-page-cursor-expired/roster.json",
         "sync": "failed-sync-page-cursor-expired/sync.json",
         "terminal": "failed-sync-page-cursor-expired/terminal.json"
@@ -1164,6 +1187,7 @@
         "attention": "replication-diverged/attention.json",
         "conversation": "replication-diverged/conversation.json",
         "details": "replication-diverged/details.json",
+        "objectives": "replication-diverged/objectives.json",
         "roster": "replication-diverged/roster.json",
         "sync": "replication-diverged/sync.json",
         "terminal": "replication-diverged/terminal.json"
@@ -5218,6 +5242,7 @@
         "attention": "huge/attention.json",
         "conversation": "huge/conversation.json",
         "details": "huge/details.json",
+        "objectives": "huge/objectives.json",
         "roster": "huge/roster.json",
         "sync": "huge/sync.json",
         "terminal": "huge/terminal.json"
@@ -5272,6 +5297,7 @@
         "attention": "unicode/attention.json",
         "conversation": "unicode/conversation.json",
         "details": "unicode/details.json",
+        "objectives": "unicode/objectives.json",
         "roster": "unicode/roster.json",
         "sync": "unicode/sync.json",
         "terminal": "unicode/terminal.json"

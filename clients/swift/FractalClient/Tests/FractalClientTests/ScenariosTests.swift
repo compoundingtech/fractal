@@ -449,6 +449,11 @@ final class ScenariosTests: XCTestCase {
                 _ = try decode(String.self, expectation.required("surface"))
                 try status(expectation.required("status"))
             }
+        case "objectives":
+            try keys(state, required: ["list", "histories", "usage"])
+            _ = try decode(SloList.self, state.required("list"))
+            _ = try decode([SloHistory].self, state.required("histories"))
+            _ = try decode(UsagePeriod.self, state.required("usage"))
         default: throw ShapeError("Unhandled slice \(slice.slice)")
         }
         for (index, value) in slice.timeline.enumerated() { try event(value, at: "/timeline/\(index)", slice: slice) }

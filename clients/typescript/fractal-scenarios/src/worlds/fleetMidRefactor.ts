@@ -5,6 +5,7 @@ import type { CastAgent, CastPerson } from '../kit/cast.ts'
 import { child, type FactoryContext } from '../kit/context.ts'
 import { agent } from '../kit/factories/agent.ts'
 import { diff } from '../kit/factories/diff.ts'
+import { fleetObjectives } from '../kit/factories/objectives.ts'
 import { terminalRun } from '../kit/factories/terminalRun.ts'
 import { terminalRecord } from '../kit/factories/terminalRecord.ts'
 import { toolCall } from '../kit/factories/toolCall.ts'
@@ -315,7 +316,8 @@ const build = (ctx: FactoryContext): Slices => {
     timeline: [],
   }
 
-  return { roster, details, attention, conversation, terminal, sync: { ...liveSync(ctx, { conversation }), variant: 'default', source } }
+  const objectives: Slice<'objectives'> = { kind: 'objectives', variant: 'default', source, decode: 'strict', loading: false, state: fleetObjectives(ctx, ctx.cast.people), timeline: [] }
+  return { roster, details, attention, conversation, terminal, sync: { ...liveSync(ctx, { conversation }), variant: 'default', source }, objectives }
 }
 
 

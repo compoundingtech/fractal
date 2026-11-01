@@ -210,6 +210,7 @@ after it (see [Store versions](#store-versions)).
 | `conversation` | per agent: `session_id`, `items: TimelineEntry[]`, `page_size`, `has_more` | `thread-create {thread}`, `thread-remove {agent}`, `entries {agent, items}` (append or revise), `replace {agent, session_id, items, has_more}` |
 | `terminal` | per terminal: owner, its terminal `runtime` (the `Runtime` that `runtimesGet` returns before every attach), `incarnation`, `cast` (asciicast v2), `screens: { at_ms, screen }[]` | `terminal-create {record}`, `terminal-remove {terminal}`, `screen`, `unavailable`, `end`, `incarnation` |
 | `sync` | `capabilities` envelope, the [sync script](#sync-matrix) and the `expected` sync status per surface | see [Replay dispatch](#replay-dispatch) |
+| `objectives` | `list: SloList` (`GET slo`), `histories: SloHistory[]` (one 24-hour, 48-step read per row), `usage: UsagePeriod` (declared accounts). A world that authors none serves an empty read. The epoch-ms fields carry no `x-st-codec`, so readers do not rebase them | none; the replay does not serve these routes |
 
 Synthetic details missions include `run_details`, derived from the same work inventory at
 the baseline and after every details change. Each run's progress, step states and claimants
@@ -317,6 +318,7 @@ so an override never introduces strangers. Variants per slice:
 | `conversation` | `default`, `empty`, `loading`, `streaming`, `long`, `huge`, `tool-heavy`, `failed-tools`, `remote-only-mail` |
 | `terminal` | `default`, `none`, `running`, `unavailable`, `exited`, `restarted` |
 | `sync` | one variant per row of the [sync matrix](#sync-matrix) |
+| `objectives` | `default`, `none`, `loading`, `unsafe-link` |
 
 `world.with({ conversation: 'long' })` returns a new world with that variant. A world may also
 pass a slice value built by its own factories: `world.with({ sync: customSync })`.
