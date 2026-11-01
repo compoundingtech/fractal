@@ -9,9 +9,12 @@ import type { SidebarClock } from './SidebarTime'
 import { useTouchLayout } from './useTouchLayout'
 
 // Only overlay contents cross this boundary; their real triggers never suspend or remount.
-const AgentRowMenu = React.lazy(() => import('./SidebarAgentRow.tsx').then(module => ({ default: module.AgentRowMenu })))
-const AgentReportedDetails = React.lazy(() => import('./SidebarAgentRow.tsx').then(module => ({ default: module.AgentReportedDetails })))
-export const AgentHoverCard = React.lazy(() => import('./SidebarAgentRow.tsx').then(module => ({ default: module.AgentHoverCard })))
+const AgentRowMenu = React.lazy(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentRowMenu })))
+const AgentReportedDetails = React.lazy(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentReportedDetails })))
+const HoverCardContents = React.lazy(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentHoverCard })))
+export function AgentHoverCard(props: { readonly row: Row; readonly reportedStatusOnly?: boolean } & SidebarClock) {
+  return <React.Suspense fallback={null}><HoverCardContents {...props} /></React.Suspense>
+}
 
 export interface AgentRowActionsProps extends SidebarClock {
   readonly row: Row

@@ -3,7 +3,7 @@ import * as React from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
 import { within } from 'storybook/test'
-import type * as RowModule from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
+import type * as RowModule from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx'
 import type { SidebarAgentRow as Row } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -16,7 +16,7 @@ afterEach(async () => {
   release()
   if (root !== undefined) await React.act(async () => root.unmount())
   container.remove()
-  vi.doUnmock('../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx')
+  vi.doUnmock('../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx')
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -37,7 +37,7 @@ it('keeps the roster and action trigger usable while optional controls are defer
   Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] })
   const requested = vi.fn()
   const gate = new Promise<void>(resolve => { release = resolve })
-  vi.doMock('../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx', async importOriginal => {
+  vi.doMock('../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx', async importOriginal => {
     requested()
     await gate
     return importOriginal<typeof RowModule>()
@@ -67,7 +67,7 @@ it('keeps the roster and action trigger usable while optional controls are defer
   expect(canvas.getByRole('button', { name: 'Actions for Builder' })).toBe(trigger)
   expect(document.activeElement).toBe(trigger)
   expect(trigger.getAttribute('aria-expanded')).toBe('true')
-  await React.act(async () => { release(); await import('../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx') })
+  await React.act(async () => { release(); await import('../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx') })
   expect(await within(document.body).findByRole('menu', { name: 'Actions for Builder' })).toBeTruthy()
   expect(container.querySelector('[data-milestone-row]')).toBe(painted)
   expect(container.querySelector('[data-agent-menu]')).toBe(trigger)

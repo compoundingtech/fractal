@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { matchPositions, type SidebarAgentRow as Row } from './model'
+import { matchPositions, usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
 import { surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 
 /** Search and accessible names belong to the eager roster, not its optional overlays. */
@@ -33,6 +33,21 @@ export const sidebarRowAccessibleName = (row: Row): string => {
   if (row.missionContext?._tag === 'Unavailable') parts.push('mission info unavailable')
   return parts.join(', ')
 }
+export const tokenCount = Intl.NumberFormat('en', { notation: 'compact', maximumSignificantDigits: 2 })
+export const spendCount = Intl.NumberFormat('en', { style: 'currency', currency: 'USD', notation: 'compact', maximumSignificantDigits: 2 })
+export function usageText(usage: Extract<Row['usage'], { _tag: 'Known' }>): string {
+  return `${usage.usd === undefined ? '' : `$${usage.usd} / `}${usage.tokens} tokens; ${usageScopeLabel(usage.scope).toLowerCase()}`
+}
+export const sidebarRowTitle = (row: Row): string => row.title
+/** Cause comes from the projection, never from matching a displayed harness name. */
+export const sidebarSubagentObservationText = (observation: Row['subagentObservation']): string => {
+  if (observation?._tag === 'NotReported') {
+    return observation.reason._tag === 'Harness' ? 'Not reported by this harness' : 'Not reported by this daemon version'
+  }
+  return observation?._tag === 'Unavailable' ? 'Not reported yet' : 'Subagent observations unavailable'
+}
+/** Opening selects the host workspace (with its parent, for subagents) and notifies the host. */
+export const openRow = (row: Row, actions: SidebarActions | undefined, onOpen: ((row: Row) => void) | undefined) => { actions?.select?.(row.id, row.parentRef?.replace(/^agent\//, '')); onOpen?.(row) }
 
 const styles = stylex.create({
   mark: { backgroundColor: surface.rowActive, color: ink.fg, fontWeight: t.weightSemibold },
