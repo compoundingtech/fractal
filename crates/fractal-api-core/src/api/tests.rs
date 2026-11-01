@@ -1893,7 +1893,15 @@ async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
     assert_eq!(body["value"]["agent"], "agent/node.fixture");
     assert_eq!(body["value"]["runtime_id"], runtime_id.as_str());
     // The runtime's own name for the seat's slice, the one a launch caps (crate::lane::prepare).
-    assert_eq!(body["value"]["slice"], fractal_runtime::seat_slice(&runtime_id).as_str());
+    let slice = fractal_runtime::seat_slice(&runtime_id);
+    assert_eq!(body["value"]["slice"], slice.as_str());
+    // The lane's own sccache server, as the runtime names it in a laned task's environment, under the
+    // daemon's runtime directory; null without one.
+    let sccache = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| fractal_runtime::lane_sccache_socket(&dir, &slice));
+    assert_eq!(body["value"]["sccache_server_uds"], json!(sccache), "{body}");
     let (status, body) = get("/v1/agents/lane?agent=node.nobody").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }

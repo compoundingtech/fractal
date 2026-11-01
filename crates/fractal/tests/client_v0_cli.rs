@@ -475,6 +475,8 @@ async fn agent_lane_cli_prints_the_slice_the_runtime_gives_the_seat() {
     let json = value(&run_cli(&socket, &["agents", "lane", "agent/garden/builder"]).await);
     assert_eq!(json["slice"], slice.as_str(), "{json}");
     assert_eq!(json["agent"], "agent/garden/builder");
+    // And the lane's sccache server, which st-test gives a check it puts in the lane.
+    assert!(json.get("sccache_server_uds").is_some(), "{json}");
     let missing = run_cli_human(&socket, &["agents", "lane", "garden/nobody"]).await;
     assert!(!missing.status.success(), "{missing:?}");
     server.abort();
