@@ -66,13 +66,25 @@ endpoints describe routes, not grants or live reachability. This endpoint remain
 a read-only membership projection and does not start or renew leave grace.
 
 On Linux worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
-`/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) require the
-Unix connector's kernel-observed process generation to match the replication
-worker. Services use the supervisor-observed worker; foreground operation uses
-the explicitly enrolled process. An unrelated unbound process is not a worker.
-Authentication precedes body decoding; unavailable process or supervisor
-evidence fails closed. Re-observation admits a restarted supervised worker
-and revokes its predecessor, including inherited connections.
+`/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
+Unix connector's kernel-observed process generation with the replication worker.
+Services use the supervisor-observed worker; foreground operation uses the explicitly
+enrolled process. An unrelated unbound process is not a worker.
+
+The optional top-level daemon TOML key `worker_ingress_generation_check` accepts
+exactly `"observe"` or `"enforce"`; omission means `"observe"`. Unknown values fail
+configuration parsing at startup. Changing the mode requires restarting the daemon.
+In observe mode, unavailable or nonmatching evidence logs
+`fractal: worker authority observation would refuse ROUTE` and admits the request.
+Observe does not close the unbound local caller authority gap.
+In enforce mode, authentication precedes body decoding and unavailable or nonmatching
+process/supervisor evidence fails closed. Re-observation admits a restarted supervised
+worker and revokes its predecessor, including inherited connections.
+
+Deploy with observe first. Before enabling enforce on a member, retain at least
+24 hours of journal evidence covering replication and the other worker-only route
+classes, including worker restarts. Review unexpected would-refuse entries before
+changing that member's configuration; roll enforcement out one member at a time.
 
 On macOS these routes retain existing admission and emit `unverified-platform`,
 not an authentication success. The unbound local caller authority gap remains

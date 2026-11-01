@@ -303,7 +303,7 @@ fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
 
 #[test]
 fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
-    let status = fractal_daemon::store::CheckpointStatusView {
+    let mut status = fractal_daemon::store::CheckpointStatusView {
         node: "alder".into(),
         newest_stable: None,
         trimmed: None,
@@ -318,6 +318,14 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
     assert!(output.contains("last daemon start (advertised build)"));
     assert!(output.contains("machine_version  alder: 0.1.0+abc1234-dirty"));
     assert!(output.contains("machine_version  birch: not advertised"));
+    status.pending = Some(serde_json::from_value(serde_json::json!({
+        "checkpoint": "checkpoint/test", "cut_unix_ms": 0, "due_at_unix_ms": 0,
+        "local_digest_state": "unavailable", "sealed": [], "disagreeing": {},
+        "unsealed": ["alder", "birch"], "verified": [], "verifications_agree": true,
+        "builds": {}
+    })).unwrap());
+    assert!(status.pending.as_ref().unwrap().terms.is_none());
+    assert!(render_checkpoint_status(&status).contains("local digest unavailable"));
 }
 
 #[test]
