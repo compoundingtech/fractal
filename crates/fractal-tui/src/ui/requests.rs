@@ -230,6 +230,10 @@ impl Inbox {
     /// Read new requests, at most every few hundred milliseconds.
     pub fn read(&mut self) {
         let Some(dir) = self.dir.clone() else { return };
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        let dir = fractal_client::product_dirs::tui_read_path(&dir);
+        let consume = matches!(dir, std::borrow::Cow::Borrowed(_));
+        // LIVE-MIGRATION END
         if self.read_at.is_some_and(|at| at.elapsed() < EVERY) {
             return;
         }
@@ -256,6 +260,9 @@ impl Inbox {
                         .ok()
                         .and_then(|at| at.elapsed().ok())
                         .is_some_and(|age| age > MAX_AGE)
+                    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+                    && consume
+                // LIVE-MIGRATION END
                 {
                     let _ = fs::remove_file(&path);
                 }
@@ -273,11 +280,15 @@ impl Inbox {
                 .and_then(|bytes| serde_json::from_slice::<Request>(&bytes).ok())
                 .filter(|request| request.version == VERSION && pane_for(&request.subject).is_ok())
             else {
-                let _ = fs::remove_file(&path);
+                if consume {
+                    let _ = fs::remove_file(&path);
+                }
                 continue;
             };
             if now.saturating_sub(request.at_unix_ms) > MAX_AGE.as_millis() as u64 {
-                let _ = fs::remove_file(&path);
+                if consume {
+                    let _ = fs::remove_file(&path);
+                }
                 continue;
             }
             request.id = id.to_owned();

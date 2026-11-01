@@ -46,6 +46,9 @@ pub fn path() -> Option<PathBuf> {
 }
 
 pub fn load(path: &Path) -> Prefs {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let path = fractal_client::product_dirs::tui_read_path(path);
+    // LIVE-MIGRATION END
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -64,6 +67,68 @@ pub fn save(path: &Path, prefs: &Prefs) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    #[test]
+    fn tui_state_reads_both_names_but_writes_only_stui() {
+        use crate::ui::{drafts_store, glass_store};
+        for (old, new) in [(false, false), (true, false), (false, true), (true, true)] {
+            let root = tempfile::tempdir().unwrap();
+            for (name, present, value) in [("stui", old, "old"), ("tui", new, "new")] {
+                if !present {
+                    continue;
+                }
+                let dir = root.path().join(name);
+                save(
+                    &dir.join("prefs.json"),
+                    &Prefs {
+                        simple: Some(name == "stui"),
+                        ..Prefs::default()
+                    },
+                )
+                .unwrap();
+                drafts_store::save(
+                    &dir.join("drafts.json"),
+                    &Default::default(),
+                    &[(value.into(), value.into())].into(),
+                )
+                .unwrap();
+                glass_store::save(
+                    &dir.join("glasses.json"),
+                    &glass_store::Stored {
+                        last: Some(value.into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            let dir = root.path().join("stui");
+            let expected = if old {
+                Some("old")
+            } else if new {
+                Some("new")
+            } else {
+                None
+            };
+            assert_eq!(
+                load(&dir.join("prefs.json")).simple,
+                expected.map(|value| value == "old")
+            );
+            assert_eq!(
+                glass_store::load(&dir.join("glasses.json")).last.as_deref(),
+                expected
+            );
+            let drafts = drafts_store::load(&dir.join("drafts.json"));
+            assert_eq!(drafts.values().next().map(String::as_str), expected);
+            // A malformed legacy file must not fall through to valid target data.
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("prefs.json"), b"invalid").unwrap();
+            assert_eq!(load(&dir.join("prefs.json")), Prefs::default());
+            save(&dir.join("prefs.json"), &Prefs::default()).unwrap();
+            assert!(dir.join("prefs.json").exists());
+            assert_eq!(root.path().join("tui").exists(), new);
+        }
+    }
+    // LIVE-MIGRATION END
 
     #[test]
     fn a_choice_survives_a_restart_and_a_missing_file_is_no_choice() {
