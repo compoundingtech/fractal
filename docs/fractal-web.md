@@ -540,6 +540,15 @@ headless Chromium, checks with Fractal that each step finished with that answer,
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `st3`, `pty`, a Playwright module and Chromium).
 
+Pending OMP `ask` calls also appear in this strip, with single/multiple choices, recommendations,
+text-safe previews and tabs for multiple questions. Only complete, uniquely identified running
+native calls are projected; a native result or interrupted call removes the draft. Web delivery
+is unavailable through the typed `answerHarnessQuestion` port, so Send stays disabled and Open
+terminal opens the selected agent's native terminal. Other/custom answers and notes remain
+terminal-only. Raw timeline content is not permission to answer: enabling delivery requires the
+metadata resource, an unambiguous native-identity join and person-authorized capability/fences
+from the `harness.answer` contract in #2315.
+
 ## Sidebar migration
 
 Importing `custom.fractal.sidebar` history into arrangements is client-owned. The legacy
