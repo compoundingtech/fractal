@@ -3,7 +3,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
-import { Agent, RuntimeId, decodeUnknownSync } from '@fractal/client/schema'
+import { Agent, Attention, RuntimeId, decodeUnknownSync } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -94,6 +94,33 @@ it('closes the drawer when an agent is selected and supports its explicit close 
   await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
   await act(async () => trigger.click())
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Close agents"]')!.click())
+  expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
+})
+
+it('closes the phone drawer when an alert opens its mission', async () => {
+  const attention = decodeUnknownSync(Attention)({
+    id: 'attention/deploy', kind: 'attention', revision: 'r1', attention_kind: 'human-gate',
+    title: 'Approve deployment', detail: '', priority: 'normal', state: 'open', alert: true,
+    person_id: 'person/avery', source_id: 'step-run/release/deploy', mission_id: 'mission/release',
+    requested_at: '2026-11-01T11:00:00Z', updated_at: '2026-11-01T11:00:00Z', actions: ['review.approve'],
+    presentation: { tier: 'stopped', kind: 'review', agent: null, raised_by: null, waiting: null },
+  })
+  const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [agent], missions: [], attention: [attention], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
+  await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
+  await act(async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true }))
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'l', bubbles: true }))
+  })
+  const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Expand sidebar"]')!
+  expect(trigger.getAttribute('aria-expanded')).toBe('true')
+  const actions = host.querySelector<HTMLButtonElement>('[aria-label="Actions for Approve deployment"]')!
+  expect(actions).not.toBeNull()
+  await act(async () => actions.click())
+  const destination = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === 'Open mission')!
+  expect(destination).not.toBeUndefined()
+  await act(async () => destination.click())
+  expect(new URLSearchParams(window.location.search).get('open')).toBe('mission/release:detail')
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
   await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
 })

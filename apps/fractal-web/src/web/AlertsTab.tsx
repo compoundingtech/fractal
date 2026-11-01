@@ -42,7 +42,10 @@ export const AlertsTab = ({ onOpen }: { readonly onOpen: (ref: string) => void }
   )
 }
 
-/** The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none. */
+/**
+ * The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none.
+ * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row and expanded answer stays reachable.
+ */
 export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
   readonly feed: Feed<readonly Native.Attention[]>
   readonly now: number
@@ -53,40 +56,92 @@ export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
 }): React.ReactNode => {
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
   const [expanded, setExpanded] = React.useState<string>()
-  if (feed._tag === 'Waiting') return <p role="status" {...stylex.props(styles.empty)}>Loading alerts…</p>
-  if (feed._tag === 'Unavailable') {
-    return (
-      <p role="alert" {...stylex.props(styles.empty)}>
-        {feed.reason === 'ungranted' ? 'Read access to alerts has not been granted.'
-          : feed.reason === 'unsupported' ? 'This connection does not support alerts.'
-            : 'Alerts could not be loaded; reconnect and try again.'}
-      </p>
-    )
-  }
+  const region = React.useRef<HTMLDivElement>(null)
+  const message = React.useRef<HTMLParagraphElement>(null)
+  // The row that last held focus: its own controls, its answer, or its menu. It stays recorded when focus falls to
+  // the page because a control inside the row unmounted (a sent answer's confirmation), and is forgotten once the
+  // person moves focus or points anywhere else, so a later feed update never takes focus back from other content.
+  const focused = React.useRef<string | undefined>(undefined)
+  const shown = React.useRef<readonly string[]>([])
+  React.useEffect(() => {
+    const away = (event: PointerEvent) => {
+      if (!(event.target instanceof Node) || region.current?.contains(event.target) !== true) focused.current = undefined
+    }
+    document.addEventListener('pointerdown', away, true)
+    return () => document.removeEventListener('pointerdown', away, true)
+  }, [])
+  // An answered alert leaves the feed and its row unmounts. If focus was in that row and nothing has taken it since,
+  // it moves to the row that took its place (else the one before it), else the list's message.
+  React.useLayoutEffect(() => {
+    const before = shown.current
+    const ids = rows.map((row) => row.id)
+    shown.current = ids
+    if (expanded !== undefined && !ids.includes(expanded)) setExpanded(undefined)
+    const lost = focused.current
+    if (lost === undefined || ids.includes(lost)) return
+    focused.current = undefined
+    const active = document.activeElement
+    if (active !== null && active !== document.body) return
+    const at = before.indexOf(lost)
+    const next = [...before.slice(at + 1), ...before.slice(0, Math.max(at, 0)).reverse()].find((id) => ids.includes(id)) ?? ids[0]
+    const row = next === undefined ? undefined : [...(region.current?.querySelectorAll<HTMLElement>('[data-alert-id]') ?? [])].find((each) => each.dataset.alertId === next)
+    const target = row === undefined ? message.current : row.querySelector<HTMLElement>('button[aria-expanded]')
+    target?.focus()
+  }, [rows, expanded])
   return (
-    <>
-      {feed.freshness === 'stale' ? (
-        <p role="status" {...stylex.props(styles.empty)}>
-          Last known alerts{feed.readAt === undefined ? '' : `, as of ${ago(new Date(feed.readAt).toISOString(), now)} ago`}; this list may be out of date.
-        </p>
-      ) : null}
-      {rows.length === 0 ? (
-        <p {...stylex.props(styles.empty)}>Nothing needs you. Asks, approvals and harness questions show here.</p>
-      ) : (
-        <ul aria-label="Alerts" {...stylex.props(styles.list)}>
-          {rows.map((row) => (
-            <AlertRow key={row.id} row={row} expanded={expanded === row.id} onExpand={(open) => setExpanded(open ? row.id : undefined)} onOpen={onOpen} onAct={onAct} onAnswer={onAnswer} />
-          ))}
-        </ul>
-      )}
-    </>
+    <div
+      ref={region}
+      data-alerts-scroll=""
+      onBlur={(event) => {
+        // Focus moving to another element forgets the row; moving within this list records it again on arrival.
+        if (event.relatedTarget !== null) focused.current = undefined
+      }}
+      {...stylex.props(styles.scroll)}
+    >
+      {feed._tag === 'Waiting' ? <p ref={message} role="status" tabIndex={-1} {...stylex.props(styles.empty)}>Loading alerts…</p>
+        : feed._tag === 'Unavailable' ? (
+          <p ref={message} role="alert" tabIndex={-1} {...stylex.props(styles.empty)}>
+            {feed.reason === 'ungranted' ? 'Read access to alerts has not been granted.'
+              : feed.reason === 'unsupported' ? 'This connection does not support alerts.'
+                : 'Alerts could not be loaded; reconnect and try again.'}
+          </p>
+        ) : (
+          <>
+            {feed.freshness === 'stale' ? (
+              <p role="status" {...stylex.props(styles.empty)}>
+                Last known alerts{feed.readAt === undefined ? '' : `, as of ${ago(new Date(feed.readAt).toISOString(), now)} ago`}; this list may be out of date.
+              </p>
+            ) : null}
+            {rows.length === 0 ? (
+              <p ref={message} tabIndex={-1} {...stylex.props(styles.empty)}>Nothing needs you. Asks, approvals and harness questions show here.</p>
+            ) : (
+              <ul aria-label="Alerts" {...stylex.props(styles.list)}>
+                {rows.map((row) => (
+                  <AlertRow
+                    key={row.id}
+                    row={row}
+                    expanded={expanded === row.id}
+                    onExpand={(open) => setExpanded(open ? row.id : undefined)}
+                    onFocusWithin={() => { focused.current = row.id }}
+                    onOpen={onOpen}
+                    onAct={onAct}
+                    onAnswer={onAnswer}
+                  />
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+    </div>
   )
 }
 
-const AlertRow = ({ row, expanded, onExpand, onOpen, onAct, onAnswer }: {
+const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAnswer }: {
   readonly row: AlertsTabRow
   readonly expanded: boolean
   readonly onExpand: (open: boolean) => void
+  /** Focus arrived in this row, including its menu, which React bubbles here from the popover. */
+  readonly onFocusWithin: () => void
   readonly onOpen: (ref: string) => void
   readonly onAct: Act | undefined
   readonly onAnswer: Answer | undefined
@@ -105,6 +160,7 @@ const AlertRow = ({ row, expanded, onExpand, onOpen, onAct, onAnswer }: {
       data-alert-id={row.id}
       data-alert-glyph={row.glyph}
       onContextMenu={(event) => { event.preventDefault(); setMenu(true) }}
+      onFocus={onFocusWithin}
       onKeyDown={(event) => {
         if (event.key !== 'Escape' || !expanded || event.defaultPrevented) return
         event.preventDefault()
@@ -159,6 +215,8 @@ const AlertRow = ({ row, expanded, onExpand, onOpen, onAct, onAnswer }: {
 
 const focus = { ':focus-visible': { outline: `2px solid ${c.primary}`, outlineOffset: '-2px' } }
 const styles = stylex.create({
+  // Fills a column parent and scrolls itself; minHeight 0 lets a `minHeight: 0` flex parent bound it instead of growing.
+  scroll: { flex: '1 1 0', minWidth: 0, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' },
   list: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column' },
   row: { display: 'flex', alignItems: 'stretch', borderRadius: 4, ':hover': { backgroundColor: c.rowHover } },
   main: { flexGrow: 1, minWidth: 0, minHeight: g.sidebarRow, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 2, paddingBlock: s.xs, paddingInline: s.row, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', cursor: 'pointer', ...focus },
@@ -175,5 +233,5 @@ const styles = stylex.create({
   menu: { outline: 'none', padding: s.xs, minWidth: 160 },
   item: { paddingBlock: s.xs, paddingInline: s.md, borderRadius: 4, cursor: 'pointer', outline: 'none', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { backgroundColor: c.rowHover } },
   panel: { paddingInline: s.row, paddingBlockEnd: s.md, outline: 'none' },
-  empty: { margin: 0, padding: s.md, color: c.fgMuted, fontSize: t.metaSize },
+  empty: { margin: 0, padding: s.md, color: c.fgMuted, fontSize: t.metaSize, outline: 'none', ...focus },
 })
