@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep checkpoint status responsive while the current cut's identity digest is cold",
+  "replay": { "status": "none", "detail": "No replay or backfill." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "Checkpoint identity hashing, agreement and retention rules are unchanged. Status participants come from already-sealed membership without sealing or judging pending local batches; maintenance keeps its normal sealing path." },
+  "compatibility": { "status": "changed", "detail": "Pending checkpoint status adds local_digest_state (ready or unavailable). Local terms use a valid warm digest or the node's own last published seal; terms is omitted when neither exists. The CLI and daemon ship together. During a mixed roll, an older CLI can fail to parse a cold status; retry after the roll. Explicit remote endpoints also need a compatible CLI. Maintenance, not status reads, computes cold identity digests." },
+  "downtime": { "status": "none", "detail": "Normal restart." },
+  "manual": { "status": "none", "detail": "No configuration changes." },
+  "recovery": { "status": "none", "detail": "Rollback needs no data migration; older binaries resume synchronous status digest computation." }
+}

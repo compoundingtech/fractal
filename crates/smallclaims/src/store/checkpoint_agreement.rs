@@ -477,8 +477,12 @@ pub struct PendingCheckpointView {
     pub checkpoint: String,
     pub cut_unix_ms: u128,
     pub due_at_unix_ms: u128,
-    /// This node's current terms, which every participant's newest seal must match.
-    pub terms: SealTerms,
+    /// Warm local terms, or this node's last published seal. Absent until either is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms: Option<SealTerms>,
+    /// Whether the local digest is warm/verified, rather than only last published or unknown.
+    #[serde(default)]
+    pub local_digest_state: String,
     /// Participants whose newest seal matches `terms`.
     pub sealed: BTreeSet<String>,
     /// Participants with a seal that differs, and how.
@@ -644,6 +648,12 @@ impl Store {
         &self,
         configured_peers: &[String],
     ) -> Result<BTreeSet<String>> {
+        self.checkpoint_known_writers_with_membership(configured_peers, &self.fleet_membership()?)
+    }
+
+    fn checkpoint_known_writers_with_membership(
+        &self, configured_peers: &[String], membership: &crate::fleet::Membership,
+    ) -> Result<BTreeSet<String>> {
         let mut known = {
             let connection = self.readers.get();
             // Both primary keys start with the writer, so step from one writer to the next with
@@ -674,7 +684,6 @@ impl Store {
         };
         known.insert(self.origin.clone());
         known.extend(configured_peers.iter().cloned());
-        let membership = self.fleet_membership()?;
         known.extend(
             membership
                 .incarnations()
@@ -686,12 +695,15 @@ impl Store {
     /// Writers that left the fleet: every incarnation ended with a drained `leave`. A removal
     /// does not count; see section 3 of the design.
     pub fn checkpoint_left_writers(&self) -> Result<BTreeSet<String>> {
-        let membership = self.fleet_membership()?;
+        Ok(Self::checkpoint_left_writers_from_membership(&self.fleet_membership()?))
+    }
+
+    fn checkpoint_left_writers_from_membership(membership: &crate::fleet::Membership) -> BTreeSet<String> {
         let names = membership
             .incarnations()
             .map(|incarnation| incarnation.name.clone())
             .collect::<BTreeSet<_>>();
-        Ok(names
+        names
             .into_iter()
             .filter(|name| {
                 matches!(
@@ -700,7 +712,7 @@ impl Store {
                         if incarnation.ended.as_deref() == Some("left")
                 )
             })
-            .collect())
+            .collect()
     }
 
     pub fn checkpoint_participants(
@@ -708,8 +720,14 @@ impl Store {
         claims: &[CheckpointClaim],
         configured_peers: &[String],
     ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
-        let known = self.checkpoint_known_writers(configured_peers)?;
-        let left = self.checkpoint_left_writers()?;
+        self.checkpoint_participants_with_membership(claims, configured_peers, &self.fleet_membership()?)
+    }
+
+    fn checkpoint_participants_with_membership(
+        &self, claims: &[CheckpointClaim], configured_peers: &[String], membership: &crate::fleet::Membership,
+    ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+        let known = self.checkpoint_known_writers_with_membership(configured_peers, membership)?;
+        let left = Self::checkpoint_left_writers_from_membership(membership);
         Ok((
             participants_for_rules(
                 &known,
@@ -1201,7 +1219,9 @@ impl Store {
             .iter()
             .next_back()
             .and_then(|(_, certificates)| certificates.first().cloned());
-        let (mut participants, left) = self.checkpoint_participants(&claims, configured_peers)?;
+        let (mut participants, left) = self.checkpoint_participants_with_membership(
+            &claims, configured_peers, &self.fleet_membership_sealed()?,
+        )?;
         participants.insert(self.origin.clone());
         let cut = newest_due_cut(now_unix_ms);
         let pending = (cut > 0
@@ -1211,23 +1231,33 @@ impl Store {
         .then(|| -> Result<PendingCheckpointView> {
             let checkpoint = checkpoint_name(cut);
             let verified = first_verifications(&claims, &checkpoint);
+            let seals = newest_seals(&claims, &checkpoint);
+            let cached_digest = if verified.contains_key(&self.origin) {
+                None
+            } else {
+                self.checkpoint_cached_sealed_digest(cut)?
+            };
+            let local_digest_state = if verified.contains_key(&self.origin) || cached_digest.is_some() {
+                "ready"
+            } else {
+                "unavailable"
+            }.into();
             // Once this node verified, its seal round is over: seals compare with the terms it
             // verified, not with a rules digest a later build of this node carries.
             let terms = match verified.get(&self.origin) {
-                Some((_, ours)) => SealTerms {
+                Some((_, ours)) => Some(SealTerms {
                     cut_unix_ms: ours.cut_unix_ms,
                     participants: ours.participants.clone(),
                     sealed_digest: ours.sealed_digest.clone(),
                     rules_digest: ours.rules_digest.clone(),
-                },
-                None => SealTerms {
+                }),
+                None => cached_digest.map(|sealed_digest| SealTerms {
                     cut_unix_ms: cut,
                     participants: participants.clone(),
-                    sealed_digest: self.checkpoint_sealed_identities(cut, None)?.digest,
+                    sealed_digest,
                     rules_digest: self.runtime.checkpoint_rules_digest(),
-                },
+                }).or_else(|| seals.get(&self.origin).cloned()),
             };
-            let seals = newest_seals(&claims, &checkpoint);
             let reference = verified
                 .get(&self.origin)
                 .or_else(|| verified.values().next())
@@ -1249,15 +1279,16 @@ impl Store {
                 due_at_unix_ms: cut + 2 * DAY_MS,
                 sealed: participants
                     .iter()
-                    .filter(|writer| seals.get(*writer) == Some(&terms))
+                    .filter(|writer| terms.as_ref().is_some_and(|terms| seals.get(*writer) == Some(terms)))
                     .cloned()
                     .collect(),
                 disagreeing: participants
                     .iter()
                     .filter_map(|writer| {
+                        let terms = terms.as_ref()?;
                         let theirs = seals.get(writer)?;
-                        (theirs != &terms)
-                            .then(|| (writer.clone(), seal_difference(&terms, theirs)))
+                        (theirs != terms)
+                            .then(|| (writer.clone(), seal_difference(terms, theirs)))
                     })
                     .collect(),
                 unsealed: participants
@@ -1277,6 +1308,7 @@ impl Store {
                 checkpoint,
                 cut_unix_ms: cut,
                 terms,
+                local_digest_state,
             })
         })
         .transpose()?;
