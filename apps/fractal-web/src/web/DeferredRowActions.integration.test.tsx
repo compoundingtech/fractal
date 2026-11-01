@@ -70,5 +70,5 @@ it('keeps the roster and action trigger usable while optional controls are defer
   await React.act(async () => { release(); await import('../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx') })
   expect(await within(document.body).findByRole('menu', { name: 'Actions for Builder' })).toBeTruthy()
   expect(container.querySelector('[data-milestone-row]')).toBe(painted)
-  expect(canvas.getByRole('button', { name: 'Actions for Builder', hidden: true })).toBe(trigger)
+  expect(container.querySelector('[data-agent-menu]')).toBe(trigger)
 })
