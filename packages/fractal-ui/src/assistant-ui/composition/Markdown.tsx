@@ -181,14 +181,17 @@ export function HighlightedSource({ code, language }: { code: string; language: 
     // Reinsert the exact source gaps, including CRLF and trailing empty lines.
     const gap = code.slice(sourceOffset, token.offset)
     sourceOffset = token.offset + token.content.length
-    return <React.Fragment key={index}>{gap}{token.color === undefined ? token.content : <span data-syntax-token={syntaxKinds[token.color]} {...stylex.props(
+    if (token.color === undefined || token.content.trim() === '') return <React.Fragment key={index}>{gap}{token.content}</React.Fragment>
+    // AccName trims each inline element: keep token-edge whitespace outside spans.
+    const [, leading, content, trailing] = /^(\s*)([\s\S]*?)(\s*)$/.exec(token.content)!
+    return <React.Fragment key={index}>{gap}{leading}<span data-syntax-token={syntaxKinds[token.color]} {...stylex.props(
       token.color === '#000001' && styles.syntaxComment,
       token.color === '#000002' && styles.syntaxKeyword,
       (token.color === '#000003' || token.color === '#000009') && styles.syntaxString,
       (token.color === '#000004' || token.color === '#000007' || token.color === '#000008') && styles.syntaxLiteral,
       token.color === '#000005' && styles.syntaxFunction,
       token.color === '#000006' && styles.syntaxDeleted,
-    )}>{token.content}</span>}</React.Fragment>
+    )}>{content}</span>{trailing}</React.Fragment>
   })}</React.Fragment>)}{code.slice(sourceOffset)}</>
 }
 
