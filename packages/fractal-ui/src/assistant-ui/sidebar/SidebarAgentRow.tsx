@@ -2,12 +2,13 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Icon } from '../composition/Icons'
-import { Button, Dialog, DialogTrigger, MenuTrigger, Popover, Text, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { Button, Dialog, Popover, Text, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
 import { ThemePortal } from '../taste/ThemePortal'
 import { Menu, MenuItem, Popover as MenuPopover } from '../composition/Controls'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
 import { Highlight } from './rowPresentation.tsx'
+import { AgentRowActions, type AgentRowActionsProps } from './DeferredRowActions.tsx'
 import { SidebarStatus, type DiscRefinement, type GlyphVariant } from './SidebarStatus'
 import { SidebarTime, type SidebarClock } from './SidebarTime'
 import { SidebarDuration } from './SidebarDuration'
@@ -151,24 +152,6 @@ const ContextDetails = ({ row }: { readonly row: Row }) => row.context?._tag !==
 </>
 /** Opening selects the host workspace (with its parent, for subagents) and notifies the host. */
 const openRow = (row: Row, actions: SidebarActions | undefined, onOpen: ((row: Row) => void) | undefined) => { actions?.select?.(row.id, row.parentRef?.replace(/^agent\//, '')); onOpen?.(row) }
-export interface AgentRowActionsProps extends SidebarClock {
-  readonly row: Row
-  readonly reportedStatusOnly?: boolean
-  readonly actions?: SidebarActions
-  readonly onOpen?: (row: Row) => void
-  readonly onMarkRead?: (ref: string) => void
-  /** The reported-details dialog anchors to this painted row frame. */
-  readonly anchorRef: React.RefObject<HTMLElement | null>
-  /** Hosts open the menu from `contextmenu` (pointer or keyboard) by clicking this trigger. */
-  readonly menuTriggerRef: React.RefObject<HTMLButtonElement | null>
-  readonly menuButtonStyle: (state: { readonly isHovered: boolean; readonly isPressed: boolean; readonly isFocusVisible: boolean }) => stylex.StyleXStyles
-  /** Wraps the visually hidden, focusable details trigger, e.g. in a hover-card `TooltipTrigger`. */
-  readonly wrapDetailsTrigger?: (trigger: React.ReactElement) => React.ReactNode
-  readonly onDetailsPress?: () => void
-  readonly onMenuOpenChange?: (isOpen: boolean) => void
-  readonly defaultMenuOpen?: boolean
-  readonly defaultDetailsOpen?: boolean
-}
 // A 320px Agents sheet, the 340px details surface and its two 8px viewport gutters.
 const compactDetailsQuery = '(max-width: 676px), (pointer: coarse)'
 const subscribeDetailsLayout = (onChange: () => void) => {
@@ -177,41 +160,26 @@ const subscribeDetailsLayout = (onChange: () => void) => {
   return () => media.removeEventListener('change', onChange)
 }
 const compactDetailsLayout = () => window.matchMedia(compactDetailsQuery).matches
-/**
- * The row's action menu (`[data-agent-menu]`) and its keyboard-reachable reported-details dialog. Shared by every sidebar
- * row so the actions stay one implementation; hosts own only the trigger's placement and visibility.
- */
-export function AgentRowActions({ row, now, reportedStatusOnly = false, actions, onOpen, onMarkRead, anchorRef, menuTriggerRef, menuButtonStyle, wrapDetailsTrigger, onDetailsPress, onMenuOpenChange, defaultMenuOpen = false, defaultDetailsOpen = false }: AgentRowActionsProps) {
+/** The reported-details surface mounts only after its eager DialogTrigger opens. */
+export function AgentReportedDetails({ row, now, reportedStatusOnly = false, anchorRef, menuTriggerRef }: AgentRowActionsProps) {
   const touch = useTouchLayout()
   const compactDetails = React.useSyncExternalStore(subscribeDetailsLayout, compactDetailsLayout, () => false) || touch
+  return <Popover triggerRef={compactDetails ? menuTriggerRef : anchorRef} placement={compactDetails ? 'bottom end' : 'right'} shouldFlip containerPadding={8}
+    {...stylex.props(styles.hovercard, compactDetails && styles.detailsCompact)}
+  ><Dialog aria-label={`Reported details for ${row.title}`}><AgentRowDetails row={row} reportedStatusOnly={reportedStatusOnly} now={now} /></Dialog></Popover>
+}
+/** One shared action menu for the live and generic rows, imported only when opened. */
+export function AgentRowMenu({ row, actions, onOpen, onMarkRead, onDetailsPress }: AgentRowActionsProps) {
+  const touch = useTouchLayout()
   const menuItemStyle = touch ? styles.menuItemFocusNarrow : styles.menuItemFocus
-  // Open from the real menu action: a synthetic click on the hidden trigger changes RAC's input modality and defers dialog focus.
-  const [detailsOpen, setDetailsOpen] = React.useState(defaultDetailsOpen)
   const title = sidebarRowTitle(row)
   const ownerId = row.parentRef?.replace(/^agent\//, '') ?? row.id
   const canOpen = actions?.select !== undefined || onOpen !== undefined
-  const trigger = <VisuallyHidden isFocusable><Button aria-label={`Reported details for ${title}`} onPress={onDetailsPress} {...stylex.props(styles.iconButton, touch && styles.detailsTouchTarget)}><Icon name="message" /></Button></VisuallyHidden>
-  // Every overlay portals into the row's themed surface (or the host's themed layer), never an unthemed document body.
-  return <ThemePortal>
-    <DialogTrigger isOpen={detailsOpen} onOpenChange={open => {
-      setDetailsOpen(open)
-      // The menu item unmounts, so RAC falls back to its tree row. Restore the persistent trigger without stealing a newer focus.
-      if (!open) requestAnimationFrame(() => {
-        const trigger = menuTriggerRef.current
-        const active = trigger?.ownerDocument.activeElement
-        if (active === trigger?.ownerDocument.body || active === anchorRef.current || active === anchorRef.current?.closest('[role="row"]')) trigger?.focus()
-      })
-    }}>{wrapDetailsTrigger === undefined ? trigger : wrapDetailsTrigger(trigger)}<Popover
-      triggerRef={compactDetails ? menuTriggerRef : anchorRef}
-      placement={compactDetails ? 'bottom end' : 'right'}
-      shouldFlip containerPadding={8}
-      {...stylex.props(styles.hovercard, compactDetails && styles.detailsCompact)}
-    ><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={row} reportedStatusOnly={reportedStatusOnly} now={now} /></Dialog></Popover></DialogTrigger>
-    <MenuTrigger defaultOpen={defaultMenuOpen} onOpenChange={onMenuOpenChange}><Button ref={menuTriggerRef} data-agent-menu="true" aria-label={`Actions for ${title}`} className={state => stylex.props(menuButtonStyle(state), touch && styles.menuNarrow).className ?? ''}><Icon name="chevron-right" /></Button><MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
+  return <MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
       <MenuItem id="open" textValue="Open conversation" isDisabled={!canOpen} onAction={() => openRow(row, actions, onOpen)} style={menuItemStyle}>Open conversation{!canOpen && <Text slot="description" {...stylex.props(styles.menuReason)}>{row.subagent !== undefined && row.subagent.session_id === undefined ? 'No session reported for this subagent' : 'Conversation opening is unavailable'}</Text>}</MenuItem>
       {actions?.split !== undefined && <MenuItem id="split-right" onAction={() => actions.split?.(row.ref, 'right')} style={menuItemStyle}>Open in split right</MenuItem>}
       {actions?.split !== undefined && <MenuItem id="split-below" onAction={() => actions.split?.(row.ref, 'below')} style={menuItemStyle}>Open in split below</MenuItem>}
-      <MenuItem id="reported-details" onAction={() => { onDetailsPress?.(); setDetailsOpen(true) }} style={menuItemStyle}>Reported agent details</MenuItem>
+      <MenuItem id="reported-details" onAction={onDetailsPress} style={menuItemStyle}>Reported agent details</MenuItem>
       {actions?.details !== undefined && <MenuItem id="details" onAction={() => actions.details?.(row.ref)} style={menuItemStyle}>Agent details</MenuItem>}
       {actions?.declaration !== undefined && row.subagent === undefined && <MenuItem id="declaration" onAction={() => actions.declaration?.(row.ref)} style={menuItemStyle}>View KDL</MenuItem>}
       {actions?.declaration !== undefined && row.mission !== undefined && <MenuItem id="mission-declaration" onAction={() => actions.declaration?.(row.mission!)} style={menuItemStyle}>View mission definition</MenuItem>}
@@ -220,8 +188,7 @@ export function AgentRowActions({ row, now, reportedStatusOnly = false, actions,
       {actions?.resource !== undefined && row.worktree !== undefined && <MenuItem id="worktree" onAction={() => actions.resource?.(row.worktree!, ownerId)} style={menuItemStyle}>Open worktree</MenuItem>}
       {actions?.resource !== undefined && row.pullRequest !== undefined && <MenuItem id="pr" onAction={() => actions.resource?.(row.pullRequest!.ref, ownerId)} style={menuItemStyle}>Open pull request</MenuItem>}
       {(row.unread ?? 0) > 0 && onMarkRead !== undefined && <MenuItem id="read" onAction={() => onMarkRead(row.ref)} style={menuItemStyle}>Mark read</MenuItem>}
-    </Menu></MenuPopover></MenuTrigger>
-  </ThemePortal>
+    </Menu></MenuPopover>
 }
 export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', glyph = 'SG-1', extraSignals = defaultExtraSignals, discRefinement = 'G1', reportedStatusOnly = false, active = false, query, now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded }: SidebarAgentRowProps) {
   const title = sidebarRowTitle(item)
@@ -308,8 +275,6 @@ const styles = stylex.create({
   rowNarrow: { gridColumn: '2 / 6' },
   metadataNarrow: { gridColumn: '2 / 6' },
   // Touch has no hover, so the phone menu is always visible; both controls fill their own column across the row's lines.
-  menuNarrow: { gridColumn: '-2 / -1', gridRow: '1 / -1', width: g.touchTarget, height: g.touchTarget, opacity: 1 },
-  detailsTouchTarget: { width: g.touchTarget, height: g.touchTarget },
   childrenNarrow: { gridColumn: '-3 / -2', gridRow: '1 / -1', width: g.touchTarget, minWidth: g.touchTarget, height: g.touchTarget },
   // The row is the containing block for its visually hidden details trigger; without it the
   // absolutely positioned trigger escapes every scroll clip and extends the document.

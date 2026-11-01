@@ -13,7 +13,7 @@ export { SidebarQueryContext, sidebarRowAccessibleName } from './sidebar/rowPres
 export { SidebarTree, SidebarTreeDisclosure, SidebarTreeRowAction } from './sidebar/SidebarTree.tsx'
 export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sidebar/SidebarTree.tsx'
 export { MilestoneAgentRow, openAgentRowMenu, type MilestoneAgentRowProps } from './sidebar/MilestoneAgentRow.tsx'
-export { AgentRowActions, type AgentRowActionsProps } from './sidebar/SidebarAgentRow.tsx'
+export { AgentRowActions, type AgentRowActionsProps } from './sidebar/DeferredRowActions.tsx'
 export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
 export { usageScopeLabel } from './sidebar/model.ts'
