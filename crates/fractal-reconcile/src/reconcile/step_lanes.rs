@@ -19,7 +19,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let mut wanted = self.wanted_lane(agent, base, work)?;
         let status = &self.seat_admission.status;
-        let applied = status.state().lane_applied.get(agent).cloned();
+        // A daemon that restarted has no record of what it set, and a raise lasts as long as the
+        // slice: it reads the slice, so a lane a step left raised comes down and counts until then.
+        let recorded = status.state().lane_applied.get(agent).cloned();
+        let applied = recorded.or_else(|| {
+            let live = self.runtime.live_lane(&member.runtime_id)?;
+            status.state().lane_applied.insert(agent.to_owned(), (incarnation.to_owned(), live));
+            Some((incarnation.to_owned(), live))
+        });
         // Lowering a lane under what it holds would reclaim or kill inside it, the jobs a step
         // left running included: it comes down once the lane holds less than it will allow.
         if let Some((_, lane)) = applied.as_ref().filter(|(at, _)| at == incarnation)

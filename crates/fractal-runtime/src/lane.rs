@@ -352,6 +352,30 @@ pub fn held_memory(runtime_id: &str) -> Option<u64> {
     Some(crate::host::unreclaimable(&stat))
 }
 
+/// The lane `runtime_id`'s slice is set to now, or `None` when it has no lane here to read. A
+/// `--runtime` raise lasts as long as the slice, so a daemon that restarts reads what a step left.
+pub fn live(runtime_id: &str) -> Option<Capacity> {
+    let cgroup = slice_cgroup(&seat_slice(runtime_id))?;
+    parse_live(
+        &std::fs::read_to_string(cgroup.join("cpu.max")).ok()?,
+        &std::fs::read_to_string(cgroup.join("memory.max")).ok()?,
+    )
+}
+
+/// A lane from a slice's `cpu.max` (`QUOTA PERIOD`) and `memory.max`; `None` when either is
+/// unlimited.
+fn parse_live(cpu_max: &str, memory_max: &str) -> Option<Capacity> {
+    let (quota, period) = cpu_max.trim().split_once(' ')?;
+    let (quota, period) = (quota.parse::<u64>().ok()?, period.parse::<u64>().ok()?);
+    if period == 0 {
+        return None;
+    }
+    Some(Capacity {
+        cores: u32::try_from(quota.div_ceil(period)).ok()?,
+        memory: memory_max.trim().parse().ok()?,
+    })
+}
+
 /// Ends the lane of `runtime_id`, when it has one: everything still running in its slice, the jobs
 /// the seat started included, then the slice's limits. In the background, since the units in it
 /// get their own stop timeouts. For a seat that stopped for good; a restart keeps its lane, and a
@@ -527,6 +551,14 @@ mod tests {
         assert!(Capacity::declared(None, Some("100M")).is_err());
         assert!(Capacity::declared(None, Some("4X")).is_err());
         assert!(Capacity::declared(None, Some("4.5G")).is_err());
+    }
+
+    #[test]
+    fn a_slice_reads_back_as_the_lane_it_was_set_to() {
+        let lane = Capacity { cores: 3, memory: 12 << 30 };
+        assert_eq!(parse_live("300000 100000\n", &format!("{}\n", 12u64 << 30)), Some(lane));
+        assert_eq!(parse_live("max 100000", "1024"), None);
+        assert_eq!(parse_live("100000 100000", "max"), None);
     }
 
     #[test]

@@ -45,7 +45,7 @@ pub use priority::{
 };
 pub use host::installed_memory_bytes;
 pub use lane::{
-    CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, Raise, end as end_lane, resize as resize_lane, held_memory as lane_held_memory, enforced as lanes_enforced,
+    CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, Raise, end as end_lane, resize as resize_lane, held_memory as lane_held_memory, live as live_lane, enforced as lanes_enforced,
     parse_memory as parse_lane_memory, sccache_socket as lane_sccache_socket, seat_slice,
     show_memory as show_lane_memory,
     set_enforced as set_lanes_enforced,

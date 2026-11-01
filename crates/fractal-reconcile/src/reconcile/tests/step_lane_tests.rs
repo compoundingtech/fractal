@@ -178,3 +178,36 @@ mission "orchid" state="ready" {
     reconciler.reconcile_work_messages(&builder, "builder-1", Some(&member)).unwrap();
     assert_eq!(*runtime.lanes_resized.lock().unwrap(), [(member.runtime_id.clone(), Capacity { cores: 8, memory: 16 * G })]);
 }
+
+#[test]
+fn a_daemon_that_restarts_lowers_a_lane_a_step_left_raised_and_counts_it_until_then() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, r#"version 2
+agent "amber" { workspace "/tmp"; command "true"; capacity cores=2 memory="4G" }"#, "seats");
+    observe(&store, "agent/node.amber", "running");
+    let member = store.desired_subject_with_writer("agent/node.amber").unwrap().unwrap().0.member.unwrap();
+    let base = member.capacity.unwrap();
+    // A fresh daemon, whose slice for the seat still carries a raise from a step it no longer holds.
+    let restarted = |held: Option<u64>| {
+        let runtime = Arc::new(FakeRuntime::default());
+        *runtime.lane_live.lock().unwrap() = Some(Capacity { cores: 8, memory: 16 * G });
+        *runtime.lane_held.lock().unwrap() = held;
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
+            .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+        reconciler.hold_step_lanes("agent/node.amber", "amber-1", &member, &store.work_for_reconcile("agent/node.amber").unwrap()).unwrap();
+        (reconciler, runtime)
+    };
+    let (reconciler, runtime) = restarted(None);
+    assert_eq!(*runtime.lanes_resized.lock().unwrap(), [(member.runtime_id.clone(), base)]);
+    assert_eq!(reconciler.held_lanes("agent/node.other", 0).unwrap(), 4 * G);
+    // While the lane holds more than the seat's own allows, its memory stays up and admission
+    // counts the raised lane.
+    let (reconciler, runtime) = restarted(Some(10 * G));
+    let held = Capacity { cores: 2, memory: 16 * G };
+    assert_eq!(*runtime.lanes_resized.lock().unwrap(), [(member.runtime_id.clone(), held)]);
+    assert_eq!(reconciler.held_lanes("agent/node.other", 0).unwrap(), 16 * G);
+    *runtime.lane_held.lock().unwrap() = Some(G);
+    reconciler.hold_step_lanes("agent/node.amber", "amber-1", &member, &store.work_for_reconcile("agent/node.amber").unwrap()).unwrap();
+    assert_eq!(runtime.lanes_resized.lock().unwrap().last(), Some(&(member.runtime_id.clone(), base)));
+    assert_eq!(reconciler.held_lanes("agent/node.other", 0).unwrap(), 4 * G);
+}

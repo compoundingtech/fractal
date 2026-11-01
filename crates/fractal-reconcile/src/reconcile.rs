@@ -607,6 +607,10 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn lane_held_memory(&self, _runtime_id: &str) -> Option<u64> {
         None
     }
+    /// The lane a seat's slice is set to now, or `None` without a lane to read.
+    fn live_lane(&self, _runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+        None
+    }
 }
 
 pub struct NativeRuntime {
@@ -985,6 +989,10 @@ impl RuntimeControl for NativeRuntime {
 
     fn lane_held_memory(&self, runtime_id: &str) -> Option<u64> {
         fractal_runtime::lane_held_memory(runtime_id)
+    }
+
+    fn live_lane(&self, runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+        fractal_runtime::live_lane(runtime_id)
     }
 }
 
@@ -21106,6 +21114,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         lanes_ended: Mutex<Vec<String>>,
         pub lanes_resized: Mutex<Vec<(String, fractal_runtime::Capacity)>>,
         pub lane_held: Mutex<Option<u64>>,
+        pub lane_live: Mutex<Option<fractal_runtime::Capacity>>,
     }
 
     #[test]
@@ -21435,6 +21444,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
         fn lane_held_memory(&self, _runtime_id: &str) -> Option<u64> {
             *self.lane_held.lock().unwrap()
+        }
+        fn live_lane(&self, _runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+            *self.lane_live.lock().unwrap()
         }
     }
 
