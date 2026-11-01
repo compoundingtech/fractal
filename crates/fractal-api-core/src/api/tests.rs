@@ -13902,3 +13902,30 @@ mission "ended-restart" state="ready" {
     let message = refused["message"].as_str().unwrap();
     assert!(message.contains(&run.subject) && message.contains("(cancelled)"), "{message}");
 }
+
+#[tokio::test]
+async fn a_restart_that_ignores_a_lanes_fit_needs_a_reason_and_records_who_asked() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example/operations\" { workspace \"/tmp\"; command \"true\"; capacity cores=2 memory=\"4G\" }";
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    state.store.apply(&intent, &planned.subject_tokens, "ignore-fit-seat").unwrap();
+    let (status, refused) = json_request(router(state.clone()), "/v1/agents/restart", json!({
+        "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "no-reason", "ignore_fit": true
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "restart-ignore-fit-reason", "{refused}");
+    let (status, claim) = json_request(router(state.clone()), "/v1/agents/restart", json!({
+        "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "with-reason",
+        "ignore_fit": true, "reason": "  the measurement is stale  "
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert_eq!(claim["actor"], "person/avery");
+    assert_eq!(claim["body"]["fields"]["ignore_fit"], true);
+    assert_eq!(claim["body"]["fields"]["reason"], "the measurement is stale");
+    let (_, plain) = json_request(router(state), "/v1/agents/restart", json!({
+        "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "plain"
+    })).await;
+    assert!(plain["body"]["fields"].get("ignore_fit").is_none(), "{plain}");
+}
