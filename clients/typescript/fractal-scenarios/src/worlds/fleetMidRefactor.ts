@@ -22,7 +22,7 @@ const synthetic = (seed: number) => ({ _tag: 'synthetic' as const, seed })
 export const SEED = 1
 
 /** Four agents rename an API across a monorepo: blocked, waiting for review, streaming diffs, idle. */
-export const syntheticFleetMidRefactor: WorldDefinition = {
+export const syntheticFleetMidRefactor = {
   id: 'fleet-mid-refactor',
   title: 'Fleet mid-refactor',
   narrative:
@@ -48,7 +48,7 @@ export const syntheticFleetMidRefactor: WorldDefinition = {
     ],
   },
   slices: (ctx) => build(ctx),
-}
+} satisfies WorldDefinition
 
 const build = (ctx: FactoryContext): Slices => {
   const [builder, reviewer, migrator, docs] = ctx.cast.agents as [CastAgent, CastAgent, CastAgent, CastAgent]
