@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Two runs take turns, a killed run frees the slot at once, a run past its timeout is stopped."""
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -48,6 +49,21 @@ def caller_slice(text):
     assert parent.endswith(".slice"), f"caller cgroup parent is not a slice: {parent}"
     return parent
 
+def starttime(text):
+    return int(text.rsplit(")", 1)[1].split()[19])  # /proc/PID/stat field 22
+
+
+def runtime_usec(value):
+    assert re.fullmatch(r"\d+(?:min|us|s)(?: \d+(?:min|us|s))*", value), value
+    return sum(int(n) * {"min": 60000000, "s": 1000000, "us": 1}[unit]
+               for n, unit in re.findall(r"(\d+)(min|us|s)", value))
+
+
+def kernel_limits(group):
+    limits = {name: int((group / name).read_text()) for name in ("memory.max", "memory.swap.max", "pids.max")}
+    assert limits == {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}, limits
+    return limits
+
 
 # Fake cgroup lines exercise hierarchy-preserving leaf slice selection without a user bus.
 manager = "/user.slice/user-1000.slice/user@1000.service"
@@ -59,6 +75,16 @@ except AssertionError:
     pass
 else:
     raise AssertionError("a non-slice parent must fail, not default to app.slice")
+assert starttime("1 (name with ) spaces) " + " ".join(["S"] + ["0"] * 18 + ["12345"])) == 12345
+assert runtime_usec("1min 30s") == runtime_usec("90s") == runtime_usec("90000000us") == 90000000
+with tempfile.TemporaryDirectory() as helper_tmp:
+    group = Path(helper_tmp)
+    for name, value in {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}.items():
+        (group / name).write_text(str(value))
+    assert kernel_limits(group)["pids.max"] == 16
+if sys.argv[1:] == ["--helpers-only"]:
+    print("passed: ci-perf-slot helpers")
+    sys.exit(0)
 
 
 
@@ -143,10 +169,49 @@ with tempfile.TemporaryDirectory() as tmp:
                         if (Path(d) / "systemd-run").exists()), None)
     if systemd_run and runtime and Path(runtime, "bus").exists():
         slice_path = caller_slice(Path("/proc/self/cgroup").read_text())
-        units, wrappers, scoped_pids = [], [], []
+        units, wrappers, scoped_pids, evidence = [], [], [], {}
         systemctl = str(systemd_run.with_name("systemctl"))
         scoped = root / "scoped"
         script = "echo $BASHPID > %s; exec sleep 60" % scoped
+        cleaned = False
+        previous_signals = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+        def finish_fixtures():
+            global cleaned
+            if cleaned:
+                return
+            for sig in previous_signals:
+                signal.signal(sig, signal.SIG_IGN)
+            try:
+                for unit in units:
+                    record = evidence.setdefault(unit, {"unit": unit})
+                    group = record.get("cgroup", f"{slice_path}/{unit}")
+                    with contextlib.suppress(OSError):
+                        record["memory.peak"] = int(Path("/sys/fs/cgroup", group.lstrip("/"), "memory.peak").read_text())
+                    subprocess.run([systemctl, "--user", "stop", unit], capture_output=True)
+                for wrapper in wrappers:
+                    if wrapper.poll() is None:
+                        wrapper.kill()
+                    wrapper.wait(10)
+                def no_fixtures():
+                    listed = subprocess.check_output([systemctl, "--user", "list-units", "ci-perf-slot-fixture-*",
+                                                      "--all", "--no-legend", "--plain"], text=True)
+                    return not listed.strip() and not any(alive(pid) for pid in scoped_pids)
+                until(no_fixtures, "all fixture scopes and processes are gone")
+                cleaned = True
+            finally:
+                for record in evidence.values():
+                    record["drain"] = "empty and collected" if cleaned else "not confirmed"
+                    print("ci-perf-slot fixture: " + json.dumps(record, sort_keys=True), flush=True)
+                for sig, handler in previous_signals.items():
+                    signal.signal(sig, handler)
+
+        def cancelled(signum, frame):
+            finish_fixtures()
+            raise SystemExit(128 + signum)
+
+        for sig in previous_signals:
+            signal.signal(sig, cancelled)
         try:
             for n, mode in enumerate(("kill", "timeout")):
                 unit = f"ci-perf-slot-fixture-{os.getpid()}-{n}.scope"
@@ -162,32 +227,27 @@ with tempfile.TemporaryDirectory() as tmp:
                 scoped_pid = int(scoped.read_text())
                 scoped_pids.append(scoped_pid)
                 group = cgroup_path(Path(f"/proc/{scoped_pid}/cgroup").read_text())
+                record = evidence.setdefault(unit, {"unit": unit})
+                record.update(pid=scoped_pid, starttime=starttime(Path(f"/proc/{scoped_pid}/stat").read_text()), cgroup=group)
                 assert group == f"{slice_path}/{unit}", f"fixture left caller slice: {group}"
                 properties = dict(line.split("=", 1) for line in subprocess.check_output(
                     [systemctl, "--user", "show", unit, "-p", "MemoryMax", "-p", "MemorySwapMax",
-                     "-p", "TasksMax", "-p", "RuntimeMaxUSec"], text=True).splitlines())
+                     "-p", "TasksMax", "-p", "RuntimeMaxUSec", "-p", "ControlGroup", "-p", "Slice"], text=True).splitlines())
                 assert properties["MemoryMax"] == "67108864", properties
                 assert properties["MemorySwapMax"] == "0" and properties["TasksMax"] == "16", properties
-                assert properties["RuntimeMaxUSec"] in ("1min 30s", "90s"), properties
-                peak = Path("/sys/fs/cgroup", group.lstrip("/"), "memory.peak")
-                if peak.is_file():
-                    print(f"{unit}: fixture memory.peak={peak.read_text().strip()} bytes", flush=True)
+                assert properties["ControlGroup"] == group and properties["Slice"] == Path(slice_path).name, properties
+                usec = runtime_usec(properties["RuntimeMaxUSec"])
+                assert usec == 90000000, properties
+                record.update(slice=properties["Slice"], limits=kernel_limits(Path("/sys/fs/cgroup", group.lstrip("/"))),
+                              RuntimeMaxUSec=usec, manager=properties)
+                with contextlib.suppress(OSError):
+                    record["memory.peak"] = int(Path("/sys/fs/cgroup", group.lstrip("/"), "memory.peak").read_text())
                 if mode == "kill":
                     victim.kill()
                 assert victim.wait(20) == (124 if mode == "timeout" else -signal.SIGKILL)
                 until(lambda: not alive(scoped_pid), f"{mode} stops the scope process")
         finally:
-            for unit in units:
-                subprocess.run([systemctl, "--user", "stop", unit], capture_output=True)
-            for wrapper in wrappers:
-                if wrapper.poll() is None:
-                    wrapper.kill()
-                wrapper.wait(10)
-            def no_fixtures():
-                listed = subprocess.check_output([systemctl, "--user", "list-units", "ci-perf-slot-fixture-*",
-                                                  "--all", "--no-legend", "--plain"], text=True)
-                return not listed.strip() and not any(alive(pid) for pid in scoped_pids)
-            until(no_fixtures, "all fixture scopes and processes are gone")
+            finish_fixtures()
     else:
         print("skipped: no systemd user bus for the scope case")
 
