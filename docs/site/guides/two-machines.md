@@ -36,7 +36,7 @@ Success means both machines show the expected membership and initial synchroniza
 
 ## Using Fabric
 
-Run Fabric with `--runtime-peers` and install `st-fabric-adapter` on both machines. Keep the external adapter running as a separate service on the sponsor. Create the fleet with `--transports fabric`; the machines need no prior Fabric trust or manual grants.
+Run Fabric with `--runtime-peers` and install `fractal-fabric-adapter` on both machines; the old name `st-fabric-adapter` is still accepted. Keep the external adapter running as a separate service on the sponsor. Create the fleet with `--transports fabric`; the machines need no prior Fabric trust or manual grants.
 
 On studio:
 
