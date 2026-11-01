@@ -20,6 +20,7 @@ mod process;
 mod procfs;
 mod pty;
 mod seat_placement;
+pub mod seat_admission;
 pub use seat_placement::UnlanedSeatPlacement;
 mod pty_launcher;
 #[path = "../../pty-launch-environment.rs"]

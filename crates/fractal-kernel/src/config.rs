@@ -42,6 +42,9 @@ pub struct Config {
     /// Explicit placement for daemon-launched seats without a lane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
+    /// Optional Linux envelope admission policy. Absent means off without reading a state file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seat_admission: Option<fractal_runtime::seat_admission::Config>,
     /// `on` caps each seat that declares `capacity` in its lane (docs/st3/seat-lanes.md). Absent
     /// means `off`: such a seat starts without one. Seats without a declaration never change.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -593,6 +596,7 @@ impl Default for Config {
             claude_primary_ownership_observe: None,
             seat_priority: None,
             unlaned_seat: None,
+            seat_admission: None,
             lanes: None,
             person: None,
             fleet_id: None,
@@ -1276,6 +1280,19 @@ mod tests {
         assert!(toml::from_str::<Config>("[unlaned_seat]\nmemoryMax = 1024\n").is_err());
         assert!(toml::from_str::<Config>(&fields.replace("8589934592", "0")).is_err());
         assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
+    }
+
+    #[test]
+    fn seat_admission_is_optional_and_strict() {
+        assert!(Config::default().seat_admission.is_none());
+        assert!(toml::from_str::<Config>("").unwrap().seat_admission.is_none());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_admission"));
+        let fields = "[seat_admission]\nstateFile = '/run/admission.state'\nbatchPausedMinSecs = 30\n";
+        let configured: Config = toml::from_str(fields).unwrap();
+        let encoded = toml::to_string(&configured).unwrap();
+        assert_eq!(toml::from_str::<Config>(&encoded).unwrap(), configured);
+        assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
+        assert!(toml::from_str::<Config>("[seat_admission]\nstateFile = 'state'\n").is_err());
     }
 
     #[test]
