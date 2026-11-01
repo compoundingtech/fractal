@@ -375,6 +375,10 @@ impl FleetAuthority for GraphAuthority {
         FleetAuthority::fleet_membership(&self.graph()?.graph)
     }
 
+    fn fleet_membership_sealed(&self) -> anyhow::Result<smallclaims::fleet::Membership> {
+        FleetAuthority::fleet_membership_sealed(&self.graph()?.graph)
+    }
+
     fn is_default_store(&self) -> anyhow::Result<bool> {
         FleetAuthority::is_default_store(&self.graph()?.graph)
     }

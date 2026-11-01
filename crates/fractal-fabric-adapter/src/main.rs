@@ -182,9 +182,11 @@ async fn poll(
         );
         bytes.extend_from_slice(&chunk);
     }
-    let mut snapshot: LeaveSnapshot = serde_json::from_slice(&bytes).context(
-        "read st leave-state contract; upgrade st to a version supporting local adapters",
-    )?;
+    let mut snapshot = serde_json::from_slice::<smallclaims::sync::PeerResponse<LeaveSnapshot>>(&bytes)
+        .context(
+            "read st leave-state contract; upgrade st to a version supporting local adapters",
+        )?
+        .value;
     ensure!(
         snapshot.persistence_error.is_none(),
         "st leave state is not durable: {}",
@@ -334,6 +336,31 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(crate) fn envelope(value: serde_json::Value) -> serde_json::Value {
+        serde_json::to_value(smallclaims::sync::PeerResponse::new("fixture", 127, value)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_leave_state_envelope_is_idle() {
+        let body = serde_json::from_str(
+            r#"{"api_version":"st3.v1","request_id":"…","snapshot_host":"dev4","store_index":127,"value":{"fleet_id":null,"own_member_key":null,"membership":{"anchor":null,"members":[],"legacy_removed":[]},"members":[],"persistence_error":null}}"#,
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("st.sock");
+        let server = local_api(&socket, "200 OK", body).await;
+        let client = reqwest::Client::builder()
+            .unix_socket(socket)
+            .build()
+            .unwrap();
+        let (fleet, status) = poll(&client, &tmp.path().join("absent-fabric.sock"), tmp.path())
+            .await
+            .unwrap();
+        assert!(fleet.is_none());
+        assert_eq!(status.state, "idle");
+        server.await.unwrap();
+    }
     #[test]
     fn carrier_retention_is_bounded_and_confirmation_specific() {
         let mut snapshot = LeaveSnapshot {
@@ -400,26 +427,34 @@ mod tests {
 
     #[tokio::test]
     async fn failed_snapshot_never_withdraws_known_owner() {
-        let tmp = tempfile::tempdir().unwrap();
-        let socket = tmp.path().join("st.sock");
-        let known = BTreeSet::from(["fleet-before".to_owned()]);
-        save(&tmp.path().join("owners.json"), &known).unwrap();
-        let server = local_api(
-            &socket,
-            "503 Service Unavailable",
-            serde_json::json!({"error":"worker unavailable"}),
-        )
-        .await;
-        let client = reqwest::Client::builder()
-            .unix_socket(socket)
-            .build()
-            .unwrap();
-        let error = poll(&client, &tmp.path().join("absent-fabric.sock"), tmp.path())
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("503"));
-        assert_eq!(owners(&tmp.path().join("owners.json")).unwrap(), known);
-        server.await.unwrap();
+        for (status, body, expected) in [
+            (
+                "503 Service Unavailable",
+                serde_json::json!({"error":"worker unavailable"}),
+                "503",
+            ),
+            (
+                "200 OK",
+                envelope(serde_json::json!({"fleet_id":null})),
+                "read st leave-state contract",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let socket = tmp.path().join("st.sock");
+            let known = BTreeSet::from(["fleet-before".to_owned()]);
+            save(&tmp.path().join("owners.json"), &known).unwrap();
+            let server = local_api(&socket, status, body).await;
+            let client = reqwest::Client::builder()
+                .unix_socket(socket)
+                .build()
+                .unwrap();
+            let error = poll(&client, &tmp.path().join("absent-fabric.sock"), tmp.path())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected));
+            assert_eq!(owners(&tmp.path().join("owners.json")).unwrap(), known);
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -429,10 +464,10 @@ mod tests {
         let server = local_api(
             &socket,
             "200 OK",
-            serde_json::json!({
+            envelope(serde_json::json!({
                 "fleet_id":null, "own_member_key":null, "membership":FleetView::default(),
                 "members":[], "persistence_error":null
-            }),
+            })),
         )
         .await;
         let client = reqwest::Client::builder()

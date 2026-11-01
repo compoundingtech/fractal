@@ -28,6 +28,7 @@ const HOST: &str = "conversation-gateway";
 
 fn app(store: Arc<Store>, node: &str, root: &Path) -> crate::api::AppState {
     crate::api::AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(tokio::sync::Notify::new()),

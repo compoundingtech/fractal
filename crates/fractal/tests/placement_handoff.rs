@@ -428,6 +428,7 @@ impl Node {
         let reconciler =
             Reconciler::new(store.clone(), runtime.clone(), name.into(), notify.clone());
         let state = AppState {
+            seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify,
@@ -539,7 +540,7 @@ agent "example/mover" {{
         let home = self.root.path().to_owned();
         let args = args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
         tokio::task::spawn_blocking(move || {
-            std::process::Command::new(test_bin!("st3")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            std::process::Command::new(test_bin!("fractal")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .env("HOME", &home)
                 .env("XDG_CONFIG_HOME", home.join("config"))

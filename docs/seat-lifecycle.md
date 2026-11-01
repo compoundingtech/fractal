@@ -9,6 +9,81 @@ st agents show agent/garden/worker
 st agents queue agent/garden/worker
 ```
 
+## Declare and update an agent
+
+An agent has a durable identity, harness, model, and workspace, kept running by Fractal. Write its
+declaration with `st agents start --print-kdl` and keep the file in Git:
+
+```sh
+cd ~/src/garden
+st agents start example/worker --harness claude --model claude-sonnet-5 --effort medium \
+  --as person/ada --print-kdl > worker.kdl
+```
+
+`agents start` accepts an identity or a complete agent subject: `example/worker` and
+`agent/example/worker` both declare `agent/example/worker`. A slash-qualified or dotted identity
+is exact; a simple name such as `worker` becomes `agent/HOST.worker` on its placement host.
+Use `agent/HOST.worker` to name that agent explicitly. A doubled `agent/agent/` prefix is rejected.
+
+Starting an existing agent preserves its declaration, including its restart policy and command.
+Only explicit `--host`, `--workspace`, `--harness`, `--model`, `--effort`, and `--arg` options patch
+it. `--model`, `--effort`, and `--arg` require an existing typed harness and are refused for
+`command`/`argv` agents. For a new agent, the defaults remain Claude, the current workspace, and
+`restart always`. `--print-kdl` queries the daemon to preview the effective declaration without
+publishing it.
+
+```kdl
+version 2
+agent "example/worker" {
+    workspace "/home/example/src/garden"
+    restart always
+    harness claude {
+        model claude-sonnet-5
+        effort medium
+    }
+}
+```
+
+Apply it and look at it:
+
+```sh
+st apply worker.kdl --as person/ada
+st agents show agent/example/worker
+st terminals peek agent/example/worker
+```
+
+See [model accounts](st3/accounts.md) for usage totals, weekly limits, and account pools.
+
+The agent starts its harness in the workspace with no prompt. It stays idle, taking no turn, until
+a person types in its terminal or a message is posted to it. An agent you declare as
+`fleet/PROJECT/...` may also publish, start, and revise missions under `fleet/PROJECT/*`;
+`st agents show` prints that authority. `st terminals attach agent/example/worker` opens its
+terminal from any fleet machine; Ctrl+\\ detaches without stopping it. On the agent's own host it
+connects straight to the PTY session, so a busy daemon cannot stall it. If the daemon does not
+answer within a second, fractal attaches to the agent's newest PTY session on that host without it and
+says so.
+
+A running agent restarts when you apply a declaration that changes how it launches: its
+workspace, harness, model, effort, arguments or command. A change to its label, environment or
+restart policy keeps the running process and takes effect the next time it starts; use `st agents
+restart agent/example/worker --as person/ada` to apply it now. Restart preserves the declaration,
+works for top-level and mission agents, and waits for a new running incarnation.
+
+Human labels are presentation, not launch configuration:
+
+```sh
+st agents rename agent/example/worker "Garden maintenance" --as person/ada
+st agents rename agent/example/worker --clear --as person/ada
+```
+
+Rename publishes only `desired.display_name`, the same durable field as KDL `name`. It does not
+restart the agent or change its identity, and a stopped agent keeps its restart budget and any
+crash-loop hold. The Agent API uses this effective label; clearing it restores `example/worker`.
+The label must be non-empty. Like declaring an agent in free mode, a person or an agent may rename
+any agent. A bound harness must act as itself, and rename preserves the original declaring actor.
+
+Ordinary messages are `silent` or `wake` (the default for every sender and agent). Silent mail stays unread without waking; each real wake offers at most eight, with older mail available on demand. There is no per-agent wake policy or inferred question type. See [silent messages](st3/silent-messages.md).
+
 ## Restart, stop, or suspend?
 
 | Need | Action |
@@ -24,6 +99,9 @@ st agents restart agent/garden/worker --as person/ada
 st agents show agent/garden/worker
 ```
 
+`--timeout 2m` changes the default ten-minute wait; a failure or timeout explains why
+the agent is not running again.
+
 When repeated failed starts have parked an agent, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the agent parks again and its cause stays visible: `st agents show` prints it on its `WHY` line and `st agents ls` under its row, with the time st parked it. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
 
 A failed start with unverified producer closure can be superseded only by a still-current restart request accepted within the last hour. The selected desired declaration must still match the request, with no later suspension, resume, stop, termination or retirement; a current suspension also blocks recovery. Otherwise reconciliation records `restart-retired-obsolete-request` and completes the request as `retired` without launching or asserting producer closure. A new explicit restart is required after intent changes or expiry. The existing minimum failed-start age, absent-runtime check and kernel launch lock still apply. Synthesized start control requests are attributed to `agent/st3/reconciler`, with the original requester-authored restart retained as evidence; they do not impersonate a new request from that actor.
@@ -32,7 +110,18 @@ Physical preflight does not release the failed operation. With the launch lock h
 
 A queued recovery rejected before dispatch is revoked and completed by the existing `never-dispatched` cancellation protocol in the same writer transaction. Reconciliation applies that nonlaunch proof and frees admission, so a later valid restart can launch without restarting the daemon.
 
-The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
+The graph retains claimed work and pending mail.
+
+On relaunch, Fractal tries to continue the harness's last native session: `st agents restart`, a
+changed launch, a harness that hung up or crashed, a daemon restart, and a stop followed by a
+start. Claude, Codex, pi, omp and OpenCode each resume the session their driver last reported for
+the agent, and a Claude agent whose workspace changed carries its transcript into the new
+workspace's project. A harness that cannot continue that session (its transcript is gone, or the
+declaration selects its own session) starts a new one and records a
+`native-continue-unavailable` warning; later relaunches do not try that session again. Only a
+mission step with `fresh-context` starts an agent on a new session on purpose.
+
+Stop and start explicitly when you want it off between uses:
 
 ```sh
 st agents stop agent/garden/worker --as person/ada --reason 'Done for the week.'
@@ -41,6 +130,30 @@ st agents start garden/worker --as person/ada
 
 The reason is optional. It is kept in the stop declaration (`stop "agent/garden/worker" { reason "Done for the week." }`), and
 `st agents show` and `st agents ls` print it with who stopped the agent and when.
+
+Stopping an agent ends every process it started, including builds and tests that outlived
+its harness, on hosts with a systemd user manager; [Stopping a session](st3/priority.md#stopping-a-session)
+says what other hosts miss. A mission agent you stop stays stopped while its run's generation
+lasts, across daemon restarts, and `st agents start` starts it again on its run's own declaration,
+creating no other agent.
+
+### Optional host seat admission
+
+Host seat admission is disabled by default. When enabled, an accepted new-seat
+declaration may wait in the host's admission queue instead of immediately launching
+a provider. This is **accepted-pending**, not a failed start or proof of a running
+harness. `st agents start`, `st agents show`, and `st agents ls` show the admission
+reason and queue position. Start JSON includes `seatAdmission`; agent detail/list
+JSON carries `seat_admission`. Authorized replacement starts are labelled
+`admitted: replacement`; internal gate runners do not join this queue.
+
+Inspect host admission using `st doctor --json`: `performance.seatAdmission`
+contains `mode`, `reason`, `pendingCount`, and `oldestPendingAgeSecs`, plus the
+pending seats and admitted replacements. The same host object is exposed as
+`seatAdmission` by current `/v1/status` reads. These are live, process-local
+observations, not replicated claims. Historical status and agent
+history do not acquire current admission facts; a daemon restart rebuilds the
+queue from current declarations rather than replaying presentation metadata.
 
 Native drivers check their work once a minute and renew held claims only while the claim's
 exact harness incarnation remains live, including an idle or blocked harness. Agents without
@@ -63,7 +176,7 @@ st agents show agent/garden/worker
 st agents resume agent/garden/worker --as person/ada
 ```
 
-Suspend refuses a busy agent with its blockers: a turn, claimed work, pending question, unsent input, or running subagent. A new harness may need one turn before it has a saved native session. Mail waits while suspended; it does not wake the agent. Resume verifies the same session on the same host. See [suspend/resume](st3/suspend.md) for failure reasons and limits.
+Suspend refuses a busy agent with its blockers: a turn, claimed work, pending question, unsent input, or running subagent. A new harness may need one turn before it has a saved native session. A suspended agent stays declared and is not restarted. Mail waits while suspended; it does not wake the agent. Resume verifies the same session on the same host. See [suspend/resume](st3/suspend.md) for failure reasons and limits.
 
 ## Client end reasons
 
@@ -401,105 +514,6 @@ back to `/bin/sh`) with no agent harness. Locally its directory defaults to your
 with a remote `--host`, pass an absolute `--cwd` or use that daemon's directory. The shell does not
 restart after exit. `end` publishes a durable stop. Only its creator may create or end its declaration.
 The client crates expose `terminal_create` and `terminal_end` (camel case in TypeScript and Swift).
-
-## Declare and update an agent
-
-An agent has a durable identity, harness, model, and workspace, kept running by Fractal. Write its
-declaration with `st agents start --print-kdl` and keep the file in Git:
-
-```sh
-cd ~/src/garden
-st agents start example/worker --harness claude --model claude-sonnet-5 --effort medium \
-  --as person/ada --print-kdl > worker.kdl
-```
-
-`agents start` accepts an identity or a complete agent subject: `example/worker` and
-`agent/example/worker` both declare `agent/example/worker`. A slash-qualified or dotted identity
-is exact; a simple name such as `worker` becomes `agent/HOST.worker` on its placement host.
-Use `agent/HOST.worker` to name that agent explicitly. A doubled `agent/agent/` prefix is rejected.
-
-Starting an existing agent preserves its declaration, including its restart policy and command.
-Only explicit `--host`, `--workspace`, `--harness`, `--model`, `--effort`, and `--arg` options patch
-it. `--model`, `--effort`, and `--arg` require an existing typed harness and are refused for
-`command`/`argv` agents. For a new agent, the defaults remain Claude, the current workspace, and
-`restart always`. `--print-kdl` queries the daemon to preview the effective declaration without
-publishing it.
-
-```kdl
-version 2
-agent "example/worker" {
-    workspace "/home/example/src/garden"
-    restart always
-    harness claude {
-        model claude-sonnet-5
-        effort medium
-    }
-}
-```
-
-Apply it and look at it:
-
-```sh
-st apply worker.kdl --as person/ada
-st agents show agent/example/worker
-st terminals peek agent/example/worker
-```
-
-See [model accounts](st3/accounts.md) for usage totals, weekly limits, and account pools.
-
-The agent starts its harness in the workspace with no prompt. It stays idle, taking no turn, until
-a person types in its terminal or a message is posted to it. An agent you declare as
-`fleet/PROJECT/...` may also publish, start, and revise missions under `fleet/PROJECT/*`;
-`st agents show` prints that authority. `st terminals attach agent/example/worker` opens its
-terminal from any fleet machine; Ctrl+\\ detaches without stopping it. On the agent's own host it
-connects straight to the PTY session, so a busy daemon cannot stall it. If the daemon does not
-answer within a second, fractal attaches to the agent's newest PTY session on that host without it and
-says so.
-
-A running agent restarts when you apply a declaration that changes how it launches: its
-workspace, harness, model, effort, arguments or command. A change to its label, environment or
-restart policy keeps the running process and takes effect the next time it starts; use `st agents
-restart agent/example/worker --as person/ada` to apply it now. Restart preserves the declaration,
-works for top-level and mission agents, and waits for a new running incarnation.
-
-Every relaunch of an agent continues its harness's last native session: `st agents restart`, a
-changed launch, a harness that hung up or crashed, a daemon restart, and a stop followed by a
-start. Claude, Codex, pi, omp and OpenCode each resume the session their driver last reported for
-the agent, and a Claude agent whose workspace changed carries its transcript into the new
-workspace's project. A harness that cannot continue that session (its transcript is gone, or the
-declaration selects its own session) starts a new one and records a
-`native-continue-unavailable` warning; later relaunches do not try that session again. Only a
-mission step with `fresh-context` starts an agent on a new session on purpose. `--timeout 2m` changes the default ten-minute
-wait; a failure or timeout explains why the agent is not running again. `st agents stop
-agent/example/worker --as person/ada` stops an agent until you apply its file again. It ends every
-process the agent started, including builds and tests that outlived the harness, on hosts with a
-systemd user manager; [Stopping a session](st3/priority.md#stopping-a-session) says what
-other hosts miss. A mission agent you stop stays stopped while its run's generation lasts, across
-daemon restarts, and `st agents start` starts it again on its run's own declaration, creating no
-other agent.
-
-`st agents suspend agent/example/worker --as person/ada` stops a quiet agent and keeps its harness's
-own session; `st agents resume agent/example/worker --as person/ada` brings the agent back on that
-same session and checks it. An agent suspends only when it is idle, with no pending question,
-claimed step, or running subagent. A suspended agent stays declared, is not restarted, and keeps
-its mail until it resumes. [Suspending an agent](st3/suspend.md) has the details.
-
-Human labels are presentation, not launch configuration:
-
-```sh
-st agents rename agent/example/worker "Garden maintenance" --as person/ada
-st agents rename agent/example/worker --clear --as person/ada
-```
-
-Rename publishes only `desired.display_name`, the same durable field as KDL `name`. It does not
-restart the agent or change its identity, and a stopped agent keeps its restart budget and any
-crash-loop hold. The Agent API uses this effective label; clearing it restores `example/worker`.
-The label must be non-empty. Like declaring an agent in free mode, a person or an agent may rename
-any agent. A bound harness must act as itself, and rename preserves the original declaring actor.
-
-[`examples/fractal/agents`](../examples/fractal/agents) has an agent file for each harness.
-
-Ordinary messages are `silent` or `wake` (the default for every sender and agent). Silent mail stays unread without waking; each real wake offers at most eight, with older mail available on demand. There is no per-agent wake policy or inferred question type. See [silent messages](st3/silent-messages.md).
 
 ## Pending runtime starts
 

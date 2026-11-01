@@ -112,6 +112,8 @@ libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
 # CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true. The profile is part of the tree, so a signed run binds it.
 [profile.dev]
 debug = 1
+# Keep file:line backtraces without copying workspace DWARF into every test executable.
+split-debuginfo = "unpacked"
 debug-assertions = false
 overflow-checks = true
 
@@ -120,6 +122,7 @@ debug = 0
 
 [profile.test]
 debug = 1
+split-debuginfo = "unpacked"
 debug-assertions = false
 overflow-checks = true
 

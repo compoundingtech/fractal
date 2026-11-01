@@ -342,6 +342,44 @@ pub async fn seat_snapshot_chunk(
         .map_err(ApiError::internal)
 }
 
+#[derive(Deserialize)]
+pub struct AgentLaneQuery {
+    pub agent: String,
+}
+
+/// The slice this host's runtime gives the agent's lane, named by the daemon so no caller copies
+/// the naming: `st-test` puts a check that a seat started outside its lane (a unit of its own) back
+/// in it. The name says where the lane is when the seat has one; whether the slice exists and is
+/// capped is the kernel's to say, so a caller reads that from the cgroup tree. `sccache_server_uds`
+/// is the lane's own sccache server, as a laned task's environment names it from the daemon's
+/// runtime directory (null without one): a job in the lane that names no server would compile in
+/// the host's, outside the lane.
+pub async fn agent_lane(
+    State(state): State<AppState>,
+    Query(query): Query<AgentLaneQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let subject = agent_subject(query.agent);
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
+    let lookup = subject.clone();
+    let desired = super::blocking_store(move || state.store.desired_subject_with_writer(&lookup)).await?;
+    let Some(member) = desired.and_then(|(desired, _)| desired.member) else {
+        return Err(ApiError::not_found(format!("{subject} has no declaration with a runtime")));
+    };
+    let slice = fractal_runtime::seat_slice(&member.runtime_id);
+    let sccache = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| fractal_runtime::lane_sccache_socket(&dir, &slice));
+    Ok(Json(json!({
+        "agent": subject,
+        "host": member.host,
+        "runtime_id": member.runtime_id,
+        "slice": slice,
+        "sccache_server_uds": sccache,
+        "lanes_enforced": fractal_runtime::lanes_enforced(),
+    })))
+}
+
 /// Ask the seat's owner to resume a suspended seat on the native session it suspended.
 pub async fn resume_agent(
     State(state): State<AppState>,
@@ -497,4 +535,43 @@ async fn rename_identity_id(
     let receipt = blocking_action(move || store.rename_identity(kind, &request, &peers)).await?;
     signal_changed(&state);
     Ok(Json(receipt))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameProofExportRequest {
+    name: String,
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    include_co_batched_claims: bool,
+}
+
+pub async fn export_agent_rename_proof(
+    State(state): State<AppState>,
+    Json(request): Json<RenameProofExportRequest>,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    export_identity_rename_proof(state, crate::store::identities::IdentityKind::Agent, request).await
+}
+
+pub async fn export_mission_rename_proof(
+    State(state): State<AppState>,
+    Json(request): Json<RenameProofExportRequest>,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    export_identity_rename_proof(state, crate::store::identities::IdentityKind::Mission, request).await
+}
+
+async fn export_identity_rename_proof(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    request: RenameProofExportRequest,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    if !request.include_co_batched_claims {
+        return Err(ApiError::bad(St3Error::new("rename-proof-disclosure-consent-required",
+            "export requires include_co_batched_claims=true: this fleet-internal bundle contains complete co-batched claims and blobs; do not publish or attach it to public issues")));
+    }
+    let store = state.store.clone();
+    blocking_action(move || {
+        store.export_rename_proof(kind, &request.name, request.revision.as_deref())
+    }).await.map(Json)
 }

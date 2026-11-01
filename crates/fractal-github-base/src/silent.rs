@@ -44,14 +44,37 @@ pub const SESSION_START_TAG_PREFIX: &str = "st3-session-start:";
 /// claim that records the request and its deadline.
 pub const PREPARE_TAG_PREFIX: &str = "st3-restart-prepare:";
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+/// Decode durable tags without rewriting them. Legacy decoding remains after contraction.
+pub fn strip_message_tag_prefix<'a>(tag: &'a str, family: &str) -> Option<&'a str> {
+    tag.strip_prefix("st3-")
+        .or_else(|| tag.strip_prefix("fractal-"))?
+        .strip_prefix(family)
+}
+
+/// Yield only legacy values when this key has any; otherwise yield new values in tag order.
+pub fn message_tag_values<'a>(
+    tags: impl Clone + Iterator<Item = &'a str> + 'a,
+    family: &'a str,
+) -> impl Iterator<Item = &'a str> + 'a {
+    let legacy = tags.clone().any(|tag| {
+        tag.strip_prefix("st3-")
+            .and_then(|value| value.strip_prefix(family))
+            .is_some()
+    });
+    let prefix = if legacy { "st3-" } else { "fractal-" };
+    tags.filter_map(move |tag| tag.strip_prefix(prefix)?.strip_prefix(family))
+}
+// LIVE-MIGRATION END
+
 /// Closed daemon event families reserved by conversation admission.
 pub fn reserved_event_tag(tag: &str) -> bool {
-    tag.starts_with("st3-work:")
-        || tag.starts_with("st3-work-handoff:")
-        || tag.starts_with("st3-fault:")
+    strip_message_tag_prefix(tag, "work:").is_some()
+        || strip_message_tag_prefix(tag, "work-handoff:").is_some()
+        || strip_message_tag_prefix(tag, "fault:").is_some()
         || tag == crate::github_watch::WATCH_TAG
-        || tag.starts_with("st3-run-report:")
-        || tag == "st3-provider-capacity-retry"
+        || strip_message_tag_prefix(tag, "run-report:").is_some()
+        || strip_message_tag_prefix(tag, "provider-capacity-retry") == Some("")
         || tag.starts_with("st3-product-wait:")
         || tag.starts_with(SESSION_START_TAG_PREFIX)
         || tag.starts_with(PREPARE_TAG_PREFIX)
@@ -322,6 +345,45 @@ mod tests {
             "sent",
             &[SILENT_TAG, "launch"]
         )));
+    }
+
+    #[test]
+    fn durable_message_tag_prefixes_and_conflicts() {
+        for family in [
+            "work:",
+            "work-handoff:",
+            "fault:",
+            "run-report:",
+            "provider-capacity-retry",
+        ] {
+            for prefix in ["st3-", "fractal-"] {
+                assert!(reserved_event_tag(&format!("{prefix}{family}")));
+            }
+        }
+        for family in ["work:", "wake-source:", "wake-attempt:"] {
+            let old = format!("st3-{family}old");
+            let new = format!("fractal-{family}new");
+            for tags in [[old.as_str(), new.as_str()], [new.as_str(), old.as_str()]] {
+                assert_eq!(
+                    message_tag_values(tags.into_iter(), family).collect::<Vec<_>>(),
+                    ["old"]
+                );
+            }
+            assert_eq!(
+                message_tag_values([new.as_str()].into_iter(), family).next(),
+                Some("new")
+            );
+            assert_eq!(
+                message_tag_values([old.as_str()].into_iter(), family).next(),
+                Some("old")
+            );
+        }
+        for prefix in ["st3-", "fractal-"] {
+            let manual = format!("{prefix}wake-source:manual");
+            let auto = format!("{prefix}wake-source:auto");
+            let tags = [auto.as_str(), manual.as_str()];
+            assert!(message_tag_values(tags.into_iter(), "wake-source:").any(|v| v == "manual"));
+        }
     }
 
     #[test]

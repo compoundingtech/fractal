@@ -1,6 +1,16 @@
 use super::*;
 
 #[test]
+fn demo_environment_excludes_both_tui_configuration_spellings() {
+    for suffix in ["PERSON", "ENDPOINT", "DOWNLOADS"] {
+        for prefix in ["ST3", "FRACTAL"] {
+            let name = format!("{prefix}_{suffix}");
+            assert!(DEMO_ENVIRONMENT_NAMES.contains(&name.as_str()), "{name} must not leak into the demo");
+        }
+    }
+}
+
+#[test]
 fn github_watch_line_shows_throttling_without_a_new_wire_state() {
     let view = serde_json::json!({
         "thread": "acme/garden#12", "state": "active",
@@ -293,7 +303,7 @@ fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
 
 #[test]
 fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
-    let status = fractal_daemon::store::CheckpointStatusView {
+    let mut status = fractal_daemon::store::CheckpointStatusView {
         node: "alder".into(),
         newest_stable: None,
         trimmed: None,
@@ -308,6 +318,14 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
     assert!(output.contains("last daemon start (advertised build)"));
     assert!(output.contains("machine_version  alder: 0.1.0+abc1234-dirty"));
     assert!(output.contains("machine_version  birch: not advertised"));
+    status.pending = Some(serde_json::from_value(serde_json::json!({
+        "checkpoint": "checkpoint/test", "cut_unix_ms": 0, "due_at_unix_ms": 0,
+        "local_digest_state": "unavailable", "sealed": [], "disagreeing": {},
+        "unsealed": ["alder", "birch"], "verified": [], "verifications_agree": true,
+        "builds": {}
+    })).unwrap());
+    assert!(status.pending.as_ref().unwrap().terms.is_none());
+    assert!(render_checkpoint_status(&status).contains("local digest unavailable"));
 }
 
 #[test]
@@ -471,6 +489,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         }).unwrap();
     };
     let state = fractal_daemon::api::AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
@@ -2550,6 +2569,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             .unwrap();
     }
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -2646,6 +2666,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         })
         .collect::<Vec<_>>();
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
@@ -2725,6 +2746,7 @@ async fn trace_wait_starts_after_existing_events() {
             .store_index;
     }
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
@@ -4416,6 +4438,23 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let observed = fractal_drivers::driver_diagnostic::read(
             &fractal_drivers::driver_diagnostic::path(directory.path()),
         );
+        // A legacy same-code diagnostic is not evidence of this runtime's failure.
+        assert!(admission_diagnostic("agent/node.fixture", "first", &observed).is_none());
+        let Observed::Failure(mut failure) = observed else {
+            panic!("missing diagnostic")
+        };
+        failure.attempt = Some(Box::new(fractal_drivers::harness_admission::AttemptDiagnostic {
+            incarnation: "first".into(),
+            phase: "version".into(),
+            outcome: "timeout".into(),
+            elapsed_ms: 5008,
+            deadline_ms: Some(5000),
+            exit_code: None,
+            exit_signal: Some(9),
+            stderr_tail: "fixture error".into(),
+            error_chain: "admission process timed out".into(),
+        }));
+        let observed = Observed::Failure(failure);
         let claim = admission_diagnostic("agent/node.fixture", "first", &observed).unwrap();
         assert_eq!(claim.fields["code"], "harness-admission-failed");
         assert_eq!(claim.fields["severity"], severity);
@@ -4424,7 +4463,13 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let reason = claim.fields["reason"].as_str().unwrap();
         assert!(reason.contains("admissionNativeConsumption") && reason.contains("99.42.7"));
         assert!(reason.contains(driver.as_str()));
-        assert!(reason.contains(&format!("st admission override {} --binary", driver.as_str())));
+        assert!(reason.contains("phase=version outcome=timeout elapsed=5008ms deadline=5000ms"));
+        assert!(reason.contains("fixture error"));
+        assert!(admission_diagnostic("agent/node.fixture", "successor", &observed).is_none());
+        assert!(reason.contains(&format!(
+            "st admission override {} --binary",
+            driver.as_str()
+        )));
         assert_eq!(
             claim.idempotency_key,
             admission_diagnostic("agent/node.fixture", "first", &observed)
@@ -4535,7 +4580,8 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
     let client = Client::new(Endpoint::Unix(PathBuf::from("/nonexistent/st3.sock")));
     let args = |to: &str| MessageSendArgs {
         to: to.into(),
-        body: "Done.".into(),
+        body: Some("Done.".into()),
+        body_file: None,
         subject: None,
         in_reply_to: Some("message/0123456789abcdef".into()),
         tags: Vec::new(),
@@ -5548,6 +5594,52 @@ fn message_list_requires_one_exact_mailbox_and_explicit_identity_wins() {
     assert!(explicit.archive);
 }
 
+fn parse_body_send(extra: &[&str]) -> Result<MessageSendArgs, clap::Error> {
+    let mut args = vec!["fractal", "conversations", "send", "agent/example", "--from", "agent/sender"];
+    args.extend_from_slice(extra);
+    match Cli::try_parse_from(args)?.command {
+        Command::Conversations { command: MessageCommand::Send(send) } => Ok(send),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn message_body_sources_require_exactly_one() {
+    assert_eq!(parse_body_send(&[]).err().unwrap().kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert_eq!(parse_body_send(&["--body", "text", "--body-file", "file"]).err().unwrap().kind(), clap::error::ErrorKind::ArgumentConflict);
+    for flag in ["--body", "-m"] {
+        let args = parse_body_send(&[flag, "-"]).unwrap();
+        let text = " \n`command` $VAR é\r\n";
+        assert_eq!(conversations_cli::read_message_body(args.body, args.body_file, text.as_bytes()).unwrap(), text);
+    }
+}
+
+#[test]
+fn message_body_file_preserves_text_and_rejects_invalid_utf8() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let path = file.path().to_str().unwrap();
+    let text = " \n`command` $VAR é\r\n";
+    std::fs::write(&file, text).unwrap();
+    let args = parse_body_send(&["--body-file", path]).unwrap();
+    assert_eq!(conversations_cli::read_message_body(args.body, args.body_file, std::io::empty()).unwrap(), text);
+    std::fs::write(&file, [0xff]).unwrap();
+    assert!(conversations_cli::read_message_body(None, Some(file.path().into()), std::io::empty()).unwrap_err().to_string().contains("UTF-8"));
+    assert!(conversations_cli::read_message_body(Some("-".into()), None, &[0xff][..]).unwrap_err().to_string().contains("UTF-8"));
+}
+
+#[test]
+fn message_body_sources_share_the_byte_limit() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    for length in [fractal_daemon::message_body::MAX_BYTES, fractal_daemon::message_body::MAX_BYTES + 1] {
+        let text = "a".repeat(length);
+        let accepted = length == fractal_daemon::message_body::MAX_BYTES;
+        std::fs::write(&file, &text).unwrap();
+        assert_eq!(conversations_cli::read_message_body(None, Some(file.path().into()), std::io::empty()).is_ok(), accepted);
+        assert_eq!(conversations_cli::read_message_body(Some("-".into()), None, text.as_bytes()).is_ok(), accepted);
+        assert_eq!(conversations_cli::read_message_body(Some(text), None, std::io::empty()).is_ok(), accepted);
+    }
+}
+
 #[test]
 fn fyi_is_the_silent_kind_on_send_and_reply() {
     let parse = |extra: &[&str]| {
@@ -5894,6 +5986,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("message-read-state").unwrap()),
         notify: Arc::new(Notify::new()),
@@ -5991,8 +6084,9 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     }).unwrap();
     let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
-        &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
+        &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
+        seat_admission: Default::default(),
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
         state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
@@ -7371,6 +7465,44 @@ fn a_graph_read_releases_the_native_delivery_fifo() {
     assert_eq!(fractal_drivers::message::list_dir(&archive).unwrap().len(), 1);
 }
 
+#[test]
+fn projected_inbox_tags_accept_both_families_without_merging() {
+    let root = tempfile::tempdir().unwrap();
+    let inbox = root.path().join("inbox");
+    let archive = root.path().join("archive");
+    for tags in [
+        vec!["st3-message:message/old"],
+        vec!["fractal-message:message/new"],
+        vec![
+            "fractal-message:message/ignored",
+            "st3-message:message/legacy",
+            "st3-message:message/second",
+        ],
+        vec!["unknown-message:message/refused"],
+    ] {
+        let tags = tags.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        fractal_drivers::message::send_to_inbox(&inbox, "requester", None, None, &tags, "body")
+            .unwrap();
+    }
+    let subjects = projected_message_subjects(&inbox, &archive).unwrap();
+    assert_eq!(subjects.len(), 4);
+    assert!(subjects.contains("message/second"));
+    assert!(!subjects.contains("message/ignored"));
+    assert!(!subjects.contains("message/refused"));
+    sync_consumed_projected_messages(
+        &inbox,
+        &archive,
+        &BTreeSet::from(["message/new".into(), "message/ignored".into()]),
+    )
+    .unwrap();
+    let archived = fractal_drivers::message::list_dir(&archive).unwrap();
+    assert_eq!(archived.len(), 1);
+    sync_consumed_projected_messages(&inbox, &archive, &BTreeSet::from(["message/second".into()]))
+        .unwrap();
+    let archived = fractal_drivers::message::list_dir(&archive).unwrap();
+    assert_eq!(archived.len(), 2);
+}
+
 #[tokio::test]
 async fn a_closed_message_missing_from_the_active_page_archives_its_projected_file() {
     use axum::{Json, Router, routing::get};
@@ -7930,6 +8062,7 @@ async fn serve_test_store(
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
@@ -8535,7 +8668,7 @@ async fn initial_snapshot_requires_the_providers_runtime_binding() {
 #[tokio::test]
 async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publication() {
     use axum::{Json, Router, routing::post};
-    use fractal_drivers::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage, Support};
+    use fractal_drivers::driver_diagnostic::{Driver, Publisher, Reason, Support};
     use std::sync::{Arc, Mutex};
 
     let root = tempfile::tempdir().unwrap();
@@ -8549,11 +8682,24 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
         Some("99.42.7".into()),
         Support::Unsupported,
     );
-    publisher.publish(
-        Stage::VersionGate,
-        Reason::AdmissionIdleEdge,
-        Source::AdmissionProbe,
-    );
+    fractal_drivers::harness_admission::Admission {
+        version: Some("99.42.7".into()),
+        failed: Some(Reason::AdmissionIdleEdge),
+        cache_path: None,
+        override_reason: None,
+        attempt: Some(fractal_drivers::harness_admission::AttemptDiagnostic {
+            incarnation: "current-runtime".into(),
+            phase: "idleEdge".into(),
+            outcome: "timeout".into(),
+            elapsed_ms: 45000,
+            deadline_ms: Some(45000),
+            exit_code: None,
+            exit_signal: None,
+            stderr_tail: "fake producer diagnostic retained through outage".into(),
+            error_chain: "required idleEdge evidence was not observed".into(),
+        }),
+    }
+    .publish(&mut publisher);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -8615,6 +8761,12 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
             .unwrap()
             .contains("admissionIdleEdge")
     );
+    assert!(
+        captured[0].fields["reason"]
+            .as_str()
+            .unwrap()
+            .contains("fake producer diagnostic retained through outage")
+    );
     assert!(!ready);
     server.abort();
 }
@@ -8657,9 +8809,9 @@ fn native_identity_rename_commands_preserve_full_ids_and_fences() {
             | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
             _ => panic!("expected identity rename"),
         };
-        assert_eq!(args.from, "agent/example-old");
-        assert_eq!(args.to, "agent/example-new");
-        assert_eq!(args.actor, "person/robin");
+        assert_eq!(args.from.as_deref(), Some("agent/example-old"));
+        assert_eq!(args.to.as_deref(), Some("agent/example-new"));
+        assert_eq!(args.actor.as_deref(), Some("person/robin"));
         assert_eq!(args.expected_naming_revision.as_deref(), Some("claim/example"));
         assert_eq!(args.expected_declaration, None);
         assert_eq!(args.idempotency_key.as_deref(), Some("example-rename"));
@@ -8690,6 +8842,80 @@ fn native_identity_rename_allows_generated_idempotency_key() {
         panic!("expected identity rename");
     };
     assert_eq!(args.idempotency_key, None);
+}
+
+#[test]
+fn rename_proof_commands_parse_without_mutation_arguments() {
+    for kind in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "export", "agent/example",
+            "--revision", "claim/exact-revision", "--out", "proof.json",
+            "--include-co-batched-claims",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename proof"),
+        };
+        assert!(args.actor.is_none());
+        let Some(IdentityRenameCommand::Proof {
+            command: RenameProofCommand::Export { name, revision, out, include_co_batched_claims },
+        }) = args.command else { panic!("expected proof export") };
+        assert_eq!(name, "agent/example");
+        assert_eq!(revision.as_deref(), Some("claim/exact-revision"));
+        assert_eq!(out, Some(PathBuf::from("proof.json")));
+        assert!(include_co_batched_claims);
+
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "verify", "proof.json",
+            "--fleet-anchor", "anchor-key", "--after-revision", "claim/prior",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename proof"),
+        };
+        let Some(IdentityRenameCommand::Proof {
+            command: RenameProofCommand::Verify { file, fleet_anchor, after_revision },
+        }) = args.command else { panic!("expected proof verify") };
+        assert_eq!(file, PathBuf::from("proof.json"));
+        assert_eq!(fleet_anchor, "anchor-key");
+        assert_eq!(after_revision.as_deref(), Some("claim/prior"));
+        assert!(Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "verify", "proof.json",
+        ]).is_err(), "caller trust anchor is mandatory");
+    }
+}
+
+#[test]
+fn rename_proof_verification_dispatches_before_instance_or_endpoint_resolution() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("malformed.json");
+    std::fs::write(&file, b"not a proof").unwrap();
+    for kind in ["agents", "missions"] {
+        let arguments: Vec<std::ffi::OsString> = [
+            "st", "--instance", "unconfigured-proof-verifier",
+            "--endpoint", "not-a-valid-endpoint",
+            kind, "rename-id", "proof", "verify",
+            file.to_str().unwrap(), "--fleet-anchor", "caller-anchor",
+        ].into_iter().map(Into::into).collect();
+        assert_eq!(offline_rename_proof_arguments(&arguments), Some(ExitCode::from(6)));
+    }
+    let (verdict, code) = rename_proof_verdict(&file, "caller-anchor", None);
+    assert_eq!(code, 6);
+    assert_eq!(verdict["schema"], "fractal.rename-proof-verdict.v1");
+    assert_eq!(verdict["ok"], false);
+    assert_eq!(verdict["error"]["code"], "malformed-bundle");
+    let missing = root.path().join("missing.json");
+    assert_eq!(rename_proof_verdict(&missing, "caller-anchor", None).1, 6);
+}
+
+#[test]
+fn fleet_anchor_show_parses_as_public_read() {
+    let cli = Cli::try_parse_from(["st", "fleet", "anchor", "show"]).unwrap();
+    assert!(matches!(cli.command, Command::Fleet {
+        command: FleetCommand::Anchor { command: FleetAnchorCommand::Show },
+    }));
 }
 
 #[test]

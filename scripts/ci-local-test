@@ -107,6 +107,23 @@ class CiLocal(unittest.TestCase):
         self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
         self.assertEqual(calls[-1]['env']['BUILD_ADMISSION_LOG'], '/elsewhere/build-admission.log')  # beside the state it names
 
+    def test_a_compile_in_the_lane_straight_after_a_check_there_succeeds(self):
+        # sccache's client starts the server its socket names when none answers there, and the server keeps the client's TMPDIR for
+        # every compile after. The stage stands in for such a compile: it starts the lane's server unless one runs, recording its TMPDIR.
+        socket = Path(self.tmp.name) / 'sccache-lane-x.sock'
+        compile_ = RECORD + 'if [ -n "${SCCACHE_SERVER_UDS:-}" ] && [ ! -e "$SCCACHE_SERVER_UDS" ]; then echo "$TMPDIR" > "$SCCACHE_SERVER_UDS"; fi\n'
+        done, calls = self.run_local('tests', ci_linux=compile_, SCCACHE_SERVER_UDS=str(socket), SCCACHE_DIR='/lane/cache')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertNotIn('SCCACHE_SERVER_UDS', call['env'])
+            self.assertNotIn('SCCACHE_DIR', call['env'])
+        # The seat's next compile in the lane: a server the run started would compile in a TMPDIR the run has removed
+        # ("Failed to create temp dir"); with none, the seat's compile starts the lane's server in its own.
+        self.assertFalse(socket.exists() and not Path(socket.read_text().strip()).is_dir(),
+                         'the lane\'s server was started inside the run and its TMPDIR is gone')
+        self.assertFalse(socket.exists(), 'no server was started inside the run')
+
     def test_the_stages_build_without_debug_info_as_ci_does(self):
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_PROFILE_TEST_DEBUG='1')
         self.assertEqual(done.returncode, 0, done.stderr)

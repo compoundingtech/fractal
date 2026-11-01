@@ -116,9 +116,14 @@ example `github-event/github/acme/garden/pull-request/7/checks/SHA/fail`.
 
 ### The graph kinds
 
-The GitHub plugin's manifest allows two kinds. This build reads both, and no build writes them yet:
-from step 3b of the plugin store, the poller writes them and stops writing `resource.observed`
-snapshots of pull requests and issues.
+The GitHub plugin's manifest allows two kinds. A poller writes both:
+
+- a `vcs.item.state` in the transaction that records a look, whenever an item's compact facts
+  change;
+- each event its mirror derives, as one `github.event` claim.
+
+Before it hands out an event key, it checks the graph's `github.event` subjects as well as its
+own key table, so a key another poller already wrote is never reused.
 
 - **`vcs.item.state` v1**, on the item's own resource subject, written on change: `version`,
   `item_kind` (`vcs.pull-request` or `vcs.issue`), `observer`, `state` (`open` or `closed`),
@@ -136,7 +141,52 @@ attention on a pull request, and the idle hold's merge-queue check, which also t
 `merge-queue-left` event as when the thread left. Without either kind they read
 `resource.observed` as before.
 
-Each member advertises `features.github_plugin = 1` in its `daemon.started` claim.
+Each member advertises `features.github_plugin` in its `daemon.started` claim: 1 from step 3a of
+the plugin store, and 2 from step 3b, which also takes typed relayed reads.
+
+### Compact mode
+
+Per repository, the poller records a change confined to compact facts as `vcs.item.state` alone,
+with no `resource.observed` snapshot, while both of these hold:
+
+1. **Its mirror is filled.** Each look is then compared with, and merged into, the mirror's facts
+   for each item instead of the graph's.
+2. **Every current member of the fleet advertises the plugin.** This fails closed. A member of an
+   older build, a held one included, keeps snapshots on for every repository until it upgrades,
+   so no member's view of a repository's items is ever frozen. The poller decides it again on
+   every look, and logs each switch, on or off, with the member that holds snapshots on.
+
+**What compact mode skips.** It skips the snapshot of a change confined to compact facts, and of
+changes to facts no wake or delivery reads, such as the per-check list, title and labels. In
+practice these are check states, heads, drafts and queue positions.
+
+**What still gets a full snapshot.** A change to any of these, so the graph stays exact for
+every fact a wake or a delivery reads:
+- a new item;
+- comments, `last_comment`, mentions, reactions and reviews;
+- `required_checks.execution`.
+
+Outside compact mode the poller writes the snapshot and, on change, the compact state beside it.
+
+**After a move.** When polling moves to a member without a filled mirror, or a mirror is lost,
+the new poller's first look compares each item whose newest record is compact-only on its
+compact and delivery facts, which the graph holds exactly. It takes the facts that drifted as a
+baseline, so it delivers nothing twice. Until the next snapshot, the graph's copies of those
+drifted facts, such as the title or per-check list, can be behind; `/v1/plugins/github/*` has
+them.
+
+In compact mode a delivered item always has a compact state to pin. Mission discovery pins it,
+and the readers of a pinned or discovered claim read a `vcs.item.state` as an observation whose
+facts are the compact ones and the item's number:
+
+- run inputs;
+- `GateSpec::Field` and `Every` on a pinned subject;
+- the stale pull request checks;
+- the delivery key;
+- the authoring review check.
+
+A gate path outside the compact field set reads absent, so the gate is pending, never wrong. Read
+such a fact through `/v1/plugins/github/*`.
 
 ### The read API
 
@@ -167,9 +217,13 @@ Every answer names the `repository`, its `resource`, `observer` and `poller` (`h
 
 A repository no member polls is `404 not-found`. `st gh watch OWNER/REPO#N` declares its observer.
 
-The relay operation is `github-plugin` version 1 in the peer client read capabilities. A member
-relays only to a poller that advertises the plugin, and each hop checks that the next one grants
-the capability.
+A member relays only to a poller that advertises the plugin, and each hop checks that the next one
+grants the operation's capability:
+
+- To a poller advertising version 2, the relayed read is typed (capability `github-plugin`
+  version 2): owner, repository, `pulls`, `pull`, `checks` or `events`, and number, state and
+  limit. The poller builds the path itself.
+- To a version 1 poller, it carries the path (`github-plugin` version 1).
 
 ### The CLI
 

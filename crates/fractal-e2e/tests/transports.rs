@@ -31,6 +31,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
 fn state(root: &Path, name: &str) -> AppState {
     AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory(name).unwrap()),
         notify: Arc::new(Notify::new()),

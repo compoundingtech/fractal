@@ -96,10 +96,10 @@ pub fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
     {
         let mut statement = staging.prepare(
             "SELECT limits_group, MAX(limits_measured) FROM claims
-             WHERE first=1 AND kind='harness.limits' AND limits_group IS NOT NULL
+             WHERE first=1 AND kind=?1 AND limits_group IS NOT NULL
              GROUP BY limits_group",
         )?;
-        let mut rows = statement.query([])?;
+        let mut rows = statement.query([LIMITS_KIND])?;
         while let Some(row) = rows.next()? {
             let group: (String, String, String, bool) = serde_json::from_str(&row.get::<_, String>(0)?)?;
             limits_newest.insert(group, u64::try_from(row.get::<_, i64>(1)?)?);

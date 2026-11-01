@@ -77,14 +77,41 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
         }
     }
 
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return Ok(PathBuf::from(runtime).join("st3.sock"));
+    let state_socket = xdg_path("XDG_STATE_HOME", ".local/state").map(|state_base| {
+        product_dirs::resolve(state_base.join("st3"), state_base.join("fractal"))
+            .join("run")
+            .join("st3.sock")
+    });
+    match (std::env::var_os("XDG_RUNTIME_DIR"), state_socket) {
+        (Some(runtime), Ok(state_socket)) => Ok(runtime_or_published_socket(
+            &PathBuf::from(runtime).join("st3.sock"),
+            &state_socket,
+        )),
+        (Some(runtime), Err(_)) => Ok(PathBuf::from(runtime).join("st3.sock")),
+        (None, state_socket) => state_socket,
     }
-    let state_base = xdg_path("XDG_STATE_HOME", ".local/state")?;
-    Ok(product_dirs::resolve(state_base.join("st3"), state_base.join("fractal"))
-        .join("run")
-        .join("st3.sock"))
 }
+
+/// The runtime default, unless nothing answers there and the daemon's published discovery link
+/// leads to a socket that does. A daemon started with `--socket` elsewhere links its state
+/// directory's `run/st3.sock` to that socket, while the runtime default can hold a dead socket
+/// left by an earlier daemon. Nothing is probed when the link leads to the default itself. The
+/// link's target is returned, not the link: a long state path can exceed the socket address limit.
+pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf {
+    let Ok(target) = std::fs::canonicalize(published) else {
+        return runtime.to_path_buf();
+    };
+    if std::fs::canonicalize(runtime).ok().as_ref() == Some(&target) {
+        return runtime.to_path_buf();
+    }
+    let answers = |socket: &Path| std::os::unix::net::UnixStream::connect(socket).is_ok();
+    if !answers(runtime) && answers(&target) {
+        target
+    } else {
+        runtime.to_path_buf()
+    }
+}
+
 
 fn configured_socket(document: &str) -> Result<Option<PathBuf>, ClientError> {
     let config: toml::Value = toml::from_str(document)
@@ -1169,6 +1196,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
+        | ErrorCode::RetireRevisionMismatch
+        | ErrorCode::RetireIncarnationMismatch
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
         | ErrorCode::MessageSelectorsNotReady
@@ -3803,6 +3832,36 @@ mod tests {
         );
         assert_eq!(configured_socket("node = 'local'\n").unwrap(), None);
         assert!(configured_socket("socket = 7\n").is_err());
+    }
+
+    #[test]
+    fn discovery_follows_the_published_link_past_a_dead_runtime_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("runtime/st3.sock");
+        let real = root.path().join("state/st3.sock");
+        let published = root.path().join("state/run/st3.sock");
+        for directory in ["runtime", "state/run"] {
+            std::fs::create_dir_all(root.path().join(directory)).unwrap();
+        }
+        // An earlier daemon's socket stays behind with nothing listening on it.
+        drop(std::os::unix::net::UnixListener::bind(&runtime).unwrap());
+        // No link yet: the runtime default, as before.
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+        let _daemon = std::os::unix::net::UnixListener::bind(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), std::fs::canonicalize(&real).unwrap());
+        // A runtime default that answers keeps precedence.
+        std::fs::remove_file(&runtime).unwrap();
+        let _other = std::os::unix::net::UnixListener::bind(&runtime).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+        // A link that leads to the default itself, and a dead link, change nothing.
+        drop(_other);
+        std::fs::remove_file(&published).unwrap();
+        std::os::unix::fs::symlink(&runtime, &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+        std::fs::remove_file(&published).unwrap();
+        std::os::unix::fs::symlink(root.path().join("state/gone.sock"), &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
     }
 
     #[test]

@@ -5,7 +5,7 @@ const URL: &str = "http://localhost:7410";
 
 fn web(arguments: &[&str]) -> Output {
     let root = tempfile::tempdir().unwrap();
-    Command::new(test_env!("CARGO_BIN_EXE_st3"))
+    Command::new(test_env!("CARGO_BIN_EXE_fractal"))
         .args(arguments)
         .env_clear()
         .env("HOME", root.path())

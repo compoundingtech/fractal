@@ -69,6 +69,8 @@ pub struct GithubPluginStore {
     absent: Mutex<HashSet<String>>,
     /// Each repository whose fill failed: when the next may start, and the wait after that.
     refills: Mutex<HashMap<String, (u128, u128)>>,
+    /// Whether each repository's last look was in compact mode, to log each switch once.
+    compact: Mutex<HashMap<String, bool>>,
 }
 
 /// The first wait after a failed fill, doubled after each further failure up to an hour.
@@ -83,7 +85,7 @@ impl GithubPluginStore {
     /// place.
     pub fn open(state_dir: &Path) -> Result<Self> {
         let connection = super::plugin_store::open(state_dir, MANIFEST.name, Self::migrate)?;
-        Ok(Self { connection: Mutex::new(connection), absent: Mutex::default(), refills: Mutex::default() })
+        Ok(Self { connection: Mutex::new(connection), absent: Mutex::default(), refills: Mutex::default(), compact: Mutex::default() })
     }
 
     /// The one handle this process keeps on the database beneath `state_dir`, opened on first
@@ -107,7 +109,7 @@ impl GithubPluginStore {
     pub fn memory() -> Self {
         let connection = Connection::open_in_memory().expect("an in-memory database opens");
         Self::migrate(&connection).expect("an in-memory database migrates");
-        Self { connection: Mutex::new(connection), absent: Mutex::default(), refills: Mutex::default() }
+        Self { connection: Mutex::new(connection), absent: Mutex::default(), refills: Mutex::default(), compact: Mutex::default() }
     }
 
     fn migrate(connection: &Connection) -> Result<()> {
@@ -283,6 +285,13 @@ impl GithubPluginStore {
             .unwrap_or(false))
     }
 
+    /// Record whether `repository`'s look is in compact mode, and whether that switched it: the
+    /// first look of a process logs its mode, and each later change logs again.
+    pub fn note_compact(&self, repository: &str, compact: bool) -> bool {
+        self.compact.lock().unwrap_or_else(PoisonError::into_inner)
+            .insert(repository.to_owned(), compact) != Some(compact)
+    }
+
     /// Whether a fill of `repository` may start now: always, unless the last one failed and its
     /// wait has not passed.
     pub fn refill_due(&self, repository: &str, now: u128) -> bool {
@@ -301,6 +310,25 @@ impl GithubPluginStore {
         }
         let wait = refills.get(repository).map_or(REFILL_RETRY_MS, |(_, wait)| (wait * 2).min(REFILL_RETRY_MAX_MS));
         refills.insert(repository.to_owned(), (now.saturating_add(wait), wait));
+    }
+
+    /// Whether `repository`'s mirror is filled and followed every look up to `cursor`, the cursor
+    /// the next look starts from. A mirror whose write failed while the daemon kept running is
+    /// behind that cursor. One the daemon stopped before writing has the same cursor as the
+    /// plugin database and may be behind the graph: a look's prior then still takes every
+    /// compact and delivery fact from the graph, which records each change to them.
+    pub fn current(&self, repository: &str, cursor: Option<&str>) -> Result<bool> {
+        let followed: Option<(Option<String>, bool)> = self
+            .connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .query_row(
+                "SELECT cursor_digest, filled_at_unix_ms IS NOT NULL FROM mirror_repositories WHERE repository=?1",
+                [repository],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(followed.is_some_and(|(digest, filled)| filled && digest.as_deref() == Some(cursor_digest(cursor).as_str())))
     }
 
     /// Fill `repository`'s mirror from one look at GitHub that recorded nothing else: each item
@@ -346,6 +374,22 @@ impl GithubPluginStore {
         cursor: Option<&str>,
         items: &[MirrorItem],
     ) -> Result<Vec<Value>> {
+        self.mirror_checked(repository, observer, locator, polled_from, cursor, items, &|_| Ok(false))
+    }
+
+    /// [`Self::mirror`], where `in_graph` also says whether an event subject is already a
+    /// `github.event` claim, as one another poller wrote, so a key is never handed out twice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mirror_checked(
+        &self,
+        repository: &str,
+        observer: &str,
+        locator: &str,
+        polled_from: Option<&str>,
+        cursor: Option<&str>,
+        items: &[MirrorItem],
+        in_graph: &dyn Fn(&str) -> Result<bool>,
+    ) -> Result<Vec<Value>> {
         self.absent.lock().unwrap_or_else(PoisonError::into_inner).remove(observer);
         let at = super::now_ms();
         let at_text = chrono::DateTime::from_timestamp_millis(at as i64)
@@ -385,7 +429,8 @@ impl GithubPluginStore {
                     Ok(transaction
                         .query_row("SELECT 1 FROM mirror_event_keys WHERE subject=?1", [&subject], |_| Ok(()))
                         .optional()?
-                        .is_some())
+                        .is_some()
+                        || in_graph(&subject)?)
                 })?;
                 let Some(subject) = fractal_schema::github_plugin::event_subject(&item.subject, &key) else {
                     continue;

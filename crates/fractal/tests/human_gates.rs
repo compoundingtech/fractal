@@ -22,6 +22,7 @@ const NODE: &str = "human-gates";
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory(NODE).unwrap()),
         notify: Arc::new(Notify::new()),

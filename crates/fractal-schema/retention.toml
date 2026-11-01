@@ -60,6 +60,7 @@
 "delivery.hold" = { class = "durable" }
 "doc.bound" = { class = "durable" }
 "eval.verdict" = { class = "durable" }
+"fault.dismissed" = { class = "durable" }
 "file.observed" = { class = "durable" }
 "fleet.invite-created" = { class = "durable" }
 "fleet.invite-redeemed" = { class = "durable" }
@@ -206,7 +207,7 @@
 "terminal.input.result" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "terminal.launch-geometry" = { class = "current", pending = "no reader audit yet" }
 "transport.observed" = { class = "current" }
-"vcs.item.state" = { class = "current", pending = "no checkpoint rule until the poller writes it (plugin store step 3b)" }
+"vcs.item.state" = { class = "current", pending = "the idle hold reads a thread's state history; no rule until the queue-exit read takes only events" }
 "work.claimed" = { class = "durable" }
 "work.extended" = { class = "durable" }
 "work.failed" = { class = "durable" }

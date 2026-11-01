@@ -13,6 +13,7 @@ use tower::ServiceExt as _;
 
 fn state(root: &Path) -> AppState {
     AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("glasses-test").unwrap()),
         notify: Arc::new(Notify::new()),

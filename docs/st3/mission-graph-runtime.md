@@ -746,6 +746,8 @@ gate "text omits value" { lacks "message/report" "UNVERIFIED" }
 
 `field` uses this argument order: path, full subject, operator, value. Operators are `is`, `starts-with`, and `contains`.
 
+On a `resource/...` subject, pinned to a claim (`resource/NAME@CLAIM`, as a resource input is) or not, the path reads the resource's facts first, then its whole observation. So `state` and `facts.state` both read a GitHub item's state.
+
 An `exit_code` field gate on an `exec/...` subject fails when the exec has ended and
 its selected launch cannot restart, including a missing exit code after the process was killed.
 The failure names the exec and its exit code. A running exec or an exec that can restart keeps
@@ -887,13 +889,13 @@ publisher, the run's requester receives it. Correct the gate and revise the run 
 `st work revise RUN FILE`. A revision that changes only a step's gates keeps the work its worker
 already submitted, and the revised gates check that work in the new generation. The item closes
 when the revision replaces the generation. A finally step cannot take a revision, so its broken
-gate fails that step, as it did before.
+gate fails that step.
 
 A gate in a loop's `until` answers each round: not yet ends the round without a pass, and a broken
 gate holds the loop for a revision.
 
 An eval run keeps the verdicts its judges give. Nobody revises an eval run, so there an exec gate
-that says not yet or is broken fails its boundary, as any status but 0 did before, and Fractal raises no
+that says not yet or is broken fails its boundary, and Fractal raises no
 attention item.
 
 #### Check a gate before you publish it
@@ -997,7 +999,7 @@ The human view shows the mission, owner step, question, review targets, age, and
 
 The list excludes resolved requests, old generations, changed definitions, old attempts, terminal owners, and runs whose parent step or delivering subscription has ended. A result from a different actor does not resolve a request.
 
-### Human attention inbox
+### Person alerts
 
 `st alerts ls --as person/NAME` reads current source state: ready person steps, human
 gates, valid launch previews, outstanding proposal reviews, requested person updates,
@@ -1108,7 +1110,7 @@ st work done step-run/release/ask-ID --as person/operator --answer revise --text
 The person answers with a named `--answer ID`, adding `--text` where the answer needs words:
 requesting changes, a custom choice, or feedback. A reply in words alone does not answer a
 decision or a choice; `answer-required` lists the answer IDs. Feedback also accepts a plain
-`--summary`, so older clients can still send it. The `work.person-done` claim records the typed
+`--summary`. The `work.person-done` claim records the typed
 answer as `{type, outcome, id, label, text}`, where `outcome` is `accept`, `decline`,
 `request_changes`, `selected`, `custom`, `feedback` or `dismissed`. `--answer dismiss` (with an optional
 `--text` reason) sets any decision or choice aside without answering it: the asker is told the person
@@ -1116,7 +1118,7 @@ dismissed it, and a request that defines its own `dismiss` answer keeps that mea
 `person_answers` with the ask, respondent, time and summary; a person ask's own step does too,
 which is where a `--new-run` asker reads it. `st work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
-history. A free-text ask works as before: it keeps no `request` field and takes no named answer.
+history. A free-text ask keeps no `request` field and takes no named answer.
 Assistant-scoped answers retain `assistant/chatgpt` as the claim actor and projected
 `respondent`; optional `sender_class`, `assistant_grant_id`, `assistant_owner`, and
 `assistant_session_actor` expose separate server-owned provenance, not person
@@ -1138,14 +1140,11 @@ working. It stays on the person's home until they read it, even after the poster
 poster can withdraw it with `cancel-ask`. Opening it with `st alerts show` as the person (not
 from an agent seat) reads it, as does `st work done STEP --as PERSON --answer read`. Reading
 records `{type: "update", outcome: "read"}` and tells nobody. The client attention card carries
-the update under `update`, not `request`, so a client that predates updates shows a plain card
-whose response reads it.
+the update under `update`, not `request`.
 
 A person message leaves on read or archive, without an age expiry. A launch needs its current
 valid preview. Faults describe source recovery and inspection; they have no independent dismiss
-state. Legacy `attention request`, `resolve` and `withdraw` return `attention-migrated`.
-Historical attention claims remain audit data; only provably live agent asks are imported as
-person steps. `st doctor` reads the same snapshot for attention age checks.
+state. `st doctor` reads the same snapshot for attention age checks.
 
 ## Dependencies
 
@@ -1253,9 +1252,7 @@ False suppresses only this run's stall reports and removes its stall reporting d
 Failure, cancellation and requested completion reports still apply. Child runs use their own
 mission's policy; schedules retain their timers, catch-up and no-overlap behavior. The field
 does not change schedule admission or schedule faults. `stalled-after` remains a positive
-duration even when stall reports are disabled. Older mission definitions and run claims
-without `report-stalls` / `report_stalls` keep stall reports enabled with the existing limit
-(30 minutes unless set).
+duration even when stall reports are disabled.
 
 A stall is measured from the run's last sign of life: its last state change, any step's last
 change or progress record, and the end of any step's lease. Activity in child runs linked from its steps,
@@ -1605,7 +1602,7 @@ A harness block cannot declare `prompt`. Parsing refuses it with `harness-prompt
 
 Each native harness driver installs the skill that `st skill` prints before it starts the harness. The skill describes how to use st: messages, work, and attention requests. It contains no mission goal and sets no rules of conduct.
 
-Fractal no longer writes a `.st3` directory into a native harness workspace. For each one, it removes a `.st3` directory that older releases wrote, unless Git tracks something in it, and removes the `.st3/` line from the Git exclude file once no worktree sharing that file still has a `.st3` directory. A declared `render { git-exclude ".st3/" }` adds nothing.
+Fractal does not write a `.st3` directory into a native harness workspace.
 
 A declared `render` operation that would change a tracked file fails that member’s render transaction and prevents its runtime from starting. Other members continue rendering and reconciling. Render, start, observation, and stop failures appear as the member’s fault in `st agents show` and `st doctor`; a successful pass clears the fault. Stopped and superseded members bypass rendering.
 
@@ -1876,7 +1873,7 @@ The subject is exactly `agent/example/cos/standing/cos`; placement does not chan
 The seat's bare `fresh-context` node starts a new harness session before each step it claims, even when the step has no `fresh-context` node. Omit it when the seat should retain context across ordinary steps.
 Messages use sender-chosen `kind: silent | wake`, defaulting to wake for every seat. Silent messages wait for a real wake; see [silent messages](silent-messages.md).
 
-A seat's bare `handles-faults` node makes it the fleet's fault agent: it receives each fault that no step assignee or agent requester owns, such as a failed loop on a run a person requested. When several live seats carry it, the first by subject takes them. Faults never go to a person's attention.
+A seat's bare `handles-faults` node makes it the fleet's fault agent: it receives each fault that no step assignee or agent requester owns, such as a failed loop on a run a person requested. Only one live seat may carry it: publishing a second is refused with `fault-agent-taken`, so the flag moves by stopping its holder or dropping it there. When two members each accepted a different holder, neither is the fault agent until one steps down, and a fault no agent owns stays visible in `st doctor`. A fault dismissal (`st missions dismiss-fault`) counts only from a person or from the seat that held the flag when it was written. Faults never go to a person's attention.
 
 Two seat faults reach that owner so a seat that cannot start is never found by looking. A seat parked by the crash-loop guard is a fault that carries the driver's last `harness.diagnostic` (its code and reason). A seat that is declared to run but that no runtime observation has ever described for ten minutes, which `st agents ls` shows as `desired`, is a fault too ("An agent seat has not started", with the same diagnostic, or the note that the driver never ran). Both end when the seat's runtime is observed or its declaration changes. A mission's seat reaches the run's requester first, like any other fault. A seat that restarts always (the default) is not left stopped for good: its parked launch is retried after one minute, then two, four, eight, sixteen and thirty, at most six times since its last successful launch, and each retry is a `retry` reconcile decision that names the failure before it (and the owner run, when the seat has one). A retry that starts the seat ends the fault; after the sixth, one `retries-exhausted` decision says the launch stays stopped until `st agents restart` or a changed declaration. Other restart policies are not retried. `st` runs the first `pty` on the launch PATH that accepts `--env NAME`, so an older build earlier on the PATH no longer parks every restart.
 Codex compares the model ID and effort returned by a saved-thread resume with the declaration exactly. If Codex normalizes a declared model alias to a different ID, the driver fails before binding; three failed starts park the seat under the Codex crash-loop guard until its declaration changes.
@@ -1934,9 +1931,10 @@ An exact repeated cancellation is idempotent. The old run and its immutable gene
 
 Fractal sends a cancellation message to each active claimant. The message tells the agent to stop that step.
 
-## Continuous missions
+## Recurring schedules
 
-A continuous mission stays open after its current steps are exhausted. It does not need a separate mission type.
+A `schedule` requests one finite mission run per occurrence. A parent mission that declares a
+schedule stays open while it has unresolved work, such as an explicit retirement gate.
 
 A recurring schedule creates a durable request for one exact finite mission revision.
 The schedule's work may name either a pinned `mission "fabric/cycle@REVISION"` or an
@@ -2048,8 +2046,8 @@ The mission steps are normal claimable work. A schedule does not start another o
 Only the schedule's owning host arms occurrences, requests work, and creates its workspaces and
 mission runs. An omitted `host` or `host "local"` means the selected declaration's originating host,
 including for schedules declared by a mission run; replication does not make each receiving member
-an owner. An explicit host selects that member. The owning host can also start an old request
-recorded by another member, so requests made by older daemons do not block the schedule forever.
+an owner. An explicit host selects that member. The owning host can also start a request
+recorded by another member.
 
 An unavailable workspace leaves its request pending. The owning daemon retries at most once every
 30 seconds per schedule and records each unchanged `workspace-unavailable` diagnostic once per
@@ -2335,7 +2333,6 @@ Mission execution uses these important claim kinds:
 - `gate.requested` and `gate.result` record gate operations and evidence.
 - `work.person-asked`, `work.person-done`, and `work.person-cancelled` record person work.
 - `operational.failure` and `operational.recovered` record observed source failure episodes.
-- Historical `attention.requested` and `attention.resolved` remain audit claims.
 
 Evidence is a list of claim IDs or immutable graph references that support a result. The evidence does not replace the gate. The gate definition says what must be decided; evidence records why the result is trustworthy.
 

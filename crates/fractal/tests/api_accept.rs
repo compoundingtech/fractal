@@ -63,6 +63,7 @@ async fn descriptor_exhaustion_child() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("accept-node").unwrap()),
         notify: Arc::new(Notify::new()),

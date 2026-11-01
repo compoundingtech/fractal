@@ -12,6 +12,7 @@ use tokio::sync::{Notify, watch};
 mod inventory;
 pub fn test_state(root: &Path) -> fractal_daemon::api::AppState {
     let state = fractal_daemon::api::AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         // Socket reads overlap graph writes, as on a real WAL-backed member.
         store: Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "stui-feed").unwrap()),

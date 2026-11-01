@@ -11,6 +11,9 @@
 //! cargo run --release -p fractal-tui --example phone_client -- --seconds 180 --label measure-phone
 use std::time::{Duration, Instant};
 
+#[path = "../src/environment.rs"]
+mod environment;
+
 use fractal_client::{Client, set_client_name};
 
 /// One JSON line for an observation: routes, outcomes, statuses, sizes and durations, with every
@@ -64,17 +67,23 @@ async fn main() {
             }
         });
     }
-    let path = fractal_client::discover_unix_endpoint(None).expect("a local st endpoint");
-    // The person as Fractal TUI resolves it: ST3_PERSON, else `person` in the st config.
-    let person = std::env::var("ST3_PERSON").ok().or_else(|| {
-        let home = std::env::var_os("HOME")?;
-        let raw = std::fs::read_to_string(std::path::Path::new(&home).join(".config/st3/config.toml")).ok()?;
-        raw.lines().find_map(|line| {
-            let (key, value) = line.split_once('=')?;
-            (key.trim() == "person").then(|| value.trim().trim_matches('"').to_owned())
-        })
-    });
-    let person = person.expect("ST3_PERSON or person in ~/.config/st3/config.toml");
+    let endpoint = environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")
+        .expect("unambiguous endpoint environment")
+        .map(std::path::PathBuf::from);
+    let path = fractal_client::discover_unix_endpoint(endpoint).expect("a local st endpoint");
+    // Use the TUI's accepting reader before falling back to the configured person.
+    let person = environment::read("FRACTAL_PERSON", "ST3_PERSON")
+        .expect("unambiguous person environment")
+        .map(|person| person.into_string().expect("a Unicode person identity"))
+        .or_else(|| {
+            let home = std::env::var_os("HOME")?;
+            let raw = std::fs::read_to_string(std::path::Path::new(&home).join(".config/st3/config.toml")).ok()?;
+            raw.lines().find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "person").then(|| value.trim().trim_matches('"').to_owned())
+            })
+        });
+    let person = person.expect("FRACTAL_PERSON, ST3_PERSON or person in ~/.config/st3/config.toml");
     let client = Client::unix_as(&path, &person);
     let mut stream = client.collection_stream().await.expect("collections stream");
     for (id, collection) in [("attention", "attention"), ("missions", "missions"), ("agents", "agents")] {

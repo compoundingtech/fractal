@@ -407,13 +407,17 @@ pub(crate) fn environment(
             .or_else(|| host("XDG_RUNTIME_DIR"))
             .filter(|dir| !dir.is_empty())
     {
-        // A slice name can be longer than a socket path may be, so the socket is named by its digest.
-        added.push((
-            "SCCACHE_SERVER_UDS",
-            format!("{runtime}/sccache-lane-{}.sock", &digest(&lane.slice)[..16]),
-        ));
+        added.push(("SCCACHE_SERVER_UDS", sccache_socket(&runtime, &lane.slice)));
     }
     added
+}
+
+/// The socket of the sccache server of `slice`'s lane, under the runtime directory `runtime`: what a
+/// laned task's environment names (`environment`), and what `GET /v1/agents/lane` tells a job the
+/// seat starts outside its lane. A slice name can be longer than a socket path may be, so the
+/// socket is named by its digest.
+pub fn sccache_socket(runtime: &str, slice: &str) -> String {
+    format!("{runtime}/sccache-lane-{}.sock", &digest(slice)[..16])
 }
 
 #[cfg(test)]
@@ -513,6 +517,7 @@ mod tests {
         let (key, socket) = &added[2];
         assert_eq!(*key, "SCCACHE_SERVER_UDS");
         assert!(socket.starts_with("/run/user/1000/sccache-lane-") && socket.len() < 108);
+        assert_eq!(*socket, sccache_socket("/run/user/1000", &lane.slice), "the name the lane route gives");
         assert_eq!(environment(&lane, runtime, nothing)[2], added[2], "a restart reuses the seat's server");
         assert_eq!(environment(&lane, nothing, runtime)[2], added[2], "the daemon's runtime directory serves too");
         let other = Lane { slice: seat_slice("fleet.example.other") };

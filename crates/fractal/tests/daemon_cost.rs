@@ -121,8 +121,6 @@ const ADAPTER_ACTOR: &str = "agent/bench/cost/adapter";
 /// much worse unnoticed. Each breaks the daemon's rule that no query's cost grows with the whole
 /// store and is owed a fix. A fixed one fails the check until it leaves this list.
 const KNOWN_GROWTH: &[(&str, f64)] = &[
-    // Checkpoint status walks the sealed set (9.8x).
-    ("GET /v1/checkpoint/status", 15.0),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
     ("GET /v1/doctor", 17.0),
     // Fleet and replication status count every replica record (9.7x).
@@ -140,6 +138,18 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
+    (
+        "GET /v1/fleet/anchor",
+        "one fleet metadata key lookup, independent of claim history; fleet::rename_proofs_export_over_cli_and_verify_without_daemon_or_config covers the real public API read through the CLI",
+    ),
+    (
+        "POST /v1/agents/rename-id/proof/export",
+        "requires genuinely signed member envelopes and an admitted fleet trust root, absent from generated cost stores; store::rename_proof_tests covers real signed agent exports; evidence export intentionally reads the complete proven declaration, rename, actor and membership history, whose growth is not measured here",
+    ),
+    (
+        "POST /v1/missions/rename-id/proof/export",
+        "requires genuinely signed member envelopes and an admitted fleet trust root, absent from generated cost stores; store::rename_proof_tests::real_mission_rename_proves_published_declaration covers signed mission export; complete proof-history growth is not measured here",
+    ),
     (
         "GET /v1/client/private-notes/{*uri}",
         "owner-local catalog/filesystem read with generation and revision fences; private bytes and recovery receipts are outside the replicated graph; path and audit refusal boundaries are covered by private_notes tests",
@@ -340,6 +350,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/checkpoint/excuse", "checkpoint agreement"),
     ("POST /v1/checkpoint/resume", "checkpoint agreement"),
     ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
+    ("POST /v1/faults/dismiss", "an operator's rare action on an ended run: one fault snapshot and one claim"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
@@ -874,6 +885,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/agent-workspaces/{*id}",
         "/v1/client/agent-workspaces/{agent}",
     ),
+    get("GET /v1/agents/lane", "/v1/agents/lane?agent={seat}"),
     get(
         "GET /v1/client/status-history/{*id}",
         "/v1/client/status-history/{agent}",
@@ -1682,6 +1694,7 @@ mission "cost/history" state="ready" {
         }).unwrap();
     }
     let app = fractal_daemon::api::router(AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -2701,6 +2714,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     })
     .unwrap();
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),

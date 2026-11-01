@@ -33,6 +33,9 @@ pub mod declarations;
 pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
+mod rename_proof;
+#[cfg(test)]
+mod rename_proof_tests;
 pub mod directive_notes;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
@@ -722,7 +725,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h806ead738248 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h409e2e2924d3 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1393,6 +1396,28 @@ CREATE TABLE IF NOT EXISTS local_latest_slots (
     pending_local_id INTEGER,
     PRIMARY KEY (subject, kind, slot)
 );
+-- Rows stored into this node's claims table, written here or received, counted per kind and
+-- writing node in the transaction that inserts them. Deletes (trim, checkpoints) never lower
+-- the totals, so the OpenTelemetry exporter reports a true storage rate from them. An ignored
+-- INSERT OR IGNORE (a duplicate, or a retired claim refused) stores nothing and counts nothing;
+-- a repair that deletes and inserts a claim again counts it again. Node-local: never replicated,
+-- in no digest, and not in backups (a restore stores its claims again and counts them). Each
+-- row's since_unix_ms is when this node first stored that kind from that writer. This schema runs
+-- on every open, so it only creates; it writes no rows.
+CREATE TABLE IF NOT EXISTS claims_stored (
+    kind TEXT NOT NULL,
+    writer TEXT NOT NULL,
+    since_unix_ms INTEGER NOT NULL,
+    claims INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    PRIMARY KEY (kind, writer)
+) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS claims_stored_insert AFTER INSERT ON claims BEGIN
+    INSERT OR IGNORE INTO claims_stored(kind, writer, since_unix_ms, claims, bytes)
+    VALUES(NEW.kind, NEW.origin, CAST(strftime('%s','now') AS INTEGER) * 1000, 0, 0);
+    UPDATE claims_stored SET claims=claims+1, bytes=bytes+length(CAST(NEW.body AS BLOB))
+    WHERE kind=NEW.kind AND writer=NEW.origin;
+END;
 CREATE TABLE IF NOT EXISTS revision_proposals (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES mission_runs(id),
@@ -2223,7 +2248,8 @@ pub fn stale_pull_request_request_tx(
     discovery: &str,
 ) -> Result<Option<String>> {
     smallclaims::touched::note_read(|| resource.to_owned());
-    let Some(requested) = claim_by_id_tx(connection, discovery)?.filter(|claim| {
+    // A compact item state, as a poller in compact mode pins, reads as its observation.
+    let Some(requested) = claim_by_id_tx(connection, discovery)?.map(|mut claim| { claim.body = fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body); claim }).filter(|claim| {
         claim.subject == resource
             && claim.body.pointer("/fields/kind").and_then(Value::as_str)
                 == Some("vcs.pull-request")
@@ -3094,6 +3120,7 @@ impl Store {
                     }
                 }
                 validate_documents(transaction, &intent.document_refs)?;
+                attention_snapshot::refuse_second_fault_agent(transaction, intent)?;
                 for desired in intent
                     .subjects
                     .values()
@@ -5063,6 +5090,7 @@ impl Store {
                     .collect::<Vec<_>>()
             });
             let mut merged = StatusResponse {
+                seat_admission: None,
                 store_index,
                 subjects: Vec::new(),
                 pending_actions: Vec::new(),
@@ -5190,6 +5218,7 @@ impl Store {
             subjects.push(status);
         }
         Ok(StatusResponse {
+            seat_admission: None,
             store_index,
             subjects,
             pending_actions,
@@ -5821,8 +5850,10 @@ impl Store {
         items.extend(self.checkpoint_attention_items(None, as_of)?);
         items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
+        let dismissed = self.dismissed_faults()?;
         self.current_attention(items, as_of)?
             .into_iter()
+            .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
             .map(|item| {
                 Ok(FaultView {
                     owner: self.fault_owner(&item, fallback.as_deref())?,
@@ -5830,6 +5861,125 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Each dismissed fault, by subject and episode. A new episode at the same source is a new
+    /// fault, so a dismissal never hides a later failure. Only a dismissal by a person, or by an
+    /// agent whose declaration carried `handles-faults` when it was written, counts: one that
+    /// another member accepted from any other actor hides nothing here.
+    pub fn dismissed_faults(&self) -> Result<HashSet<(String, String)>> {
+        let connection = self.readers.get();
+        let mut query = connection.prepare(
+            "SELECT dismissal.subject, json_extract(dismissal.body, '$.fields.episode')
+             FROM claims AS dismissal INDEXED BY claims_kind_index
+             WHERE dismissal.kind='fault.dismissed'
+               AND (substr(dismissal.actor, 1, 7)='person/' OR (
+                 SELECT json_extract(declaration.body, '$.kind')='agent' AND EXISTS (
+                     SELECT 1 FROM json_each(declaration.body, '$.desired.children')
+                     WHERE json_extract(value, '$.name')='handles-faults'
+                   )
+                 FROM claims AS declaration INDEXED BY claims_subject_kind_accepted_index
+                 WHERE declaration.subject=dismissal.actor AND declaration.kind='intent.desired'
+                   AND (length(declaration.accepted_at_unix_ms), declaration.accepted_at_unix_ms)
+                     <= (length(dismissal.accepted_at_unix_ms), dismissal.accepted_at_unix_ms)
+                 ORDER BY length(declaration.accepted_at_unix_ms) DESC,
+                   declaration.accepted_at_unix_ms DESC, declaration.store_index DESC
+                 LIMIT 1
+               ) = 1)",
+        )?;
+        Ok(query
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?
+            .filter_map(|row| match row {
+                Ok((subject, Some(episode))) => Some(Ok((subject, episode))),
+                Ok((_, None)) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Dismiss a current fault whose run has ended. Nothing at such a source can close it: a
+    /// failed child run's outcome belongs to its parent step, and an ended run is not retried,
+    /// revised or cancelled. A person may, and so may the fleet's fault agent, which owns faults
+    /// no one else does; no other agent. A fault whose run is still open closes at its source.
+    pub fn dismiss_fault_as(
+        &self,
+        request: &crate::model::FaultDismissRequest,
+    ) -> Result<crate::model::FaultDismissal, St3Error> {
+        let actor = smallclaims::store::normalize_actor(&request.actor, "person");
+        let fault_agent = self.fleet_fault_agent().map_err(internal)?;
+        if !(actor.starts_with("person/") || fault_agent.as_deref() == Some(actor.as_str())) {
+            return Err(St3Error::new(
+                "fault-dismiss-forbidden",
+                format!("`{actor}` cannot dismiss a fault; a person, or the fleet's fault agent, can"),
+            ));
+        }
+        if request.reason.trim().is_empty() {
+            return Err(St3Error::new("fault-dismiss-reason", "a fault dismissal needs a reason"));
+        }
+        let source = request.source.as_str();
+        let matching = self
+            .fault_snapshot(now_ms())
+            .map_err(internal)?
+            .into_iter()
+            .map(|fault| fault.item)
+            .filter(|item| item.subject == source || item.mission_run.as_deref() == Some(source))
+            .filter(|item| request.episode.as_deref().is_none_or(|episode| item.episode == episode))
+            .collect::<Vec<_>>();
+        let item = match matching.as_slice() {
+            [item] => item,
+            [] => {
+                return Err(St3Error::new(
+                    "missing-fault",
+                    format!("`{source}` has no current fault{}", request.episode.as_deref().map(|episode| format!(" with episode `{episode}`")).unwrap_or_default()),
+                ));
+            }
+            several => {
+                return Err(St3Error::new(
+                    "ambiguous-fault",
+                    format!(
+                        "`{source}` has {} current faults; name one with --episode: {}",
+                        several.len(),
+                        several.iter().map(|item| format!("{} ({})", item.episode, item.title)).collect::<Vec<_>>().join("; ")
+                    ),
+                ));
+            }
+        };
+        let run = item
+            .mission_run
+            .clone()
+            .or_else(|| item.subject.starts_with("mission-run/").then(|| item.subject.clone()));
+        let ended = match &run {
+            Some(run) => self
+                .mission_run(run)
+                .map_err(internal)?
+                .is_some_and(|view| is_terminal_run_state(&view.status)),
+            None => false,
+        };
+        if !ended {
+            return Err(St3Error::new(
+                "fault-source-open",
+                format!("the fault on `{}` belongs to a run that has not ended; it closes at its source", item.subject),
+            ));
+        }
+        self.append_claim(&ClaimInput {
+            subject: item.subject.clone(),
+            kind: "fault.dismissed".into(),
+            actor: Some(actor.clone()),
+            fields: BTreeMap::from([
+                ("episode".into(), Value::String(item.episode.clone())),
+                ("reason".into(), Value::String(request.reason.clone())),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("fault-dismissed:{}:{}", item.subject, item.episode)),
+        })?;
+        Ok(crate::model::FaultDismissal {
+            subject: item.subject.clone(),
+            episode: item.episode.clone(),
+            title: item.title.clone(),
+            actor,
+            reason: request.reason.clone(),
+        })
     }
 
     /// Clear a persisted signature fault and wake the stopped migration. A person may, and so
@@ -7811,13 +7961,23 @@ fn resolve_mission_run_inputs(
                 let claim_id = if let Some(claim_id) = requested_claim {
                     let exists = transaction
                         .query_row(
-                            "SELECT 1 FROM claims WHERE id=?1 AND subject=?2 AND kind='resource.observed'",
+                            "SELECT 1 FROM claims WHERE id=?1 AND subject=?2 AND kind IN ('resource.observed','vcs.item.state')",
                             params![claim_id, subject],
                             |_| Ok(()),
                         )
                         .optional()
                         .map_err(internal)?
                         .is_some();
+                    // A claim this member trimmed is never admitted again, so its pin cannot wait
+                    // for replication as an unarrived claim does.
+                    if !exists && smallclaims::store::retired::claim_refused(transaction, claim_id).map_err(internal)? {
+                        return Err(St3Error::new(
+                            "trimmed-resource-input-version",
+                            format!(
+                                "mission input `{name}`: {subject}@{claim_id} was trimmed on this member; pin a kept observation or the subject"
+                            ),
+                        ));
+                    }
                     if !exists {
                         return Err(St3Error::new(
                             "missing-resource-input-version",
@@ -7826,14 +7986,23 @@ fn resolve_mission_run_inputs(
                     }
                     claim_id.to_owned()
                 } else {
-                    transaction
+                    // The item's newest record: a compact state only when it is newer than the
+                    // newest snapshot, whose facts are fuller.
+                    let observed: Option<(String, String)> = transaction
                         .query_row(
-                            /* sqlite-large-value: allow-for-now lv-h35da657ee22f owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1"),
+                            /* sqlite-large-value: allow-for-now lv-h842f1ac38047 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1"),
                             [subject],
-                            |row| row.get(0),
+                            |row| Ok((row.get(0)?, row.get(1)?)),
                         )
                         .optional()
-                        .map_err(internal)?
+                        .map_err(internal)?;
+                    let state = crate::store::resources::newest_item_state(transaction, subject).map_err(internal)?;
+                    match (observed, state) {
+                        (Some((_, observed_at)), Some((id, _, state_at)))
+                            if state_at.parse::<u128>().unwrap_or_default() > observed_at.parse::<u128>().unwrap_or_default() => Some(id),
+                        (None, Some((id, _, _))) => Some(id),
+                        (observed, _) => observed.map(|(id, _)| id),
+                    }
                         .ok_or_else(|| {
                             St3Error::new(
                                 "missing-resource-input",
@@ -11724,6 +11893,23 @@ impl crate::otlp::ObservationSource for Store {
                 .await??;
             Ok(())
         })
+    }
+
+    fn claims_stored(&self) -> Result<Vec<crate::otlp::StoredClaims>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT kind, writer, since_unix_ms, claims, bytes FROM claims_stored ORDER BY kind, writer",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(crate::otlp::StoredClaims {
+                kind: row.get(0)?,
+                writer: row.get(1)?,
+                since_unix_ms: row.get::<_, i64>(2)?.max(0) as u128,
+                claims: row.get::<_, i64>(3)?.max(0) as u64,
+                bytes: row.get::<_, i64>(4)?.max(0) as u64,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 
@@ -19276,14 +19462,14 @@ pub fn enrich_step_wake_at(
         hex::encode(Sha256::digest(current_incarnation_id.as_bytes()))[..12].to_owned();
     let mut attempts = Vec::new();
     let wake_tag_prefix = format!(
-        "st3-work:{}@{}@{}@",
+        "{}@{}@{}@",
         view.subject, view.attempt, view.readiness_epoch
     );
     let bare_assignee = assignee
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha4b73baa9121 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h193b5e906715 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.body, claims.accepted_at_unix_ms,
                 EXISTS(SELECT 1 FROM claims consumed
                        WHERE consumed.subject=claims.subject
@@ -19299,7 +19485,7 @@ pub fn enrich_step_wake_at(
                          AND staged.accepted_at_unix_ms<=?1)
          FROM claims INDEXED BY claims_message_to_index
          WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
-           AND instr(claims.body, ?2)>0
+           AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
            AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
          ORDER BY CANONICAL_ASC(claims)",
     ))?;
@@ -19328,8 +19514,11 @@ pub fn enrich_step_wake_at(
             .get("tags")
             .and_then(Value::as_array)
             .is_some_and(|tags| {
-                tags.iter()
-                    .any(|tag| tag.as_str() == Some("st3-wake-source:manual"))
+                crate::silent::message_tag_values(
+                    tags.iter().filter_map(Value::as_str),
+                    "wake-source:",
+                )
+                .any(|value| value == "manual")
             })
         {
             continue;
@@ -19339,7 +19528,8 @@ pub fn enrich_step_wake_at(
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(Value::as_str)
+            .filter_map(Value::as_str);
+        let matching_incarnation = crate::silent::message_tag_values(matching_incarnation, "work:")
             .find_map(|tag| {
                 work_wake_tag_incarnation(tag, &view.subject, view.attempt, view.readiness_epoch)
                     .map(str::to_owned)
@@ -19458,13 +19648,56 @@ pub fn enrich_step_wake_at(
     Ok(())
 }
 
+#[test]
+fn work_wake_multiple_tags_preserve_attempts_and_manual_exclusion() {
+    for (prefix, first, source, manual_prefix) in [
+        ("st3-", "st3-", "st3-", "st3-"),
+        ("fractal-", "fractal-", "fractal-", "fractal-"),
+        ("fractal-", "st3-", "st3-", "st3-"),
+        ("st3-", "st3-", "st3-", "fractal-"),
+    ] {
+        for manual in [false, true] {
+            let store = Store::open_memory("fixture").unwrap();
+            let mut tags = vec![
+                format!("{first}work:other@1@1@other"),
+                format!("{prefix}work:step-run/r/s@2@3@inc"),
+                format!("{source}wake-source:auto"),
+            ];
+            if manual {
+                tags.push(format!("{manual_prefix}wake-source:manual"));
+            }
+            let input = serde_json::from_value(json!({
+                "subject": "message/wake", "kind": "message.sent", "actor": "daemon/runtime",
+                "fields": {"from": "daemon/runtime", "to": "agent/worker", "content": "",
+                    "status": "sent", "tags": tags}, "evidence": [],
+                "expected_subject": null, "idempotency_key": null
+            }))
+            .unwrap();
+            store.append_claim(&input).unwrap();
+            let mut view: StepRunView = serde_json::from_value(json!({
+                "subject": "step-run/r/s", "run": "mission-run/r", "generation": "g", "step": "s",
+                "definition_hash": "", "status": "ready", "attempt": 2, "readiness_epoch": 3,
+                "assigned_to": "agent/worker", "agentless": false, "worker_reported": false,
+                "created_at_unix_ms": 0, "updated_at_unix_ms": 0
+            }))
+            .unwrap();
+            enrich_step_wake_at(&store.readers.get(), &mut view, u128::MAX).unwrap();
+            assert_eq!(
+                view.wake.unwrap().attempts,
+                u32::from(first == prefix && (!manual || source != manual_prefix)),
+                "{prefix} {first} {source} {manual_prefix} {manual}"
+            );
+        }
+    }
+}
+
 fn work_wake_tag_incarnation<'a>(
     tag: &'a str,
     step_subject: &str,
     attempt: u32,
     readiness_epoch: u32,
 ) -> Option<&'a str> {
-    let tag = tag.strip_prefix("st3-work:")?;
+    // Each value is decoded independently; fields from different tags are never merged.
     let mut parts = tag.rsplitn(4, '@');
     let incarnation = parts.next()?;
     (parts.next().and_then(|value| value.parse::<u32>().ok()) == Some(readiness_epoch)

@@ -1006,6 +1006,7 @@ mod tests {
     fn membership_repair_state(node: &str) -> AppState {
         let root = std::path::PathBuf::from("/unused-membership-repair");
         AppState {
+            seat_admission: Default::default(),
             store: Arc::new(Store::open_memory(node).unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,

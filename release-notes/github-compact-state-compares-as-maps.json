@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "In compact mode a GitHub poller no longer writes a `vcs.item.state` identical to the item's newest one. The two states were compared in key order, and a stored state reads back in another order than a new one is built in, so every look that reached an item wrote a fresh state, whether or not it changed. They now compare as maps. An unchanged state is pinned as it is, except when the look delivers the item to a plain message subscription: a message's key names the item claims it carries, so such a delivery still gets a fresh state of its own, one per delivered change. Fixes #4553.",
+  "replay": {"status": "none", "detail": "No claim or projection replay; duplicate states already written stay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Only how often the poller writes an existing claim kind changes; no claim kind, field or wire capability changes, and members of older builds read the same claims."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Rolling back restores the duplicate states; nothing reads them differently."}
+}

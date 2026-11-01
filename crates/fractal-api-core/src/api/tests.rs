@@ -1920,6 +1920,47 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
     assert_eq!(resources[0]["state"], "waiting");
 }
 
+#[tokio::test]
+async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"fixture\" { workspace \"/tmp\"; command \"true\" }\n";
+    let intent = parse_intent(source, "node").unwrap();
+    let plan = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    state.store.apply(&intent, &plan.subject_tokens, "agent-lane").unwrap();
+    let (desired, _) = state.store.desired_subject_with_writer("agent/node.fixture").unwrap().unwrap();
+    let runtime_id = desired.member.unwrap().runtime_id;
+    let app = router(state);
+    let get = |path: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(Request::builder().method("GET").uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        }
+    };
+    let (status, body) = get("/v1/agents/lane?agent=node.fixture").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["value"]["agent"], "agent/node.fixture");
+    assert_eq!(body["value"]["runtime_id"], runtime_id.as_str());
+    // The runtime's own name for the seat's slice, the one a launch caps (crate::lane::prepare).
+    let slice = fractal_runtime::seat_slice(&runtime_id);
+    assert_eq!(body["value"]["slice"], slice.as_str());
+    // The lane's own sccache server, as the runtime names it in a laned task's environment, under the
+    // daemon's runtime directory; null without one.
+    let sccache = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| fractal_runtime::lane_sccache_socket(&dir, &slice));
+    assert_eq!(body["value"]["sccache_server_uds"], json!(sccache), "{body}");
+    let (status, body) = get("/v1/agents/lane?agent=node.nobody").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
 #[test]
 fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     let store = Store::open_memory("amber").unwrap();
@@ -7695,10 +7736,8 @@ async fn retired_mailbox_successor_lists_reads_and_closes_as_itself() {
         idempotency_key: Some("custody-api-send".into()),
     }).unwrap();
     let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
-    let retirement = state.store.retire_agent_with_successor(
-        "agent/example/old", "person/avery", "Rollover", &token, None,
-        "custody-api-retire", &[], Some("agent/example/new"),
-    ).unwrap().0;
+    let retirement = state.store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover", &token, None,
+    "custody-api-retire", &[], Some("agent/example/new"), None).unwrap().0;
     let app = router(state.clone());
     let (status, detail) = get_request(app.clone(), "/v1/client/agents/example/old").await;
     assert_eq!(status, StatusCode::OK, "{detail}");
@@ -7743,10 +7782,8 @@ fn retired_agent_cached_card_refolds_custody_once_at_new_cut() {
     let old = before.iter().find(|card| card["id"] == "agent/example/old").unwrap();
     assert!(old.get("mail_custody").is_none());
     let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
-    state.store.retire_agent_with_successor(
-        "agent/example/old", "person/avery", "Rollover", &token, None,
-        "custody-card-retire", &[], Some("agent/example/new"),
-    ).unwrap();
+    state.store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover", &token, None,
+    "custody-card-retire", &[], Some("agent/example/new"), None).unwrap();
     let after_index = state.store.index().unwrap();
     let after = client_agent_resources_cached(&state.store, false, after_index).unwrap();
     let old = after.iter().find(|card| card["id"] == "agent/example/old").unwrap();
@@ -13590,6 +13627,111 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
 }
 
 #[tokio::test]
+async fn a_bound_harness_dismisses_a_fault_only_as_itself() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let dismiss = |bound: Option<&'static str>, actor: &'static str| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/faults/dismiss")
+            .header("content-type", "application/json");
+        if let Some(agent) = bound {
+            request = request.extension(BoundAgent(agent.into()));
+        }
+        let body = json!({"source":"mission-run/ended","reason":"the run ended","actor":actor});
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            (status, envelope.get("value").cloned().unwrap_or(envelope))
+        }
+    };
+    for (bound, actor, code) in [
+        // A harness never names a person; an ordinary agent acting as itself reaches the store,
+        // which refuses it, and a person reaches the store and finds no such fault.
+        (Some("agent/helper"), "person/avery", "foreign-agent-actor"),
+        (Some("agent/helper"), "agent/helper", "fault-dismiss-forbidden"),
+        (None, "person/avery", "missing-fault"),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = dismiss(bound, actor).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], code, "{actor}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before, "{actor}");
+    }
+}
+
+async fn checkpoint_actor_request(
+    app: Router, path: &str, bound: Option<&str>, actor: &str,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(agent) = bound {
+        request = request.extension(BoundAgent(agent.into()));
+    }
+    // Deliberately omit the identity header: the socket binding still governs the body actor.
+    let body = json!({"actor":actor, "reason":"reviewed checkpoint", "writer":"absent-writer"});
+    let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    (status, envelope.get("value").cloned().unwrap_or(envelope))
+}
+
+#[tokio::test]
+async fn checkpoint_mutations_bind_body_actors_without_an_identity_header() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    for path in ["/v1/checkpoint/resume", "/v1/checkpoint/excuse"] {
+        for actor in ["person/operator", "agent/other"] {
+            let before = state.store.index().unwrap();
+            let (status, refused) = checkpoint_actor_request(
+                app.clone(), path, Some("agent/helper"), actor,
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {refused}");
+            assert_eq!(refused["code"], "foreign-agent-actor", "{path}: {refused}");
+            assert_eq!(state.store.index().unwrap(), before, "{path}");
+        }
+        // The binding accepts the seat's own identity; store authorization still applies.
+        let code = if path.ends_with("/resume") {
+            "invalid-checkpoint-resume"
+        } else {
+            "invalid-checkpoint-excusal"
+        };
+        let (status, refused) = checkpoint_actor_request(
+            app.clone(), path, Some("agent/helper"), "agent/helper",
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {refused}");
+        assert_eq!(refused["code"], code, "{path}: {refused}");
+
+        let (status, accepted) = checkpoint_actor_request(
+            app.clone(), path, None, "person/operator",
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {accepted}");
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_resume_accepts_the_bound_local_trim_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.trim_locally(true).unwrap();
+    *state.store.extension::<crate::store::answers_check::TrimSettings>()
+        .notify.lock().unwrap() = Some("agent/helper".into());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let (status, resumed) = checkpoint_actor_request(
+        app, "/v1/checkpoint/resume", Some("agent/helper"), "agent/helper",
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+}
+
+#[tokio::test]
 async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_replicas() {
     const OLD: &str = "agent/example-mail-original/worker";
     const NEW: &str = "agent/example-mail-renamed/worker";
@@ -13726,3 +13868,71 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
     }
 }
 
+
+#[test]
+fn a_doctor_check_past_its_deadline_reports_timeout_and_the_next_check_still_runs() {
+    let clock = DoctorClock::new(Duration::from_secs(5), Duration::from_millis(100));
+    let pass = |name: &str| DoctorCheck { name: name.into(), status: "pass".into(), message: String::new() };
+    let slow = clock.checks("slow-check", || {
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(vec![pass("slow-check")])
+    });
+    assert_eq!(slow.len(), 1);
+    assert_eq!((slow[0].name.as_str(), slow[0].status.as_str()), ("slow-check", "timeout"));
+    assert!(slow[0].message.starts_with("did not finish in 0.") && slow[0].message.contains(" s;"), "{}", slow[0].message);
+    // A store read past the deadline is interrupted rather than left to run.
+    let interrupted = clock.checks("interrupted", || {
+        std::thread::sleep(Duration::from_millis(150));
+        smallclaims::read_budget::check().map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+        Ok(vec![pass("interrupted")])
+    });
+    assert_eq!(interrupted[0].status, "timeout");
+    let next = clock.checks("next-check", || Ok(vec![pass("next-check")]));
+    assert_eq!(next[0].status, "pass");
+    // An error fails its own check and nothing else.
+    let failed = clock.checks("failing-check", || Err(ApiError::internal(anyhow::anyhow!("no such table"))));
+    assert_eq!((failed[0].name.as_str(), failed[0].status.as_str()), ("failing-check", "fail"));
+    assert!(failed[0].message.contains("no such table"), "{}", failed[0].message);
+    let checks = [slow, next].concat();
+    assert_eq!(doctor_status(&checks), "fail", "a timed-out check fails the report");
+    assert_eq!(doctor_status(&checks[1..]), "pass");
+}
+
+#[test]
+fn doctor_checks_after_the_total_is_spent_say_they_did_not_run() {
+    let clock = DoctorClock::new(Duration::from_millis(150), Duration::from_millis(100));
+    let ran = std::cell::Cell::new(0);
+    for _ in 0..2 {
+        clock.checks("slow-check", || {
+            ran.set(ran.get() + 1);
+            std::thread::sleep(Duration::from_millis(110));
+            Ok(Vec::new())
+        });
+    }
+    assert_eq!(ran.get(), 2);
+    let skipped = clock.checks("late-check", || {
+        ran.set(ran.get() + 1);
+        Ok(Vec::new())
+    });
+    assert_eq!(ran.get(), 2, "a check after the total is spent does not run");
+    assert_eq!((skipped[0].status.as_str(), skipped[0].message.as_str()), ("timeout", "not run: doctor's checks used all their time"));
+}
+
+#[tokio::test]
+async fn doctor_reads_what_is_sealed_without_sealing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.append_claim(&ClaimInput {
+        subject: "agent/example.sealing".into(), kind: "runtime.observed".into(),
+        actor: Some("agent/example.sealing".into()),
+        fields: BTreeMap::from([("status".into(), json!("running"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let (status, doctor) = get_request(router(state.clone()), "/v1/doctor").await;
+    assert_eq!(status, StatusCode::OK, "{doctor}");
+    let checks = doctor["checks"].as_array().unwrap();
+    let signatures = checks.iter().find(|check| check["name"] == "claim-signatures").unwrap();
+    let message = signatures["message"].as_str().unwrap();
+    assert!(!message.contains(" 0 not yet sealed"), "doctor sealed this node's batches to answer: {message}");
+    assert!(checks.iter().all(|check| check["status"] != "timeout"), "{doctor}");
+}

@@ -58,7 +58,7 @@ fn isolated(test: &str) -> bool {
         .env("XDG_STATE_HOME", &state)
         .env("XDG_CONFIG_HOME", &config)
         .env("TMPDIR", &tmp)
-        .env("NEXTEST_BIN_EXE_st3", test_bin!("st3"))
+        .env("NEXTEST_BIN_EXE_fractal", test_bin!("fractal"))
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
@@ -98,7 +98,7 @@ fn git(repo: &Path, args: &[&str], input: &[u8]) -> String {
 }
 
 fn cli(repo: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(test_bin!("st3"))
+    Command::new(test_bin!("fractal"))
         .args([
             "--endpoint",
             "unix:/no-evidence-daemon.sock",
@@ -561,7 +561,7 @@ os.execv(os.environ['FIXTURE_REAL_GIT'],[os.environ['FIXTURE_REAL_GIT'],*args])
     let observe_request = |attempt: &str, artifact: &str, extra: &[&str]| {
         let mut paths = vec![tools.clone()];
         paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-        Command::new(test_bin!("st3"))
+        Command::new(test_bin!("fractal"))
             .args([
                 "--endpoint",
                 "unix:/absent.sock",

@@ -5,7 +5,7 @@
 #
 #   1. KVM: the VM tests need /dev/kvm read-write and a VM that can be created (CI's "Probe KVM").
 #   2. The workspace test archive linux-test-build produces (`cargo nextest archive` with CI's own filter) and the standalone
-#      production gateway (`cargo build -p fractal --bin st3`, refused when it carries test-support or a test profile).
+#      production gateway (`cargo build -p fractal --bin fractal`, refused when it carries test-support or a test profile).
 #   3. The transport isolation VM driver, run with the archive (all three systemd-scope tests), then the sekrets VM driver, run with
 #      the gateway. The drivers keep their VM state (a 16 GiB disk image) under XDG_RUNTIME_DIR when it is set, else TMPDIR; they
 #      run without XDG_RUNTIME_DIR (a CI runner has none) and with TMPDIR in this run's scratch on disk, so the image never lands
@@ -32,12 +32,12 @@ EOF
 
 targets=$(python3 scripts/ci-nextest-targets)
 cargo nextest archive --workspace --locked --profile ci -E "$targets" --archive-file "$archives/workspace.tar.zst"
-cargo build --locked -p fractal --bin st3 --message-format=json > "$archives/production-build.json"
+cargo build --locked -p fractal --bin fractal --message-format=json > "$archives/production-build.json"
 gateway=$(python3 - "$archives/production-build.json" <<'EOF'
 import json, sys
 artifacts = [json.loads(line) for line in open(sys.argv[1]) if line.startswith('{')]
 binaries = [item for item in artifacts if item.get('reason') == 'compiler-artifact'
-            and item['target']['name'] == 'st3' and item.get('executable')]
+            and item['target']['name'] == 'fractal' and item.get('executable')]
 if len(binaries) != 1 or 'test-support' in binaries[0]['features'] or binaries[0]['profile']['test']:
     sys.exit('ci-local-isolation-vm: standalone production gateway feature/profile identity required')
 print(binaries[0]['executable'])

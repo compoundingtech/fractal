@@ -28,6 +28,7 @@ Use these documents for implementation details:
 - [Install/upgrade troubleshooting and support](../when-something-is-wrong.md) provides the diagnostic entry point and sanitized issue path.
 - [Claim backups](backups.md) explains live snapshots, offline restore, and recovered writer identities.
 - [Stable node identity](node-identity.md) explains computer renames, same-state recovery and local ownership diagnostics.
+- [Portable rename proofs](rename-proof.md) explains signed agent/mission naming history, offline verification and explicit fleet-anchor trust.
 - [Fleet replication](replication.md) defines convergence, inspection, and repair.
 - [Seat state truth](seat-state-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
 - [Agent seat queues](seat-queue.md) explains how each seat orders its mission runs and how moves
@@ -59,6 +60,7 @@ Use these documents for implementation details:
   message a restarted seat is sent with that handoff and the live state of its work.
 - [Seats across deploys](seat-deploys.md) explains how a running seat's driver and channels follow
   a replaced Fractal binary without ending the provider session, and how Fractal reports a stale message path.
+- [Binding an agent to a person's terminal](terminal-binding.md) explains `bind-terminal`: running a native harness in a shell the person already has open.
 - [Silent messages](silent-messages.md) explains the silent and wake message kinds, capped held batches, and where status and run events go.
 - [Delivery probes](delivery-probes.md) describes token-free native-channel probes, per-direction
   read latency, overdue attention, and the replicated results in `st doctor`.
@@ -99,6 +101,8 @@ Use these documents for implementation details:
 - [Client v0 contract](client-v0/README.md) defines the shared TUI and mobile JSON, event, action,
   pairing, and terminal protocols.
 - [Device signing](device-signing.md) defines paired-client keys and signed requests.
+- [ChatGPT app](chatgpt-app.md) is the design for the ChatGPT app: composition boundaries, the
+  adapter's place beside the iOS app, and how any person installs it against their own daemon.
 - [Operational-state contract](operational-state/README.md) separates immutable history, current
   projection, and actor-specific actionable views and defines screen/CLI parity.
 
@@ -116,3 +120,4 @@ A seat that sits idle holding a claimed step, with nothing set to wake it, gets 
 the step and what it waits on ([idle holders](mission-graph-runtime.md#idle-holders)).
 Fractal's only other text for agents is the skill that `st skill` prints, which describes how to use Fractal
 and sets no rules of conduct. Keep this rule when changing drivers, messages, or the skill.
+- [Manual onboarding test rig](onboarding-test-rig.md) documents release-archive fixtures and disposable Linux/macOS guest preparation.

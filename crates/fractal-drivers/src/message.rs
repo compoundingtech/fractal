@@ -1111,12 +1111,12 @@ pub fn with_resolved_state_dir<T>(
             test_capability_checkpoint();
             let path = match agent.capability.as_ref() {
                 Some(capability) if components.is_empty() => {
-                    crate::catalog_transaction::retained_dir_path(capability)?
+                    crate::directory::retained_dir_path(capability)?
                 }
                 Some(capability) => {
                     let directory = open_message_box(capability, components, create)?
                         .context("resolved state directory does not exist")?;
-                    let path = crate::catalog_transaction::retained_dir_path(&directory)?;
+                    let path = crate::directory::retained_dir_path(&directory)?;
                     return operation(&path);
                 }
                 None => components
@@ -1171,8 +1171,8 @@ pub(crate) fn with_resolved_message_boxes<T>(
     let archive = open_message_box(capability, &["resources", "archive"], true)?
         .context("created archive capability is missing")?;
     operation(
-        &crate::catalog_transaction::retained_dir_path(&inbox)?,
-        &crate::catalog_transaction::retained_dir_path(&archive)?,
+        &crate::directory::retained_dir_path(&inbox)?,
+        &crate::directory::retained_dir_path(&archive)?,
     )
 }
 
@@ -1408,7 +1408,7 @@ fn addressable_agent_dirs(
                     .parent()
                     .context("Agent Spec has no identity directory")?
                     .to_path_buf();
-                let capability = crate::catalog_transaction::open_dir_beneath(catalog_root, &path)?;
+                let capability = crate::directory::open_dir_beneath(catalog_root, &path)?;
                 Ok(AddressableAgent {
                     id: spec.effective_id(this_host),
                     bus_id: spec.bus_id(this_host),
@@ -1442,8 +1442,8 @@ fn addressable_agent_dirs(
                 identity: identity_name.clone(),
             };
             let path = identity.path();
-            let capability = crate::catalog_transaction::open_dir_beneath(catalog_root, &path)?;
-            let retained = crate::catalog_transaction::retained_dir_path(&capability)?;
+            let capability = crate::directory::open_dir_beneath(catalog_root, &path)?;
+            let retained = crate::directory::retained_dir_path(&capability)?;
             let current_spec = marker_spec_matches(&retained, &key)?;
             let retained_state =
                 transition.original_agents.contains(&key) && marker_state_exists(&retained)?;
@@ -1614,7 +1614,7 @@ pub fn collect_thread(catalog_root: &Path, filename: &str) -> anyhow::Result<Vec
                 let Some(dir) = open_message_box(capability, components, false)? else {
                     continue;
                 };
-                for message in list_dir(&crate::catalog_transaction::retained_dir_path(&dir)?)
+                for message in list_dir(&crate::directory::retained_dir_path(&dir)?)
                     .unwrap_or_default()
                 {
                     all.entry(message.filename.clone()).or_insert(message);
@@ -1708,7 +1708,7 @@ impl DeliveryEndpoint {
         match self {
             Self::Agent(agent) => {
                 let root = match agent.capability.as_ref() {
-                    Some(capability) => crate::catalog_transaction::retained_dir_path(capability)?,
+                    Some(capability) => crate::directory::retained_dir_path(capability)?,
                     None => agent.path.clone(),
                 };
                 Ok((inbox_dir(&root), archive_dir(&root)))
@@ -1808,7 +1808,7 @@ pub fn send_to_resolved_inbox(
     let (canonical_from, sender_root) = match sender.as_ref() {
         Some(agent) => {
             let path = match agent.capability.as_ref() {
-                Some(capability) => crate::catalog_transaction::retained_dir_path(capability)?,
+                Some(capability) => crate::directory::retained_dir_path(capability)?,
                 None => agent.path.clone(),
             };
             (agent.bus_id.clone(), path)
@@ -2479,8 +2479,8 @@ pub fn archive_resolved_message(
         let archive = open_message_box(capability, &["resources", "archive"], true)?
             .context("created archive capability is missing")?;
         archive_msg(
-            &crate::catalog_transaction::retained_dir_path(&inbox)?,
-            &crate::catalog_transaction::retained_dir_path(&archive)?,
+            &crate::directory::retained_dir_path(&inbox)?,
+            &crate::directory::retained_dir_path(&archive)?,
             filename,
         )
     } else {
@@ -2497,7 +2497,7 @@ fn open_message_box(
     use std::os::fd::AsRawFd as _;
     let mut current = agent.try_clone()?;
     for component in components {
-        match crate::catalog_transaction::openat_dir_nofollow(
+        match crate::directory::openat_dir_nofollow(
             &current,
             std::ffi::OsStr::new(component),
         ) {
@@ -2514,7 +2514,7 @@ fn open_message_box(
                         return Err(error.into());
                     }
                 }
-                current = crate::catalog_transaction::openat_dir_nofollow(
+                current = crate::directory::openat_dir_nofollow(
                     &current,
                     std::ffi::OsStr::new(component),
                 )?;

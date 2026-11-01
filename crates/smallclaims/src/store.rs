@@ -39,10 +39,10 @@ use crate::sqlite::{
 mod admitted;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
-mod operation_metadata;
+mod proof;
 pub mod prepared_envelope;
 mod replica_record;
-pub use operation_metadata::OperationMetadata;
+use crate::operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod full_inventory_tests;
 #[cfg(test)]
@@ -124,7 +124,10 @@ pub use checkpoint_agreement::{
     SealTerms, VerifiedTerms, certificates, checkpoint_build, chosen_certificate, excused_writers,
     first_verifications, newest_seals, participants as checkpoint_participants, stable_checkpoints,
 };
-pub use checkpoint_trim::{CheckpointManifestNeed, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault};
+pub use checkpoint_trim::{
+    CheckpointManifestNeed, LOCAL_TRIM_CONTEXT_KINDS, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault,
+    local_trim_capture_kinds,
+};
 
 /// A committed projection frontier plus optional work inside its current transaction.
 #[derive(Clone, Copy, Debug)]
@@ -844,6 +847,12 @@ pub struct Store {
     pub divergence_capture: std::sync::atomic::AtomicBool,
     /// Whether this member trims on its own (`[trim] local`); see `trim_locally`.
     trim_local: AtomicBool,
+    /// The most claims a local trim deletes in a day (`[trim] daily_claims`); see
+    /// `trim_locally_at_most`.
+    trim_daily_claims: AtomicU64,
+    /// The day, in days since the epoch, that a local trim's deletions count against: each
+    /// checkpoint step sets it from its own clock.
+    pub(crate) trim_day: AtomicU64,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
     /// Fixed local schema identity, initialized lazily before the first admission pass.
@@ -1259,6 +1268,8 @@ impl Store {
             replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
             trim_local: AtomicBool::new(false),
+            trim_daily_claims: AtomicU64::new(checkpoint_trim::LOCAL_TRIM_DAILY_CLAIMS),
+            trim_day: AtomicU64::new(0),
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
@@ -2490,6 +2501,25 @@ impl Store {
         Ok(membership)
     }
 
+    /// Read only already-sealed membership; never seed or judge local batches on a cache miss.
+    pub fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership> {
+        if let Some(authority) = self.fleet_authority.get() {
+            return authority.fleet_membership_sealed();
+        }
+        self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            let current = fleet_generation(&connection)?;
+            if let Some((folded_at, membership)) = self.membership_cache.lock()
+                .unwrap_or_else(PoisonError::into_inner).as_ref()
+                && *folded_at == current
+            {
+                return Ok(membership.clone());
+            }
+            // Do not populate the sealing path's cache with a fold that can omit local batches.
+            fleet_membership_tx(&connection)
+        })
+    }
+
     /// Whether transport observations about `peer` belong in the graph. A dial-out member is
     /// never dialed and never reports on others, so neither side records one.
     pub fn observes_transport_to(&self, peer: &str) -> Result<bool> {
@@ -3318,6 +3348,7 @@ pub trait FleetAuthority: Send + Sync {
     /// Advances whenever the default store's membership may have changed.
     fn fleet_generation(&self) -> Result<i64>;
     fn fleet_membership(&self) -> Result<crate::fleet::Membership>;
+    fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership>;
     /// Whether this is a default store that takes its fleet from no other store.
     fn is_default_store(&self) -> Result<bool>;
 }
@@ -3333,6 +3364,10 @@ impl FleetAuthority for Store {
 
     fn fleet_membership(&self) -> Result<crate::fleet::Membership> {
         Store::fleet_membership(self)
+    }
+
+    fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership> {
+        Store::fleet_membership_sealed(self)
     }
 
     fn is_default_store(&self) -> Result<bool> {
@@ -9096,6 +9131,17 @@ impl Store {
 
     pub fn trims_locally(&self) -> bool {
         self.trim_local.load(Ordering::Relaxed)
+    }
+
+    /// The most claims a member that trims locally deletes in one day, `[trim] daily_claims`. A
+    /// cut that drops more stays `trimming` and goes on where it stopped the next day, before the
+    /// next cut begins, so a large backlog drains over several days rather than in one long trim.
+    pub fn trim_locally_at_most(&self, claims: u64) {
+        self.trim_daily_claims.store(claims, Ordering::Relaxed);
+    }
+
+    pub fn local_trim_daily_claims(&self) -> u64 {
+        self.trim_daily_claims.load(Ordering::Relaxed)
     }
 
     /// Every projection that a peer with the same envelopes projects differently, by peer.

@@ -520,6 +520,18 @@ impl Runtime for FractalRuntime {
         reapply_local_work_lease_renewals_tx(transaction)
     }
 
+    fn rebuild_deferred(&self, transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
+        resources::flush_deferred_preparation(transaction, budget)
+    }
+
+    fn deferred_pending(&self, connection: &Connection) -> Result<bool> {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred)",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
         // Replication admission/import, repair and pruning can dirty preparation
         // without running APPEND (or can do so after its last claim projector).
