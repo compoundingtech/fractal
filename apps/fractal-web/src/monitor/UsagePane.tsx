@@ -144,8 +144,9 @@ const Chart = ({ id, kind, tone, source }: { readonly id: string; readonly kind:
 const tones = stylex.create({
   red: { color: c.dangerFg },
   yellow: { color: c.attention },
-  // The live theme has no green token (its green is the neutral `done`); served green mixes toward the scheme's ink so it stays legible in both.
-  green: { color: `color-mix(in srgb, #22c55e 60%, ${c.fg})` },
+  // The live theme has no green token (its green is the neutral `done`); served green mixes evenly with the scheme's ink:
+  // #247644 on the light canvas (5.5:1, 5.1:1 on row hover), #8cddaa on dark, so 12px text clears AA in both.
+  green: { color: `color-mix(in srgb, #22c55e 50%, ${c.fg})` },
   quiet: { color: c.fgMuted },
 })
 

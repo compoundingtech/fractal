@@ -3,6 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import { ANCHOR_MS } from '@fractal/scenarios'
 import { useScenarioNow, useScenarioSlice } from '@fractal/scenarios/react'
 import { scenarioArgTypes } from '@fractal/scenarios/storybook'
 import { assistantDarkTheme, liveAccentTheme, compositionLightTheme } from '@fractal/ui/assistant-ui'
@@ -28,8 +29,10 @@ const UsageSurface = ({ reads, scheme }: UsageArgs) =>
 const meta = {
   title: 'Fractal/App/UsagePane',
   tags: ['critical'],
-  component: UsageSurface,
+  component: UsagePane,
+  render: UsageSurface,
   args: { reads: ['live'], scheme: 'dark' },
+  globals: { scenarioNow: ANCHOR_MS },
   argTypes: { ...scenarioArgTypes(['objectives']), scheme: { control: 'radio', options: ['dark', 'light'] }, reads: { table: { disable: true } } },
   parameters: { layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['objectives'] } },
 } satisfies Meta<UsageArgs>
@@ -42,7 +45,9 @@ export const AllStates: Story = {
   play: async ({ canvasElement }) => {
     await waitFor(() => expect(pane(canvasElement, 'live').getByRole('heading', { name: 'budgets 4' })).toBeVisible())
     await expect(pane(canvasElement, 'waiting').getByText('Loading objectives and budgets…')).toBeVisible()
-    await expect(pane(canvasElement, 'stale').getByText('Last reading: could not read again (Could not read objectives and budgets.)')).toBeVisible()
+    const staleNotices = pane(canvasElement, 'stale').getAllByText('Last reading: could not read again (Could not read objectives and budgets.)')
+    await expect(staleNotices).toHaveLength(2)
+    for (const notice of staleNotices) await expect(notice).toBeVisible()
     await expect(pane(canvasElement, 'stale').getByRole('heading', { name: 'objectives 4' })).toBeVisible()
     await expect(pane(canvasElement, 'failed').getByText('Could not read objectives and budgets')).toBeVisible()
     await expect(pane(canvasElement, 'unsupported').getByText(/needs an update to show objectives and budgets/)).toBeVisible()
