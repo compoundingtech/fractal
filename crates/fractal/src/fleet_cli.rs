@@ -471,13 +471,13 @@ async fn bootstrap_fabric_invite(
     {
         return Ok(());
     }
-    let Endpoint::Unix(socket) = endpoint else {
+    let Some(socket) = endpoint.unix_socket() else {
         anyhow::bail!("Fabric bootstrap invitations must be issued on the sponsor machine");
     };
     let helper = adapter.context(FABRIC_PAIRING_UNAVAILABLE)?;
     let mut child = tokio::process::Command::new(helper)
         .arg("--st-socket")
-        .arg(socket)
+        .arg(socket.as_ref())
         .arg("pairing-invite")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

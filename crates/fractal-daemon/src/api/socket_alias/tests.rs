@@ -1,6 +1,7 @@
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::os::unix::fs::FileTypeExt as _;
 
 fn response(value: usize) -> axum::Json<crate::model::ApiResponse<usize>> {
     axum::Json(crate::model::ApiResponse {
@@ -126,6 +127,39 @@ async fn overlong_primary_names_serve_only_reachable_legacy_paths() {
         ));
         serving.await.unwrap();
         for path in [legacy_socket, legacy_discovery] {
+            let client = crate::client::Client::new(crate::client::Endpoint::Unix(path));
+            assert_eq!(client.get::<usize>("/test").await.unwrap(), 42);
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+}
+
+#[tokio::test]
+async fn explicit_legacy_listener_is_not_reserved_as_its_own_discovery_alias() {
+    for aliased_parent in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join("state/run");
+        fs::create_dir_all(&run).unwrap();
+        let socket = run.join("st3.sock");
+        let discovery_parent = if aliased_parent {
+            let alias = root.path().join("run-alias");
+            symlink(&run, &alias).unwrap();
+            alias
+        } else {
+            run
+        };
+        let discovery = discovery_parent.join("fractal.sock");
+        let reserved = reserve_unix_socket(&socket, Some(&discovery)).await.unwrap();
+        assert!(fs::symlink_metadata(&socket).unwrap().file_type().is_socket());
+        assert_eq!(fs::canonicalize(&socket).unwrap(), fs::canonicalize(&discovery).unwrap());
+        let (ready, serving) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_reserved_unix_with_ready(
+            reserved, Router::new().route("/test", axum::routing::get(|| async { response(42) })),
+            None, || { let _ = ready.send(()); },
+        ));
+        serving.await.unwrap();
+        for path in [socket, discovery] {
             let client = crate::client::Client::new(crate::client::Endpoint::Unix(path));
             assert_eq!(client.get::<usize>("/test").await.unwrap(), 42);
         }

@@ -305,7 +305,7 @@ async fn prepare_harness(
         return Ok(None);
     }
     let found = if daemon_ready(config).await {
-        match Client::new(Endpoint::Unix(config.client_socket()))
+        match Client::new(Endpoint::DiscoveredUnix(config.client_discovery()))
             .get::<Vec<String>>("/v1/harnesses")
             .await
         {
@@ -877,7 +877,7 @@ fn check_login_path(executable: &Path) {
 }
 
 async fn daemon_ready(config: &Config) -> bool {
-    let client = Client::new(Endpoint::Unix(config.client_socket()));
+    let client = Client::new(Endpoint::DiscoveredUnix(config.client_discovery()));
     tokio::time::timeout(
         Duration::from_millis(750),
         client.get::<serde_json::Value>("/v1/health"),
