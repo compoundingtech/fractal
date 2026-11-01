@@ -7433,8 +7433,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
                 Arc::downgrade(&store),
             ));
-            stderr_message("st", format_args!("local API listening at {}", config.socket.display()));
-            stderr_message("st", format_args!("paired client gateway listening at {}", config.client_gateway_socket.display()));
+            stderr_message("st", format_args!("local API listening at {}", fractal_daemon::config::socket_binding_path(&config.socket).display()));
+            stderr_message("st", format_args!("paired client gateway listening at {}", fractal_daemon::config::socket_binding_path(&config.client_gateway_socket).display()));
         }
     };
     let web_dist = args.web_dist.unwrap_or(std::env::current_exe()?
@@ -8995,7 +8995,10 @@ async fn run_devices_fabric(
                 );
             }
             fabric
-                .expose_socket(&service, &config.client_gateway_socket)
+                .expose_socket(
+                    &service,
+                    &fractal_daemon::config::socket_binding_path(&config.client_gateway_socket),
+                )
                 .await
                 .context("Fabric could not expose the client gateway; nothing changed")?;
             GatewayExposure {
