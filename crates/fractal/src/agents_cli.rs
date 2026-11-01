@@ -413,10 +413,15 @@ pub(super) async fn run_agents(
             if json_output {
                 let mut value = serde_json::to_value(&response)?;
                 value["handoff"] = serde_json::to_value(&agent.handoff)?;
+                if let Some(admission) = agent.extra.get("seat_admission") {
+                    value["seatAdmission"] = admission.clone();
+                }
                 print_value(&value, true)?;
             } else {
                 print_value(&response, false)?;
-                if let Some(handoff) = &agent.handoff {
+                if let Some(admission) = agent.extra.get("seat_admission") {
+                    println!("{}", admission_start_message(&subject, admission));
+                } else if let Some(handoff) = &agent.handoff {
                     println!("{subject}: {} → {}", handoff.phase, handoff.destination);
                     if !handoff.pending_sources.is_empty() {
                         println!(
@@ -731,6 +736,18 @@ enum MissionSeatStart {
     Declared(String),
     /// Someone stopped it; the daemon restores the run's declaration.
     Stopped,
+}
+
+pub(super) fn admission_start_message(subject: &str, admission: &Value) -> String {
+    let reason = admission["reason"].as_str().unwrap_or("awaiting admission");
+    if admission["pending"].as_bool().unwrap_or(true) {
+        let position = admission["queuePosition"].as_u64()
+            .map(|position| format!(" (queue position {position})"))
+            .unwrap_or_default();
+        format!("{subject}: accepted-pending: {reason}{position}")
+    } else {
+        format!("{subject}: {reason}")
+    }
 }
 
 async fn agent_start_status(
@@ -1479,4 +1496,23 @@ async fn request_suspension(
                 if resume { "resume" } else { "suspend" }
             )
         })?
+}
+
+#[cfg(test)]
+mod admission_presentation_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_pending_is_not_reported_as_running_or_failure() {
+        assert_eq!(admission_start_message("agent/example/queued",
+            &json!({"reason":"memory reserve", "queuePosition":2})),
+            "agent/example/queued: accepted-pending: memory reserve (queue position 2)");
+    }
+
+    #[test]
+    fn authorized_replacement_retains_its_admission_reason() {
+        assert_eq!(admission_start_message("agent/example/restart",
+            &json!({"reason":"admitted: replacement", "pending":false})),
+            "agent/example/restart: admitted: replacement");
+    }
 }
