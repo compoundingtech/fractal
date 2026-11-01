@@ -107,7 +107,8 @@ pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf 
     if std::fs::canonicalize(runtime).ok().as_ref() == Some(&target) {
         return runtime.to_path_buf();
     }
-    let answers = |socket: &Path| std::os::unix::net::UnixStream::connect(socket).is_ok();
+    let answers = |socket: &Path| unix_socket_path_fits(socket)
+        && std::os::unix::net::UnixStream::connect(socket).is_ok();
     if !answers(runtime) && answers(&target) {
         target
     } else {
@@ -115,16 +116,24 @@ pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf 
     }
 }
 
+/// Whether the platform can address this filesystem Unix socket path.
+pub fn unix_socket_path_fits(socket: &Path) -> bool {
+    std::os::unix::net::SocketAddr::from_pathname(socket).is_ok()
+}
+
 /// Resolve default socket names without changing explicit configured endpoints.
 pub fn default_unix_socket(runtime: &Path, published: &Path) -> PathBuf {
     let primary = runtime_or_published_socket(runtime, published);
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction.
-    if std::os::unix::net::UnixStream::connect(&primary).is_err() {
+    let primary_fits = unix_socket_path_fits(&primary);
+    if !primary_fits || std::os::unix::net::UnixStream::connect(&primary).is_err() {
         let legacy = runtime_or_published_socket(
             &runtime.with_file_name("st3.sock"),
             &published.with_file_name("st3.sock"),
         );
-        if std::os::unix::net::UnixStream::connect(&legacy).is_ok() {
+        if unix_socket_path_fits(&legacy)
+            && (!primary_fits || std::os::unix::net::UnixStream::connect(&legacy).is_ok())
+        {
             return legacy;
         }
     }
@@ -3864,6 +3873,18 @@ mod tests {
         assert_eq!(default_unix_socket(&primary, &primary), legacy);
         let _new_daemon = std::os::unix::net::UnixListener::bind(&primary).unwrap();
         assert_eq!(default_unix_socket(&primary, &primary), primary);
+    }
+
+    #[test]
+    fn socket_names_skip_a_primary_that_exceeds_the_platform_path_budget() {
+        let mut directory = String::from("/");
+        while unix_socket_path_fits(&Path::new(&directory).join("fractal.sock")) {
+            directory.push('x');
+        }
+        let primary = Path::new(&directory).join("fractal.sock");
+        let legacy = Path::new(&directory).join("st3.sock");
+        assert!(unix_socket_path_fits(&legacy));
+        assert_eq!(default_unix_socket(&primary, &primary), legacy);
     }
 
     #[test]

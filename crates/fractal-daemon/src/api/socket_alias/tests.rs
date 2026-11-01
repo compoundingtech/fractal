@@ -2,6 +2,13 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+fn response(value: usize) -> axum::Json<crate::model::ApiResponse<usize>> {
+    axum::Json(crate::model::ApiResponse {
+        api_version: "st3.v1".into(), request_id: "socket-alias-test".into(),
+        snapshot_host: "test-node".into(), store_index: 1, value,
+    })
+}
+
 #[tokio::test]
 async fn primary_and_legacy_clients_reach_the_same_handler() {
     for (primary, legacy) in [("fractal.sock", "st3.sock"), ("fractal-client.sock", "st3-client.sock")] {
@@ -12,7 +19,7 @@ async fn primary_and_legacy_clients_reach_the_same_handler() {
         let handler_calls = calls.clone();
         let app = Router::new().route("/test", axum::routing::get(move || {
             let count = handler_calls.fetch_add(1, Ordering::SeqCst) + 1;
-            async move { axum::Json(count) }
+            async move { response(count) }
         }));
         let reserved = reserve_unix_socket(&socket, None).await.unwrap();
         assert_eq!(fs::read_link(&alias).unwrap(), Path::new(primary));
@@ -64,7 +71,7 @@ async fn legacy_state_discovery_reaches_a_custom_control_socket() {
     assert!(!socket.with_file_name("st3.sock").exists());
     let (ready, serving) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ready(
-        reserved, Router::new().route("/test", axum::routing::get(|| async { axum::Json(42) })),
+        reserved, Router::new().route("/test", axum::routing::get(|| async { response(42) })),
         None, || { let _ = ready.send(()); },
     ));
     serving.await.unwrap();
@@ -91,5 +98,39 @@ async fn cleanup_does_not_unlink_a_replacement_and_custom_paths_have_no_alias() 
     assert_eq!(fs::read_to_string(&alias).unwrap(), "replacement");
     assert!(reserve_unix_socket(&socket, None).await.is_err());
     assert_eq!(fs::read_to_string(&alias).unwrap(), "replacement");
+}
+
+#[tokio::test]
+async fn overlong_primary_names_serve_only_reachable_legacy_paths() {
+    #[cfg(target_os = "macos")]
+    let limit = 104;
+    #[cfg(not(target_os = "macos"))]
+    let limit = 108;
+    for (primary, legacy) in [("fractal.sock", "st3.sock"), ("fractal-client.sock", "st3-client.sock")] {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let padding = limit - legacy.len() - root.path().as_os_str().as_bytes().len() - 3;
+        let parent = root.path().join("x".repeat(padding));
+        let socket = parent.join(primary);
+        let legacy_socket = parent.join(legacy);
+        let discovery = root.path().join("y".repeat(padding)).join(primary);
+        let legacy_discovery = discovery.with_file_name(legacy);
+        assert!(crate::config::validate_unix_socket_path(&socket, "--socket").is_err());
+        crate::config::validate_unix_socket_path(&legacy_socket, "--socket").unwrap();
+        let reserved = reserve_unix_socket(&socket, Some(&discovery)).await.unwrap();
+        assert!(!socket.exists());
+        assert!(!discovery.exists());
+        let (ready, serving) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_reserved_unix_with_ready(
+            reserved, Router::new().route("/test", axum::routing::get(|| async { response(42) })),
+            None, || { let _ = ready.send(()); },
+        ));
+        serving.await.unwrap();
+        for path in [legacy_socket, legacy_discovery] {
+            let client = crate::client::Client::new(crate::client::Endpoint::Unix(path));
+            assert_eq!(client.get::<usize>("/test").await.unwrap(), 42);
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
