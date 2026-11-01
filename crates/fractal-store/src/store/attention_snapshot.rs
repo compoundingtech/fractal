@@ -237,7 +237,7 @@ impl Store {
                 default_answer: None,
                 episode: claim,
                 priority: "high".into(),
-                kind: if missing_principal { "question-principal-missing" } else { "harness-prompt" }.into(),
+                kind: "harness-prompt".into(),
                 review_mode: None,
                 subject: seat.clone(),
                 person: owner,
