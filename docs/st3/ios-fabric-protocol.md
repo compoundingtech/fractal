@@ -78,7 +78,7 @@ source inspection alone does not establish iOS viability.
 
 Expose exactly the **paired-only** gateway socket, whose router is
 [`fabric_router`](../../crates/fractal-api-core/src/api.rs) and whose configured path is
-`client_gateway_socket` (normally `st3-client.sock`). Do not expose `st3.sock`:
+`client_gateway_socket` (normally `fractal-client.sock`). Do not expose `fractal.sock`:
 that is the privileged local API. A generic socket exposure is sufficient; no
 new server-side Rust service is needed.
 
@@ -144,7 +144,7 @@ daemon first, then arrange the one member exposure and phone grant; remove the
 phone grant after the proof:
 
 ```sh
-fabric expose demo-client/0 --socket /path/to/private/st3-client.sock --ephemeral
+fabric expose demo-client/0 --socket /path/to/private/fractal-client.sock --ephemeral
 fabric peers
 # Choose an unused peer name before adding the phone.
 fabric add PHONE_NODE_ID demo-phone --inbound-only --allow demo-client/0
@@ -383,7 +383,7 @@ stream data. Check this behavior against `TunnelSession::run_attach` and its
 reader/writer loops, not just the frame encoder.
 
 Fabric loss, suspension, or premature connection closure can leave the session
-detached on the member. The original `st3-client.sock` connection remains open
+detached on the member. The original `fractal-client.sock` connection remains open
 and gateway output can accumulate to the 4 MiB threshold plus one read until the
 900-second TTL or eviction. A framing gap also ends the attach and leaves it
 detached. A failed local target write is `LocalEndpointGone`, which instead
