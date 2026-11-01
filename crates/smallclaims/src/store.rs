@@ -1165,6 +1165,7 @@ impl Store {
             inventory_generation::initialize(connection)
         })?;
         principals::initialize_schema(connection)?;
+        principals::initialize_held_index(connection, fresh)?;
         if fresh {
             runtime.create_schema_for_fresh_store(connection)?;
         } else {
