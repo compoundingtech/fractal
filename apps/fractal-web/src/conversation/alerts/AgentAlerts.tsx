@@ -1,6 +1,7 @@
 import * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
+import { Schema } from 'effect'
 
 import {
   alertConversations,
@@ -155,7 +156,8 @@ const PromptAlert = ({
   readonly served: boolean
 }): React.ReactNode => {
   const prompt = promptAnswers(alert)
-  const presented = served ? servedPrompt({ presentation: { prompt: alert.presentation?.prompt } }) : undefined
+  const presented = served ? servedPrompt({ presentation: { prompt: alert.presentation?.prompt === undefined
+    ? undefined : Schema.encodeSync(Native.AttentionPrompt)(alert.presentation.prompt) } }) : undefined
   const available = presented?.calls ?? (served ? [] : calls)
   // Only the exact call the prompt asks about, when the daemon names it.
   const shown = prompt === null ? available : promptCalls(prompt, available)
