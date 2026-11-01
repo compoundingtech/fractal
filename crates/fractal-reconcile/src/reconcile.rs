@@ -1124,6 +1124,10 @@ pub trait FaultInjection: Send + Sync + 'static {
 }
 
 pub const FIRST_READINESS_FAULT_AFTER_MS: u128 = 120_000;
+
+/// How long one observer look may run, its provider calls and a mirror refill together, before
+/// it ends as a failure and frees its observer for the next look.
+const OBSERVER_LOOK_LIMIT: Duration = Duration::from_secs(15 * 60);
 pub use crate::model::FIRST_READINESS_FAULT_SCOPE;
 
 fn first_readiness_pending(run: &MissionRunView) -> bool {
@@ -1281,6 +1285,13 @@ pub struct Reconciler<R = NativeRuntime> {
     /// more polls at once rather than keeping a deadline set by a poll that read less.
     observer_fields: Arc<Mutex<HashMap<String, Vec<String>>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
+    /// By observer: held from a look reading its cursor until the look publishes the cursor it
+    /// kept, so an arm that retired another waits for that look rather than polling from the
+    /// cursor it moved past.
+    observer_looks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// How long one look's GitHub calls, its provider look and a mirror refill together, may run
+    /// while it holds its observer's look lock: past it the look ends as a failure.
+    look_limit: Duration,
     /// Each observer's poll cursor across restarts, in the GitHub plugin's own database rather
     /// than the graph (see [`github_plugin_store`]).
     github_plugin: Arc<github_plugin_store::GithubPluginStore>,
@@ -1507,6 +1518,8 @@ impl Reconciler<NativeRuntime> {
             observer_intervals: Arc::new(Mutex::new(HashMap::new())),
             observer_fields: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
+            observer_looks: Arc::new(Mutex::new(HashMap::new())),
+            look_limit: OBSERVER_LOOK_LIMIT,
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
             github_plugin: github_plugin_store::GithubPluginStore::shared(state_dir)?,
             refill_mirrors: true,
@@ -1688,6 +1701,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             observer_intervals: Arc::new(Mutex::new(HashMap::new())),
             observer_fields: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
+            observer_looks: Arc::new(Mutex::new(HashMap::new())),
+            look_limit: OBSERVER_LOOK_LIMIT,
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
             github_plugin: Arc::new(github_plugin_store::GithubPluginStore::memory()),
             refill_mirrors: false,
@@ -17028,6 +17043,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         };
         let unkept_cursors = self.unkept_cursors.clone();
+        let look_lock = self.observer_looks.lock().unwrap_or_else(PoisonError::into_inner)
+            .entry(observer.subject.clone()).or_default().clone();
+        let look_limit = self.look_limit;
         let github_plugin = self.github_plugin.clone();
         let refill_mirrors = self.refill_mirrors;
         let poller_host = self.host.clone();
@@ -17072,7 +17090,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                     return;
                 }
+                // One look per observer at a time. An arm that retired another waits for that look
+                // to publish the cursor it kept, then reads on from it: a look from the cursor
+                // before would find the mirror ahead of it and record a full snapshot.
+                // Lock order: this is the outermost lock. It is taken holding no store writer
+                // and no other observer's lock, and nothing inside a look takes it again. The
+                // look's GitHub calls, its provider look and a mirror refill, end at `look_limit`,
+                // so a stuck GitHub call cannot hold it; the local store writes after them can.
+                let _look = look_lock.clone().lock_owned().await;
+                let look_deadline = tokio::time::Instant::now() + look_limit;
                 if !armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation) { return; }
+                if let Some(latest) = cursors.lock().unwrap_or_else(PoisonError::into_inner).get(&deadline_key).cloned() {
+                    kept_cursor = Some(latest.clone());
+                    cursor = latest;
+                }
                 // Until the plugin database keeps the cursor the last poll recorded facts for,
                 // the provider is not asked again and the observer stays degraded.
                 let pending = unkept_cursors.lock().unwrap_or_else(PoisonError::into_inner)
@@ -17108,9 +17139,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     every_ms: spec.every_ms,
                     refresh: refresh_attempt.is_some(),
                 };
-                let observed =
-                    crate::resource::spend_as(observer_subject.clone(), provider.observe(request))
-                        .await;
+                let observed = tokio::time::timeout_at(
+                    look_deadline,
+                    crate::resource::spend_as(observer_subject.clone(), provider.observe(request)),
+                )
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!(
+                    "the look ran past its {}s limit", look_limit.as_secs(),
+                )));
                 // This UUID is the arm generation. The writer checks it inside the
                 // transaction; never keep the scheduler lock while waiting for Store I/O.
                 let current = || {
@@ -17214,10 +17250,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         && !github_plugin.filled(&spec.resource).unwrap_or(true)
                                         && github_plugin.refill_due(&spec.resource, now_ms())
                                     {
-                                        refill_mirror(
+                                        let refill = refill_mirror(
                                             &store, provider.as_ref(), &github_plugin, &observer_subject, &spec,
                                             observation.cursor.as_deref(),
-                                        ).await;
+                                        );
+                                        // A refill past the look's limit is a failed refill: it
+                                        // waits its backoff, and the look goes on to keep its cursor.
+                                        if tokio::time::timeout_at(look_deadline, refill).await.is_err() {
+                                            github_plugin.refill_ended(&spec.resource, now_ms(), false);
+                                            tracing::warn!(observer = %observer_subject, resource = %spec.resource,
+                                                "the GitHub plugin mirror refill ran past the look's limit; it retries later");
+                                        }
                                     }
                                 }
                                 previous_facts = Some(observation.facts);
@@ -17241,6 +17284,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         }
                                         completed_deadline = Some(observation.next_check_unix_ms);
                                         completed_cursor = Some(observation.cursor);
+                                        #[cfg(any(test, feature = "test-support"))]
+                                        if let Some(injection) = &completion_fault {
+                                            injection.fault("observer-cursor-kept", &observer_subject);
+                                        }
                                     }
                                     Some(error) => {
                                         completed_deadline = Some(now_ms().saturating_add(60_000));
@@ -17401,20 +17448,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let mut active = armed.lock().unwrap_or_else(PoisonError::into_inner);
                     let armed_now = active.contains(&operation);
                     let still_current = armed_now && revision_state == Some(true);
-                    if still_current {
-                        if let Some(next_check) = completed_deadline {
-                            deadlines.lock().unwrap_or_else(PoisonError::into_inner)
-                                .insert(deadline_key.clone(), next_check);
-                            if let Some(interval) = standing_interval {
-                                intervals.lock().unwrap_or_else(PoisonError::into_inner)
-                                    .insert(deadline_key.clone(), interval);
-                            }
+                    if still_current && let Some(next_check) = completed_deadline {
+                        deadlines.lock().unwrap_or_else(PoisonError::into_inner)
+                            .insert(deadline_key.clone(), next_check);
+                        if let Some(interval) = standing_interval {
+                            intervals.lock().unwrap_or_else(PoisonError::into_inner)
+                                .insert(deadline_key.clone(), interval);
                         }
-                        if let Some(next_cursor) = completed_cursor {
-                            cursors.lock().unwrap_or_else(PoisonError::into_inner)
-                                .insert(deadline_key.clone(), next_cursor.clone());
-                            cursor = next_cursor;
-                        }
+                    }
+                    // The plugin database already keeps the cursor this look recorded to, so it is
+                    // the observer's position even when the arm was retired meanwhile.
+                    if let Some(next_cursor) = completed_cursor {
+                        cursors.lock().unwrap_or_else(PoisonError::into_inner)
+                            .insert(deadline_key.clone(), next_cursor.clone());
+                        cursor = next_cursor;
                     }
                     // Retain this generation across idle polls and error backoff: a full pass
                     // sees the same arm, and cancellation/cadence changes can still retire it.
@@ -41620,6 +41667,168 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         assert_eq!(recorded(), baseline, "a change outside the compact state records nothing");
         assert!(store.messages(Some("agent/example.reader"), true).unwrap().is_empty());
         assert_eq!(plugin.item("resource/repo", 1).unwrap().unwrap()["facts"]["title"], "Fern, renamed");
+    }
+
+    /// The observer `repo` on acme/garden, a subscription so it polls, and its revision.
+    fn one_look_fixture(source: &str) -> (Arc<Store>, String) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example.reader"; delivery "message" }"#,
+            source,
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        (store, revision)
+    }
+
+    /// One look's listing: issue 1 titled `title`, and the cursor `cursor`.
+    fn one_look(title: &str, cursor: &str) -> crate::resource::ProviderObservation {
+        crate::resource::ProviderObservation {
+            facts: serde_json::json!({"repository_id": 7, "issues": [{
+                "node_id": "I_fern", "number": 1, "state": "open", "title": title,
+                "url": "https://github.com/acme/garden/issues/1",
+            }]}),
+            cursor: Some(cursor.to_owned()),
+            next_check_unix_ms: now_ms() + 300_000,
+        }
+    }
+
+    /// Retire every arm of `observer/repo` and arm a new one, due now, as a refresh or a changed
+    /// declaration does.
+    fn rearm_repo(reconciler: &Reconciler<FakeRuntime>, revision: &str) {
+        reconciler.armed_observers.lock().unwrap().retain(|operation| !operation.starts_with("observer/repo:"));
+        reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+        reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+    }
+
+    async fn until(what: &str, mut done: impl FnMut() -> bool) {
+        // A bound for a loaded machine, not an expected duration.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while !done() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap_or_else(|_| panic!("timed out waiting until {what}"));
+    }
+
+    /// A look that recorded and kept its cursor, and was retired before it published it, as a
+    /// refresh or a scheduled arm retires the arm before it, is the observer's position: the
+    /// arm armed meanwhile waits for that look, then reads on from its cursor. Reading from the
+    /// cursor before, it found the poller's mirror ahead of it and recorded a full snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_arm_armed_during_a_look_reads_on_from_the_cursor_that_look_kept() {
+        struct Counter { asked: Arc<Mutex<Vec<Option<String>>>> }
+        impl ResourceProvider for Counter {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                let mut asked = self.asked.lock().unwrap();
+                asked.push(request.cursor);
+                let n = asked.len();
+                Box::pin(async move { Ok(one_look(&format!("title {n}"), &format!("c{n}"))) })
+            }
+        }
+        /// Holds the second look that keeps a cursor until the test lets it go.
+        struct HoldSecondKept {
+            kept: AtomicUsize,
+            reached: Mutex<std::sync::mpsc::Sender<()>>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl FaultInjection for HoldSecondKept {
+            fn fault(&self, scope: &str, _subject: &str) -> Option<String> {
+                if scope == "observer-cursor-kept" && self.kept.fetch_add(1, Ordering::SeqCst) == 1 {
+                    self.reached.lock().unwrap().send(()).unwrap();
+                    self.release.lock().unwrap().recv().unwrap();
+                }
+                None
+            }
+        }
+        let (store, revision) = one_look_fixture("one-look");
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (reached_tx, reached) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        )
+        .with_resource_provider(Arc::new(Counter { asked: asked.clone() }))
+        .with_fault_injection(Arc::new(HoldSecondKept {
+            kept: AtomicUsize::new(0),
+            reached: Mutex::new(reached_tx),
+            release: Mutex::new(release_rx),
+        }));
+        let key = format!("observer/repo:{revision}");
+        let published = || reconciler.observer_cursors.lock().unwrap().get(&key).cloned().flatten();
+
+        // The first look keeps c1.
+        rearm_repo(&reconciler, &revision);
+        until("the first look publishes c1", || published().as_deref() == Some("c1")).await;
+
+        // The second look records and keeps c2, and is held there.
+        rearm_repo(&reconciler, &revision);
+        tokio::task::spawn_blocking(move || reached.recv().unwrap()).await.unwrap();
+        // An arm armed now retires it, and is due at once.
+        rearm_repo(&reconciler, &revision);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(asked.lock().unwrap().len(), 2, "the new arm waits for the look in flight");
+        release.send(()).unwrap();
+
+        until("the third look", || asked.lock().unwrap().len() == 3).await;
+        assert_eq!(*asked.lock().unwrap(), [None, Some("c1".into()), Some("c2".into())]);
+        until("the third look publishes c3", || published().as_deref() == Some("c3")).await;
+    }
+
+    /// A look holds its observer at most `look_limit`: a mirror refill that never answers, and
+    /// then a look that never answers, each end at the limit, and the next look still runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_look_that_never_answers_frees_its_observer_at_the_limit() {
+        struct Stalls { asked: Arc<Mutex<Vec<Option<String>>>> }
+        impl ResourceProvider for Stalls {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                let mut asked = self.asked.lock().unwrap();
+                asked.push(request.cursor);
+                // The first look answers; the refill after it and the next look never do.
+                match asked.len() {
+                    1 => Box::pin(async { Ok(one_look("first", "c1")) }),
+                    2 | 3 => Box::pin(std::future::pending()),
+                    _ => Box::pin(async { Ok(one_look("last", "c2")) }),
+                }
+            }
+        }
+        let (store, revision) = one_look_fixture("one-look-limit");
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        )
+        .with_mirror_refill(true)
+        .with_resource_provider(Arc::new(Stalls { asked: asked.clone() }));
+        reconciler.look_limit = Duration::from_millis(300);
+        let key = format!("observer/repo:{revision}");
+        let published = || reconciler.observer_cursors.lock().unwrap().get(&key).cloned().flatten();
+
+        // The first look records; its refill stalls and ends at the limit, and the look still
+        // keeps c1.
+        rearm_repo(&reconciler, &revision);
+        until("the first look publishes c1 past its stalled refill", || published().as_deref() == Some("c1")).await;
+        assert_eq!(asked.lock().unwrap().len(), 2, "the refill asked once");
+
+        // The next look stalls and ends at the limit as a failure.
+        rearm_repo(&reconciler, &revision);
+        until("the stalled look ends as a failure", || {
+            reconciler.store.latest_actual_value("observer/repo").unwrap().is_some_and(|actual| {
+                actual["reason"].as_str().is_some_and(|reason| reason.contains("ran past its"))
+            })
+        }).await;
+
+        // The observer is free: an arm armed now looks again.
+        rearm_repo(&reconciler, &revision);
+        until("the look after the stalled one", || published().as_deref() == Some("c2")).await;
+        assert_eq!(*asked.lock().unwrap(), [None, None, Some("c1".into()), Some("c1".into())]);
     }
 
     /// A mirror refilled from GitHub keeps the comments the graph recorded on each item, which
