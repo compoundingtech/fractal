@@ -20,8 +20,11 @@ Use the existing package manager. Do not overwrite a Nix-owned path with an arch
 Keep `.fractal-install.json` beside your installed `bin/fractal`: installers use this
 ownership receipt to recognize their executable even when compatibility aliases are
 absent. It records the executable's SHA-256, schema, canonical name, installer, and
-incoming build's version and commit. Do not delete it or copy it between builds.
-An invalid, symlinked, or mismatched receipt stops an upgrade with its path and
+incoming build's version and commit. Before replacing bytes, installers publish
+`.fractal-install.json.pending`; a retry can recognize those exact incoming bytes
+if interrupted before the receipt is finalized. Keep both files with the executable;
+do not delete them or copy them between builds. An invalid, symlinked, or mismatched
+receipt without a matching pending intent stops an upgrade with its path and
 reinstall guidance; restore the matching executable and receipt together before
 reinstalling through the original installer. The separate `RELEASE.json` is release
 display metadata, not an ownership receipt.

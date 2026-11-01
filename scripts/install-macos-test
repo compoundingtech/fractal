@@ -118,7 +118,7 @@ class Installer(unittest.TestCase):
         destination.mkdir(parents=True)
         canonical = destination / 'fractal'
         receipt = destination / '.fractal-install.json'
-        for kind in ('receipt-aliases', 'receipt-only', 'aliases-only', 'tampered', 'symlink'):
+        for kind in ('receipt-aliases', 'receipt-only', 'aliases-only', 'tampered', 'symlink', 'fifo'):
             with self.subTest(kind=kind):
                 canonical.symlink_to(self.built['fractal'])
                 if kind != 'receipt-only':
@@ -134,7 +134,10 @@ class Installer(unittest.TestCase):
                     saved = destination / 'saved-receipt'
                     receipt.rename(saved)
                     receipt.symlink_to(saved)
-                if kind in ('tampered', 'symlink'):
+                if kind == 'fifo':
+                    receipt.unlink()
+                    os.mkfifo(receipt)
+                if kind in ('tampered', 'symlink', 'fifo'):
                     with self.assertRaisesRegex(RuntimeError, r'\.fractal-install\.json.*reinstall'):
                         m.owns_fractal(canonical, self.home)
                 elif kind == 'aliases-only':
@@ -146,6 +149,39 @@ class Installer(unittest.TestCase):
                     self.assertTrue(m.owns_fractal(canonical, self.home))
                 for path in destination.iterdir():
                     path.unlink()
+
+    def test_pending_intent_recovers_crash_after_app_swap(self):
+        original_swap = m.swap
+        for kind in ('fresh', 'stale-receipt'):
+            with self.subTest(kind=kind), patch.object(m, 'command', side_effect=self.command), \
+                    patch.object(m, 'exchange', side_effect=self.exchange):
+                home = self.home / kind
+                job = home / 'job'
+                job.mkdir(parents=True)
+                if kind == 'stale-receipt':
+                    self.built['fractal'].write_bytes(b'old-build')
+                    app, _, _ = m.prepare(home, job, self.built)
+                    m.install(app, home, job)
+                self.built['fractal'].write_bytes(b'incoming-build')
+                incoming = home / 'incoming'; incoming.mkdir()
+                app, _, _ = m.prepare(home, incoming, self.built)
+                m.backup(home, incoming)
+                def crash(*args):
+                    original_swap(*args)
+                    raise KeyboardInterrupt('crash after executable publication')
+                with patch.object(m, 'swap', side_effect=crash), self.assertRaises(KeyboardInterrupt):
+                    m.install(app, home, incoming)
+                canonical = m.bin_dir(home) / 'fractal'
+                pending = canonical.parent / '.fractal-install.json.pending'
+                self.assertTrue(pending.is_file())
+                for name in ('st', 'st3'):
+                    (canonical.parent / name).unlink(missing_ok=True)
+                retry = home / 'retry'; retry.mkdir()
+                app, _, _ = m.prepare(home, retry, self.built)
+                m.backup(home, retry)
+                m.install(app, home, retry)
+                self.assertTrue(m.owns_fractal(canonical, home))
+                self.assertFalse(pending.exists())
 
     def test_foreign_canonical_refusal_preserves_installed_app_and_commands(self):
         with patch.object(m, 'command', side_effect=self.command), \
@@ -1038,13 +1074,13 @@ class Installer(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'darwin', 'native macOS signing and atomic directory exchange')
     def test_native_ad_hoc_install_upgrade_and_rollback(self):
-        shutil.copyfile('/usr/bin/true', self.built['fractal'])
+        self.built['fractal'].write_text('#!/bin/sh\nprintf \'{"machine_version":"native-one","commit":"abcdef123"}\\n\'\n')
         app, _, _ = m.prepare(self.home, self.job, self.built)
         m.install(app, self.home, self.job)
         first = m.sha(m.binaries(m.fixed(self.home))['fractal'])
         second_job = self.home / 'native-second'; second_job.mkdir()
         had_app = m.backup(self.home, second_job)
-        shutil.copyfile('/bin/echo', self.built['fractal'])
+        self.built['fractal'].write_text('#!/bin/sh\nprintf \'{"machine_version":"native-two","commit":"012345678"}\\n\'\n')
         app, _, _ = m.prepare(self.home, second_job, self.built)
         m.install(app, self.home, second_job)
         self.assertNotEqual(m.sha(m.binaries(m.fixed(self.home))['fractal']), first)

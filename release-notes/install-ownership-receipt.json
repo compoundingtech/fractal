@@ -7,5 +7,5 @@
   "compatibility": { "status": "changed", "detail": "Existing alias layouts remain accepted. A valid receipt independently proves ownership; an invalid or symlinked receipt fails closed even when aliases remain. Identical unmanaged bytes are not adopted. Version JSON adds a commit field without changing machine_version." },
   "downtime": { "status": "none", "detail": "No additional service restart requirement." },
   "manual": { "status": "changed", "detail": "Keep .fractal-install.json with its executable. Restore a matching executable and receipt together if an upgrade reports a mismatched receipt, then reinstall through the original installer." },
-  "recovery": { "status": "changed", "detail": "Installer rollback restores the prior executable and ownership receipt together. Compatibility aliases remain unchanged." }
+  "recovery": { "status": "changed", "detail": "Installers publish .fractal-install.json.pending before replacing executable bytes. A retry accepts the exact prepared digest if interrupted before finalization; unrelated mismatches still fail closed. Rollback restores the prior executable, finalized receipt and pending intent together. Compatibility aliases remain unchanged." }
 }

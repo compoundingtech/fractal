@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -224,15 +225,40 @@ def prepare(home, job, built):
     return app, dict(identity, payload_unchanged=False), payload
 
 
+def read_install_receipt(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor) as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError('receipt must be a regular non-symlink file')
+        value = json.load(stream)
+    if type(value.get('schema')) is not int or value['schema'] != 1 or value.get('name') != 'fractal':
+        raise ValueError('invalid receipt identity')
+    return value
+
+
+def physical_digest(path):
+    descriptor = os.open(path.resolve(strict=True), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError('executable must be a regular file')
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(65536), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def owns_fractal(path, home, check_receipt=True):
     receipt = path.parent / '.fractal-install.json'
-    if check_receipt and (receipt.exists() or receipt.is_symlink()):
+    pending = path.parent / '.fractal-install.json.pending'
+    candidates = [candidate for candidate in (receipt, pending)
+                  if candidate.exists() or candidate.is_symlink()]
+    if check_receipt and candidates:
         try:
-            if receipt.is_symlink() or not receipt.is_file():
-                raise ValueError('receipt must be a regular non-symlink file')
-            value = json.loads(receipt.read_text())
-            if (type(value.get('schema')) is not int or value['schema'] != 1
-                    or value.get('name') != 'fractal' or value.get('sha256') != sha(path)):
+            values = [read_install_receipt(candidate) for candidate in candidates]
+            if not path.exists() and not path.is_symlink() and candidates == [pending]:
+                return True
+            digest = physical_digest(path)
+            if not any(value.get('sha256') == digest for value in values):
                 raise ValueError('receipt does not match the installed executable')
             return True
         except (OSError, ValueError, TypeError, AttributeError) as error:
@@ -309,7 +335,7 @@ def backup(home, job, stage_fractal=False):
     entries = {}
     previous_bin = Path(job) / 'previous-bin'
     previous_bin.mkdir(exist_ok=True)
-    for name in ['st3', 'stui', 'st', 'fractal', '.fractal-install.json']:
+    for name in ['st3', 'stui', 'st', 'fractal', '.fractal-install.json', '.fractal-install.json.pending']:
         path = bin_dir(home) / name
         # A foreign fractal command is outside this transaction, including rollback.
         if name == 'fractal' and (path.exists() or path.is_symlink()) and not owns_fractal(path, home):
@@ -363,7 +389,9 @@ def swap(app, home, job, suffix, expected=None):
 def install(app, home, job, stage_fractal=False):
     canonical = bin_dir(home) / 'fractal'
     receipt = canonical.parent / '.fractal-install.json'
-    if ((canonical.exists() or canonical.is_symlink() or receipt.exists() or receipt.is_symlink()) and not owns_fractal(canonical, home)
+    pending = canonical.parent / '.fractal-install.json.pending'
+    if ((canonical.exists() or canonical.is_symlink() or receipt.exists() or receipt.is_symlink()
+         or pending.exists() or pending.is_symlink()) and not owns_fractal(canonical, home)
             or foreign_fractal_on_path(canonical, home)):
         raise RuntimeError('refusing to replace foreign fractal command at destination or on PATH')
     if stage_fractal:
@@ -388,6 +416,14 @@ def install(app, home, job, stage_fractal=False):
     identity = json.loads(command([binaries(app)['fractal'], '--version', '--json']))
     if not all(isinstance(identity.get(field), str) and identity[field] for field in ('machine_version', 'commit')):
         raise RuntimeError('incoming Fractal --version --json must provide machine_version and commit')
+    intent = {'schema': 1, 'name': 'fractal', 'sha256': physical_digest(binaries(app)['fractal']),
+              'installer': 'script', 'version': identity['machine_version'], 'commit': identity['commit']}
+    write_atomic(pending, json.dumps(intent).encode())
+    directory = os.open(pending.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
     swap(app, home, job, 'install')
     links = dict(binaries(fixed(home)))
     # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
@@ -400,9 +436,9 @@ def install(app, home, job, stage_fractal=False):
         staged = link.parent / ('.' + name + '-' + Path(job).name)
         staged.unlink(missing_ok=True); staged.symlink_to(path); os.replace(staged, link)
     retired.unlink(missing_ok=True)
-    receipt = {'schema': 1, 'name': 'fractal', 'sha256': sha(canonical),
-               'installer': 'script', 'version': identity['machine_version'], 'commit': identity['commit']}
-    write_atomic(canonical.parent / '.fractal-install.json', json.dumps(receipt).encode())
+    if physical_digest(canonical) != intent['sha256']:
+        raise RuntimeError(f'pending install receipt {pending} does not match executable; reinstall Fractal')
+    os.replace(pending, receipt)
     for service in ([] if stage_fractal else service_labels()):
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
         if not path.exists():
