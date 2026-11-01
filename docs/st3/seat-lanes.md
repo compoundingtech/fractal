@@ -263,6 +263,8 @@ from the next pass. `builds.slice` keeps its own cap and admission and is not co
   run (covered checks skip, a docs-only run needs almost nothing). A burst raises the live scope
   with `systemctl --user set-property --runtime` and lowers it when the command ends. A step may
   adjust the base. A seat in `work wait` holds only its base.
+- **Placement.** A mission that pins no host runs on a member with room for it: see
+  [lane-placement.md](lane-placement.md).
 - **Starvation.** Waiters already wait in order, so the host drains to fit for the first in line
   (built). A lane or burst may declare a minimum and start smaller. After 30
   minutes the seat should move to a host with room (by hand until moves are automatic). A wait
