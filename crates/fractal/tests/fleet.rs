@@ -6587,18 +6587,21 @@ async fn wait_for_mirror(node: &Node, what: &str) {
     }
 }
 
-/// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
-/// repository.
+/// Declare a watching seat of `node`'s own, `agent/example/watch-NODE`, and watch fixture/app#12
+/// as it, so `node` polls the repository. Each node's seat is its own: one seat declared on two
+/// nodes is one subscription, which the other node's copy can change while this one plans it.
 fn watch_fixture_app(node: &Node) {
+    let seat = format!("example/watch-{}", node.name);
+    let agent = format!("agent/{seat}");
     let file = node.root.join("seat.kdl");
     fs::write(&file, format!(
-        "version 2\nagent \"example/watch\" {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        "version 2\nagent {seat:?} {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
         node.name, node.root,
     )).unwrap();
     node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
     let output = node
-        .command(&["gh", "watch", "fixture/app#12", "--as", "agent/example/watch"])
-        .env("ST_AGENT", "agent/example/watch")
+        .command(&["gh", "watch", "fixture/app#12", "--as", &agent])
+        .env("ST_AGENT", &agent)
         .output()
         .unwrap();
     assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stderr), node.logs());
