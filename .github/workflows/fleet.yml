@@ -3874,6 +3874,7 @@ jobs:
     outputs:
       relevant: ${{ steps.detect.outputs.relevant }}
       kit-inputs: ${{ steps.detect.outputs.kit-inputs }}
+      changed-stories: ${{ steps.detect.outputs.changed-stories }}
     steps:
       - name: Identify runner hardware
         shell: bash
@@ -3902,6 +3903,7 @@ jobs:
           Manual runs always execute.
           """
 
+          import json
           import os
           import re
           import subprocess
@@ -4186,6 +4188,11 @@ jobs:
           KIT_MATCHERS = tuple(pattern_regex(pattern) for pattern in KIT_PATTERNS)
 
 
+          def changed_stories(paths):
+              """Select at most 20 story files in stable repository-path order."""
+              return sorted({path for path in paths if path.endswith(".stories.tsx")})[:20]
+
+
           def kit_paths(paths):
               return [path for path in paths if any(matcher.match(path) for matcher in KIT_MATCHERS)]
 
@@ -4225,6 +4232,7 @@ jobs:
           def main():
               event = os.environ.get("EVENT", "")
               summary = []
+              stories = None
               if event == "workflow_dispatch":
                   relevant, kit_inputs, summary = True, True, ["Manual run: web execution and kit plays are forced."]
               elif event in ("pull_request", "merge_group", "push"):
@@ -4240,12 +4248,20 @@ jobs:
                       matched = relevant_paths(paths)
                       relevant = bool(matched)
                       kit_inputs = bool(kit_paths(paths))
-                      summary = [f"{len(paths)} changed path(s), {len(matched)} web-relevant."] + [f"- `{path}`" for path in matched[:50]]
+                      stories = changed_stories(paths) if event == "pull_request" else []
+                      if stories:
+                          relevant = kit_inputs = True
+                      if event == "pull_request":
+                          count = len({path for path in paths if path.endswith(".stories.tsx")})
+                          summary.append(f"Changed-story playback: {len(stories)}/{count} files; "
+                                         "cap 20, sorted by repository path. Deleted or unindexed files have no plays.")
+                      summary = [f"{len(paths)} changed path(s), {len(matched)} web-relevant.", *summary] + [f"- `{path}`" for path in matched[:50]]
               else:
                   raise ValueError(f"unsupported event {event!r}")
               with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                   output.write(f"relevant={'true' if relevant else 'false'}\n")
                   output.write(f"kit-inputs={'true' if kit_inputs else 'false'}\n")
+                  output.write(f"changed-stories={json.dumps(stories, separators=(',', ':'))}\n")
               with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as step_summary:
                   step_summary.write("\n".join([f"fractal-web execution: **{'required' if relevant else 'not required'}**", *summary]) + "\n")
               print(f"relevant={'true' if relevant else 'false'}")
@@ -4365,6 +4381,7 @@ jobs:
           KIT_SHARD_COUNT: ${{ needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '4' || '1' }}
           KIT_RECEIPT_DIRECTORY: "${{ runner.temp }}/kit-play-receipts"
           KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'commit' || 'all' }}
+          KIT_CHANGED_STORIES: ${{ github.event_name == 'pull_request' && needs.fractal-web-changes.outputs.changed-stories || '[]' }}
           KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' }}
           KIT_PLAY_WALL_GUARD_SECONDS: ${{ github.event_name == 'pull_request' && '268' || '' }}
           APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}

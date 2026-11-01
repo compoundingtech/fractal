@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { playWorkers } from './kit-play-workers.mjs'
 import { readFile, stat, mkdir, writeFile, appendFile } from 'node:fs/promises'
-import { resolve, sep, extname, join } from 'node:path'
+import { resolve, sep, extname, join, posix } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism, cpus, loadavg } from 'node:os'
@@ -23,6 +23,12 @@ export function assertStrictEvidence(records, id, a11y) {
   if (a11y === 'off' && reports.length) throw new Error(`a11y off: axe still ran: ${JSON.stringify(reports)}`)
 }
 
+export function changedStoryIds(index, paths) {
+  const entries = Object.values(index.entries).filter(entry => entry.type === 'story')
+  const normalize = path => posix.normalize(posix.join('packages/fractal-ui', path))
+  const files = (paths ?? [...new Set(entries.map(entry => normalize(entry.importPath)))]).toSorted().slice(0, 20)
+  return entries.filter(entry => files.includes(normalize(entry.importPath))).map(entry => entry.id).toSorted()
+}
 
 // The CLI always supplies the reviewed source policy; fixture tests may inject theirs directly.
 export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES }) {
@@ -37,10 +43,11 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     if (!allowed.includes(value)) throw new Error(`${name} must be one of ${allowed.join(', ')}`)
     return value
   }
-  const set = option('KIT_PLAY_SET', ['all', 'critical', 'commit'], 'all')
-  const a11y = option('KIT_PLAY_A11Y', ['on', 'off'], 'on')
-  const budget = kitPlayBudget(process.env)
-  const initialCpu = await captureKitCpu()
+  const set = option('KIT_PLAY_SET', ['all', 'critical', 'commit', 'changed'], 'all')
+  const changed = set === 'changed'
+  const a11y = changed ? 'off' : option('KIT_PLAY_A11Y', ['on', 'off'], 'on')
+  const budget = changed ? null : kitPlayBudget(process.env)
+  const initialCpu = changed ? null : await captureKitCpu()
   // Only the full set is sharded; the critical and per-commit sets run whole on one runner.
   if (set !== 'all' && (shardCount !== 1 || shardIndex !== 0)) throw new Error(`KIT_PLAY_SET=${set} runs unsharded; only KIT_PLAY_SET=all is sharded`)
   const root = resolve(buildDirectory)
@@ -78,22 +85,22 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError, storyFiles = {}
   await mkdir(outputDirectory, { recursive: true })
   const writeReceipt = async () => {
-    const cost = assessKitPlayCost(budget, {
+    const cost = changed ? {} : assessKitPlayCost(budget, {
       elapsedSeconds, busyCoreMinutes: cpuDelta.busyCoreMinutes, costRequired: set === 'commit',
     })
     const receipt = {
-      pass: !fatalError && !cost.overBudget && (shardCount > 1 ? fullIds : ids).length > 0 && rows.length === expectedCases && rows.every(row => row.pass),
+      pass: !fatalError && !cost.overBudget && (changed || (shardCount > 1 ? fullIds : ids).length > 0) && rows.length === expectedCases && rows.every(row => row.pass),
       shardIndex, shardCount, fullIds,
       runId: process.env.GITHUB_RUN_ID, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
       headSha: process.env.GITHUB_SHA,
       set, a11y, ...cost,
       stories: ids.length, expectedCases, cases: rows.length, workers, omitted,
-      caseOverrides: Object.fromEntries([...overrides].filter(([id]) => fullIds.includes(id))),
+      caseOverrides: changed ? {} : Object.fromEntries([...overrides].filter(([id]) => fullIds.includes(id))),
       passed: rows.filter(row => row.pass).length, failed: rows.filter(row => !row.pass).length,
       playMinutes: elapsedSeconds / 60,
       storybookBuildSeconds: Number(process.env.KIT_STORYBOOK_BUILD_SECONDS ?? 0),
       isolation: 'reused-context-fresh-page-cleared-storage',
-      cpu: { count: cpus().length, ...cpuDelta, loadavgStart: loadStarted, loadavgEnd: loadEnded },
+      ...(changed ? {} : { cpu: { count: cpus().length, ...cpuDelta, loadavgStart: loadStarted, loadavgEnd: loadEnded } }),
       elapsedSeconds, fatalError, rows: rows.toSorted((a, b) => a.id.localeCompare(b.id) || a.scheme.localeCompare(b.scheme) || a.width - b.width),
       effectiveWorkerSecondsPerCase: rows.length ? elapsedSeconds * workers / rows.length : null,
       meanCaseSeconds: rows.length ? rows.reduce((sum, row) => sum + row.elapsedSeconds, 0) / rows.length : null,
@@ -105,6 +112,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     if (process.env.GITHUB_STEP_SUMMARY && process.env.KIT_PLAY_SHARD_COUNT) {
       await appendFile(process.env.GITHUB_STEP_SUMMARY, `\n| Shard | Cases (completed/expected) | Passed | Failed | Play minutes | Result |\n| --- | --- | --- | --- | --- | --- |\n| kit ${shardIndex}/${shardCount} | ${receipt.cases}/${receipt.expectedCases} | ${receipt.passed} | ${receipt.failed} | ${receipt.playMinutes.toFixed(2)} | ${receipt.pass ? 'PASS' : 'FAIL'} |\n`)
       await appendFile(process.env.GITHUB_STEP_SUMMARY, `\nkit ${shardIndex}/${shardCount} Storybook build: ${(receipt.storybookBuildSeconds / 60).toFixed(2)} runner-minutes (included in this shard; duplicate build cost is the sum of nonzero-shard builds).\n`)
+      if (changed) await appendFile(process.env.GITHUB_STEP_SUMMARY, `\nChanged-story rendering and interaction: ${ids.length} indexed stories, ${expectedCases} cases (440/1440 × dark/light). No CPU measurements or CPU gate. File cap: 20 in repository-path order; unavailable diff selects from the built index.\n`)
     }
     if (cost.overCpuBudget) console.error(`Kit plays (${set}) used ${cost.cpuSeconds.toFixed(2)} CPU s, over the ${cost.maxCpuSeconds} CPU s limit (anchor ${cost.cpuAnchorSeconds} s +10%).`)
     if (cost.overWallGuard) console.error(`Kit plays (${set}) took ${elapsedSeconds.toFixed(1)} s, over the ${cost.wallGuardSeconds} s wall hang guard.`)
@@ -116,8 +124,9 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     // Validate the complete index; fullIds is the selected set's inventory, which the union gate
     // checks a sharded full run against. Only KIT_PLAY_SET=all partitions it across shards.
     const index = await response.json()
-    fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
-    validateCaseOverrides(index.entries, overrides)
+    fullIds = changed ? changedStoryIds(index, JSON.parse(process.env.KIT_CHANGED_STORIES ?? '[]'))
+      : storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
+    if (!changed) validateCaseOverrides(index.entries, overrides)
     storyFiles = Object.fromEntries(Object.values(index.entries).filter(entry => entry.type === 'story').map(entry => [entry.id, entry.importPath]))
     ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
     let cases
@@ -126,13 +135,15 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
       ;({ ids, cases } = selection)
       omitted = { stories: selection.omittedStories, cases: selection.omittedCases }
     } else {
-      cases = fullCases(ids, overrides)
-      omitted = { stories: ids.filter(id => overrides.get(id)?.length === 0), cases: ids.length * 4 - cases.length }
+      cases = fullCases(ids, changed ? new Map() : overrides)
+      omitted = { stories: changed ? [] : ids.filter(id => overrides.get(id)?.length === 0), cases: ids.length * 4 - cases.length }
     }
     expectedCases = cases.length
     // Record CPU and proc/stat deltas, including steal ticks, around the play phase.
-    cpuStarted = await captureKitCpu()
-    loadStarted = loadavg()
+    if (!changed) {
+      cpuStarted = await captureKitCpu()
+      loadStarted = loadavg()
+    }
     playStarted = performance.now()
     const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
     browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
@@ -223,8 +234,10 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     await browser?.close()
     await new Promise(resolve => server.close(resolve))
     elapsedSeconds = (performance.now() - playStarted) / 1000
-    cpuDelta = kitCpuDelta(cpuStarted, await captureKitCpu())
-    loadEnded = loadavg()
+    if (!changed) {
+      cpuDelta = kitCpuDelta(cpuStarted, await captureKitCpu())
+      loadEnded = loadavg()
+    }
   }
   const receipt = await writeReceipt()
   // The complete receipt stays in CI logs even when the gate fails.
