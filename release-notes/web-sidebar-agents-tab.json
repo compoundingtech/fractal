@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add an Agents sidebar tab with leading attention and shared agent status vocabulary",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No daemon schema changes. Sidebar selection uses gateway-scoped browser storage."},
+  "rules": {"status": "none", "detail": "No checkpoint or rules changes."},
+  "compatibility": {"status": "none", "detail": "Existing feeds and sidebar filters remain compatible. Only Agents is exposed; alerts remain in the existing popover."},
+  "downtime": {"status": "none", "detail": "No service interruption is required."},
+  "manual": {"status": "none", "detail": "No operator actions are required."},
+  "recovery": {"status": "none", "detail": "Removing this client change leaves existing browser filters intact; the sidebar.tab browser key is ignored by earlier clients."}
+}

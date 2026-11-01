@@ -70,6 +70,17 @@ for (const definition of [fleetMidRefactor, empty, ciFailingFix, firstRunOnboard
     if (kind === 'details' && (variant === 'stalled' || variant === 'failed')) expect(variantWorld.slices.details.state.work.every((work) => work.state === (variant === 'stalled' ? 'blocked' : 'failed'))).toBe(true)
     if (kind === 'attention' && variant === 'many') expect(variantWorld.slices.attention.state.attention).toHaveLength(50)
     if (kind === 'attention' && variant === 'one-of-each-kind') expect(new Set(variantWorld.slices.attention.state.attention.map((card) => card.attention_kind)).size).toBe(4)
+    if (kind === 'attention' && variant === 'sidebar-tabs') {
+      const cards = variantWorld.slices.attention.state.attention
+      expect(cards.filter(card => card.attention_kind === 'harness-prompt').map(card => [card.requester_id, card.mission_id, card.source_id])).toEqual([[undefined, undefined, world.cast.agents[0]!.session]])
+      expect(cards.filter(card => card.attention_kind !== 'harness-prompt').map(card => card.requester_id)).toEqual(world.cast.agents.slice(1).map(member => member.id))
+      expect(cards.filter(card => card.mission_id !== undefined).map(card => card.requester_id)).toEqual(world.cast.agents.length > 1 && world.cast.missions[0] ? [world.cast.agents[1]!.id] : [])
+    }
+    if (kind === 'roster' && variant === 'sidebar-tabs') for (const machine of variantWorld.slices.roster.state.machines) {
+      const local = machine.host_id === world.cast.hosts[0]?.id
+      expect(machine.state === 'unreachable').toBe(!local)
+      if (!local) expect(machine.work).toEqual((world.cast.missions[0]?.steps ?? []).map(step => step.work))
+    }
     if (kind === 'conversation') {
       const conversation = variantWorld.slices.conversation
       if (variant === 'long') expect(conversation.state.threads.every((thread) => thread.has_more && thread.items.length > thread.page_size)).toBe(true)

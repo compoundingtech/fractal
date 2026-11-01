@@ -161,7 +161,9 @@ manifest or shards. The bounded history window preserves the unchanged 8 MiB/fil
 
 - `roster.all-states` cycles states across existing cast agents; `conversation.long` has 80
   exchanges per agent; `attention.many` has 50 cards. Singleton `remote-only-mail` casts use
-  protocol-valid agent loopback mail, not invented participants.
+  protocol-valid agent loopback mail, not invented participants. `attention.sidebar-tabs` and
+  `roster.sidebar-tabs` serve the sidebar tab markers: an open harness question, one needs-you
+  card per other agent, and unreachable non-local machines holding work.
 - Loading consumers render their loading state without displaying withheld backing records.
   Story checks use one representative visible world contrast per declared slice; replication
   metadata alone is not a visible contrast for a roster-name story.
