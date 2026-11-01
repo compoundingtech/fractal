@@ -2,7 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
-import { accentVars as accent, borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 /** Shared status glyphs: working ●, idle ○, ended ×, fault !, pending ~. */
@@ -101,11 +101,11 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, children }: S
 const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' } as const
 const styles = stylex.create({
   root: { position: 'relative', display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  bar: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'minmax(max-content, 1fr)', alignItems: 'center', gap: s.xs2, flexShrink: 0, boxSizing: 'border-box', height: g.controlLg, paddingInline: s.xs, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  bar: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'minmax(0, 1fr)', alignItems: 'center', gap: 0, flexShrink: 0, boxSizing: 'border-box', height: g.controlLg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   // Same box as the bar but sized by its content and taking no layout space, so measuring never changes what is measured.
   measure: { position: 'absolute', top: 0, insetInlineStart: 0, width: 'max-content', visibility: 'hidden', pointerEvents: 'none' },
   // Equal tracks keep tab positions stable when counts change; labels never shrink.
-  tab: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: g.controlSm, paddingInline: s.xs, borderRadius: r.control, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: ink.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: ink.fg }, ':is([data-focus-visible])': focusRing },
+  tab: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: g.controlSm, borderRadius: r.control, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: ink.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: ink.fg }, ':is([data-focus-visible])': focusRing },
   touch: { height: g.touchTarget },
   touchTab: { height: g.touchTarget, minWidth: g.touchTarget, boxSizing: 'border-box' },
   face: { whiteSpace: 'nowrap' },
