@@ -3059,7 +3059,7 @@ mod native_prompt_tests {
         let store = Store::open_memory("node").unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
-            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            "version 2\nagent \"worker\" {{ workspace {:?}; principal \"person/operator\"; harness \"claude\" {{}} }}\n",
             workspace.path().display().to_string()
         );
         let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
@@ -3113,7 +3113,7 @@ mod native_prompt_tests {
         let first = append_harness_history();
         let choice = r#"{"0":[1],"1":[0,2]}"#;
         let answered = store
-            .answer_native_prompt(seat, &first.id, choice, "person/avery")
+            .answer_native_prompt(seat, &first.id, choice, "person/operator")
             .unwrap();
         assert_eq!(answered.body["fields"]["status"], "answer");
         assert_eq!(answered.body["fields"]["reason"], choice);
@@ -3148,7 +3148,7 @@ mod native_prompt_tests {
             "driver":"claude", "incarnation_id":"one"
         }), Some(native_prompt_gone_key(&first.id)));
         store
-            .answer_native_prompt(seat, &restated.id, choice, "person/avery")
+            .answer_native_prompt(seat, &restated.id, choice, "person/operator")
             .unwrap();
         assert_eq!(resolve(gone.store_index), Some(NativePromptState::Gone));
         assert_eq!(resolve(store.index().unwrap()), Some(NativePromptState::Gone));
