@@ -14898,9 +14898,13 @@ async fn send_message(
     let mut args = args;
     args.in_reply_to = args
         .in_reply_to
-        .as_deref()
+        .take()
         .map(|reference| {
-            let subject = format!("message/{}", normalize_message_reference(reference));
+            // Canonical subjects already belong to the server's validation boundary.
+            if reference.starts_with("message/") {
+                return Ok(reference);
+            }
+            let subject = format!("message/{}", normalize_message_reference(&reference));
             fractal_schema::registry()
                 .validate_subject(&subject)
                 .with_context(|| {

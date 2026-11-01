@@ -309,6 +309,23 @@ async fn send_reply_references_use_read_normalization() {
     assert!(!malformed.status.success());
     assert!(stderr(&malformed).contains("message/<id>"), "{}", stderr(&malformed));
     assert_eq!(message_count(&store), 3, "invalid reference sent a message");
+
+    // Canonical subjects retain their exact spelling, even when read would normalize it.
+    use sha2::{Digest as _, Sha256};
+    for reference in ["message/message/x", "message/topic.md", "message/topic%2Fx"] {
+        let sent = value(&st(&socket, &[("ST3_MESSAGE_KEY_HOUR", "42")], &[
+            "--json", "conversations", "send", WORKER,
+            "--from", LEAD, "--body", "Canonical.", "--in-reply-to", reference,
+        ]).await);
+        assert_eq!(sent["in_reply_to"], reference);
+        let canonical = serde_json::json!([
+            "st3-message:v1:", LEAD, WORKER, reference, null, "Canonical.",
+            [], [], null, 42,
+        ]);
+        let digest = hex::encode(Sha256::digest(canonical.to_string().as_bytes()));
+        let expected_key = format!("st3-message:v1:{}", &digest[..32]);
+        assert_eq!(sent["idempotency_key"], expected_key);
+    }
     server.abort();
 }
 
