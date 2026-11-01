@@ -123,14 +123,15 @@ LOCAL = {
     # report (scripts/ci-clippy-result, as rust-tests records ci-rust-test-result); the stage itself runs once, in linux-gate's run when that
     # runs here, else alone (RUN_CLIPPY). Right after linux-gate, so it signs from that run's report.
     'linux-clippy': ['python3', 'scripts/ci-clippy-result'],
+    # The fleet-compat stage (the previous release's st3 against this tree's), keyed by what it reads, the same way: the recorded command
+    # reads the stage's report (scripts/ci-fleet-compat-result); the stage runs once, in linux-gate's run when that runs here, else alone
+    # (RUN_FLEET_COMPAT).
+    'linux-fleet-compat': ['python3', 'scripts/ci-fleet-compat-result'],
     # The web lane as ONE shard that covers every kit play and app test (scripts/ci-local-web); it runs only when a web input changed.
     'fractal-web': ['nix', 'develop', '.#web', '-c', 'bash', 'scripts/ci-local-web'],
     # One signature per workspace crate (docs/per-crate-test-signing.md): the recorded command is the small script that reads one crate's
     # result out of the run's JUnit report; the run itself is RUN_TESTS, for the crates that have no passing note for their key.
     'rust-tests': ['python3', 'scripts/ci-rust-test-result'],
-    # The fleet-compat stage alone (the previous release's st3 against this tree's), keyed by what it reads. Opt-in while linux-gate's own
-    # run still includes fleet-compat, so a default run never runs it twice: `--check linux-fleet-compat` signs it.
-    'linux-fleet-compat': ['nix', 'develop', '-c', 'bash', 'scripts/ci-fleet-compat-keyed'],
 }
 RUST_TESTS = 'rust-tests'
 RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]
@@ -139,9 +140,24 @@ RUN_TESTS = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']
 # The clippy stage alone, for a linux-clippy note when linux-gate does not run here (signed, a lane edit, not selected); its report goes to
 # CI_CLIPPY_REPORT, as linux-gate's run writes it when linux-clippy is selected too.
 LINUX_CLIPPY = 'linux-clippy'
-# Checks whose local notes carry their input key (source_inputs), so a tree with the same key reuses them, as CI's notes for them do.
-KEYED = frozenset({LINUX_CLIPPY})
 RUN_CLIPPY = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'clippy']
+# The fleet-compat stage alone, for a linux-fleet-compat note when linux-gate does not run here; its report goes to CI_FLEET_COMPAT_REPORT.
+LINUX_FLEET_COMPAT = 'linux-fleet-compat'
+RUN_FLEET_COMPAT = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'fleet-compat']
+# The checks signed from one of linux-gate's stages: {check: (the stage, the variable the stage writes its report to, the variable the
+# check's recorded command reads it from)}. stage_alone(check) is the stage's command when it runs alone.
+STAGE_SIGNED = {
+    LINUX_CLIPPY: ('clippy', 'CI_CLIPPY_REPORT', 'CLIPPY_REPORT'),
+    LINUX_FLEET_COMPAT: ('fleet-compat', 'CI_FLEET_COMPAT_REPORT', 'FLEET_COMPAT_REPORT'),
+}
+
+
+def stage_alone(check):
+    return {LINUX_CLIPPY: RUN_CLIPPY, LINUX_FLEET_COMPAT: RUN_FLEET_COMPAT}[check]
+
+
+# Checks whose local notes carry their input key (source_inputs), so a tree with the same key reuses them, as CI's notes for them do.
+KEYED = frozenset(STAGE_SIGNED)
 # nextest: 0 every test passed, 100 some test failed (the report is complete either way), 4 the selection matched no test.
 RUN_COMPLETED = frozenset({0, 4, 100})
 # The signer refuses an input longer than 500 characters (scripts/evidence-sign); a full run's filterset is longer than that.
@@ -153,10 +169,10 @@ BUILDS = frozenset({'linux-gate', 'linux-clippy', 'linux-fleet-compat', 'fractal
 # the same workspace build and selection), so the tests are not run twice. When the gate skips linux-gate's tests stage on the per-crate
 # notes, linux-gate's local command shrinks to clippy and fleet-compat and rust-tests runs the crates without a note itself
 # (docs/per-crate-test-signing.md, step 5).
-# linux-clippy runs by default too, signed from linux-gate's clippy stage. linux-gate keeps that stage while linux-clippy is in shadow: a
-# shadow note skips nothing, so a linux-gate run without it would sign no linux-gate note and CI would run clippy again (the shrink comes
-# after the flip, with rust-tests').
-OPT_IN = frozenset({'linux-fleet-compat'})
+# linux-clippy and linux-fleet-compat run by default too, signed from linux-gate's clippy and fleet-compat stages. linux-gate keeps those
+# stages while the checks are in shadow: a shadow note skips nothing, so a linux-gate run without them would sign no linux-gate note and CI
+# would run them again (the shrink comes after each flip, with rust-tests').
+OPT_IN = frozenset()
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate', 'linux-clippy'})  # rust-tests is not: a test's result does not depend on the base
 # What the fractal-web note records about the run, as CI's aggregate note does (scripts/ci-evidence-signing): one shard, every kit
@@ -296,6 +312,8 @@ def scrub_seat_environment():
     FRACTAL_AGENT): a check that kept them could reach the live daemon as the seat. Every check starts in `nix develop`, whose shell
     sets the dev shell's FRACTAL_* settings (flake.nix) itself, and scripts/ci-local drops the rest for its stages. ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
     starts the check); the evidence switches stay. The kept list is the only exception mechanism for a future ST_* switch."""
+    if os.environ.get('CI_PERF_SLOT_RECEIPT_DIR'):
+        os.environ['CI_PERF_SLOT_DISPOSABLE_ROOTS'] = json.dumps([str(pool_base().resolve()), str(run_tmp_root().resolve())])
     for name in [name for name in os.environ
                  if name.startswith(SEAT_PREFIXES) and name not in KEPT_SEAT and not name.startswith('ST_EVIDENCE')]:
         del os.environ[name]
@@ -751,38 +769,37 @@ def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
 
 
 def seat_lane(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
-    """(slice, sccache socket, None) for the capped lane of the seat ST_AGENT names, or (None, None, why not). The daemon names
-    the slice and the lane's sccache server (`st agents lane`; an older daemon names no server), so the naming lives in one place; the kernel says whether that slice exists under this process's
+    """(slice, None) for the capped lane of the seat ST_AGENT names, or (None, why not). The daemon names the slice
+    (`st agents lane`), so the naming lives in one place; the kernel says whether that slice exists under this process's
     user manager, in app-lanes.slice, holding a memory.max and a cpu.max. For a caller outside every build cap: a seat
     that started st-test as a unit of its own outside its lane (2026-10-31, on a build host: a seat's signing runs, each
     a systemd-run unit without --slice, built in builds.slice while its lane held only its harness)."""
     agent = os.environ.get('ST_AGENT')
     if not agent:
-        return None, None, None
+        return None, None
     st = os.environ.get('ST3_BIN') or shutil.which('fractal') or shutil.which('st')
     if not st:
-        return None, None, 'no st on PATH to name its lane'
+        return None, 'no st on PATH to name its lane'
     try:
         named = subprocess.run([st, 'agents', 'lane', agent, '--json', '--daemon-wait', '0'], stdin=subprocess.DEVNULL,
                                capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as error:
-        return None, None, f'st did not name its lane ({error})'
+        return None, f'st did not name its lane ({error})'
     if named.returncode:
         reason = (named.stderr.strip().splitlines() or [f'exit {named.returncode}'])[-1]
-        return None, None, f'st did not name its lane ({reason})'
+        return None, f'st did not name its lane ({reason})'
     try:
-        reply = json.loads(named.stdout)
-        lane, socket = reply['slice'], reply.get('sccache_server_uds') or None
-    except (ValueError, KeyError, TypeError, AttributeError):
-        return None, None, 'st named no lane slice'
+        lane = json.loads(named.stdout)['slice']
+    except (ValueError, KeyError, TypeError):
+        return None, 'st named no lane slice'
     try:
         text = Path(cgroup_file).read_text()
     except OSError:
-        return None, None, 'its own cgroup is unreadable'
+        return None, 'its own cgroup is unreadable'
     parts = next((line[3:] for line in text.splitlines() if line.startswith('0::')), '').strip('/').split('/')
     manager = next((depth for depth, part in enumerate(parts) if re.fullmatch(r'user@\d+\.service', part)), None)
     if manager is None:
-        return None, None, 'it runs under no user manager'
+        return None, 'it runs under no user manager'
     cgroup = Path(root, *parts[:manager + 1], 'app.slice', 'app-lanes.slice', lane)
 
     def limited(file):
@@ -792,23 +809,10 @@ def seat_lane(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
             return False
 
     if not cgroup.is_dir():
-        return None, None, f'its lane {lane} is not on this host'
+        return None, f'its lane {lane} is not on this host'
     if not (limited('memory.max') and limited('cpu.max')):
-        return None, None, f'its lane {lane} holds no memory and CPU limit'
-    return lane, socket, None
-
-
-def lane_server(socket):
-    """The lane's own sccache server for a check in the lane, as `env` arguments. The account's cargo may compile through sccache
-    (a rustc-wrapper in its cargo config, which ci-local keeps), and a client that names no server reaches the host's, which
-    compiles in builds.slice, outside the lane (2026-11-01, on a build host: the cacheable compiles of a check st-test had put in a
-    seat's lane ran in the host's server). The daemon names the socket as a laned task's environment does, and the client starts
-    that server in the lane when it is not running. A caller that names a socket keeps it; a port alone does not, since the client
-    takes a socket first and st-test cannot tell a seat's own port from the host server's. Nothing when the daemon names none (an
-    older daemon, or one without a runtime directory)."""
-    if not socket or os.environ.get('SCCACHE_SERVER_UDS'):
-        return []
-    return [f'SCCACHE_SERVER_UDS={socket}']
+        return None, f'its lane {lane} holds no memory and CPU limit'
+    return lane, None
 
 
 def governed(argv, name):
@@ -833,28 +837,22 @@ def governed(argv, name):
     the check in a scope in the seat's capped lane (`seat_lane`), with the lane's variables, rather than in builds.slice
     beside it. Without a capped lane, it takes builds.slice as before and says why.
 
-    A check in a seat's lane, in place or in a scope, also gets the lane's sccache server when the caller names none
-    (`lane_server`): a seat's harness has it from its lane, but a unit of its own does not unless it was passed on."""
+    A check's compiles that go through an account's sccache wrapper still reach the host's server, in builds.slice: ci-local leaves a
+    lane's sccache socket, since a lane's server started inside a run kept the run's removed TMPDIR (2026-11-01)."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
     cap = own_cap()
     if cap:
         print(f'fractal-test: {name} runs in the caller\'s own cap ({cap})', file=sys.stderr)
-        server = []
-        if cap.startswith('app-lanes-') and os.environ.get('ST_AGENT') and not os.environ.get('SCCACHE_SERVER_UDS'):
-            lane, socket, _ = seat_lane()
-            if lane and cap.startswith(f'{lane}:'):
-                server = lane_server(socket)
-        return [shutil.which('env') or '/usr/bin/env', 'BUILDS_SLICE_ACTIVE=1'] + server + argv
+        return [shutil.which('env') or '/usr/bin/env', 'BUILDS_SLICE_ACTIVE=1'] + argv
     runtime = os.environ.get('XDG_RUNTIME_DIR')
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
     if scope and runtime and Path(runtime, 'bus').exists():
-        lane, socket, why = seat_lane()
+        lane, why = seat_lane()
         if lane:
             print(f'fractal-test: {name} runs in its seat\'s lane ({lane})', file=sys.stderr)
             return [scope, '--user', '--scope', '--quiet', '--collect', f'--slice={lane}', '--property=OOMPolicy=continue', '--',
-                    shutil.which('env') or '/usr/bin/env', 'BUILDS_SLICE_ACTIVE=1', f'FRACTAL_LANE_SLICE={lane}'] \
-                + lane_server(socket) + argv
+                    shutil.which('env') or '/usr/bin/env', 'BUILDS_SLICE_ACTIVE=1', f'FRACTAL_LANE_SLICE={lane}'] + argv
         if why:
             print(f'fractal-test: {name} runs in builds.slice, not its seat\'s lane: {why}', file=sys.stderr)
         return [scope, '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--'] + argv
@@ -2778,8 +2776,9 @@ def run_main(argv, cleanup):
 
                 setup_seconds = round(time.monotonic() - (round_started if round_number else main_started))  # fetch and the clean tree (the members are fetched when a check first needs them)
                 gate_report = Path(scratch) / 'linux-gate-nextest-junit.xml'
-                gate_clippy = Path(scratch) / 'linux-gate-clippy'  # linux-gate's clippy stage report, for linux-clippy's note (scripts/ci-clippy-result)
-                ran = set()  # the checks whose command ran in this round (linux-gate's tells linux-clippy where its stage ran)
+                # linux-gate's clippy and fleet-compat stage reports, for linux-clippy's and linux-fleet-compat's notes (STAGE_SIGNED)
+                gate_stages = {check: Path(scratch) / f'linux-gate-{stage}' for check, (stage, *_) in STAGE_SIGNED.items()}
+                ran = set()  # the checks whose command ran in this round (linux-gate's tells linux-clippy and linux-fleet-compat where their stages ran)
                 stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
                 def run_one(name, output=None):
                     """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
@@ -2832,10 +2831,12 @@ def run_main(argv, cleanup):
                     if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
                         # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
                         environment['CI_TEST_JUNIT'] = str(gate_report)
-                    if name == 'linux-gate' and LINUX_CLIPPY in checks and 'clippy' in LOCAL[name]:
-                        # linux-clippy signs from this run's clippy stage (the same stage, its cargo messages and dep-info): ask it for its report.
-                        environment['CI_CLIPPY_REPORT'] = str(gate_clippy)
-                    if name in BUILDS and name != LINUX_CLIPPY:
+                    for check, (stage, report_variable, _) in STAGE_SIGNED.items():
+                        if name == 'linux-gate' and check in checks and stage in LOCAL[name]:
+                            # linux-clippy (linux-fleet-compat) signs from this run's clippy (fleet-compat) stage, the same stage, its cargo
+                            # messages and dep-info: ask it for its report.
+                            environment[report_variable] = str(gate_stages[check])
+                    if name in BUILDS and name not in STAGE_SIGNED:
                         # A test that cannot run on this host (no unprivileged user namespace, say) skips outside CI and writes its id here;
                         # the note records the list as env_skips, so the evidence says which tests did not run on this machine. rust-tests
                         # reads linux-gate's list for its per-crate records, so it is written even under a base wrapper without --input-file.
@@ -2865,22 +2866,22 @@ def run_main(argv, cleanup):
                     streams = output is None and CI_LOCAL in LOCAL[name]
                     limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
                     environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
-                    if name == LINUX_CLIPPY:
-                        # The clippy stage runs once: linux-gate's run in this round already ran it, else it runs here alone. Either way the note
+                    if name in STAGE_SIGNED:
+                        # The stage runs once: linux-gate's run in this round already ran it, else it runs here alone. Either way the note
                         # records the report reader (LOCAL) and which run made the report (run_command_sha256).
+                        (stage, report_variable, reader_variable), alone = STAGE_SIGNED[name], stage_alone(name)
                         if 'linux-gate' in ran:
-                            report, run_sha = gate_clippy, hashlib.sha256(json.dumps([LOCAL['linux-gate']]).encode()).hexdigest()
+                            report, run_sha = gate_stages[name], hashlib.sha256(json.dumps([LOCAL['linux-gate']]).encode()).hexdigest()
                             if not (report / 'passed').is_file():
-                                return (name, 'NOT SIGNED', 0, "linux-gate's clippy stage did not pass in this run"), True, False
+                                return (name, 'NOT SIGNED', 0, f"linux-gate's {stage} stage did not pass in this run"), True, False
                         else:
-                            report, run_sha = Path(scratch) / 'linux-clippy-report', hashlib.sha256(json.dumps([RUN_CLIPPY]).encode()).hexdigest()
-                            stage = dict(environment, CI_CLIPPY_REPORT=str(report))
-                            code = run_limited(governed(RUN_CLIPPY, name), limit, cwd=directory, env=stage, stdout=output,
-                                               stderr=subprocess.STDOUT if output else None)
+                            report, run_sha = Path(scratch) / f'{name}-report', hashlib.sha256(json.dumps([alone]).encode()).hexdigest()
+                            code = run_limited(governed(alone, name), limit, cwd=directory, env=dict(environment, **{report_variable: str(report)}),
+                                               stdout=output, stderr=subprocess.STDOUT if output else None)
                             if code != 0:
                                 return (name, 'timed out' if code == 124 else f'FAILED ({code})', round(time.monotonic() - started),
-                                        'the clippy stage failed: nothing signed' + queue_note(limit)), True, False
-                        environment['CLIPPY_REPORT'] = str(report)
+                                        f'the {stage} stage failed: nothing signed' + queue_note(limit)), True, False
+                        environment[reader_variable] = str(report)
                         environment = report_environment(scratch, environment)
                         wrap += ['--input', f'run_command_sha256={run_sha}']
                     pre_start = None

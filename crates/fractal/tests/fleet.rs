@@ -6258,12 +6258,25 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     o.start().await;
     merged.insert(2, (third, "sent".to_owned()));
     assert_eq!(listed(&o).await, merged);
+    // Pages by sender, and without a recipient, list the release's mail before the stream's.
+    let page = |query: &'static str| {
+        let client = o.client();
+        async move {
+            let page: MessagePage = client.get(&format!("/v1/messages/page?{query}")).await.unwrap();
+            page.items.into_iter().map(|item| item.subject).collect::<Vec<_>>()
+        }
+    };
+    let subjects = merged.iter().map(|(subject, _)| subject.clone()).collect::<Vec<_>>();
+    assert_eq!(page("include_closed=true").await, subjects);
+    assert_eq!(page("from=agent/fleet-sender&include_closed=true").await, [stream]);
+    assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
 }
 
-/// The previous release never holds the messages shard: it is never dialed for it, and its
-/// graph sync with new members runs as before in both directions. Upgrading it in place opens
-/// the shard and it starts receiving stream items; rolling it back to the release leaves the
-/// shard file in place, keeps graph sync working, and new members stop dialing it.
+/// When the previous release predates the messages shard, it is never dialed for it.
+/// Upgrading it in place opens the shard; rolling it back leaves the shard file in place
+/// and new members stop dialing it. If the release already opens the shard, only these
+/// transition-specific expectations are skipped. Both baselines must retain history,
+/// receive stream items after upgrade, and keep graph sync working without invalid records.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place() {
@@ -6296,8 +6309,15 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
     for node in [&o, &n1] {
         wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
     }
-    assert!(!o.state_dir().join("shards").exists(), "the release opens no shard");
-    assert!(stream_peers(&n1).await.is_empty(), "the release does not advertise the shard");
+    let release_opens_shard = o.state_dir().join("shards").exists();
+    if release_opens_shard {
+        eprintln!(
+            "baseline release already opens shards/: the messages-shard transition is behind \
+             this fleet; skipping only the no-shard/no-advertisement and rollback transition assertions"
+        );
+    } else {
+        assert!(stream_peers(&n1).await.is_empty(), "the release does not advertise the shard");
+    }
     append_stream_item(&n1, "message/0000000000000b01").await;
     o.note("o-mixed").await;
     n1.note("n1-mixed").await;
@@ -6318,12 +6338,14 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
     wait_for_stream_peers(&n1, &["o"], 90).await;
     wait_for_stream_item(&o, "message/0000000000000b01", 90).await;
 
-    // Roll it back to the release: the shard file stays, and the release ignores it.
+    // Roll back in place; a release predating the shard leaves it alone and stops advertising it.
     o.stop();
     o.binary = old;
     o.start().await;
-    assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
-    wait_for_stream_peers(&n1, &[], 90).await;
+    if !release_opens_shard {
+        assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+        wait_for_stream_peers(&n1, &[], 90).await;
+    }
     o.note("o-rolled-back").await;
     n1.note("n1-after-rollback").await;
     expected.extend([
@@ -6436,18 +6458,21 @@ async fn wait_for_mirror(node: &Node, what: &str) {
     }
 }
 
-/// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
-/// repository.
+/// Declare a watching seat of `node`'s own, `agent/example/watch-NODE`, and watch fixture/app#12
+/// as it, so `node` polls the repository. Each node's seat is its own: one seat declared on two
+/// nodes is one subscription, which the other node's copy can change while this one plans it.
 fn watch_fixture_app(node: &Node) {
+    let seat = format!("example/watch-{}", node.name);
+    let agent = format!("agent/{seat}");
     let file = node.root.join("seat.kdl");
     fs::write(&file, format!(
-        "version 2\nagent \"example/watch\" {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        "version 2\nagent {seat:?} {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
         node.name, node.root,
     )).unwrap();
     node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
     let output = node
-        .command(&["gh", "watch", "fixture/app#12", "--as", "agent/example/watch"])
-        .env("ST_AGENT", "agent/example/watch")
+        .command(&["gh", "watch", "fixture/app#12", "--as", &agent])
+        .env("ST_AGENT", &agent)
         .output()
         .unwrap();
     assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stderr), node.logs());

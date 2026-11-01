@@ -3053,9 +3053,11 @@ signatures, with SVG/HTML/unrecognized bytes returned only as opaque octets.
 `message.send` accepts `kind: "silent" | "wake"`; omitted kind means wake. Silent mail stays unread until a real wake offers at most eight held messages, or it is read on demand. Replies default to wake independently of their parent; there is no question tag or per-seat wake policy. Person and system wake events always wake. Signed silent requests carry `st3-silent` in signed tags. Old daemons ignore the kind field and do not hold silent tags; inspect receipt tags in mixed-version fleets. See [silent messages](../silent-messages.md).
 
 Message resources and `GET /v1/messages/delivery/{subject}` expose the existing
-`delivery` projection: `state` (`pending`, `waiting`, or `read`), durable handoff `phase`,
-human-readable `reason`, `age_ms`, and `recipient_delivery`. Native transport acceptance
-(`phase: delivered`) is not recipient read. A `sent` or `staged` message whose recipient's
+`delivery` projection: `state` (`pending`, `waiting`, `read`, or `unknown`), durable handoff
+`phase`, human-readable `reason`, `age_ms`, and `recipient_delivery`. A message carried by the
+messages stream to a seat on another host has `state: unknown` and `phase: unknown`: its
+receipts stay on the recipient's host, so the sender's member cannot see them. Native
+transport acceptance (`phase: delivered`) is not recipient read. A `sent` or `staged` message whose recipient's
 current, fresh native harness observation is `blocked_on: human` has `state: waiting`
 and a `reason` explicitly saying it is held outside the native harness for a human answer
 or approval. The durable message remains queued, not delivered; no separate held wire

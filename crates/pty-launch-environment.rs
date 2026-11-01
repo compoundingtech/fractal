@@ -23,6 +23,7 @@ pub(crate) enum PtyLaunchFailureKind {
     PlacementConflict,
     SessionInUse,
     SpawnFailed,
+    WorkingDirectoryMissing,
     Unknown,
 }
 
@@ -33,6 +34,7 @@ impl PtyLaunchFailureKind {
             Self::PlacementConflict => "placement-conflict",
             Self::SessionInUse => "session-in-use",
             Self::SpawnFailed => "spawn-failed",
+            Self::WorkingDirectoryMissing => "working-directory-missing",
             Self::Unknown => "unknown",
         }
     }
@@ -55,6 +57,8 @@ pub(crate) fn classify_pty_launch_failure(stderr: &[u8], stdout: &[u8]) -> PtyLa
         || contains(b"pty: PTY_ROOT is too long")
     {
         PtyLaunchFailureKind::PlacementConflict
+    } else if contains(b"Working directory does not exist") {
+        PtyLaunchFailureKind::WorkingDirectoryMissing
     } else if contains(b"already in use") {
         PtyLaunchFailureKind::SessionInUse
     } else if contains(b"failed to start daemon")
@@ -83,6 +87,11 @@ mod tests {
             (b"pty: PTY_ROOT is too long", PtyLaunchFailureKind::PlacementConflict),
             (b"Session id \"NAME\" is already in use.", PtyLaunchFailureKind::SessionInUse),
             (b"failed to start daemon: synthetic detail", PtyLaunchFailureKind::SpawnFailed),
+            // What the launcher prints for a --cwd that does not exist, not a launcher mismatch.
+            (
+                b"pty run: Daemon process exited immediately (code 1).\nWorking directory does not exist: /synthetic\n".as_slice(),
+                PtyLaunchFailureKind::WorkingDirectoryMissing,
+            ),
             (b"Invalid env format: \"NAME\". Use --env KEY=VALUE or --env KEY", PtyLaunchFailureKind::Unknown),
             (b"\xffsynthetic-unrecognized-output", PtyLaunchFailureKind::Unknown),
         ] {
