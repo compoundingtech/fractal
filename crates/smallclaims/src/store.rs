@@ -1170,6 +1170,7 @@ impl Store {
         } else {
             runtime.create_schema(connection)?;
         }
+        replica_record::recover_publication_pending_collision(connection)?;
         // Reassigning user_version dirties the database header even when it is unchanged.
         // Upgrade once, then let ordinary reopens avoid that write and its durable commit.
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
