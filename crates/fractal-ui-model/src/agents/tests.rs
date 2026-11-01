@@ -15,6 +15,16 @@ fn agent(fields: Value) -> Facts {
     Facts::deserialize(&row).unwrap()
 }
 
+#[test]
+fn refused_delivery_presents_its_code_in_web_and_tui_facts() {
+    let refusal = present(&agent(json!({
+        "state": "waiting",
+        "delivery": {"state": "refused", "reason": "delivery refused: mailbox-runtime-indeterminate"},
+    })));
+    assert_eq!(refusal.group, Group::Fault);
+    assert_eq!(refusal.because.as_deref(), Some("delivery refused: mailbox-runtime-indeterminate"));
+}
+
 fn label(id: &str, path: &str) -> Value {
     json!({
         "id": id, "mission_id": "mission/fleet/example/audit",

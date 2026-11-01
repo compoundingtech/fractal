@@ -28,17 +28,17 @@ const record = (value: unknown): value is Record<string, unknown> => typeof valu
 const projectQuestion = (value: unknown): HarnessQuestion | undefined => {
   if (!record(value) || typeof value.id !== 'string' || value.id.length === 0 || typeof value.question !== 'string'
     || !Array.isArray(value.options) || value.options.length > 64
-    || (value.multi !== undefined && typeof value.multi !== 'boolean')) return undefined
+    || (value.multi != null && typeof value.multi !== 'boolean')) return undefined
   const options: HarnessOption[] = []
   for (const [position, option] of value.options.entries()) {
     if (!record(option) || typeof option.label !== 'string'
-      || (option.description !== undefined && typeof option.description !== 'string')
-      || (option.preview !== undefined && typeof option.preview !== 'string')) return undefined
+      || (option.description != null && typeof option.description !== 'string')
+      || (option.preview != null && typeof option.preview !== 'string')) return undefined
     options.push({ position, label: option.label,
       ...(typeof option.description === 'string' ? { description: option.description } : {}),
       ...(typeof option.preview === 'string' ? { preview: option.preview } : {}) })
   }
-  if (value.recommended !== undefined && (typeof value.recommended !== 'number' || !Number.isInteger(value.recommended)
+  if (value.recommended != null && (typeof value.recommended !== 'number' || !Number.isInteger(value.recommended)
     || value.recommended < 0 || value.recommended >= options.length)) return undefined
   return {
     _tag: value.multi === true ? 'MultiSelect' : 'SingleSelect', id: value.id, title: value.question, options,

@@ -83,9 +83,7 @@ fn poke_reference(msg: &Message) -> &str {
 }
 
 pub fn fractal_message_reference(msg: &Message) -> Option<&str> {
-    msg.tags
-        .iter()
-        .find_map(|tag| tag.strip_prefix("st3-message:"))
+    fractal_tag(msg, "st3-message:")
         .filter(|reference| reference.starts_with("message/") && reference.len() > "message/".len())
 }
 
@@ -96,9 +94,27 @@ pub const FRACTAL_SHA256_TAG: &str = "st3-sha256:";
 /// One tag per attachment on a projected message: [`AttachmentNotice`] as percent-escaped JSON.
 pub const FRACTAL_ATTACHMENT_TAG: &str = "st3-attachment:";
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+/// Choose one durable tag family before parsing; malformed legacy tags still win.
+pub fn fractal_tag_family<'a>(tags: &[String], legacy: &'a str, renamed: &'a str) -> &'a str {
+    if tags.iter().any(|tag| tag.starts_with(legacy)) {
+        legacy
+    } else {
+        renamed
+    }
+}
+
 fn fractal_tag<'a>(msg: &'a Message, prefix: &str) -> Option<&'a str> {
+    let renamed = match prefix {
+        "st3-message:" => "fractal-message:",
+        FRACTAL_TO_TAG => "fractal-to:",
+        FRACTAL_SHA256_TAG => "fractal-sha256:",
+        _ => return None,
+    };
+    let prefix = fractal_tag_family(&msg.tags, prefix, renamed);
     msg.tags.iter().find_map(|tag| tag.strip_prefix(prefix))
 }
+// LIVE-MIGRATION END
 
 /// Lowercase hex SHA-256 of one exact graph message body.
 pub fn fractal_body_sha256(body: &str) -> String {
@@ -181,7 +197,10 @@ impl AttachmentNotice {
     }
 
     pub fn from_tag(tag: &str) -> Option<Self> {
-        let escaped = tag.strip_prefix(FRACTAL_ATTACHMENT_TAG)?.as_bytes();
+        let escaped = tag
+            .strip_prefix(FRACTAL_ATTACHMENT_TAG)
+            .or_else(|| tag.strip_prefix("fractal-attachment:"))?
+            .as_bytes();
         let mut bytes = Vec::with_capacity(escaped.len());
         let mut index = 0;
         while index < escaped.len() {
@@ -468,9 +487,12 @@ fn poke_text_with_resolver(
         let sha256 = fractal_tag(msg, FRACTAL_SHA256_TAG)
             .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
             .map_or_else(|| fractal_body_sha256(&msg.body), str::to_owned);
+        let attachment_prefix =
+            fractal_tag_family(&msg.tags, FRACTAL_ATTACHMENT_TAG, "fractal-attachment:");
         let attachments: Vec<AttachmentNotice> = msg
             .tags
             .iter()
+            .filter(|tag| tag.starts_with(attachment_prefix))
             .filter_map(|tag| AttachmentNotice::from_tag(tag))
             .collect();
         return with_tag_notices(

@@ -11,7 +11,11 @@ use anyhow::{Context as _, Result, bail};
 pub mod github_gates;
 mod github_repository;
 pub mod github_workflows;
-pub use github_repository::{RECENT_COMMENTS, merge_recent_comments, recent_comment_key};
+pub use github_repository::{
+    RECENT_COMMENTS, merge_recent_comments, recent_comment_key, replicated_cursor,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use github_repository::test_github;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -218,11 +222,10 @@ const GITHUB_REQUEST_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(60)
 };
 
-/// Where the daemon reaches GitHub's API: `https://api.github.com`, or `ST3_GITHUB_API_URL` when
+/// Where the daemon reaches GitHub's API: `https://api.github.com`, or `FRACTAL_GITHUB_API_URL` when
 /// the daemon's environment names another, such as a test's.
 pub fn github_api_base() -> String {
-    std::env::var("ST3_GITHUB_API_URL")
-        .ok()
+    fractal_drivers::contracts::env("ST3_GITHUB_API_URL")
         .map(|base| base.trim().trim_end_matches('/').to_owned())
         .filter(|base| !base.is_empty())
         .unwrap_or_else(|| "https://api.github.com".to_owned())
@@ -933,11 +936,20 @@ async fn github_graphql_with_cache_eligibility(
                 status: 200,
             });
         }
-        let message = errors[0]
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("an unnamed error");
-        bail!("GitHub GraphQL refused the query: {message}");
+        let details = errors.iter().map(|error| {
+            let message = error.get("message").and_then(Value::as_str).unwrap_or("an unnamed error");
+            let kind = error.get("type").and_then(Value::as_str);
+            let path = error.get("path").and_then(Value::as_array).map(|segments|
+                segments.iter().map(|segment| segment.as_str().map_or_else(|| segment.to_string(), str::to_owned))
+                    .collect::<Vec<_>>().join("."));
+            match (kind, path) {
+                (Some(kind), Some(path)) => format!("{message} ({kind} at {path})"),
+                (Some(kind), None) => format!("{message} ({kind})"),
+                (None, Some(path)) => format!("{message} (at {path})"),
+                (None, None) => message.to_owned(),
+            }
+        }).collect::<Vec<_>>().join("; ");
+        bail!("GitHub GraphQL refused the query: {details}");
     }
     let data = body.get("data")
         .filter(|data| !data.is_null())
@@ -1226,6 +1238,22 @@ async fn observe_github_pull_request_at(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn graphql_refusal_names_error_type_and_field_path() {
+        let fixture = crate::github_http::app_read::tests::server(|_, _, _| {
+            (reqwest::StatusCode::OK, json!({"errors":[{
+                "message":"Resource not accessible by integration",
+                "type":"FORBIDDEN",
+                "path":["repository","pullRequests","nodes",0,"commits"]
+            }]}))
+        }).await;
+        let error = github_graphql_with_cache_eligibility(&reqwest::Client::new(),
+            &fixture.base, &GithubAuth::test("fixture-pat"), "query { repository { id } }",
+            json!({})).await.unwrap_err().to_string();
+        assert!(error.contains("Resource not accessible by integration"));
+        assert!(error.contains("FORBIDDEN at repository.pullRequests.nodes.0.commits"), "{error}");
+    }
 
     #[tokio::test]
     async fn forgetting_artifact_url_invalidates_every_principal_without_double_counting_responses() {

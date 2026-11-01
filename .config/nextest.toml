@@ -125,6 +125,11 @@ filter = '''
 '''
 priority = 50
 
+# Conversation content tests must fail promptly instead of parking on a fold gate forever.
+[[profile.default.overrides]]
+filter = 'package(=fractal-api-client-v0) and test(::conversation_blocks::tests::)'
+slow-timeout = { period = "60s", terminate-after = 1 }
+
 [profile.ci]
 # Owned quarantine: merge-queue-flakes runs link_minutes once in optional perf-cost.
 # Its full 10-second/native/authentication oracle stays unchanged while the signed
@@ -132,6 +137,10 @@ priority = 50
 test-threads = 8
 fail-fast = false
 retries = { count = 2, backoff = "fixed", delay = "30s", jitter = false }
+# A test still running after 10 minutes is killed and fails (TIMEOUT), and is retried like any other failure, so a hung
+# test fails its run instead of holding it until the job's timeout-minutes in CI or forever in a local scripts/st-test.
+# The longest tests take under 2 minutes. scripts/ci-linux (nextest_timeout_check) holds this bound and shows a hang is killed.
+slow-timeout = { period = "60s", terminate-after = 10 }
 status-level = "fail"
 final-status-level = "flaky"
 # The gate covers fractal, fractal-runtime, fractal-drivers and the other shared crates, and the st2 test
@@ -166,8 +175,13 @@ not (
 )
 '''
 
-# Retain the synthetic sorter byte/latency comparisons on success as well as failure.
+[[profile.ci.overrides]]
+filter = 'package(=fractal-api-client-v0) and test(::conversation_blocks::tests::)'
+slow-timeout = { period = "60s", terminate-after = 1 }
+retries = 0
+
 # Output visibility only: selection, retries, threads and byte budgets are unchanged.
+# Retain the synthetic sorter byte/latency comparisons on success as well as failure.
 [[profile.ci.overrides]]
 filter = '(package(=fractal) or package(=fractal-daemon) or package(=fractal-api-client-v0) or package(=fractal-api-mailbox) or package(=fractal-attention) or package(=fractal-delivery) or package(=fractal-missions) or package(=fractal-seats) or package(=fractal-evidence) or package(=fractal-github) or package(=fractal-seats-base) or package(=fractal-delivery-base) or package(=fractal-missions-base) or package(=fractal-github-base) or package(=fractal-secrets) or package(=fractal-api-core) or package(=fractal-reconcile) or package(=fractal-peer) or package(=fractal-store)) and test(/^store::actual_state_sorter_tests::actual_identity_stream_bounds_native_reader_and_writer_temp_bytes$/)'
 success-output = "immediate"

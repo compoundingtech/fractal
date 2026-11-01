@@ -1,14 +1,108 @@
-# Fractal 0.x compatibility
+# Fractal fleet compatibility
 
-For your own fleet, install the **same verified release source on every member** and read the
-release's **Upgrade impact** before restart. A patch tag is a publication label, not a promise
-of compatible databases, mixed builds or safe rollback. Check exact sources using `BUILD.json`,
-`RELEASE.json`, `st --version --json` and the daemon's `machine_version` in `st doctor --json`.
-Downloading or installing an archive does not restart or replace the running daemon **process**.
-It does replace the installed command files and, on macOS, the app bundle. Until an explicit
-restart, the daemon keeps its current build while new CLI invocations use the installed build.
-Follow the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
+## Required rolling window
+
+[R49](../vrs/requirements.md#must-support-rolling-fleet-upgrades) requires this window: adjacent published releases
+**N and N-1 must coexist for at least 14 days** without lost work, duplicate
+schedule fires, or blocked schedules. Features that need all members activate
+only when every active member advertises support. An older-release member that
+returns within **30 days offline** must not block or corrupt the fleet.
+
+**Implementation status: open — [#4002](https://github.com/compoundingtech/fractal/issues/4002).**
+The adjacent-release window is a required target and design sketch, **not a current guarantee**.
+Hosts roll out independently today through
+[per-feature peer capability negotiation](replication.md#peer-protocol-capability-negotiation):
+every new peer operation and changed ID or wire format must be gated before dispatch
+at each hop. Missing support requires a genuinely compatible fallback or a typed
+`peer-too-old` refusal with upgrade guidance, never a speculative request to an older
+decoder. An unsupported feature does not make the entire mixed fleet unsupported.
+The adjacent-release target covers baseline work and features without a negotiated
+gate; it neither substitutes for capability checks nor authorizes new ungated
+incompatible changes. Features requiring all-member activation have the additional
+admission conditions below, not a coordinated host-rollout requirement.
+
+Read each release's **Upgrade impact** before restart. A patch tag is a publication
+label, not a promise of compatible databases or safe rollback. Check exact sources
+using `BUILD.json`, `RELEASE.json`, `st --version --json`, and the daemon's
+`machine_version` in `st doctor --json`. Downloading or installing an archive does
+not restart or replace the running daemon **process**. It does replace installed
+command files and, on macOS, the app bundle. Until an explicit restart, the daemon
+keeps its current build while new CLI invocations use the installed build. Follow
+the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
 alone as a daemon upgrade.
+
+### Additive claims and unknown-field retention
+
+During the window, optional claim fields must be additive: absence preserves old
+semantics, and an older reader must retain unknown fields without stripping or
+rewriting their signed representation. Replication, replay, restart, forwarding,
+and later upgrade must preserve those fields in both directions. Unrecognized
+optional data must not prevent known work or schedules from progressing. New
+semantics that cannot satisfy this rule require fleet feature activation.
+
+**Open ([#4002](https://github.com/compoundingtech/fractal/issues/4002)):** older
+daemons currently retain unknown-field claim failures as retryable records; that
+retention alone does not establish compatible projection or schedule progress.
+The `owner_run` addition in `restart-retries-a-parked-launch.json` illustrates this
+gap: its text requires daemons to deploy together, despite compatibility `none`.
+That historical fragment is immutable; its classification needs a fresh correction.
+
+### Fleet feature activation and offline rejoin
+
+Design sketch (**open, [#4002](https://github.com/compoundingtech/fractal/issues/4002)**):
+
+1. Members advertise versioned capabilities in the authenticated replication
+   exchange, bound to the authenticated member identity rather than a release tag.
+2. Activate an all-member feature only when **all active members advertise it**.
+   A missing or unknown advertisement is not support. A partition must not allow
+   one side to silently exclude an active older member and activate incompatible
+   writes. Persisted activation and write admission must remain safe across restart.
+3. An older member returning within 30 days catches up without blocking existing
+   work, duplicating a schedule occurrence, or corrupting retained claims. Membership
+   and capability admission must fence unsupported writes before accepting them,
+   including when a feature activated while the member was absent.
+4. A member offline **more than 30 days must re-sync before writing**; it cannot
+   resume stale ownership or schedule authority merely because its old process
+   restarts. Re-sync must establish current membership, capabilities, and history
+   before write admission. This does not authorize discarding unsynchronized work.
+
+The active-member definition, authenticated freshness/absence evidence, durable
+activation record, and re-sync completion/write fence are unresolved protocol
+details in #4002. A local timeout alone is not authority to remove a member.
+
+### Checkpoints in a mixed fleet
+
+The current [checkpoint contract](checkpoints.md) requires exactly equal rules
+digests for sealing and seal verification. Preserve that safety check: release
+ordering is not digest compatibility. During N/N-1 coexistence, retain compatible
+rules or defer incompatible sealing behind feature activation; continued claim
+replication, ownership transfer, and schedules must not depend on a new seal.
+Do not trim history an admitted older reader still needs. Mixed digests may defer
+new sealing, but must not stall work or schedules.
+
+**Open ([#4002](https://github.com/compoundingtech/fractal/issues/4002)):** prove
+progress and retained-history safety across the full window, including a returning
+older member. Existing digest checks alone do not prove them.
+
+### Client API capability negotiation
+
+Negotiate against the **serving daemon**, not the fleet's newest release:
+`st3.client.v0`, projection versions, capability versions, and release tags are
+independent. Existing API reads must work against either N or N-1. Unknown optional
+capabilities may be ignored; an unsupported required capability must produce an
+explicit refusal before using it. A client opting into a new response shape must
+first observe support; member-local API support does not activate an all-member
+feature. See [client-v0 discovery](client-v0/README.md#discovery-lists-and-details).
+Negotiation exists; **N/N-1 read and refusal coverage is open in
+[#4002](https://github.com/compoundingtech/fractal/issues/4002)**.
+
+### Out of scope: downgrade
+
+Coexistence of distinct members is not permission to run an old binary against an
+upgraded member's database or driver resume state. Database downgrade, arbitrary
+nonadjacent release pairs, and historical 0.x rollback are outside this window.
+The offline-return rule is separate from the adjacent-release pair: it requires
+safe admission or fencing even if publication advanced while the member was away.
 
 ## Upgrade starting points and limits
 
@@ -99,9 +193,37 @@ and repin once it is resolved. Release preparation requires the latest published
 unless the pin carries that explicit exception. See [CI operations](../ci.md#rolling-compatibility-baselines)
 for recovery and local commands.
 
-These fixtures prove their specified histories and messaging contracts, not arbitrary mixed
-fleets or downgrade support. The friend-ready idle and delivery gates remain separate evidence;
-packaging or documentation checks do not replace their continuous observations.
+These fixtures prove their specified histories and messaging contracts, not the
+full R49 window or downgrade support. The friend-ready idle and delivery gates
+remain separate evidence; packaging or documentation checks do not replace their
+continuous observations.
+
+### Required compatibility test plan
+
+**Open — [#4002](https://github.com/compoundingtech/fractal/issues/4002).** Extend
+`linux-fleet-compat` (`scripts/ci-linux`, `crates/fractal/tests/fleet.rs`), which
+currently runs one history-preservation test against one previous published binary.
+Keep exact release/source/archive pins; exercise N/N-1 in both owner/peer roles,
+with controlled time covering at least 14 days of coexistence.
+
+| Scenario | Required assertions |
+| --- | --- |
+| Schedules across mixed members, restart, and reconnect | Every due occurrence has one durable fire identity and one execution; no duplicate fire or schedule blocked by unsupported claims, capabilities, or checkpoint rules. |
+| Ownership transfer N → N-1 and N-1 → N | Existing work survives, stale owners cannot execute after transfer, and schedules continue without losing or repeating occurrences. |
+| New optional claim field in both directions | Old/new readers retain and forward original signed bytes; restart, replay, and upgrade preserve the field; known work continues without permanent retry blockers. |
+| API reads against N and N-1 | Baseline list/detail reads remain usable; optional shapes require advertised support and unsupported required capabilities refuse explicitly. |
+| Capability activation | One active member without support prevents activation; all active members advertising support permits it; partition/restart cannot bypass the gate. |
+| Offline older member returning within 30 days | Catch-up preserves unsynchronized work and current ownership, does not stall schedules or fleet progress, and cannot replay a fired occurrence or introduce unsupported writes. |
+| Offline member returning after 30 days | Writes and stale scheduling authority remain fenced until re-sync completes; rejoin cannot corrupt history or lose unsynchronized work. |
+| Equal and unequal checkpoint rules digests | Compatible sealing succeeds; incompatible sealing/verification stays refused without blocking work or schedules or trimming required history. |
+
+Extend the fast **release-impact** check to reject upgrade text requiring
+“deploy together” (or equivalent coordinated deployment) unless the incompatible
+change is capability-gated. The check must validate compatibility status against
+the text: `none` cannot accompany a known mixed-fleet incompatibility. Add rejecting
+fixtures for the ungated `owner_run` case and accepting fixtures for a described,
+tested capability gate. **This validator enforcement is not implemented (#4002)**;
+the existing fragment-presence/schema check is not this acceptance proof.
 
 ## Platform verification
 
@@ -109,7 +231,7 @@ packaging or documentation checks do not replace their continuous observations.
 | --- | --- |
 | Linux x86_64 archive | glibc 2.35+ (for example Ubuntu 22.04), Bash or Zsh, CA certificates, `curl`, `tar`, a checksum tool and Git for the walkthrough. Persistent service setup needs a systemd user manager; enable lingering for work after logout. Archives include the pinned PTY runtime and need neither Rust nor Nix. Native release CI verifies extraction, installation, exact source and CLI/TUI smoke tests. |
 | Apple Silicon archive | macOS 15+, `curl`, `tar`, `shasum`, Git and Python 3. Installer creates `SmallTalk.app`, with ad-hoc signing unless explicitly configured otherwise. LaunchAgent permissions and login remain user setup. Optional voice-helper builds need Xcode's macOS 26 SDK; voice is not an onboarding prerequisite. |
-| Nix profile or Home Manager | A Nix installation with `nix-command` and `flakes` enabled. It supplies build dependencies and PTY; pin the same source across members. Home Manager owns service paths when that route is selected. Harness login and host permissions remain separate. |
+| Nix profile or Home Manager | A Nix installation with `nix-command` and `flakes` enabled. It supplies build dependencies and PTY; pin and verify each member's source, negotiating capabilities across independently upgraded hosts. Home Manager owns service paths when that route is selected. Harness login and host permissions remain separate. |
 
 A **fresh Mac onboarding rehearsal remains unverified**. The separate macOS workspace CI is
 [manually disabled](https://github.com/compoundingtech/fractal/actions/workflows/macos.yml)

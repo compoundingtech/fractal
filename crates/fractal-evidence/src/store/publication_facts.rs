@@ -675,6 +675,9 @@ mod tests {
             .unwrap();
             tx.commit().unwrap();
         }
+        // Both corrections queue a pending claim; the commit's 10ms loan may sync only the
+        // first and leave the other to the background drain, which this test drives itself.
+        finish(&store);
         oracle(&store);
         let connection = store.readers.get();
         let selected: String = connection

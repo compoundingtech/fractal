@@ -103,7 +103,7 @@ impl Seat {
             .env("XDG_STATE_HOME", self.home.join("state"))
             .env("XDG_CACHE_HOME", self.home.join("cache"))
             .env("ST_AGENT", format!("agent/{IDENTITY}"))
-            .env("ST3_BIN", test_env!("CARGO_BIN_EXE_st3-fixture"))
+            .env("ST3_BIN", test_env!("CARGO_BIN_EXE_fractal-fixture"))
             .env("ST3_DRIVER_STATE_DIR", self.paths.root.join("driver-state"))
             .env("ST3_ENDPOINT", self.home.join("unused.sock"))
             .envs(self.paths.environment(IDENTITY))
@@ -362,7 +362,7 @@ fn without_the_seat_binary_the_script_drains_stdin_and_renders_the_fault() {
         return;
     }
     let seat = Seat::new();
-    for binary in [None, Some("/no/such/st3-fixture")] {
+    for binary in [None, Some("/no/such/fractal-fixture")] {
         let mut command = Command::new("bash");
         command
             .arg(script())

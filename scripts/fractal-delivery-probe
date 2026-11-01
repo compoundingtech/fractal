@@ -147,8 +147,15 @@ class Probe:
     def __init__(self, config):
         self.config = config
         self.actor = config["agent"]
-        if os.environ.get("ST_AGENT") != self.actor:
-            raise ValueError("run this probe as its own declared ST_AGENT seat")
+        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction.
+        preferred = os.environ.get("FRACTAL_AGENT")
+        legacy = os.environ.get("ST_AGENT")
+        if preferred and legacy is not None and preferred != legacy:
+            raise ValueError("Conflicting identity environment variables: FRACTAL_AGENT and ST_AGENT")
+        identity = preferred if preferred is not None else legacy
+        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+        if identity != self.actor:
+            raise ValueError("run this probe as its own declared FRACTAL_AGENT (or legacy ST_AGENT) seat")
         self.source = config["host"]
         self.alert_agent = config.get("alert_agent")
         if "alert_agent" in config and (not isinstance(self.alert_agent, str)

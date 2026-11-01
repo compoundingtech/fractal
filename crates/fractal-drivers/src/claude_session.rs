@@ -451,7 +451,16 @@ fn development_fractal_channel_argv(
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .context("the authored Claude --mcp-config mcpServers value must be a JSON object")?;
-    if let Some(authored) = servers.get("st3") {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let server_name = if servers.contains_key("st3") {
+        "st3"
+    } else if servers.contains_key("fractal") {
+        "fractal"
+    } else {
+        "st3"
+    };
+    // LIVE-MIGRATION END
+    if let Some(authored) = servers.get(server_name) {
         anyhow::ensure!(
             authored == &st3_server,
             "the authored Claude --mcp-config already defines a different st3 server"
@@ -480,7 +489,9 @@ fn development_fractal_channel_argv(
             if existing_mcp.is_none() {
                 output.extend(["--mcp-config".to_string(), mcp.clone()]);
             }
-            output.push("--dangerously-load-development-channels=server:st3".to_string());
+            output.push(format!(
+                "--dangerously-load-development-channels=server:{server_name}"
+            ));
             index += 2;
             continue;
         }
@@ -1753,6 +1764,9 @@ pub const STATUSLINE_RENDERER_ENV: &str = "ST_CLAUDE_STATUSLINE_RENDERER";
 /// is HC-R18's inverse. A user-level file st2 never writes has no such hazard.
 const STATUSLINE_RENDERER_FILE: &str = ".claude/statusline-renderer.json";
 
+/// The same file's name inside an instance's own Claude folder (`CLAUDE_CONFIG_DIR`).
+const STATUSLINE_RENDERER_NAME: &str = "statusline-renderer.json";
+
 /// Project one Claude status-line payload onto a harness-context reading (HC-R02, HC-R03).
 ///
 /// The status-line payload is the ONLY Claude channel carrying a window: hook payloads have no
@@ -1914,6 +1928,32 @@ fn record_statusline_owned(agent_dir: &Path, identity: &str, raw: &[u8], native:
         .map(|_landed| ())
 }
 
+/// Where the operator's renderer file is looked for. The person's own install reads
+/// `~/.claude/statusline-renderer.json`. An instance seat runs on the instance's own Claude folder
+/// (`CLAUDE_CONFIG_DIR`), so it reads that folder's file and never the person's default
+/// `~/.claude`: the instance is a separate fractal and does not borrow the person's renderer.
+/// An instance with no `CLAUDE_CONFIG_DIR` has no file at all.
+fn renderer_file(
+    in_instance: bool,
+    claude_config_dir: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if in_instance {
+        return claude_config_dir
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(|dir| dir.join(STATUSLINE_RENDERER_NAME));
+    }
+    home.map(|home| home.join(STATUSLINE_RENDERER_FILE))
+}
+
+fn current_renderer_file() -> Option<std::path::PathBuf> {
+    renderer_file(
+        crate::contracts::env("ST_INSTANCE").is_some(),
+        std::env::var_os("CLAUDE_CONFIG_DIR").map(Into::into),
+        std::env::var_os("HOME").map(Into::into),
+    )
+}
+
 /// Two sources in strict order, first hit wins, never merged and never both — so the resolution
 /// has one answer and an operator debugging their status line has one place to look for it.
 /// Neither resolving is the third case, handled by the caller as an empty status line.
@@ -1924,7 +1964,10 @@ fn downstream_renderer() -> Option<String> {
     {
         return Some(command);
     }
-    let path = std::path::PathBuf::from(std::env::var_os("HOME")?).join(STATUSLINE_RENDERER_FILE);
+    renderer_command_in(&current_renderer_file()?)
+}
+
+fn renderer_command_in(path: &Path) -> Option<String> {
     let declaration: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     declaration
         .get("command")
@@ -1937,9 +1980,14 @@ fn chain_statusline(raw: &[u8]) -> Result<()> {
     let Some(command) = downstream_renderer() else {
         // Both resolution paths named, because "no renderer resolved" is the whole diagnosis and
         // the operator's next move is to set one of exactly these two.
+        let file = if crate::contracts::env("ST_INSTANCE").is_some() {
+            format!("$CLAUDE_CONFIG_DIR/{STATUSLINE_RENDERER_NAME}")
+        } else {
+            format!("~/{STATUSLINE_RENDERER_FILE}")
+        };
         tracing::warn!(
             "st claude-statusline: no downstream renderer resolved from \
-             ${STATUSLINE_RENDERER_ENV} or ~/{STATUSLINE_RENDERER_FILE}; \
+             ${STATUSLINE_RENDERER_ENV} or {file}; \
              rendering an empty status line"
         );
         return Ok(());
@@ -2472,6 +2520,77 @@ mod tests {
             format!("{error:#}").contains("already defines a different st3 server"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn fractal_development_channel_preserves_authored_server_names() {
+        let server = serde_json::json!({
+            "type": "stdio", "command": "/opt/st3/bin/st3",
+            "args": ["driver", "claude-mcp", "--subject", "agent/example"]
+        });
+        for (servers, name) in [
+            (serde_json::json!({"st3": server}), "st3"),
+            (serde_json::json!({"fractal": server}), "fractal"),
+            (
+                serde_json::json!({"st3": server, "fractal": {"command": "other"}}),
+                "st3",
+            ),
+            (serde_json::json!({}), "st3"),
+            (serde_json::json!({"unknown": server}), "st3"),
+        ] {
+            let mut expected = servers.clone();
+            if !expected.as_object().unwrap().contains_key("st3")
+                && !expected.as_object().unwrap().contains_key("fractal")
+            {
+                expected["st3"] = server.clone();
+            }
+            let argv = vec![
+                "claude".into(),
+                format!(
+                    "--mcp-config={}",
+                    serde_json::json!({"mcpServers": servers})
+                ),
+                "--channels".into(),
+                crate::claude_channel::FRACTAL_CHANNEL.into(),
+            ];
+            let output = development_fractal_channel_argv(
+                argv,
+                Path::new("/opt/st3/bin/st3"),
+                Path::new("/unused"),
+                "example",
+            )
+            .unwrap();
+            let config = output
+                .iter()
+                .find_map(|arg| arg.strip_prefix("--mcp-config="))
+                .unwrap();
+            let config: serde_json::Value = serde_json::from_str(config).unwrap();
+            assert_eq!(config["mcpServers"], expected);
+            assert!(output.contains(&format!(
+                "--dangerously-load-development-channels=server:{name}"
+            )));
+        }
+        for legacy in [
+            serde_json::Value::Null,
+            serde_json::json!({"command": "other"}),
+        ] {
+            let config = serde_json::json!({"mcpServers": {"st3": legacy, "fractal": server}});
+            let argv = vec![
+                "claude".into(),
+                format!("--mcp-config={config}"),
+                "--channels".into(),
+                crate::claude_channel::FRACTAL_CHANNEL.into(),
+            ];
+            assert!(
+                development_fractal_channel_argv(
+                    argv,
+                    Path::new("/opt/st3/bin/st3"),
+                    Path::new("/unused"),
+                    "example",
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -3937,5 +4056,59 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("residency checkpoint"));
         assert!(!marker.exists());
+    }
+
+    fn declare_renderer(dir: &Path, command: &str) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let file = dir.join("statusline-renderer.json");
+        fs::write(
+            &file,
+            serde_json::json!({"schema": "dotfiles.claude-statusline-renderer.v1", "command": command})
+                .to_string(),
+        )
+        .unwrap();
+        file
+    }
+
+    #[test]
+    fn a_default_install_reads_the_renderer_file_in_dot_claude_under_home() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let default_file = declare_renderer(&home.join(".claude"), "persons-renderer");
+        let file = renderer_file(false, None, Some(home.clone())).unwrap();
+        assert_eq!(file, default_file);
+        assert_eq!(renderer_command_in(&file).as_deref(), Some("persons-renderer"));
+        // A Claude folder named in the environment does not move a default install's lookup.
+        let elsewhere = root.path().join("elsewhere");
+        declare_renderer(&elsewhere, "other-renderer");
+        assert_eq!(renderer_file(false, Some(elsewhere), Some(home)).unwrap(), default_file);
+    }
+
+    #[test]
+    fn an_instance_reads_the_renderer_file_in_its_own_claude_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let default_file = declare_renderer(&home.join(".claude"), "persons-renderer");
+        let instance_claude = root.path().join("instance").join("claude");
+        let instance_file = declare_renderer(&instance_claude, "instance-renderer");
+        let file = renderer_file(true, Some(instance_claude), Some(home)).unwrap();
+        assert_eq!(file, instance_file);
+        assert_ne!(file, default_file);
+        assert_eq!(renderer_command_in(&file).as_deref(), Some("instance-renderer"));
+    }
+
+    #[test]
+    fn an_instance_without_its_own_file_does_not_fall_back_to_the_default_one() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let default_file = declare_renderer(&home.join(".claude"), "persons-renderer");
+        let instance_claude = root.path().join("instance").join("claude");
+        fs::create_dir_all(&instance_claude).unwrap();
+        let file = renderer_file(true, Some(instance_claude), Some(home.clone())).unwrap();
+        assert_ne!(file, default_file);
+        assert_eq!(renderer_command_in(&file), None);
+        // No Claude folder at all: nothing is looked up, and the default file is not offered.
+        assert_eq!(renderer_file(true, None, Some(home.clone())), None);
+        assert_eq!(renderer_file(true, Some(PathBuf::new()), Some(home)), None);
     }
 }

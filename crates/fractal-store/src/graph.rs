@@ -127,41 +127,85 @@ pub fn validate_mission_runtimes(
     intent: &NormalizedIntent,
     default_host: &str,
 ) -> Result<BTreeSet<String>, St3Error> {
+    type Lanes = BTreeMap<String, Option<fractal_runtime::Capacity>>;
+
     fn validate_mission(
         mission: &crate::model::MissionSpec,
         default_host: &str,
         subjects: &mut BTreeSet<String>,
+        beside: &Lanes,
     ) -> Result<(), St3Error> {
         fn validate_source(
             source: &str,
+            capacity: Option<fractal_runtime::Capacity>,
             variables: &BTreeMap<String, String>,
             default_host: &str,
             subjects: &mut BTreeSet<String>,
+            lanes: &mut Lanes,
         ) -> Result<(), St3Error> {
             let source = crate::mission::interpolate_kdl(source, variables)?;
+            let source = crate::mission::with_mission_capacity(&source, capacity)?;
             let runtime = parse_execution_intent(&source, default_host, "migration-proof")?;
             subjects.extend(runtime.subjects.keys().cloned());
+            lanes.extend(agent_lanes(&runtime.subjects));
             Ok(())
         }
 
         let variables = runtime_proof_variables(mission);
+        let mut lanes = beside.clone();
         if let Some(source) = &mission.declarations_kdl {
-            validate_source(source, &variables, default_host, subjects)?;
+            validate_source(source, mission.capacity, &variables, default_host, subjects, &mut lanes)?;
         }
         for step in mission.steps.values() {
             if let Some(source) = &step.declarations_kdl {
-                validate_source(source, &variables, default_host, subjects)?;
+                validate_source(source, mission.capacity, &variables, default_host, subjects, &mut lanes)?;
             }
+        }
+        validate_step_capacities(mission, &variables, &lanes)?;
+        for step in mission.steps.values() {
             if let Some(nested) = &step.nested_mission {
-                validate_mission(nested, default_host, subjects)?;
+                validate_mission(nested, default_host, subjects, beside)?;
             }
         }
         Ok(())
     }
 
+    fn agent_lanes(subjects: &BTreeMap<String, DesiredSubject>) -> impl Iterator<Item = (String, Option<fractal_runtime::Capacity>)> + '_ {
+        subjects.iter()
+            .filter(|(_, desired)| desired.kind == "agent")
+            .filter_map(|(subject, desired)| desired.member.as_ref().map(|member| (subject.clone(), member.capacity)))
+    }
+
+    /// A step only raises the lane of a seat declared in this publication; one declared elsewhere
+    /// is held to the same rule when the step is delivered.
+    fn validate_step_capacities(
+        mission: &crate::model::MissionSpec,
+        variables: &BTreeMap<String, String>,
+        lanes: &Lanes,
+    ) -> Result<(), St3Error> {
+        for step in mission.steps.values() {
+            let Some(raise) = step.capacity else { continue };
+            let agents = match step.work_selector.as_ref().or(mission.work_selector.as_ref()) {
+                Some(crate::model::WorkSelector::Assigned { agent }) => std::slice::from_ref(agent),
+                Some(crate::model::WorkSelector::Available { agents }) => agents.as_slice(),
+                _ => &[],
+            };
+            for agent in agents {
+                let agent = crate::mission::interpolate(agent, variables)?;
+                let Some(base) = lanes.get(&agent) else { continue };
+                // An undeclared seat counts at the base lane.
+                raise.over(base.unwrap_or(fractal_runtime::Capacity::DEFAULT)).map_err(|error| {
+                    St3Error::new("invalid-capacity", format!("step `{}` for `{agent}`: {error:#}", step.path))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    let beside = agent_lanes(&intent.subjects).collect::<Lanes>();
     let mut subjects = BTreeSet::new();
     for mission in intent.missions.values() {
-        validate_mission(mission, default_host, &mut subjects)?;
+        validate_mission(mission, default_host, &mut subjects, &beside)?;
     }
     Ok(subjects)
 }
@@ -1373,6 +1417,7 @@ fn parse_agent(
             shutdown_timeout_ms,
             driver: None,
             terminal_size: None,
+            capacity: None,
         });
     }
 
@@ -1384,6 +1429,7 @@ fn parse_agent(
                 "render",
                 "fresh-context",
                 "one-shot",
+                "capacity",
                 "pty",
                 "exec",
                 "rollout",
@@ -1437,6 +1483,9 @@ fn parse_agent(
 
     if let Some(member) = primary.as_mut() {
         member.one_shot = unique_child(children, "one-shot")?.is_some();
+        member.capacity = unique_child(children, "capacity")?
+            .map(parse_capacity)
+            .transpose()?;
         member.tags.extend(parse_tags(children)?);
         member.tags.insert("st3.subject".into(), subject.clone());
         if fresh_context {
@@ -1880,8 +1929,18 @@ fn validate_account_binding(
 
 fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
     ensure_no_properties(node)?;
-    ensure_no_children(node)?;
-    let subject = one_string(node)?;
+    let subject = one_string_with_children(node)?;
+    // Why the seat stops, as its author gave it: the card shows it beside who stopped it.
+    let reason = match node.children() {
+        Some(children) => {
+            reject_unknown_children(children, &["reason"], "stop", &subject)?;
+            child_string(children, "reason")?
+        }
+        None => None,
+    };
+    if reason.as_deref().is_some_and(|reason| reason.trim().is_empty()) {
+        return Err(St3Error::new("empty-stop-reason", "a stop reason cannot be blank"));
+    }
     if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty")) {
         return Err(St3Error::new(
             "invalid-stop-subject",
@@ -1906,7 +1965,11 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
             accountable: None,
             subject: subject.clone(),
             kind: "stop".into(),
-            desired: json!({ "stop": subject }),
+            // A stop without a reason keeps the exact declaration, and revision, it always had.
+            desired: match reason {
+                Some(reason) => json!({ "stop": subject, "reason": reason }),
+                None => json!({ "stop": subject }),
+            },
             member: None,
             owner_run: context.owner_run.clone(),
             owner_generation: None,
@@ -2113,6 +2176,7 @@ fn driver_member(
         shutdown_timeout_ms,
         driver: Some(name),
         terminal_size: None,
+        capacity: None,
     })
 }
 
@@ -2205,6 +2269,7 @@ fn task_member(
         shutdown_timeout_ms,
         driver: None,
         terminal_size: None,
+        capacity: None,
     })
 }
 
@@ -2318,6 +2383,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "fresh-context",
         "bind-terminal",
         "one-shot",
+        "capacity",
         "handles-faults",
         "accountable",
         "mission-authority",
@@ -2361,6 +2427,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "fresh-context",
         "bind-terminal",
         "one-shot",
+        "capacity",
         "handles-faults",
         "accountable",
         "mission-authority",
@@ -4894,6 +4961,158 @@ agent "seat" {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn capacity_declares_the_seats_lane_and_an_undeclared_seat_has_none() {
+        let seat = |body: &str| {
+            parse_intent(
+                &format!("version 2\nagent \"example/laned\" {{ {body} harness \"omp\" {{}}; exec \"helper\" {{ command \"true\" }} }}"),
+                "node",
+            )
+        };
+        let intent = seat(r#"capacity cores=2 memory="4G";"#).unwrap();
+        let member = intent.subjects["agent/example/laned"].member.as_ref().unwrap();
+        assert_eq!(
+            member.capacity,
+            Some(fractal_runtime::Capacity { cores: 2, memory: 4 << 30 })
+        );
+        // The lane is the seat's; a task the agent declares beside it is not in it.
+        assert!(intent.subjects["exec/example/laned/helper"].member.as_ref().unwrap().capacity.is_none());
+        assert_eq!(
+            seat("capacity cores=3;").unwrap().subjects["agent/example/laned"].member.as_ref().unwrap().capacity,
+            Some(fractal_runtime::Capacity { cores: 3, ..fractal_runtime::Capacity::DEFAULT })
+        );
+        // No declaration: no lane, and the stored member is byte-for-byte what it was before.
+        let undeclared = seat("").unwrap();
+        let undeclared = undeclared.subjects["agent/example/laned"].member.as_ref().unwrap();
+        assert!(undeclared.capacity.is_none());
+        assert!(serde_json::to_value(undeclared).unwrap().get("capacity").is_none());
+        // A mission's own agent declares its lane the same way.
+        let mission = |capacity: &str| {
+            parse_intent(
+                &format!("version 2\nmission \"example/laned\" state=\"ready\" {{\n  goal \"Work.\"\n  agent \"worker\" {{\n    {capacity}\n    command \"true\"\n  }}\n  step \"work\" {{\n    assigned-to \"agent/${{ST_MISSION_RUN}}/worker\"\n    goal \"Work.\"\n  }}\n}}\n"),
+                "node",
+            )
+        };
+        mission(r#"capacity cores=2 memory="4G""#).unwrap();
+        assert!(mission(r#"capacity disk="1G""#).is_err());
+        for invalid in [
+            "capacity \"big\";",
+            "capacity cores=0;",
+            "capacity cores=-1;",
+            "capacity cores=1.5;",
+            "capacity memory=\"4X\";",
+            "capacity memory=\"64M\";",
+            "capacity disk=\"1G\";",
+            "capacity cores=1 { memory \"1G\"; };",
+            "capacity cores=1; capacity cores=2;",
+        ] {
+            assert!(seat(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn a_mission_lanes_its_agents_and_a_step_only_raises_its_seats_lane() {
+        const G: u64 = 1 << 30;
+        let mission = |mission_capacity: &str, step: &str| {
+            parse_intent(
+                &format!(
+                    "version 2\nagent \"example/beside\" {{ capacity cores=4; command \"true\" }}\nmission \"example/laned\" state=\"ready\" {{\n  goal \"Work.\"\n  {mission_capacity}\n  agent \"worker\" {{ command \"true\" }}\n  agent \"big\" {{ capacity cores=4 memory=\"8G\"; command \"true\" }}\n  step \"work\" {{\n    goal \"Work.\"\n    {step}\n  }}\n}}\n"
+                ),
+                "node",
+            )
+        };
+        let worker = r#"assigned-to "agent/${ST_MISSION_RUN}/worker""#;
+
+        // The mission's lane goes to each of its agents that declares none of its own.
+        let intent = mission(r#"capacity cores=2 memory="4G""#, worker).unwrap();
+        let spec = &intent.missions["example/laned"];
+        assert_eq!(spec.capacity, Some(fractal_runtime::Capacity { cores: 2, memory: 4 * G }));
+        let source = crate::mission::interpolate_kdl(
+            spec.declarations_kdl.as_deref().unwrap(),
+            &runtime_proof_variables(spec),
+        )
+        .unwrap();
+        let source = crate::mission::with_mission_capacity(&source, spec.capacity).unwrap();
+        // Only the lane is added; the rest is the author's text.
+        let kept = "version 2\nagent \"worker\"  {   command \"true\" // kept\n}\n";
+        let added = crate::mission::with_mission_capacity(kept, spec.capacity).unwrap();
+        assert!(added.starts_with("version 2\nagent \"worker\"  {   command \"true\" // kept\n"), "{added}");
+        assert!(parse_execution_intent(&added, "node", "migration-proof").unwrap().subjects
+            .values().any(|desired| desired.member.as_ref().is_some_and(|member| member.capacity == spec.capacity)));
+        let seats = parse_execution_intent(&source, "node", "migration-proof").unwrap();
+        let lane = |name: &str| seats.subjects[&format!("agent/migration-proof/{name}")].member.as_ref().unwrap().capacity;
+        assert_eq!(lane("worker"), Some(fractal_runtime::Capacity { cores: 2, memory: 4 * G }));
+        assert_eq!(lane("big"), Some(fractal_runtime::Capacity { cores: 4, memory: 8 * G }));
+        // Without one, the declarations are what the author wrote and nothing more is stored.
+        let undeclared = mission("", worker).unwrap();
+        let undeclared = &undeclared.missions["example/laned"];
+        assert!(matches!(
+            crate::mission::with_mission_capacity("version 2", undeclared.capacity).unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let stored = serde_json::to_value(undeclared).unwrap();
+        assert!(stored.get("capacity").is_none());
+        assert!(stored["steps"]["work"].get("capacity").is_none());
+
+        // A step raises what it names and keeps the rest of its seat's lane.
+        let raised = mission(r#"capacity cores=2 memory="4G""#, &format!("{worker}\n    capacity memory=\"16G\"")).unwrap();
+        assert_eq!(
+            raised.missions["example/laned"].steps["work"].capacity,
+            Some(fractal_runtime::Raise { cores: None, memory: Some(16 * G) })
+        );
+        // It may not lower the lane of a seat this publication declares, wherever its lane comes
+        // from: the mission, the agent itself, an agent beside the mission, or the base lane.
+        for (mission_capacity, step) in [
+            (r#"capacity cores=2 memory="4G""#, format!("{worker}\n    capacity memory=\"2G\"")),
+            ("", r#"assigned-to "agent/${ST_MISSION_RUN}/big"
+    capacity cores=2"#.to_owned()),
+            ("", r#"available-to "agent/example/beside"
+    capacity cores=2"#.to_owned()),
+            ("", format!("{worker}\n    capacity memory=\"2G\"")),
+        ] {
+            let error = mission(mission_capacity, &step).unwrap_err();
+            assert_eq!(error.code, "invalid-capacity", "{step}");
+            assert!(error.message.contains("a step may only raise its seat's lane"), "{}", error.message);
+        }
+        mission("", &format!("{worker}\n    capacity memory=\"3G\"")).unwrap();
+        // A seat declared elsewhere is checked when the step is delivered.
+        mission("", "assigned-to \"agent/example/elsewhere\"\n    capacity cores=1").unwrap();
+
+        for (mission_capacity, step) in [
+            ("", "agentless\n    capacity cores=2"),
+            ("", &format!("{worker}\n    capacity")),
+            ("", &format!("{worker}\n    capacity cores=0")),
+            ("", &format!("{worker}\n    capacity cores=2\n    capacity cores=3")),
+            ("capacity cores=2\n  capacity cores=3", worker),
+            ("capacity cores=0", worker),
+        ] {
+            assert!(mission(mission_capacity, step).is_err(), "{mission_capacity} / {step}");
+        }
+    }
+
+    #[test]
+    fn a_revision_of_only_a_missions_capacity_changes_its_header() {
+        let spec = |capacity: &str| {
+            parse_intent(
+                &format!("version 2\nmission \"example/laned\" state=\"ready\" revisions=\"human-only\" revision-reviewer=\"person/reviewer\" {{\n  goal \"Work.\"\n  {capacity}\n  step \"work\" {{\n    agentless\n    goal \"Work.\"\n  }}\n}}\n"),
+                "node",
+            )
+            .unwrap()
+            .missions
+            .remove("example/laned")
+            .unwrap()
+        };
+        for (old, new) in [("", "capacity cores=2"), ("capacity cores=2", "capacity cores=3"), ("capacity cores=2", "")] {
+            // Accepted, with the header's reviewers, and the step itself carries unchanged.
+            let (compatible, reviewers) =
+                crate::store::analyze_mission_revision(&spec(old), &spec(new), "person/requester").unwrap();
+            assert_eq!(compatible, BTreeSet::from(["work".to_owned()]), "{old} -> {new}");
+            assert!(reviewers.contains("person/reviewer"), "{old} -> {new}: {reviewers:?}");
+        }
+        let unchanged = crate::store::analyze_mission_revision(&spec(""), &spec(""), "person/requester").unwrap_err();
+        assert_eq!(unchanged.code, "unchanged-mission-revision");
     }
 
     #[test]

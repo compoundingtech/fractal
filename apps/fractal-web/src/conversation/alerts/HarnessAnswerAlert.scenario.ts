@@ -41,9 +41,9 @@ export const harnessAskConversation = (source: ConversationThread): Conversation
         },
       ],
     },
-  }).map(item => ({
+  }).map(item => item.type === 'message' ? {
     ...item,
-    body: { ...item.body, blocks: [{ id: `block/${source.agent}/omp-ask`, kind: 'tool_call', source_type: 'omp', payload: { body_ref: true } }] },
-  }))
+    body: { ...item.body, blocks: [{ id: `block/${source.agent}/omp-ask`, kind: 'tool_call' as const, source_type: 'omp', payload: { body_ref: true } }] },
+  } : item)
   return { ...source, items, page_size: items.length, has_more: false }
 }

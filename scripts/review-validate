@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Check a review verdict against .st/review-verdict.schema.json and the rules a schema cannot say.
+"""Check a review verdict against .fractal/review-verdict.schema.json (.st only if absent) and the rules a schema cannot say.
 
-  review-validate VERDICT.json [--schema FILE]     exit 0 when it parses and validates; otherwise print every problem, exit 1
+  review-validate VERDICT.json [--schema FILE] [--previous FILE]     exit 0 when it parses and validates; otherwise print every problem, exit 1
 
 The schema language is the subset the schema uses (type, enum, required, properties, additionalProperties, items, minItems,
 minLength, pattern, minimum, maximum, $ref into #/definitions), so nothing outside the standard library is needed. Then:
 risk.final is the higher of risk.deterministic.level and risk.llm.level; a GO has no blocking finding and a CHANGES has at least one;
-a round after the first answers an earlier finding with a change.
+a round after the first answers an earlier finding with a change, unless the earlier verdict (--previous) was a GO, which left
+nothing to answer: a delta read after a GO, such as a merge of main that resolved a conflict, has no finding to answer.
 """
 import argparse
 import json
@@ -15,7 +16,20 @@ import re
 import sys
 sys.dont_write_bytecode = True
 
-SCHEMA = Path(__file__).resolve().parent.parent / ".st/review-verdict.schema.json"
+ROOT = Path(__file__).resolve().parent.parent
+SCHEMA = ROOT / ".st/review-verdict.schema.json"
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config
+def schema_path():
+    new = ROOT / ".fractal/review-verdict.schema.json"
+    try:
+        new.lstat()
+    except FileNotFoundError:
+        return SCHEMA
+    return new
+
+
 ORDER = {"low": 0, "medium": 1, "high": 2}
 TYPES = {
     "object": lambda value: isinstance(value, dict),
@@ -76,7 +90,7 @@ def check(root, schema, value, where, problems):
                 check(root, extra, item, f"{where}.{name}", problems)
 
 
-def semantic(verdict, problems):
+def semantic(verdict, problems, previous=None):
     risk = verdict["risk"]
     floor = max(risk["deterministic"]["level"], risk["llm"]["level"], key=ORDER.get)
     if risk["final"] != floor:
@@ -84,34 +98,46 @@ def semantic(verdict, problems):
     for reason in risk["deterministic"]["reasons"]:
         if ORDER[reason["level"]] > ORDER[risk["deterministic"]["level"]]:
             problems.append(f"risk.deterministic: level {risk['deterministic']['level']!r} is lower than the reason {reason['rule']!r} ({reason['level']!r})")
+    if "needs_factory_read" in risk:
+        wanted = risk["final"] == "medium" and bool(risk["deterministic"].get("factory_read"))
+        if risk["needs_factory_read"] != wanted:
+            problems.append(f"risk.needs_factory_read: {risk['needs_factory_read']!r} but final risk {risk['final']!r} with "
+                            f"{len(risk['deterministic'].get('factory_read') or [])} area(s) makes it {wanted!r}")
     blocking = [finding for finding in verdict["findings"] if finding["severity"] == "blocking"]
     if verdict["verdict"] == "GO" and blocking:
         problems.append(f"verdict: GO with {len(blocking)} blocking finding(s)")
     if verdict["verdict"] == "CHANGES" and not blocking:
         problems.append("verdict: CHANGES without a blocking finding")
-    if verdict["round"] > 1 and not verdict.get("answers"):
+    after_a_go = previous is not None and previous.get("verdict") == "GO"
+    if verdict["round"] > 1 and not verdict.get("answers") and not after_a_go:
         problems.append("answers: a round after the first must say which change answers which finding")
 
 
-def validate(verdict, schema):
+def validate(verdict, schema, previous=None):
     problems = []
     check(schema, schema, verdict, "verdict", problems)
     if not problems:
-        semantic(verdict, problems)
+        semantic(verdict, problems, previous)
     return problems
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("verdict", type=Path)
-    parser.add_argument("--schema", type=Path, default=SCHEMA)
+    parser.add_argument("--schema", type=Path)
+    parser.add_argument("--previous", type=Path, help="the earlier verdict this round follows")
     args = parser.parse_args()
     try:
         verdict = json.loads(args.verdict.read_text())
     except (OSError, ValueError) as error:
         print(f"review-validate: {args.verdict} does not parse: {error}", file=sys.stderr)
         return 1
-    problems = validate(verdict, json.loads(args.schema.read_text()))
+    try:
+        previous = json.loads(args.previous.read_text()) if args.previous else None
+    except (OSError, ValueError) as error:
+        print(f"review-validate: {args.previous} does not parse: {error}", file=sys.stderr)
+        return 1
+    problems = validate(verdict, json.loads((args.schema or schema_path()).read_text()), previous)
     for problem in problems:
         print(f"review-validate: {problem}", file=sys.stderr)
     return 1 if problems else 0

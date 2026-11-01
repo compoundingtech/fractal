@@ -373,6 +373,21 @@ Namespace as overflow for ordinary PRs. The second test shard and supporting job
 macOS CI is currently disabled; its retained workflow is not a required check.
 See [CI operations](ci.md) for stage scope, routing, caches, and failure inspection.
 
+The `perf-cost` messaging-faults fixture applies its recipient on the receiving node,
+then waits for both provider readiness there and a successful native recipient
+preflight on the sending node before its cross-node warmup. Local provider readiness
+and agent-card visibility do not prove the sender's materialized recipient state is
+ready; the fixture polls the same `/v1/messages/recipient` endpoint as native sends.
+The subsequent fault and delivery deadline remain unchanged.
+
+Changes to `docs/site/**` on `main` notify `compoundingtech/private` to deploy
+fractal.how. The docs notification workflow mints a repository-scoped GitHub App
+token using this repository's `SITE_CI_APP_ID` variable and
+`SITE_CI_APP_PRIVATE_KEY` secret. The App must be installed on
+`compoundingtech/private` with Contents: write permission for repository dispatches.
+The website deploy separately mints a read-only token for `compoundingtech/fractal`
+and reads the documentation from `main`, not from the dispatch payload.
+
 The standalone Rust client's generated `crates/fractal-client/src/lib.rs` must be
 regenerated with `cargo run -p fractal-client-codegen`, including after changes to
 directory discovery. Commit the generator's exact output rather than hand-formatting

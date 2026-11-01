@@ -1593,8 +1593,17 @@ mod tests {
 
         tx.send(Ok(r#"{"type":"state","state":"active"}"#.to_string()))
             .unwrap();
+        // Hang up once a heartbeat has re-stamped the record, not after a fixed sleep: on a loaded
+        // host the loop could first run after the sleep, see EOF and return before any heartbeat.
+        let watched = record.clone();
         let disconnect = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(40));
+            while !std::fs::read(&watched)
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+                .is_some_and(|raw| raw["writtenAtMs"].as_u64() > raw["sinceMs"].as_u64())
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
             drop(tx);
         });
         let mut out = Vec::new();

@@ -41,7 +41,13 @@ peer holds. Every node computes the same graph from the same admitted claims. Th
 the table at startup and hourly: rows older than `[observations] retention` (default `7d`, at
 least `1h`) and rows beyond `max_per_subject_kind` (default 20,000) go. The newest row of each
 subject and kind stays. An older build that still writes such a kind as a claim replicates it as
-before, and readers merge those claims with the local rows.
+before, and readers merge those claims with the local rows. `daemon.diagnostic` is local: no
+control logic reads it, so a daemon's diagnostics (reconcile failures, kill survivors, checkpoint
+proof and trim failures) stay in its local log, and its OpenTelemetry logs carry them when a
+collector is configured. `/v1/claims` and `st trace show` list only those older builds wrote.
+`harness.diagnostic` is split by code (`local_codes` in retention.toml): its observability codes
+are local in the same way, and the seat's conversation timeline on its own node still shows them.
+Its control codes stay claims.
 
 A kind of `system-local` retention is local when the system records it without an actor and a
 claim when a person or agent writes it as its actor. The reconciler's own `runtime.action.*`
@@ -57,7 +63,13 @@ may drop the claims each newer one replaced. `harness.observed` replicates when 
 than `observed_at_ms` changes. `harness.usage` replicates the first reading of each incarnation and
 semantics, a compaction or model change, a reading at least five minutes after the last replicated
 one while the harness works, and any reading while it does not. The newest pending reading
-replicates when the harness stops working.
+replicates when the harness stops working. Response rollups are an exception, below. Context
+occupancy that says how full the window is (a percent, or used and window tokens) is the other:
+it replicates its first reading, a reading at least 5 points of the window from the replicated
+one, a compaction or model change, and the last reading when the seat ends or its step completes,
+fails or is released; a reading after the seat ended replicates at once. The readings
+between stay pending in the host's local log, and the host's agent cards fold them, so its own
+cards stay exact; other members' cards stay within 5 points.
 
 A node can also send every local observation to an OpenTelemetry collector. The exporter is off
 unless the config names a collector:
@@ -73,15 +85,49 @@ Each local observation becomes one OTLP log record in OTLP/HTTP JSON:
 - the record's timestamp is the observation time, and its body holds the fields;
 - its attributes are `st3.subject`, `st3.kind`, `st3.actor`, `st3.incarnation_id` and
   `st3.local_id`;
-- the resource names `service.name = st` and `st3.node`; the scope is `st.observations`.
+- the resource names `service.name = st-daemon` and `st3.node`; the scope is `st.observations`.
+
+This log is the full harness telemetry series. Every `harness.observed`, `harness.usage` and
+`harness.limits` reading lands in the local observation log, including the readings the graph
+keeps local because they change no current value, so the collector receives each one with its
+subject and incarnation. Nothing in the graph depends on that series: the graph keeps each
+seat's current state and usage, and each account's current limits. The same batches also post
+`st_account_limit_used_percent` on `/v1/metrics`, a gauge of the newest reading of each driver,
+account and window (`five_hour` or `weekly`); seat identities appear only in the log records.
+
+Each node also counts the rows it stores into its claims table, written here or received from a
+peer, per kind and writing node: a trigger on claim insert adds to the node-local `claims_stored`
+totals in the same transaction. Deleting claims (local trim, checkpoints) never lowers them, so they
+stay a true storage rate after superseded claims are gone; counting the claims that survive in the
+store would not. An ignored `INSERT OR IGNORE` (a duplicate, or a retired claim refused on
+re-admission) stores and counts nothing; a repair that deletes a claim and inserts it again counts
+it again. The totals are node-local: they are not replicated, not part of any digest, and not in
+backups; a restore stores its claims again, counts them, and starts a new series. The exporter
+sends them as `st_claims_stored_total` and `st_claim_body_bytes_stored_total`, cumulative sums
+labelled `kind` and `writer`, whenever they changed; each series starts when the node first stored
+that kind from that writer.
 
 Claude and Codex response token buckets are `harness.timeline` usage observations. They retain
 the turn ID, model, agent, mission run, and step on the producing node. `local_usage_responses` remembers
 each counted provider response, so replay across harness incarnations does not count it again;
 `local_usage_spend` keeps cumulative buckets per agent incarnation, model, account, mission run and
 step, and host even after the observation log is trimmed, and `local_usage_provenance` their pricing. The node replicates
-`harness.usage` response rollups by agent, incarnation, model, mission step, and host. Fleet usage
-queries subtract the last rollup before a period from the last rollup inside it.
+`harness.usage` response rollups by agent, incarnation, model, mission step, and host: each
+series' first reading, then the last reading of each UTC hour once that hour is over (on the
+series' next reading or the resting seat's next re-stamp), and its final totals when the seat
+ends or its step completes, fails or is released: the run is judged on its origin, and a loop's
+token budget reads the seat's replicated usage then. A reading after the seat ended, or from an
+incarnation a restart replaced, replicates at once. The hourly local trim replicates any rollup
+whose hour is over first, for a seat that stopped re-stamping, and never deletes a reading a slot
+still waits on. The readings between stay pending in the host's local log. Fleet usage queries subtract the
+last rollup before a period from the last rollup inside it, so they are exact to the hour. On the
+seat's host, a period also counts every reading since each series' last replication, and the
+agent, mission and run cards fold the newest, so current totals and any boundary since then are
+exact there; other members lag by up to about an hour. Card reads pass the request's snapshot
+index, and a read at that index counts as current. The host finds the readings since a slot's last
+publication by local arrival time, so after the clock steps back they stay hidden from its reads
+until it catches up; they still replicate. A configured OpenTelemetry collector
+receives every response.
 
 Claude event hooks submit `harness.telemetry` observations to their local daemon. They retain
 the counter recorded at the shared hook's actual application point, bounded warning/error logs,
@@ -108,6 +154,12 @@ publishes a backlog. Admission binds the Unix peer to its seat and checks the pu
 inside the daemon's writer transaction. Source runtime, spool sequence, claim kind and usage
 semantics identify an exact retry; changed input is rejected. Graph-derived claim fields are
 persisted in the spool before the first HTTP attempt so retries preserve their original attribution.
+Byte-identical snapshot reports leave both the snapshot and event queue untouched after ownership
+validation. WAL commits retain full synchronization and SQLite's default 1,000-page automatic
+checkpoint threshold. Connections defer last-close checkpoints only while the existing WAL is
+below a 1,000-page byte budget (32-byte header plus 1,000 page frames). At or above that budget,
+SQLite's ordinary last-close checkpoint remains enabled. This also recycles the WAL across
+zero-connection gaps, when SQLite rebuilds shared-memory backfill/restart state.
 
 Authority reads reuse up to 128 harness-spool SQLite connections across the process, with
 at most 64 per thread. At either limit a thread evicts its least recently used connection;
@@ -122,8 +174,10 @@ The outbox is transport recovery state, not graph authority. The daemon retains 
 observation under its existing local/latest/durable policy. Producer snapshots remain local
 coalescing and ownership evidence; timeline producers read only the previous matching entry and
 latest status instead of parsing/replacing a retained JSON log. That auxiliary timeline history
-is bounded to 4,096 operations and 2 MiB, independently of unacknowledged events. An outbox with 64 MiB of pending payload
-rejects a producer transaction and reports the failure rather than dropping queued events.
+is exposed as at most 4,096 operations and 2 MiB, independently of unacknowledged events.
+Physical retention permits up to 256 additional operations or 128 KiB before deleting a batch;
+readers do not expose that slack. An outbox with 64 MiB of pending payload rejects a producer
+transaction and reports the failure rather than dropping queued events.
 An evidence deadline queues derived unknown once after fifteen minutes without fresh state;
 a concurrent heartbeat supersedes that deadline. Native transcripts and session bindings retain
 their existing source paths.
@@ -247,6 +301,7 @@ order from the same admitted claims.
 | `local_glass_head_pending` | Local | Glass-head projection work queue. |
 | `local_idle_messages` | Local | Disposable message delivery and source-wake index, maintained by claim writes and backfilled in bounded startup batches. Excluded from replicated projection digests. |
 | `local_latest_slots` | Local | Local latest-retention publication slots and pending local observation pointers. |
+| `claims_stored` | Local | Claims stored here per kind and writing node and their body bytes, counted on insert and never lowered by deletes; not replicated, in no digest, not in backups. |
 | `local_limit_stops` | Local | Seats this node's limits policy stopped, once per account and weekly window. |
 | `local_mailbox_argv_bindings` | Local | Launch-argv binding evidence for native mailbox ownership. |
 | `local_mailbox_bindings` | Local | Stable binding request tokens mapped to daemon-allocated epochs. Lost acknowledgements retry the same binding; retired tokens cannot allocate a successor. Excluded from replicated projection digests. |
@@ -254,6 +309,7 @@ order from the same admitted claims.
 | `local_mailbox_owners` | Local | This daemon's native socket subscription owner, live runtime incarnation and replacement epoch. Survives daemon restart; excluded from replicated projection digests. |
 | `local_native_delivery_receipts_v2` | Local | Qualified native session/record identities and receipt-meaning fingerprints attached to an actual newly committed message.read claim in its existing native-authority savepoint. No transcript/envelope payload; not replicated, a claim backup or a shared projection/digest. Normal reopen and unchanged-claim projection rebuild preserve it; receipt identity/meaning mutation or deletion retires it. Missing/ambiguous/unprovable bindings produce no optional timeline link; readers never backfill it. |
 | `local_observations` | Local | Local-retention observations and their local frontier/id; never replicated. |
+| `local_ordered_membership_pending` | Local | Deduplicated lifecycle invalidations drained in the writer transaction; no independent authority. |
 | `client_diagnostic_receipts` | Local operational fact | Paired-device diagnostic retry receipts and admission accounting; retained for 30 days independently of local observations, never replicated or included in projection digests. |
 | `local_publication_claims`, `local_publication_starts`, `local_publication_pending`, `local_publication_batches`, `local_publication_bootstrap`, `local_publication_launch_epoch` | Local derived state | Rebuildable retained runtime and incarnation launch evidence, canonical keys, exact delta and coalesced batch queues, cache generation, and durable bootstrap cursor. Outside replicated digests; missing or incomplete evidence is Unknown. |
 | `local_resource_projection_pending` | Local projection work queue | Resource subjects whose admitted observations changed in the current transaction; flushed before commit |
@@ -274,6 +330,10 @@ order from the same admitted claims.
 | `mission_run_requests` | Local | Local original request-hash cache paired with idempotency; run identities in the request API are origin-scoped. |
 | `mission_runs` | Shared projection | Shared run creation inputs, hierarchy, ownership, workspace, requester, mode, status/phase and durable timestamps. Digest full logical row, not just status columns. |
 | `operations` | Shared projection | Shared operation identity, canonical claim, request digest and conflict state, derived from live claims plus tombstones. After trim, operations with no live claim are served by tombstones. |
+| `ordered_membership_counts` | Shared projection | Transactional live count; `changed_index` is a local invalidation frontier and excluded from the digest. |
+| `ordered_membership_heads` | Shared projection | Raw nullable position, winning revision and complete canonical winner bytes; hidden and absent heads remain represented. |
+| `ordered_membership_lifecycle` | Shared projection | Authoritative visibility and selected declaration/retirement revision for each referenced member and container. |
+| `ordered_membership_live` | Shared projection | Lifecycle-visible effective `(container, bucket, key, member)` ordering and pair revision. Root is indexed as the empty bucket; member identity breaks equal-key ties. |
 | `peer_cursors` | Local | Local per-peer legacy transport progress. |
 | `peer_replica_cursors` | Local | Local per-peer/per-writer transport progress. |
 | `person_directive_notes` | Shared projection | Current person-authored directive notes derived from claims. |
@@ -291,10 +351,10 @@ order from the same admitted claims.
 | `replica_records` | Shared storage, with stated local fields | Shared raw record/position/claim identity and replicated repair meaning; admission status/errors/updated_at are local. Normalize from retained records plus tombstones; never compare physical receipt rows. |
 | `claim_positions` | Shared storage | Each claim's canonical batch position: stored at admission, lowered only by a later record of the same claim, frozen before a claim or record deletion could renumber it, and never deleted. An input of canonical order, not a projection; it is not compared or exchanged. |
 | `repaired_claim_replacements` | Local storage | Each repaired original claim's current replacement and record reference, copied by trigger from repaired records and kept after a checkpoint deletes the record; never deleted. The original's exclusion stays in `projection_digest_repaired_claims`; the authenticated meaning stays in `record.repaired` claims. |
-| `retired_claim_ids`, `retired_envelopes` | Shared storage | Exact identity sets of every claim ID and envelope identity a checkpoint table has held; they only grow. A SHA-256 hex identity is stored as its 32 bytes, any other value as its TEXT. Not yet read by admission or evidence; never compared or exchanged. |
-| `claim_range_digests` | Local storage | Count and order-independent digest of the retained claim IDs in each of 4,096 leaf and 64 top ranges, folded from `claim_range_pending`. A transport summary for claims sync, not authentication; not yet read or exchanged. |
-| `claim_range_pending`, `claim_range_import` | Local storage | Claim inserts and deletes queued by trigger until the background fold, and the cursor of the one-time fold of claims that predate the triggers. |
-| `retired_claim_withdrawals`, `retired_envelope_withdrawals` | Local storage | Retired identities a checkpoint table stopped holding (adoption keeping only a manifest), with the recording checkpoint, so a later conversion can judge them under the old recorded-state rules. |
+| `retired_claim_ids`, `retired_envelopes` | Shared storage | Exact identity sets of every claim ID and envelope identity a checkpoint table has held. A SHA-256 hex identity is stored as its 32 bytes, any other value as its TEXT. On a member with `[trim] local`, the authority for what it deleted: admission refuses them, its inventory lists them without payload, and it serves none of them; becoming the authority judges withdrawn and uncommitted recordings out once, and from then on an identity enters only as it is deleted, in the deleting transaction, so a cut that records and stops retires nothing. Otherwise they only grow. Not read by evidence. Members that trim locally exchange the retired claim IDs by claim-range walk, and each records what it lacked, so across those members the retired claim IDs only grow: nothing removes an ID once a peer has learned it. |
+| `claim_range_digests` | Local storage | Count and order-independent digest of the retained claim IDs (namespace 0) and the retired claim IDs (namespace 1) in each of 4,096 leaf and 64 top ranges, folded from `claim_range_pending` and `retired_range_pending`. A transport summary for claims sync, not authentication. |
+| `claim_range_pending`, `claim_range_import`, `retired_range_pending`, `retired_range_import` | Local storage | Claim and retired-ID inserts and deletes queued by trigger until the background fold, and the cursors of the one-time folds of IDs that predate the triggers. |
+| `retired_claim_withdrawals`, `retired_envelope_withdrawals` | Local storage | Retired identities a checkpoint table stopped holding (adoption keeping only a manifest), with the recording checkpoint. Spent when the ledger becomes a local-trim member's authority, which judges them no deletion. |
 | `retired_operation_receipts`, `retired_claim_ancestry` | Shared storage | Operation receipts and ancestry (subject, kind, predecessors) of every claim a checkpoint table has held; they only grow. Not yet read; retries, ancestry walks and seat history still read `checkpoint_claims`. |
 | `writer_heads` | Local storage | Each writer's highest (sequence, hash), raised on batch insert and stored before batch delete, never lowered or deleted. Local sequence allocation and the chain's previous hash read it with `batches`, so a trimmed head is never reused. |
 | `replication_peers` | Local | Local connectivity, peer digest observations, receive timings and errors. |
@@ -361,3 +421,193 @@ A cleanup infrastructure error produces `eval.verdict` with `verdict=void`.
 agent workspace reconciliation. It carries `host`, `workspace`, and an optional `repository`.
 The reconciler writes only changed values. Repository suggestions combine those observations
 with current checkout declarations; a gateway reads graph evidence and never scans host disks.
+
+## Ordered membership projections
+
+`ordered-membership.edited` claims on a declared container select one canonical LWW
+position or retained absence per `(container, member)`. These indexed pair records are
+not graph subjects and do not own their members. Their tables are listed above.
+
+The lifecycle registry beside the schema registry declares each supported family's
+visibility authority and container capability. Seats remain visible while running, stopped,
+offline or suspended; only a shared stop declaration hides them, and same-ID redeclaration
+restores an unchanged position. Unknown members are hidden without erasing their heads.
+Lifecycle invalidation follows the shared target reverse index, with work proportional to
+incoming containers. Folder deletion/lifting follows the existing arrangement resolver.
+Current keyset pages seek the materialized live order, never raw heads followed by dead-member
+filtering. Admission limits count live entries only; replication retains convergent overflow.
+Claim history, absent winners, hidden edges and folder tombstones have no new drop rule.
+
+Version-2 arrangements have folder-only bodies and consume ordered memberships.
+Version-1 placements remain intact and are not treated as empty membership pages or
+implicitly converted. Canonical-winner-preserving migration of existing placements is
+separate from this primitive. The combined layout identity is
+`st3.shared-projections.person-directive-notes-declared-resource-edges-ordered-membership.v1`; older layouts continue exchanging claims
+but do not compare incompatible projection maps.
+Concurrent v1/v2 creates preserve any unrepaired v1 creation or placement authority.
+Projection caches that effective layout in an existing explicit-version register; pure
+legacy layouts gain no synthetic register, and reads/admission use an indexed lookup.
+Repairing a retained arrangement or membership original rebuilds both dependent projections,
+including the container revision and reverse edges, so operations omitted by a replacement
+cannot remain visible. Incremental projection and rebuild both exclude repaired originals.
+Repairs advance local arrangement and membership invalidation watermarks stored in `meta`,
+even if the last arrangement or count row disappears. Bounded pages and held windows consult
+those watermarks after rebuild; they are not shared authority or digested projection fields. Repairing a referenced
+retained-claim member explicitly refreshes its lifecycle selection, because the repair does
+not mutate the original claims row or fire its lifecycle triggers.
+
+## Every store_index order
+
+Locations below refer to the audited commit, so later line-number changes do not invalidate the inventory. Shared rows must move to the canonical helper, including commutative enumerations whose returned ordering is observable. Local rows may retain arrival order only for the purpose stated.
+
+Added operational reader `outcome_history` is a local raw terminal-claim history page, using
+the serving node's claim index as its continuation cursor. It does not reduce shared state.
+Its recovered reasons and `mission_overview` reasons use canonical claim ordering; a local
+history cursor is not an exception for choosing a shared reason.
+
+| store.rs line | Function / constant | Scope | Reason |
+| --- | --- | --- | --- |
+| 810 | `AGENT_STATUS_INDEX_QUERY` | Local | Local snapshot/cache invalidation frontier; this index names what this node has seen. |
+| 2582 | `authoring_pull_request_runs_tx` | Shared | Shared association between an observed PR and authoring runs; first-seen deduplication affects returned order. |
+| 2659 | `claims_page_query` | Local | Local claim-log pagination with a node-specific cursor; shared reducers must not consume this arrival-ordered page as a fold. |
+| 2825 | `agent_projection_index` | Local | Local status-cache invalidation frontier; newest arrival relevant to the cache. |
+| 5750 | `open_reconcile_faults` | Shared | Shared fault/recovery facts folded by subject/scope even when filtered to one origin; origin filtering does not make replicated facts local. |
+| 5792 | `open_reconcile_fault_claim` | Shared | Shared selected fault/recovery claim for a subject/scope/origin. |
+| 5809 | `reconcile_fault` | Shared | Shared selected fault/recovery reason used by status and attention. |
+| 5933 | `mission_run_origin` | Shared | Shared creator/ownership attribution from the selected run-creation claim. |
+| 7095 | `work_action` | Local | Local lease-publication cadence; quiet renewals are host-owned. Durable work state and lease anchors remain shared. |
+| 9363 | `apply_operational_repair` | Shared | Shared durable repair receipt/winner and idempotent evidence; selection must be stable. |
+| 10057 | `events_after_bounded` | Local | Local event-stream cursor; events are notifications about admission on this node. |
+| 10077 | `events_tail_bounded` | Local | Local event-stream tail and presentation order. |
+| 10078 | `events_tail_bounded` | Local | Local event-stream tail and presentation order. |
+| 10123 | `projection_time_at` | Local | Local snapshot frontier timestamp. Do not use it as a shared winner or a cross-node timeless digest input. |
+| 10142 | `events_after_filtered` | Local | Local event-stream cursor, including filtered notifications. |
+| 10445 | `eval_runtime_records` | Shared | Shared desired/gate facts exported for evals; local test execution does not make desired selection shared-arrival-safe. |
+| 10483 | `eval_runtime_records` | Shared | Shared desired/gate facts exported for evals; local test execution does not make desired selection shared-arrival-safe. |
+| 10763 | `member_reconcile_fault` | Local | Local runtime.reconcile-decision observation at a local snapshot. |
+| 10796 | `member_reconcile_faults_for` | Local | Local runtime.reconcile-decision observation at a local snapshot. |
+| 10889 | `pending_observer_refresh_attempt` | Shared | Shared pending refresh selection; LIMIT 1 must select a canonical request. |
+| 10905 | `gate_request_for_owner` | Shared | Shared current gate request selection and approval fences. |
+| 11221 | `pending_attention_closed_by_condition` | Shared | Shared historical attention source/condition selection; derived-attention replaces current heuristics, but retained historical readers still need canonical order. |
+| 11318 | `attention_requests` | Shared | Shared attention history listing; preserve stable source order. |
+| 11350 | `pending_attention_requests_raised_by` | Shared | Shared pending attention source set, even for host-authored requests. |
+| 11502 | `attention_items` | Shared | Shared attention source selection/onset time and subscription-failure fold; acceptance time alone is not a total order. |
+| 11533 | `attention_items` | Shared | Shared attention source selection/onset time and subscription-failure fold; acceptance time alone is not a total order. |
+| 11697 | `selected_actual_origin` | Shared | Shared selected runtime/resource ownership attribution; must match canonical actual-state selection. |
+| 11712 | `selected_actual_origin` | Shared | Shared selected runtime/resource ownership attribution; must match canonical actual-state selection. |
+| 12396 | `pending_subscription_mission_requests` | Shared | Shared durable pending delivery requests; affects dispatch order and grouped attention sources. |
+| 12523 | `subscription_mission_deferral` | Shared | Shared legacy replicated deferral; distinct from local_subscription_mission_deferrals. |
+| 12568 | `pending_schedule_work_requests` | Shared | Shared pending schedule requests and action ordering. |
+| 12588 | `schedule_work_start_for_request` | Shared | Shared request disposition/start winner. |
+| 12627 | `usage_summary_at` | Shared | Shared replicated usage fold: response_rollup and context occupancy are order-sensitive. |
+| 12661 | `usage_summaries_at` | Shared | Shared usage fold per subject; same issue as usage_summary_at. |
+| 12921 | `usage_period_rows` | Shared | Shared period totals; equal observed-time ties currently use local store index. |
+| 13051 | `claims_for_subject_kind_at` | Local | Local raw-history page using a local cursor; callers reducing shared state need the canonical helper instead. |
+| 13235 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
+| 13241 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
+| 13242 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
+| 13243 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
+| 13301 | `timeline_claim_rows_for_incarnation_at` | Local | Local harness timeline/history page. Current timeline retention is local; legacy rows can appear in claims. |
+| 13339 | `claims_for_kind_at` | Local | Local raw-kind history page; not a permitted source of arrival-ordered shared reduction. |
+| 13435 | `work_claim_is_orphaned` | Shared | Shared runtime-incarnation/terminal-state selection controls durable work ownership. |
+| 15220 | `export_replication_for_heads` | Shared | Shared immutable batch position, not inter-batch arrival. Relative store indexes within one atomically admitted batch preserve its wire position; migrate to explicit position for uniform enforcement. |
+| 16930 | `resolve_mission_run_inputs` | Shared | Shared resource input claim identity persisted in a run; latest must be canonical. |
+| 17066 | `desired_row_at` | Shared | Shared desired selection within a local historical frontier. Winner is ancestry/revision/id and is commutative today; traversal and returned logical rows must still be canonical. |
+| 17596 | `latest_resource_kind` | Shared | Shared resource schema/type selection from durable observations. |
+| 18503 | `rebuild_planning_tx` | Shared | Shared planning fold; out-of-order started/candidate/approved causes skipped updates, quarantine, and different launch state. |
+| 18785 | `validate_message_transition` | Shared | Shared message lifecycle validation; newest arrival can authorize/reject the wrong transition. |
+| 19017 | `latest_claim_id_tx` | Shared | Shared predecessor selection for new durable claims. Evidence identity must not depend on arrival. |
+| 19470 | `current_harness_at` | Shared | Shared replicated harness/work activity reduction; local host overlays are separate. Work activity still compares physical indexes against runtime/harness indexes. |
+| 19525 | `claim_ids_at` | Shared | Shared evidence/optimistic-fence identity set at a local frontier; serialized ordering must be stable. |
+| 19546 | `desired_conflicts_at` | Shared | Shared conflict set at a local frontier; membership is commutative, but returned ordering is observable. |
+| 19825 | `pending_human_reviews_tx` | Shared | Shared human gate/review source ordering and pending state. |
+| 19866 | `attention_request_view_tx` | Shared | Shared legacy ask/resolution selection; equal acceptance times lack writer/sequence/position ties. |
+| 19879 | `attention_request_view_tx` | Shared | Shared legacy ask/resolution selection; equal acceptance times lack writer/sequence/position ties. |
+| 19968 | `pending_attention_requests_tx` | Shared | Shared pending attention sources; physical arrival changes order. |
+| 20294 | `attention_target_moved_on_tx` | Shared | Shared terminal/recovery episode selection; ClaimMoment also compares (accepted time, local index), which must become a canonical identity. |
+| 20365 | `attention_target_moved_on_tx` | Shared | Shared terminal/recovery episode selection; ClaimMoment also compares (accepted time, local index), which must become a canonical identity. |
+| 20382 | `attention_target_moved_on_tx` | Shared | Shared terminal/recovery episode selection; ClaimMoment also compares (accepted time, local index), which must become a canonical identity. |
+| 20412 | `attention_target_moved_on_tx` | Shared | Shared terminal/recovery episode selection; ClaimMoment also compares (accepted time, local index), which must become a canonical identity. |
+| 20447 | `pull_request_state_tx` | Shared | Shared selected PR resource state used to close/currently show attention. |
+| 20522 | `loop_run_moved_on_tx` | Shared | Shared loop recovery/episode selection. |
+| 20578 | `mission_run_ended_tx` | Shared | Shared terminal run episode onset. |
+| 20683 | `attention_target_state_tx` | Shared | Shared runtime/observer/subscription/loop/message source state selection. |
+| 20694 | `attention_target_state_tx` | Shared | Shared runtime/observer/subscription/loop/message source state selection. |
+| 20702 | `attention_target_state_tx` | Shared | Shared runtime/observer/subscription/loop/message source state selection. |
+| 20711 | `attention_target_state_tx` | Shared | Shared runtime/observer/subscription/loop/message source state selection. |
+| 21180 | `operational_repair_plan_tx` | Shared | Shared persisted wake failure selection used in fenced durable repairs; local lease/time inputs stay outside timeless shared digests. |
+| 23307 | `fleet_invites` | Shared | Shared invite created/redeemed/revoked lifecycle; token secrets and attempt counters are separate local rows. |
+| 23922 | `seed_replica_envelopes_tx` | Shared | Shared immutable batch wire position during legacy envelope seeding; relative intra-batch index is stable, unlike global arrival. |
+| 26124 | `generation_run_tx` | Shared | Shared run ownership fallback from generation/run creation claims. |
+| 26139 | `generation_run_tx` | Shared | Shared run ownership fallback from generation/run creation claims. |
+| 26175 | `run_tree_of_tx` | Shared | Shared aggregate/root ownership fallback; chosen creation/proposal claim must be stable. |
+| 26204 | `run_tree_of_tx` | Shared | Shared aggregate/root ownership fallback; chosen creation/proposal claim must be stable. |
+| 26519 | `try_project_simple_replication_tx` | Local | Local projection-backlog frontier scan. Each shared aggregate must still reduce canonically; sorting run_updates only by acceptance time is insufficient for equal-time ties. |
+| 28599 | `seat_queue_inputs_tx` | Shared | Shared queue moves: nearly canonical but missing batch-id/explicit-position/final-id tie breaks; use the helper. |
+| 29548 | `enrich_step_summaries_at` | Shared | Shared durable progress/submission summary at fixed as_of; equal-time local-index ties alter latest content. |
+| 29846 | `enrich_step_wake_at` | Shared | Shared durable wake-failure episode selection; host-local live harness overlay remains local. |
+| 29908 | `harness_incarnation_for_key_at` | Shared | Shared replicated incarnation selection for wake fences. |
+| 30202 | `active_step_blockers_tx` | Shared | Shared pending blocker source ordering at fixed as_of. |
+| 31216 | `loop_run_views_tx` | Shared | Shared loop state winner and ordered round results. |
+| 31233 | `loop_run_views_tx` | Shared | Shared loop state winner and ordered round results. |
+| 34044 | `the_newest_message_to_a_recipient_is_found_by_index` | Local | Isolated test/fixture verification query; does not project live shared state. |
+| 39669 | `replication_inventory_uses_the_batch_indexes` | Local | Isolated test/fixture verification query; does not project live shared state. |
+| 42599 | `a_worker_can_submit_each_retry_attempt_once` | Local | Isolated test/fixture verification query; does not project live shared state. |
+
+CANONICAL_ORDER (705-706) and CANONICAL_ORDER_DESC (707-709): Shared ordering helpers, with the intra-batch physical-index limitation described above. RUNTIME_SUBJECTS and SUBJECTS_IN_RANGE order by subject, not by store_index; their index bounds are Local snapshot membership. Index definitions on store_index accelerate local log access but do not themselves select a shared winner.
+
+## Other arrival-derived state that an ORDER BY store_index search misses
+
+- Document latest binding/token selection: created_index DESC in put_document, mission resolution, latest_document_hash, document_bindings_at and latest_document_token. That cursor cannot choose the shared version. Repeated same-name/same-hash bindings also need a canonical binding claim representative rather than INSERT OR IGNORE arrival.
+- Message ordering: message_index created_index, MIN(store_index), recipient mailbox order and exported filenames are local cursor metadata. The shared mailbox source, status and onset use canonical claim identity/time; compare logical message rows and recipient order independently of physical file names.
+- ClaimMoment at 20229 compares (accepted time, store_index) for attention episode closure. current_harness_at compares work/runtime/harness physical indexes. usage_period_rows uses (observed time, index) and usage_summary_from_rows overwrites rollup/context fields as rows arrive. Canonical SQL alone is insufficient unless these comparisons change too.
+- try_project_simple_replication_tx sorts run_updates only by accepted_at_unix_ms; equal-time ordering inherits the local scan. Its backlog scan may remain local, but shared updates must use the complete key. seat_queue_inputs_tx has an almost-canonical hand-written order that must use the same helper.
+- Partial shared digests hide differences inside run/generation/step/proposal fields, even in already covered tables. updated_at from effective local lease renewal must be separated from the durable source timestamp rather than blindly hashed or silently used as a shared clock.
+
+## Claim-derived shared readers without a materialized table
+
+These are Shared: actual/effective subject state and selected runtime/resource owner; harness replicated snapshot; message lifecycle/unread/reminders; gate request/result/review facts; subscription and schedule request dispositions; observer refresh/state; loop state/round results; reconcile and delivery failure/recovery episodes; fleet member/invite lifecycle; seat queue movement; progress/result summaries; replicated usage snapshots; shared checkpoint protocol facts. Shared outputs at a fixed as_of/recipient need a canonical source representation and per-source/table digest coverage even when currently folded directly from claims. Local reachability, harness liveness, lease overlay and notification delivery do not define shared completion or disappearance.
+
+Some readers already use CANONICAL_ORDER or sort IDs; retain their deterministic behavior and route their implementation through the common helper. Checkpoint proof canonicalizes physical indexes on a copy before comparison, which can hide an arrival-order bug on real replicas. Therefore the new test also compares real stores before proof normalization and after actual production tombstone/delete/replay operations.
+
+## Derived-attention coordination
+
+The attention builder confirmed that its reviewed proposal introduces one snapshot function, not an attention table. Design: `doc/fleet/smalltalk/attention-derived-design@e3a78d7c336f3aa068629121baa967c40e9ef7695885de62766667bc0c0975b3`; reply: `message/177021f57187a57f`, following audit coordination `message/60e73ec7b9f4374a`.
+
+Its sources are person steps/human gates/revision approvals, launch candidate/preview review, unread person messages/reminders, held subscription source gates, current durable operational failures and checkpoint waits. Legacy attention.requested/resolved becomes historical. Proposed person asks extend step_runs and claim-derived person metadata; final DDL is pending in that mission. Hash new shared step columns automatically and add canonical source inventories for nonmaterialized dependencies. Do not hash the local checkpoints ledger as if every host had sealed/trimmed simultaneously.
+
+The view must be tested separately at identical explicit as_of and recipients. Identity includes source + recipient + gate/episode, preserving multiple reviewers, attempt/generation replacement, original waiting age, reminder versions, preview replacement and failure/recovery episode fences. Sort by priority, waiting_since, source_id, person_id, episode. Ownership filtering precedes pagination. Final helper API and table inventory additions must be sent back when implemented. No need to wait for that mission to complete this audit.
+
+## Regression written first
+
+`crates/st3/src/store/canonical_audit.rs`, included under store::tests::canonical_audit, compares all 16 shared logical materialized tables with independent SHA-256 hashes of sorted full logical rows. It excludes only the explicitly local arrival/lease-overlay columns listed in SHARED_TABLES; selected document and message readers are compared separately, and replicated usage is checked. These hashes are a test oracle, not the planned incremental production digest API.
+
+The history includes mission/work/run state, two immutable document versions, started/candidate/preview/approved planning, message send/close, cumulative usage and harness transitions. It uses equal acceptance times, reversed and interleaved single-envelope arrival, on-disk restart plus full replay, checkpoint proof, and real production tombstone/delete/replay on isolated stores. All mismatches are accumulated by phase and table instead of stopping at the first planning mismatch. No shared daemon or agent seat is restarted.
+
+Validation command: `cargo test -p st3 --lib every_shared_projection_agrees_after_shuffle_restart_and_checkpoint -- --nocapture`.
+
+Observed baseline failure: reverse delivery disagrees on planning_sessions, planning_candidates,
+planning_previews, selected document bindings and usage summary in all three phases. Interleaved
+delivery disagrees on planning_sessions, planning_candidates and selected document bindings in
+all three phases. The six-table graph_digest still matches in every comparison. Both checkpoint
+proofs pass, confirming that proof normalization alone does not expose the live-replica bug.
+
+`every_persistent_table_has_a_projection_scope` requires classification of each persistent
+table. The original source-text guard `shared_folds_never_order_by_local_arrival` was retired:
+literal SQL inspection cannot distinguish shared winner selection from legitimate local
+pagination metadata and requires an implementation-name allowlist. Behavioral shuffle,
+restart, checkpoint, reader and digest comparisons enforce the invariant without pinning SQL
+wording. Run the current checks with `cargo test -p st3 --lib canonical_audit -- --nocapture`.
+At the original audit baseline, table classification passed; the source guard named 62 shared
+arrival-order clauses; shuffle/restart/checkpoint comparison failed with the divergences above.
+
+The required sync invariants and these enforcing test names are stated in
+[replication](replication.md#sync-invariants), linked from the README and fleet join guide.
+
+The fix step must extend this foundation with non-empty fixtures for currently empty proposal/dependency tables, multiple writers/equal-time conflict ties, every nonmaterialized shared source, derived attention at fixed as_of, and production per-table incremental digests. It must check incremental insert/update/delete results against a full digest oracle, name differing tables in replication status/doctor, and ensure an unchanged table never needs a whole-table rescan. Restart/checkpoint tests must compare logical rows and each production digest, not just the legacy six-table graph_digest.
+
+## Required fix boundaries
+
+1. Shared canonical helper + exhaustive local exceptions + behavioral coverage for shared winner selection independent of local arrival. Retain deterministic ancestry/operation selection and local cursor semantics.
+2. One incremental digest per logical shared table/source covering all shared columns, with insert/update/delete maintenance in the same transaction, stable serialization/PK order, full-rebuild validation and migration. Cheap cache invalidation alone is not incremental hashing. Physical indexes, receipt metadata, local clocks and live overlays stay outside. Extend replication status, heal diagnostics and doctor with named mismatches, and keep format/version compatibility explicit.
+3. Expand shuffle/restart/checkpoint CI coverage to every source and derived attention view. The audit commit intentionally contains the failing regression; it is not a green merge candidate. Only the completed fix PR with st/ci green on its own head may join the smalltalk merge train.

@@ -22,6 +22,8 @@
 #   window  for a transition, how long it stays in the replicated log
 #   pending why a kind whose class allows dropping has no checkpoint rule yet; it is kept whole
 #           until one exists
+#   local_codes  for a kind whose claims carry a `code` field: the codes that go only to the
+#           local observation log of the node that made them, whatever `log` says
 
 [kinds]
 "deploy.go" = { class = "durable" }
@@ -51,11 +53,14 @@
 "client.js-error" = { class = "transition", window = "7d", log = "local" }
 "client.launch" = { class = "transition", window = "7d", log = "local" }
 "client.native-crash" = { class = "transition", window = "7d", log = "local" }
-"daemon.diagnostic" = { class = "current" }
+# Observability only: no control logic reads it, so its history goes to OpenTelemetry through
+# [observations.otlp]. Claims written by older members stay, under the checkpoint rule below.
+"daemon.diagnostic" = { class = "current", log = "local" }
 "daemon.started" = { class = "transition", window = "7d", pending = "restart windows read every start" }
 "delivery.hold" = { class = "durable" }
 "doc.bound" = { class = "durable" }
 "eval.verdict" = { class = "durable" }
+"fault.dismissed" = { class = "durable" }
 "file.observed" = { class = "durable" }
 "fleet.invite-created" = { class = "durable" }
 "fleet.invite-redeemed" = { class = "durable" }
@@ -72,6 +77,9 @@
 "gate.review-withdrawn" = { class = "durable" }
 "gate.reviewer-reassigned" = { class = "durable" }
 "github.posted" = { class = "durable" }
+# The GitHub plugin's keyed events and compact item state (docs/st3/plugins.md). Written only by a
+# repository's poller from step 3b of the plugin store; readers take the newest state per item.
+"github.event" = { class = "transition", window = "30d", pending = "no reader audit yet" }
 "glass.deleted" = { class = "durable" }
 "glass.upserted" = { class = "durable" }
 # Compact question identity, shape, status, positions and receipt stay indefinitely.
@@ -80,7 +88,6 @@
 "harness-question.resolved" = { class = "durable" }
 "harness.context-clear.requested" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "harness.context-clear.result" = { class = "transition", window = "7d", pending = "no reader audit yet" }
-"harness.diagnostic" = { class = "transition", window = "7d", pending = "only the seat status history rule retains its sources" }
 "harness.inventory.observed" = { class = "current", log = "on-change", pending = "no reader audit yet" }
 "harness.limits" = { class = "current" }
 # Other nodes read the current harness state: step readiness is judged on the mission's node and
@@ -124,6 +131,7 @@
 "observer.state" = { class = "current", pending = "no reader audit yet" }
 "operational.failure" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "operational.recovered" = { class = "transition", window = "7d", pending = "no reader audit yet" }
+"ordered-membership.edited" = { class = "durable" }
 "owned-set.revised" = { class = "durable" }
 "person.delegation-set" = { class = "durable" }
 "person.directive-note-set" = { class = "durable" }
@@ -199,6 +207,7 @@
 "terminal.input.result" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "terminal.launch-geometry" = { class = "current", pending = "no reader audit yet" }
 "transport.observed" = { class = "current" }
+"vcs.item.state" = { class = "current", pending = "the idle hold reads a thread's state history; no rule until the queue-exit read takes only events" }
 "work.claimed" = { class = "durable" }
 "work.extended" = { class = "durable" }
 "work.failed" = { class = "durable" }
@@ -213,6 +222,36 @@
 "work.submitted" = { class = "durable" }
 "workspace.observed" = { class = "current", log = "on-change", pending = "no reader audit yet" }
 
+# Driver and daemon diagnostics. Control codes stay replicated claims: login and update fences,
+# the channel attach fence, admission, capacity retries, prompts and their answers, suspension,
+# wake failures and stop deferrals are read by other members and by control logic. The codes in
+# `local_codes` are observability only: nothing but a person reads them, so they go to the local
+# observation log and on to OpenTelemetry through [observations.otlp]. A code not named here
+# stays a claim. Claims that older members write keep replicating and are kept as before.
+[kinds."harness.diagnostic"]
+class = "transition"
+window = "7d"
+pending = "only the seat status history rule retains its sources"
+local_codes = [
+    "provider-update-available",
+    "claude-channel-initialized",
+    "codex-driver-failed",
+    "codex-launch-failed",
+    "claude-session-unbound",
+    "pi-handoff-failed",
+    "native-delivery-degraded",
+    "native-delivery-recovered",
+    "message-unforwarded",
+    "claude-handoff-status-unavailable",
+    "claude-receipt-unavailable",
+    "claude-handoff-unconfirmed",
+    "claude-receipt-unsettled",
+    "checkout-fetch-failed",
+    "checkout-kept",
+    "start-revocation-unverified",
+    "render-warning",
+]
+
 # The checkpoint rules, in order. Each names the kind it applies to, the conditions under which it
 # applies (`when`), the fields besides subject and kind that make up a slot (`slot`; `claim.origin`
 # is the writer, not a field), what it keeps, and how old a claim must be before the cut
@@ -224,7 +263,7 @@
 kind = "harness.observed"
 slot = ["incarnation_id"]
 require_slot = true
-keep = "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start"
+keep = "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start-and-the-report-ending-the-run-before,newest-working,newest-ended"
 
 [[rules]]
 kind = "seat.status-history"
@@ -333,7 +372,7 @@ keep = "newest,newest-carrier-of-each-field"
 kind = "resource.observed"
 when = ["actor=null", "observer=set"]
 slot = []
-keep = "newest"
+keep = "newest,newest-of-each-attribution_only,earliest-opener,pull-request-back-to-newest-not-open-outside-merge-queue-else-thread-scan,all-if-flat-facts"
 
 [[rules]]
 kind = "render.applied"

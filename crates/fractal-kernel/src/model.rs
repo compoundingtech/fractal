@@ -256,6 +256,10 @@ pub struct MemberSpec {
     /// read at each launch. Never declared, so never a launch change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_size: Option<fractal_runtime::TerminalSize>,
+    /// The seat's lane: the CPU and memory cap its scope holds when its host enforces lanes
+    /// (docs/st3/seat-lanes.md). Absent, the seat runs without one. Read at each launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<fractal_runtime::Capacity>,
 }
 
 impl MemberSpec {
@@ -675,6 +679,11 @@ pub struct StepSpec {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_constraints: BTreeMap<String, Vec<String>>,
     pub timeout_ms: Option<u64>,
+    /// The lane the seat working this step holds while it holds it, raised from its own for what
+    /// it names (docs/st3/seat-lanes.md). Omitted when absent, so an undeclared step hashes as it
+    /// did before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<fractal_runtime::Raise>,
     pub retry: RetrySpec,
     pub finally: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -767,6 +776,11 @@ pub struct MissionSpec {
     pub revision_cutover: RevisionCutover,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declarations_kdl: Option<String>,
+    /// The lane of each agent this mission and its steps declare that declares none of its own,
+    /// applied when a run materializes them (docs/st3/seat-lanes.md). Omitted when absent, so an
+    /// undeclared mission's revision is what an older member computes for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<fractal_runtime::Capacity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_selector: Option<WorkSelector>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1239,6 +1253,29 @@ pub struct ResourceObservationOutcome {
     #[serde(default)]
     pub observation_claim: Option<String>,
     pub message_subjects: Vec<String>,
+    /// The item resources this observation recorded, for the poller's plugin mirror. Never
+    /// serialized: an idempotent replay returns none, and the first call already mirrored them.
+    #[serde(skip)]
+    pub recorded_items: Vec<RecordedItem>,
+}
+
+/// What a GitHub repository's poller lays beside one look it records, from its plugin mirror:
+/// each item's facts as the mirror holds them, which replace the graph's as what the look is
+/// compared and merged with, and whether the repository is in compact mode, where an item's
+/// change is recorded as `vcs.item.state` alone instead of a `resource.observed` snapshot.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MirroredPrior {
+    pub compact: bool,
+    pub items: std::collections::HashMap<String, Value>,
+}
+
+/// One item resource an observation recorded: its subject, item kind, facts and claim.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordedItem {
+    pub subject: String,
+    pub kind: String,
+    pub facts: Value,
+    pub claim: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1600,6 +1637,9 @@ pub struct StatusResponse {
     pub store_index: u64,
     pub subjects: Vec<SubjectStatus>,
     pub pending_actions: Vec<PlannedAction>,
+    /// Current controller-host admission observation; absent on historical/store-only reads.
+    #[serde(default, rename = "seatAdmission", skip_serializing_if = "Option::is_none")]
+    pub seat_admission: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1964,6 +2004,28 @@ pub struct FaultView {
     pub item: AttentionItemView,
 }
 
+/// A request to dismiss a current fault whose run has ended, so nothing at its source can close
+/// it. `source` is the fault's subject or its run; `episode` picks one fault when the source has
+/// several.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FaultDismissRequest {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode: Option<String>,
+    pub reason: String,
+    pub actor: String,
+}
+
+/// The fault a dismissal closed: it stays closed until its source raises a new episode.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FaultDismissal {
+    pub subject: String,
+    pub episode: String,
+    pub title: String,
+    pub actor: String,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AttentionItemView {
     #[serde(default)]
@@ -2009,6 +2071,12 @@ pub struct AttentionItemView {
     #[serde(default)]
     pub targets: Vec<String>,
     pub requested_at_unix_ms: u128,
+    /// When a person ask resolves by itself if nobody answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_unix_ms: Option<u128>,
+    /// The answer that then applies, `{id, label}`. Absent, the ask times out without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<Value>,
     #[serde(default)]
     pub actions: Vec<AttentionActionView>,
 }
@@ -2654,6 +2722,20 @@ pub struct MissionRunView {
     pub scheduler_fault: Option<String>,
 }
 
+impl MissionRunView {
+    /// How this run ended, when it has: its terminal status, or the terminal or cleanup phase it
+    /// stops its seats in. A run stops its owned agents in cleanup, before it becomes terminal.
+    pub fn ended(&self) -> Option<&str> {
+        if matches!(self.status.as_str(), "completed" | "failed" | "cancelled") {
+            Some(&self.status)
+        } else if self.phase == "terminal" || self.phase.starts_with("cleanup-") {
+            Some(&self.phase)
+        } else {
+            None
+        }
+    }
+}
+
 /// A bounded slice of the root graph for human mission presentation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionRunTreePage {
@@ -3098,6 +3180,14 @@ pub struct PersonAskRequest {
     /// is free text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<Value>,
+    /// How long the person has to answer, in milliseconds. Absent, the fleet's default deadline
+    /// applies. At the deadline the ask resolves by itself with `default_answer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+    /// The answer id of the structured request that applies when the deadline passes. Absent,
+    /// the ask resolves as timed out with no answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<String>,
     pub idempotency_key: String,
 }
 
@@ -3152,9 +3242,14 @@ pub struct PersonAnswerView {
     /// The answering principal, including `assistant/chatgpt` for assistant responses.
     pub respondent: String,
     pub answered_at_unix_ms: u128,
-    /// The typed answer: `type`, `outcome`, and `id`, `label` and `text` when present.
+    /// The typed answer: `type`, `outcome`, and `id`, `label` and `text` when present. An ask
+    /// that timed out carries its default answer as the person's choice of it would read, or no
+    /// answer when it named none; `resolved_by` says the deadline gave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<Value>,
+    /// `deadline` when the ask resolved by itself at its deadline, not by the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
 }

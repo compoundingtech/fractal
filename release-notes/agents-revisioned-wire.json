@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stream complete agents rosters with opt-in revision-fenced snapshots and whole-row deltas",
+  "replay": {"status": "none", "detail": "Only the latest publication is available. Reconnect and replacement start from complete snapshots; no replay log is introduced."},
+  "schema": {"status": "none", "detail": "No database or claim schemas change. The client wire contract adds agents publication metadata, snapshot chunks and whole-row deltas."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
+  "compatibility": {"status": "none", "detail": "Legacy HTTP, exact agent selectors and bounded collection subscriptions remain unchanged. Granted collections.agents.revisioned.v1 clients can subscribe with agents_publication_version:1 and no filters or limit. Fractal feed opts in only when granted and atomically assembles complete agents snapshots. Frames are bounded to 1 MiB; oversized whole rows are permanently refused. Publication notices coalesce over a non-sliding 50 ms window; contiguous sequences revalidate authority and have an eight-second total send deadline."},
+  "downtime": {"status": "none", "detail": "Normal binary upgrade restart only; the publication epoch changes on restart."},
+  "manual": {"status": "none", "detail": "No configuration or state migration is required."},
+  "recovery": {"status": "none", "detail": "Reconnect obtains the latest complete roster. Oversized-row refusals retain the agents-publication-row-too-large code through client error normalization. Returning to an older binary needs no database rollback; clients negotiate the legacy window."}
+}

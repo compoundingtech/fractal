@@ -157,6 +157,14 @@ describe('AnswerAlert', () => {
     expect(html).toContain('>Nothing to do<')
   })
 
+  it('says how long is left before an ask resolves by itself and what then applies', () => {
+    const deadline = DateTime.makeUnsafe(Date.parse(at) + 3 * 3_600_000 + 5 * 60_000)
+    const kept = renderToStaticMarkup(<AnswerAlert alert={item({ request: decision, deadline_at: deadline, default_answer: { id: 'hold', label: 'Hold' } })} onAct={async () => ({ _tag: 'Sent' })} now={now} />)
+    expect(kept).toContain('waited 5m · answer within 3h, or “Hold” applies')
+    const plain = renderToStaticMarkup(<AnswerAlert alert={item({ deadline_at: deadline })} onAct={async () => ({ _tag: 'Sent' })} now={now} />)
+    expect(plain).toContain('answer within 3h, or it times out')
+  })
+
   it('leads a structured request with its recommendation, then the question, reasons and what each answer does', () => {
     const html = renderToStaticMarkup(<AnswerAlert alert={item({ request: { ...decision, reasons: ['CI is green'] } })} onAct={async () => ({ _tag: 'Sent' })} now={now} />)
     expect(html).toContain('Recommends <strong>Merge</strong>: Tests and review passed.')

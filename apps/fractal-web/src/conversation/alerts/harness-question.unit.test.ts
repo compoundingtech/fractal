@@ -13,6 +13,17 @@ const call = (extra: Partial<ConversationCall> = {}): ConversationCall => ({
 })
 
 describe('projectHarnessAsks', () => {
+  it('normalizes native null placeholders for optional question and option fields', () => {
+    expect(projectHarnessAsks([call({ input: { questions: [{
+      id: 'database', question: 'Which database?', multi: null, recommended: null,
+      options: [{ label: 'SQLite', description: null, preview: null }],
+    }] } })])).toEqual([{
+      _tag: 'OmpAsk', callId: 'native-call', title: 'The agent has a question',
+      questions: [{ _tag: 'SingleSelect', id: 'database', title: 'Which database?',
+        options: [{ position: 0, label: 'SQLite' }] }],
+    }])
+  })
+
   it('retains native identities, option order, full previews and recommendations without choosing for the user', () => {
     expect(projectHarnessAsks([call({ input: { questions: [question, { ...question, id: 'features', multi: true }] } })]))
       .toEqual([{ _tag: 'OmpAsk', callId: 'native-call', title: 'The agent has a question', questions: [

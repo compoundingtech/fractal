@@ -321,6 +321,8 @@ pub struct Drafts<'a> {
     pub needs_words: Option<String>,
     /// "Chat about this": who it goes to, the draft, and the thread so far.
     pub chat: Option<Chat<'a>>,
+    /// A prompt's form: its mark, whether it has the keys, and a question's choices.
+    pub form: super::alerts::FormState<'a>,
 }
 
 pub struct Chat<'a> {
@@ -1312,35 +1314,28 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             );
         }
         AttentionKind::Prompt {
-            seat,
-            text: prompt,
-            answers,
-            ..
+            seat, text: prompt, ..
         } => {
             card.line(Line::from(vec![
                 span("waits  ", theme::dim()),
                 span(seat.clone(), theme::strong(theme::PERSON)),
             ]));
             card.blank();
-            card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
-            card.blank();
-            if answers.is_empty() {
-                card.wrap(
-                    &text::inline(
-                        "Answer it in the seat's terminal (Ctrl+]). This clears when the prompt is gone, however it was answered.",
-                        theme::dim(),
-                    ),
-                    inner,
-                );
-            } else {
-                card.wrap(
-                    &text::inline(
-                        "The call it would make is the pending one in the seat's conversation: open the conversation to read it in full, then allow or deny it there. This clears when the prompt is gone, however it was answered.",
-                        theme::dim(),
-                    ),
-                    inner,
-                );
+            // A prompt the form asks in its own words is said once, as the form's question.
+            if !super::alerts::form_asks(world, item, prompt) {
+                card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
+                card.blank();
             }
+            // The same form the band in its conversation expands to, with the call in full.
+            super::alerts::prompt_form(
+                &mut card,
+                world,
+                item,
+                drafts.form,
+                inner,
+                None,
+                super::alerts::Place::Inbox,
+            );
         }
         AttentionKind::Login { text: login, seats } => {
             card.lines(text::markdown(&spaced(login), inner, theme::text()));
@@ -1354,7 +1349,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             card.blank();
             card.wrap(
                 &text::inline(
-                    "One sign-in in the seat's terminal (Ctrl+]) fixes every seat; this clears when the next authenticated turn succeeds.",
+                    &format!("One sign-in in the seat's terminal ({}) fixes every seat; this clears when the next authenticated turn succeeds.", terminal_route()),
                     theme::dim(),
                 ),
                 inner,
@@ -1513,6 +1508,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             needs_words: None,
             confirm: None,
             chat: None,
+            form: Default::default(),
         };
         text_box(
             &mut card,
@@ -1734,9 +1730,9 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
 /// state once the harness is signed in again, on the same run: no restart (Nathan, 2026-10-04).
 pub fn login_guidance(agent: &Agent) -> String {
     let how = match agent.harness {
-        Harness::Claude => "open its terminal (ctrl+]) and run /login".to_owned(),
+        Harness::Claude => format!("open its terminal ({}) and run /login", terminal_route()),
         Harness::Codex => format!("run `codex login` on {} (or in its terminal)", agent.host),
-        _ => "open its terminal (ctrl+]) and log it in".to_owned(),
+        _ => format!("open its terminal ({}) and log it in", terminal_route()),
     };
     let provider = match agent.harness {
         Harness::Claude => "Claude",
@@ -2728,6 +2724,21 @@ fn demo_banner(doc: &mut Doc, width: usize) {
 
 // ------------------------------------------------------------------ popovers
 
+/// The chord (with Ctrl) that opens an agent's actions menu from its conversation.
+pub const ACTIONS_CHORD: char = 'a';
+/// The actions menu's key for attaching the agent's terminal in its tab.
+pub const TERMINAL_ACTION: char = 't';
+
+/// How to get to an agent's terminal from where its conversation shows, said as the keys that
+/// do it: the actions menu, then its Terminal row. The Attach button lives only on a detached
+/// terminal pane, where Enter does the same.
+pub fn terminal_route() -> String {
+    format!(
+        "Ctrl+{} then {TERMINAL_ACTION} from the conversation",
+        ACTIONS_CHORD.to_ascii_uppercase()
+    )
+}
+
 /// The small card a clicked reference opens: enough to recognise the subject, and a way
 /// to go to it.
 /// One row of the agent actions menu: its key, what it says, and what it does.
@@ -2756,7 +2767,11 @@ pub fn agent_actions(agent: &Agent) -> Vec<AgentAction> {
         rows.push(row('u', "Resume", "resume a suspended seat on the same session"));
     }
     if agent.terminal {
-        rows.push(row('t', "Terminal", "attach its terminal (ctrl+] too)"));
+        rows.push(row(
+            TERMINAL_ACTION,
+            "Terminal",
+            "attach its terminal in this tab",
+        ));
     }
     rows.push(row('d', "Details", "what it is doing and what is queued (ctrl+d too)"));
     rows.push(row('f', "Find", "find in its conversation (ctrl+f too)"));
@@ -3461,7 +3476,7 @@ mod tree_tests {
         let id = item.id.clone();
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
-            answering: None, needs_words: None, chat: None,
+            answering: None, needs_words: None, chat: None, form: Default::default(),
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
@@ -3489,7 +3504,7 @@ mod tree_tests {
         let id = item.id.clone();
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
-            answering: None, needs_words: None, chat: None,
+            answering: None, needs_words: None, chat: None, form: Default::default(),
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");

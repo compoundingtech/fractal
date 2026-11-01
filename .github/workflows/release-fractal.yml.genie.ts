@@ -1,6 +1,6 @@
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { fullHistoryCheckoutSteps, linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob, megarepoApplyStep } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
@@ -24,6 +24,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
       "tags": [
         "**",
         "!edge",
+        "!embed-*",
         // Evidence records may live under refs/tags/evidence/ (one immutable tag per signed note); pushing one must never release.
         "!evidence/**"
       ]
@@ -45,6 +46,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "scripts/release-rust-version",
         "scripts/fixtures/install-release-v0.3.17",
         "scripts/release-fractal*",
+        "scripts/release-fractal-embed.mjs",
+        "apps/fractal-web/**",
         "scripts/release_notes*",
         "scripts/compat-baseline-release*",
         ".github/*-compat-baseline.json",
@@ -93,13 +96,45 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         },
         {
           "name": "Test release names, install entry points and isolated app transactions",
-          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-fractal-edge-test\npython3 scripts/release-fractal-manifest-test\npython3 scripts/compat-baseline-release-test\n"
+          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-fractal-edge-test\npython3 scripts/release-publish-embed-test\npython3 scripts/release-fractal-manifest-test\npython3 scripts/compat-baseline-release-test\n"
         },
         {
           "name": "Test the daily release failure path",
           "run": "python3 scripts/release-fractal-daily-test"
         }
       ]
+    },
+    embed: {
+      name: 'release-web-embed',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 20,
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        { uses: 'actions/cache@v4', with: { path: '${{ runner.temp }}/pnpm-store', key: "web-embed-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-source-inputs.json') }}" } },
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        megarepoApplyStep,
+        { name: 'Build the offline embed and capture four posters', env: { pnpm_config_store_dir: '${{ runner.temp }}/pnpm-store' }, run: 'nix develop .#web --command node scripts/release-fractal-embed.mjs dist' },
+        { uses: 'actions/upload-artifact@v4', with: { name: 'release-web-embed', path: 'dist/*', 'if-no-files-found': 'error', 'retention-days': 7 } },
+      ],
+    },
+    publishEmbed: {
+      name: 'release-publish-web-embed',
+      if: "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+      needs: 'embed',
+      'runs-on': 'ubuntu-latest',
+      permissions: { contents: 'write' },
+      env: { GH_TOKEN: '${{ github.token }}', GH_REPO: '${{ github.repository }}', SOURCE_SHA: '${{ github.sha }}' },
+      steps: [
+        // The publish script, at the commit this run releases.
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        { uses: 'actions/download-artifact@v4', with: { name: 'release-web-embed', path: 'dist' } },
+        {
+          name: 'Publish once under a source-addressed release, never the rolling edge tag',
+          // No --clobber or edit of a published release: even reruns cannot replace a pin. A draft a
+          // failed attempt left is continued, and GitHub's 5xx and timeouts are retried (#4606).
+          run: 'scripts/release-publish-embed --source "$SOURCE_SHA" --dist dist',
+        },
+      ],
     },
     "build": {
       "needs": ["pick-runner"],
@@ -198,6 +233,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       "name": "release-assemble",
       "needs": [
         "build",
+        "embed",
         "installer"
       ],
       "runs-on": "ubuntu-latest",
@@ -319,4 +355,4 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       ],
     }
   }
-}, {"pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing.", "advance": "Verifies published archives and proposes the baseline maintenance PR; builds nothing."}))))
+}, {"publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing.", "advance": "Verifies published archives and proposes the baseline maintenance PR; builds nothing."}))))

@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 
 use crate::fleet::transport::Fabric;
 
-/// The service name `enable` uses when none is given.
+/// The service name `enable` uses when none is given. Both native client URI
+/// spellings dial this service; accepting `fractal-client-v0` does not change exposure.
 pub const DEFAULT_SERVICE: &str = "st3-client-v0";
 const PEER_PREFIX: &str = "st-device-";
 

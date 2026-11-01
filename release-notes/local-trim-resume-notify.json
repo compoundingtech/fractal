@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "On a member with [trim] local = true, only a person or the [trim] notify agent may resume a stopped trim; any other agent is refused. Correction to local-trim-own-cut: the local cut drops observer.observed only, not resource.observed",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No table or claim schema change."},
+  "rules": {"status": "none", "detail": "No retention rule change. Correction: LOCAL_TRIM_KINDS is observer.observed alone; resource.observed stays whole until its keep-set rule exists."},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change. The resume API and command are unchanged; an agent other than the [trim] notify agent now gets invalid-checkpoint-resume."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step. A member with no [trim] notify agent is resumed by a person, as before local trim."},
+  "recovery": {"status": "none", "detail": "Revert the build: any agent may resume such a member again."}
+}

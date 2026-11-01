@@ -25,6 +25,9 @@ use super::{
     github_client, github_graphql_with_cache_eligibility, github_json, github_listing,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_github;
+
 /// The data types a repository observer can emit.
 pub const DATA_TYPES: [&str; 5] = [
     "pull_requests",
@@ -94,6 +97,10 @@ pub struct RepositoryCursor {
     identities: BTreeMap<String, ItemIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail_after: Option<String>,
+    /// Where the open listing a resume reads for identities continues, when it had more pages
+    /// than one poll reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume_next: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -134,14 +141,19 @@ fn content_digest(value: &Value) -> String {
     hex::encode(digest.0.finalize())
 }
 
+/// `started` is when the look began. A watermark never moves past it: GitHub can stamp a record
+/// in the future (on 2026-11-01 some comments were stamped an hour ahead), and a watermark at
+/// that stamp would hide every change stamped before it until the time came.
 fn finish_listing(
     scan: &mut Option<ListingScan>,
     watermark: &mut Option<String>,
     listing: &GithubListing,
+    started: &str,
 ) -> bool {
     let newest = newest_updated_at(&listing.values);
     if scan.is_none() && !listing.truncated {
         *watermark = newest.into_iter().chain(watermark.take()).max()
+            .map(|at| at.min(started.to_owned()))
             .or_else(|| Some(watermark_now()));
         return false;
     }
@@ -164,7 +176,8 @@ fn finish_listing(
             .saturating_add(1).min(IMMEDIATE_RECONCILIATION_SWEEPS);
         return progress.unstable_sweeps < IMMEDIATE_RECONCILIATION_SWEEPS;
     }
-    *watermark = progress.newest.take().into_iter().chain(watermark.take()).max();
+    *watermark = progress.newest.take().into_iter().chain(watermark.take()).max()
+        .map(|at| at.min(started.to_owned()));
     *scan = None;
     false
 }
@@ -173,6 +186,24 @@ fn finish_listing(
 struct ItemIdentity {
     number: u64,
     pull: bool,
+}
+
+/// The part of a repository cursor that rides in the observer's `observer.observed` claim: how
+/// far the observer has read items and comments. Every member keeps it, so a member that takes
+/// over polling, or lost its plugin database, reads on from there and misses nothing; what it
+/// reads again equals the recorded facts and delivers nothing; its first poll also reads the open
+/// listing once, for the identities of open items. The version maps, which are most of a
+/// cursor's bytes, stay with the member that polled. `None` when the observer has read nothing
+/// yet.
+pub fn replicated_cursor(cursor: &str) -> Option<String> {
+    let cursor = RepositoryCursor::parse(Some(cursor));
+    let position = RepositoryCursor {
+        items_since: cursor.items_since,
+        comments_since: cursor.comments_since,
+        ..RepositoryCursor::default()
+    };
+    (position != RepositoryCursor::default())
+        .then(|| serde_json::to_string(&position).expect("a repository cursor serializes"))
 }
 
 impl RepositoryCursor {
@@ -1253,9 +1284,10 @@ fn merge(items: &mut BTreeMap<u64, Item>, item: Item) {
 }
 
 fn watermark_now() -> String {
-    let at = SystemTime::now()
-        .checked_sub(WATERMARK_SKEW)
-        .unwrap_or(UNIX_EPOCH);
+    watermark_at(SystemTime::now().checked_sub(WATERMARK_SKEW).unwrap_or(UNIX_EPOCH))
+}
+
+fn watermark_at(at: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(at)
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
@@ -1350,10 +1382,22 @@ pub async fn observe_at(
         .and_then(Value::as_str)
         .and_then(|name| name.split_once('/'))
         .unwrap_or((owner, repository));
+    let started = watermark_at(SystemTime::now());
     let mut cursor = RepositoryCursor::parse(request.cursor.as_deref());
+    // A cursor an earlier build moved past its look's start reads on from now instead.
+    for since in [&mut cursor.items_since, &mut cursor.comments_since].into_iter().flatten() {
+        if *since > started {
+            since.clone_from(&started);
+        }
+    }
     // How far the observer had read before this poll. Without one, this poll reads every open
     // item once; from then on it reads only what changed.
     let watermark = cursor.items_since.clone();
+    // A read position with nothing else is how far another member read, from the observer's
+    // claim: that member kept the identities. This poll learns them from the open listing once,
+    // and the polls after it read on until that listing ends.
+    let resuming = cursor.resume_next.is_some()
+        || (watermark.is_some() && cursor.seen.is_empty() && cursor.identities.is_empty());
     let mut items = BTreeMap::<u64, Item>::new();
     let mut more = false;
     let mut changed_open_pull = false;
@@ -1464,9 +1508,40 @@ pub async fn observe_at(
                 }
             }
         }
-        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing);
+        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing, &started);
         if cursor.items_scan.is_none() {
             retain_boundary(&mut cursor.item_versions, cursor.items_since.as_deref());
+        }
+        // Without them, an item that is open but unchanged since the position is unknown here:
+        // the detail reads would not ask about it, and a transfer would go unseen until it
+        // changes again.
+        if resuming && (fields.contains("pull_requests") || fields.contains("issues")) {
+            let next = cursor.resume_next.take();
+            let open = github_listing(
+                &client,
+                next.clone().unwrap_or_else(|| format!("{base}/issues?state=open&per_page=100")),
+                token,
+                if next.is_some() { Duration::ZERO } else { cache_for },
+                LISTING_PAGES,
+                true,
+            )
+            .await?;
+            more |= open.truncated;
+            // GitHub pages this listing by offset: an item that closes between two polls moves
+            // the rest back, so the first item past the boundary can be skipped. It is learned
+            // when it next changes, as any item was before this read existed.
+            cursor.resume_next = open.next.clone();
+            for issue in &open.values {
+                if let (Some(id), Some(number)) = (
+                    issue.get("node_id").and_then(Value::as_str),
+                    issue.get("number").and_then(Value::as_u64),
+                ) {
+                    cursor.identities.entry(id.into()).or_insert(ItemIdentity {
+                        number,
+                        pull: issue.get("pull_request").is_some(),
+                    });
+                }
+            }
         }
 
         // A reaction changes no `updated_at`, so reactions on open items come from the open
@@ -1524,7 +1599,7 @@ pub async fn observe_at(
                             merge(&mut items, item);
                         }
                     }
-                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments);
+                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments, &started);
                     if cursor.comments_scan.is_none() {
                         retain_boundary(&mut cursor.comment_versions, cursor.comments_since.as_deref());
                     }
@@ -2118,207 +2193,8 @@ async fn required_by_base(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::Mutex;
+    use super::test_github::*;
     use crate::resource::{github_usage_report, spend_as};
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    /// Pulls served by the fake listing, with the largest page it accepts.
-    type PullPages = Option<(Vec<Value>, usize)>;
-
-    /// A GitHub that answers each path from a table, revalidates with ETags, answers GraphQL
-    /// with a fixed body or queued pages, and keeps every request it received.
-    #[derive(Clone, Default)]
-    struct FakeGithub {
-        routes: Arc<Mutex<HashMap<String, (String, String)>>>,
-        links: Arc<Mutex<HashMap<String, String>>>,
-        refused: Arc<Mutex<HashMap<String, String>>>,
-        graphql: Arc<Mutex<String>>,
-        graphql_pages: Arc<Mutex<HashMap<String, String>>>,
-        graphql_queue: Arc<Mutex<std::collections::VecDeque<Value>>>,
-        graphql_pulls: Arc<Mutex<PullPages>>,
-        reject_combined_details: Arc<Mutex<bool>>,
-        graphql_requests: Arc<Mutex<Vec<Value>>>,
-        requests: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl FakeGithub {
-        async fn start() -> (Self, String) {
-            let github = Self::default();
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            // cargo test shares the production caches between tests. A recycled TCP port
-            // must not let a new fixture reuse another fixture's REST or GraphQL state.
-            let scope = format!("/fixture/{}", uuid::Uuid::now_v7());
-            let base = format!("http://{}{scope}", listener.local_addr().unwrap());
-            let server = github.clone();
-            tokio::spawn(async move {
-                loop {
-                    let (mut stream, _) = listener.accept().await.unwrap();
-                    let server = server.clone();
-                    let scope = scope.clone();
-                    tokio::spawn(async move {
-                        let mut request = Vec::new();
-                        let mut chunk = [0_u8; 4096];
-                        let header_end = loop {
-                            let size = stream.read(&mut chunk).await.unwrap();
-                            request.extend_from_slice(&chunk[..size]);
-                            if let Some(end) =
-                                request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
-                            {
-                                break end + 4;
-                            }
-                            if size == 0 {
-                                return;
-                            }
-                        };
-                        // Route tables and request assertions use paths relative to this
-                        // fixture's API base; the client/cache still sees the unique scope.
-                        let head = String::from_utf8_lossy(&request[..header_end]).replacen(&scope, "", 1);
-                        let length = head
-                            .lines()
-                            .find_map(|line| {
-                                line.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|value| value.trim().parse::<usize>().unwrap())
-                            })
-                            .unwrap_or(0);
-                        while request.len() < header_end + length {
-                            let size = stream.read(&mut chunk).await.unwrap();
-                            request.extend_from_slice(&chunk[..size]);
-                        }
-                        let target = head.lines().next().unwrap().to_owned();
-                        server.requests.lock().push(head.clone());
-                        let respond = |status: &str, etag: Option<&str>, body: &str| {
-                            let etag =
-                                etag.map_or(String::new(), |etag| format!("ETag: {etag}\r\n"));
-                            let link = target.split(' ').nth(1)
-                                .and_then(|path| server.links.lock().get(path).cloned())
-                                .map_or(String::new(), |link| format!("Link: {link}\r\n"));
-                            format!(
-                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{etag}{link}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                                body.len()
-                            )
-                        };
-                        let response = if target.starts_with("POST /graphql ") {
-                            let request: Value =
-                                serde_json::from_slice(&request[header_end..header_end + length])
-                                    .unwrap();
-                            let combined = request["query"].as_str().is_some_and(|query| {
-                                query.contains("pullRequests(") && query.contains("nodes(ids:")
-                            });
-                            // Only the pull request listing pages; identity resolution is its own query.
-                            let listing = request["variables"].get("first").is_some();
-                            let keyed = request["variables"]["after"].as_str()
-                                .and_then(|after| server.graphql_pages.lock().get(after).cloned());
-                            let body = if combined && *server.reject_combined_details.lock() {
-                                r#"{"errors":[{"message":"Something went wrong while executing your query"}]}"#.to_owned()
-                            } else if let Some((pulls, max_size)) = server.graphql_pulls.lock().as_ref().filter(|_| listing) {
-                                let first = request["variables"]["first"].as_u64().unwrap() as usize;
-                                if first > *max_size {
-                                    json!({"errors": [{
-                                        "message": "Something went wrong while executing your query",
-                                    }]}).to_string()
-                                } else {
-                                    let after = request["variables"]["after"].as_str()
-                                        .map_or(0, |cursor| cursor.parse::<usize>().unwrap());
-                                    let end = (after + first).min(pulls.len());
-                                    let cursor = end.to_string();
-                                    pull_page(
-                                        json!(pulls[after..end]),
-                                        (end < pulls.len()).then_some(cursor.as_str()), json!([]),
-                                    ).to_string()
-                                }
-                            } else if let Some(body) = keyed {
-                                body
-                            } else if let Some(page) = listing
-                                .then(|| server.graphql_queue.lock().pop_front())
-                                .flatten()
-                            {
-                                page.to_string()
-                            } else {
-                                server.graphql.lock().clone()
-                            };
-                            server.graphql_requests.lock().push(request);
-                            respond("200 OK", None, &body)
-                        } else {
-                            let path = target.split(' ').nth(1).unwrap().to_owned();
-                            let route = server.routes.lock().get(&path).cloned();
-                            let refused = server.refused.lock().get(&path).cloned();
-                            match route {
-                                _ if refused.is_some() => respond(
-                                    refused.as_deref().unwrap(),
-                                    None,
-                                    r#"{"message":"Resource not accessible by integration"}"#,
-                                ),
-                                None => respond("404 Not Found", None, r#"{"message":"Not Found"}"#),
-                                Some((etag, _))
-                                    if head
-                                        .to_ascii_lowercase()
-                                        .contains(&format!("if-none-match: {}", etag.to_ascii_lowercase())) =>
-                                {
-                                    "HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
-                                }
-                                Some((etag, body)) => respond("200 OK", Some(&etag), &body),
-                            }
-                        };
-                        stream.write_all(response.as_bytes()).await.unwrap();
-                    });
-                }
-            });
-            (github, base)
-        }
-
-        fn route(&self, path: &str, body: Value) {
-            let body = body.to_string();
-            let etag = format!(
-                "\"{}\"",
-                &hex::encode(Sha256::digest(body.as_bytes()))[..12]
-            );
-            self.routes.lock()
-                .insert(path.to_owned(), (etag, body));
-        }
-
-        /// Answer `path` with `status`, such as `403 Forbidden`.
-        fn refuse(&self, path: &str, status: &str) {
-            self.refused.lock()
-                .insert(path.to_owned(), status.to_owned());
-        }
-
-        fn open_pull_requests(&self, nodes: Value) {
-            *self.graphql.lock() = json!({"data": {"repository": {"pullRequests": {
-                "pageInfo": {"hasNextPage": false, "endCursor": null},
-                "nodes": nodes,
-            }}}})
-            .to_string();
-        }
-
-        fn resolved_nodes(&self, nodes: Value) {
-            let mut response: Value = serde_json::from_str(&self.graphql.lock()).unwrap();
-            response["data"]["nodes"] = nodes;
-            *self.graphql.lock() = response.to_string();
-        }
-
-        fn take_requests(&self) -> Vec<String> {
-            std::mem::take(&mut *self.requests.lock())
-                .into_iter()
-                .map(|request| request.lines().next().unwrap_or_default().to_owned())
-                .collect()
-        }
-    }
-
-    /// Make this host's last GraphQL answer for `acme/garden` at `base` older by `by`.
-    fn age_pull_request_check(base: &str, by: Duration) {
-        let mut checks = pull_request_checks()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let key = format!("{base} acme/garden");
-        let key = if checks.contains_key(&key) {
-            key
-        } else {
-            format!("{key} issues")
-        };
-        let check = checks.get_mut(&key).expect("GraphQL was read");
-        check.at = check.at.checked_sub(by).expect("the clock reaches back");
-    }
 
     fn request(
         fields: &[&str],
@@ -2397,6 +2273,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forbidden_installation_queries_do_not_cache_pat_pull_request_facts() {
+        use crate::github_http::app_read::{select, tests::{install, server}};
+        let root = tempfile::tempdir().unwrap();
+        let owner = "forbidden-pulls";
+        for app in ["gh-ci", "github-ledger"] {
+            install(root.path(), owner, app, "fixture-app", chrono::Utc::now() + chrono::Duration::minutes(60));
+        }
+        let auth = select(Some(root.path()), owner, "gh-ci", &GithubAuth::test("fixture-pat"));
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let fixture = server(move |authorization, _, body| {
+            recorded.lock().push((authorization.to_owned(), body.clone()));
+            let data = if body["query"] == OPEN_PULL_REQUESTS {
+                json!({"repository":{"pullRequests":{"pageInfo":{"hasNextPage":false},"nodes":[]}}})
+            } else {
+                assert!(body["query"] == RESOLVED_PULLS || body["query"] == RESOLVED_ISSUES);
+                json!({"nodes":[]})
+            };
+            (reqwest::StatusCode::OK, if authorization == "Bearer fixture-app" {
+                json!({"errors":[{"message":"Resource not accessible by integration"}]})
+            } else { assert_eq!(authorization, "Bearer fixture-pat"); json!({"data":data}) })
+        }).await;
+        for _ in 0..2 {
+            open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
+                Duration::ZERO, "forbidden-pulls/repo", (owner, "repo"), false, true,
+                &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        }
+        let calls = calls.lock();
+        assert_eq!(calls.len(), 12, "each query must still read the App and replay with PAT on the second observation");
+        for pair in calls.chunks_exact(2) {
+            assert_eq!(pair[0].0, "Bearer fixture-app");
+            assert_eq!(pair[1].0, "Bearer fixture-pat");
+            assert_eq!(pair[0].1, pair[1].1);
+        }
+    }
+
+    #[tokio::test]
     async fn installation_pages_split_opaque_identities_and_merge_pat_legacy_status_once_per_head() {
         use crate::github_http::app_read::{select, tests::{install, server}};
         use reqwest::StatusCode;
@@ -2467,16 +2380,6 @@ mod tests {
             "statuses":[{"context":"legacy","state":"pending"}]})).unwrap();
         assert_eq!(pull.pointer("/commits/nodes/0/commit/statusCheckRollup/state").unwrap(), "PENDING");
         assert!(merge_legacy_statuses(&mut pull, &json!({"state":"success","total_count":2,"statuses":[]})).is_err());
-    }
-
-    fn pull_page(nodes: Value, after: Option<&str>, resolved: Value) -> Value {
-        json!({"data": {
-            "repository": {"pullRequests": {
-                "nodes": nodes,
-                "pageInfo": {"hasNextPage": after.is_some(), "endCursor": after},
-            }},
-            "nodes": resolved,
-        }})
     }
 
     async fn read_pull_pages(base: &str, identities: &[String]) -> Result<RepositoryDetails> {
@@ -3279,6 +3182,109 @@ mod tests {
         );
     }
 
+    /// A member that resumes from another member's read position, as a claim carries it, learns
+    /// the open items' identities from the open listing once. An issue that was open and
+    /// unchanged since that position, then transferred, is reported moved on the first poll; the
+    /// poll after it does not read the open listing again.
+    #[tokio::test]
+    async fn resuming_from_a_read_position_learns_open_identities_once() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route(
+            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+            json!([]),
+        );
+        github.route(
+            "/repos/acme/garden/issues?state=open&per_page=100",
+            json!([issue(5, "2026-09-01T00:00:00Z", json!({"node_id": "I_fern"}))]),
+        );
+        github.open_pull_requests(json!([]));
+        github.resolved_nodes(json!([{"id": "I_fern", "state": "OPEN", "number": 77,
+            "url": "https://github.com/acme/greenhouse/issues/77"}]));
+        let position = replicated_cursor(
+            &json!({"items_since": "2026-09-10T00:00:00Z", "seen": {"items": "elsewhere"}}).to_string(),
+        )
+        .unwrap();
+        let first = observe_at(request(&["issues"], Some(&position), None), &base, Some(&GithubAuth::test("test")))
+            .await
+            .unwrap();
+        assert_eq!(item(&first.facts, "issues", 5)["moved_to"], "resource/github/acme/greenhouse/issue/77");
+        assert!(github.take_requests().iter().any(|request| request.contains("/issues?state=open&")));
+
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        observe_at(request(&["issues"], first.cursor.as_deref(), Some(first.facts)), &base, Some(&GithubAuth::test("test")))
+            .await
+            .unwrap();
+        assert!(
+            !github.take_requests().iter().any(|request| request.contains("/issues?state=open&")),
+            "the open listing is read once"
+        );
+    }
+
+    /// A resume whose open listing is longer than one poll reads learns the identities on the
+    /// first pages, and the polls after it read on from where it stopped until the listing ends.
+    #[tokio::test]
+    async fn resuming_reads_a_long_open_listing_across_polls() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route(
+            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+            json!([]),
+        );
+        let start = "/repos/acme/garden/issues?state=open&per_page=100";
+        for page in 1..=11 {
+            let path = if page == 1 { start.to_owned() } else { format!("{start}&page={page}") };
+            let values: Vec<_> = (0..100)
+                .map(|offset| {
+                    let number = (page - 1) * 100 + offset + 1;
+                    issue(number, "2026-09-01T00:00:00Z", json!({"node_id": format!("I_{number}")}))
+                })
+                .collect();
+            github.route(&path, json!(values));
+            if page < 11 {
+                github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+            }
+        }
+        github.open_pull_requests(json!([]));
+        github.resolved_nodes(json!([]));
+        let position = replicated_cursor(
+            &json!({"items_since": "2026-09-10T00:00:00Z", "seen": {"items": "elsewhere"}}).to_string(),
+        )
+        .unwrap();
+        let auth = GithubAuth::test("test");
+        let first = observe_at(request(&["issues"], Some(&position), None), &base, Some(&auth))
+            .await
+            .unwrap();
+        let cursor = RepositoryCursor::parse(first.cursor.as_deref());
+        assert!(cursor.identities.contains_key("I_1000"));
+        assert!(!cursor.identities.contains_key("I_1001"));
+        assert!(cursor.resume_next.as_deref().unwrap().ends_with("&page=11"));
+
+        github.take_requests();
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        let second = observe_at(request(&["issues"], first.cursor.as_deref(), Some(first.facts)), &base, Some(&auth))
+            .await
+            .unwrap();
+        let cursor = RepositoryCursor::parse(second.cursor.as_deref());
+        assert!(cursor.identities.contains_key("I_1100"));
+        assert!(cursor.resume_next.is_none());
+        let requests = github.take_requests();
+        assert_eq!(
+            requests.iter().filter(|request| request.contains("/issues?state=open&")).count(),
+            1,
+            "the second poll reads only the page the first stopped before"
+        );
+
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        observe_at(request(&["issues"], second.cursor.as_deref(), Some(second.facts)), &base, Some(&auth))
+            .await
+            .unwrap();
+        assert!(
+            !github.take_requests().iter().any(|request| request.contains("/issues?state=open&")),
+            "once the listing ends it is not read again"
+        );
+    }
+
     #[tokio::test]
     async fn open_pull_request_execution_pages_keep_all_items_and_the_total_bound() {
         let (github, base) = FakeGithub::start().await;
@@ -3572,6 +3578,61 @@ mod tests {
         }).await;
     }
 
+    /// GitHub can stamp a record in the future: on 2026-11-01, as US Pacific clocks fell back,
+    /// some were stamped an hour ahead. A watermark stops at the look's own start, so the next
+    /// look still sees a change stamped just after that start, and the future-stamped record
+    /// is not handed out twice.
+    #[tokio::test]
+    async fn a_future_stamp_holds_no_watermark_past_the_look() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let stamp = |offset: chrono::Duration| (chrono::Utc::now() + offset).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let earlier = stamp(chrono::Duration::minutes(-10));
+        let ahead = stamp(chrono::Duration::hours(1));
+        let listings = |since: &str| (
+            format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={}&per_page=100", inclusive_since(since)),
+            format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={}&per_page=100", inclusive_since(since)),
+        );
+        let comment = |id: u64, number: u64, at: &str| json!({
+            "id": id, "issue_url": format!("https://api.github.com/repos/acme/garden/issues/{number}"),
+            "html_url": format!("https://github.com/acme/garden/issues/{number}#issuecomment-{id}"),
+            "user": {"login": "fern"}, "body": "hello", "created_at": at, "updated_at": at,
+        });
+        let (issues, comments) = listings(&earlier);
+        github.route(&issues, json!([issue(1, &ahead, json!({}))]));
+        github.route(&comments, json!([comment(91, 1, &ahead)]));
+        let token = GithubAuth::test("future-stamp-token");
+        let cursor = json!({"items_since": earlier, "comments_since": earlier}).to_string();
+        let started = stamp(chrono::Duration::zero());
+        let first = observe_at(request(&["comments"], Some(&cursor), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(item(&first.facts, "issues", 1)["recent_comments"][0]["id"], 91);
+        let held = RepositoryCursor::parse(first.cursor.as_deref());
+        for since in [&held.items_since, &held.comments_since] {
+            let since = since.as_deref().unwrap();
+            assert!(since >= started.as_str() && since < ahead.as_str(), "{since} is not the look's start");
+        }
+
+        // A change stamped just after the first look began is still read, and the record
+        // stamped ahead is not handed out again.
+        let just_after = stamp(chrono::Duration::seconds(1));
+        let (issues, comments) = listings(held.items_since.as_deref().unwrap());
+        github.route(&issues, json!([issue(1, &ahead, json!({})), issue(2, &just_after, json!({}))]));
+        github.route(&comments, json!([comment(91, 1, &ahead), comment(92, 2, &just_after)]));
+        let next = observe_at(request(&["comments"], first.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(items(&next.facts, "issues").len(), 1, "{}", next.facts);
+        assert_eq!(item(&next.facts, "issues", 2)["recent_comments"][0]["id"], 92);
+
+        // A cursor an earlier build left at the future stamp reads on from the look's start.
+        let stuck = json!({"items_since": ahead, "comments_since": ahead}).to_string();
+        let resumed = observe_at(request(&["comments"], Some(&stuck), None), &base, Some(&token))
+            .await.unwrap();
+        let resumed = RepositoryCursor::parse(resumed.cursor.as_deref());
+        assert!(resumed.items_since.as_deref().unwrap() < ahead.as_str());
+        assert!(resumed.comments_since.as_deref().unwrap() < ahead.as_str());
+    }
+
     #[tokio::test]
     async fn inclusive_overlap_continues_past_a_full_boundary_second() {
         let (github, base) = FakeGithub::start().await;
@@ -3704,6 +3765,8 @@ mod tests {
     async fn continuously_changing_sweeps_fall_back_to_normal_polling_without_committing() {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7}));
+        // A bare read position also reads the open listing once, for open items' identities.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
         let at = "2026-09-10T00:00:00Z";
         let start = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
         for page in 1..=11 {
@@ -3740,6 +3803,22 @@ mod tests {
             cursor = observation.cursor;
         }
         assert!(RepositoryCursor::parse(cursor.as_deref()).items_scan.is_none());
+    }
+
+    /// What rides in the claim is how far the observer read, never the version maps.
+    #[test]
+    fn a_replicated_cursor_keeps_only_how_far_the_observer_read() {
+        let cursor = json!({
+            "items_since": "2026-09-10T00:00:00Z", "comments_since": "2026-09-11T00:00:00Z",
+            "seen": {"items": "digest"}, "detail_after": "I_orchid",
+            "identities": {"I_orchid": {"number": 1, "pull": false}},
+        }).to_string();
+        assert_eq!(
+            replicated_cursor(&cursor).as_deref(),
+            Some(r#"{"items_since":"2026-09-10T00:00:00Z","comments_since":"2026-09-11T00:00:00Z"}"#),
+        );
+        assert_eq!(replicated_cursor(r#"{"seen":{"items":"digest"}}"#), None);
+        assert_eq!(replicated_cursor("not a cursor"), None);
     }
 
     #[test]
@@ -3962,6 +4041,8 @@ mod tests {
                  "created_at": "2026-09-10T05:00:00Z", "updated_at": "2026-09-10T05:00:00Z"},
             ]),
         );
+        // A bare read position also reads the open listing once, for open items' identities.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
         let cursor = serde_json::to_string(&RepositoryCursor {
             items_since: Some(since.into()),
             comments_since: Some(comments_since.into()),
@@ -4031,6 +4112,8 @@ mod tests {
     async fn every_comment_and_review_is_one_recent_entry_without_its_body() {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7}));
+        // A bare read position also reads the open listing once, for open items' identities.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
         let since = "2026-09-10T00:00:00Z";
         github.route(
             &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),

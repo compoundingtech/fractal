@@ -224,7 +224,7 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
         .env("ST_TEST_PRIMARY_HOOK_DIR", &paths.agent_dir)
         .env(
             "ST_TEST_PRIMARY_HOOK_BINARY",
-            test_env!("CARGO_BIN_EXE_st3-fixture"),
+            test_env!("CARGO_BIN_EXE_fractal-fixture"),
         )
         .env("ST_AGENT", "agent/fixture/primary-hooks")
         .env("ST3_SUBJECT", "agent/fixture/primary-hooks")

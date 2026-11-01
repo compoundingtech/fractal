@@ -48,12 +48,14 @@ stop declared agents. See [Checkpoints](st3/checkpoints.md) before treating remo
 |---|---|---|
 | `STATE/fleet/` | `0700` | Local fleet files |
 | `STATE/fleet/fleet.toml` | `0600` | Fleet ID, anchor, mode, port, transports, key/secret paths, writer floor and legacy setting |
-| `STATE/fleet/secret` | `0600` | Fleet secret |
+| `STATE/fleet/secret` | `0600` | 32 random bytes stored as 64 hexadecimal characters |
 | `STATE/fleet/node.key` | `0600` | Private member key |
 | `STATE/fleet/join.json` | `0600` | Interrupted join progress, without secrets |
 | `STATE/fleet/pairing-recovery.json` | `0600` | Authenticated pending pairing answer, including fleet secret; bound to code digest, member key and name; erased after the durable join checkpoint |
 | `STATE/fleet/removal.json` | `0600` | Signed removal reporter, reason and time |
 
+`fleet.toml` also records the local `node`, `anchor_key`, `sponsor`, `sponsor_key`,
+`sponsor_routes` and `advertise_loopback` used by admission and listener setup.
 Fleet commands maintain `fleet.toml`; change it through those commands. Config loading uses the
 effective state directory after `--state-dir`. A conflicting fleet ID in `config.toml` is refused.
 Local invite tokens do not replicate; see [Data authority](st3/data-authority.md).
@@ -76,14 +78,23 @@ st fleet invites revoke fleet-invite/ID --reason TEXT
 
 The optional name pins the joiner's name. Expiry defaults to 10 minutes and accepts
 10 seconds to 24 hours; an invitation carrying Fabric pairing is capped at 10
-minutes. `auto` includes advertised endpoints; `--via` selects a transport. A
+minutes. `auto` includes advertised endpoints; `--via` selects a transport.
+Without `st-fabric-adapter`, `auto` leaves Fabric out and uses the member's
+Tailscale (or loopback) endpoints; an invitation only Fabric could carry fails
+with the setup it needs, before any invite exists. An invite that is created but
+not delivered (by `--code-file` or `--send-fabric`) is revoked, and the command
+exits non-zero. A
 sponsor must already be a fleet member with a listener. Invites are person
 operations; an agent seat must provide an explicit `--as person/NAME` where the
 command permits it.
 
 Prefer the no-echo prompt, a pipe, `--code-file` or `--send-fabric` to a code in argv or a transcript.
-The Fabric form creates a private temporary code file, sends it and deletes the local copy;
-`st fleet join --fabric-inbox` reads and removes the matching inbox file.
+`--code-file PATH` writes a new 0600 file and leaves its directory's mode alone.
+`--send-fabric` sends to NAME as Fabric knows it: a peer name or NodeID listed by
+`fabric peers` on the sponsor. It creates a private temporary code file, sends it,
+deletes the local copy, and reports success only after Fabric confirms the file
+arrived. `st fleet join --fabric-inbox` waits up to ten minutes for the matching
+inbox file, then reads and removes it.
 
 ### Expiry and single use
 
@@ -334,6 +345,11 @@ digest before and after that claim or a signed `member-left` naming its key. Int
 resumes; `--cancel` restores normal mode before the claim is written. Offline leave skips the peer
 proof and prints the removal command for another member. The local history remains fleet-bound;
 joining a different fleet needs a separately authorized reset.
+
+`st service reset [--config PATH]` erases the local store and `STATE/fleet/` without
+contacting the fleet; it does not perform a membership leave. On a member, run
+`st fleet leave` first, or `st fleet leave --offline` followed by `st fleet remove NAME`
+on another member. A reset machine can rejoin only as a new incarnation.
 
 `st uninstall [--dry-run] [--yes] [--offline] [--keep-binaries] [--erase-local-graph] [--no-service] [--as PERSON]`
 leaves the fleet, stops owned runtimes, removes services/exposure and fractal's Claude plugin/marketplace,
