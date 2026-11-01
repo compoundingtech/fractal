@@ -782,7 +782,10 @@ pub(crate) fn verify_install_receipt(bin: &Path) -> Result<bool> {
     {
         return Ok(false);
     }
-    let digest = executable_digest(&bin.join("fractal"))?;
+    let digest = executable_digest(&bin.join("fractal")).with_context(|| format!(
+        "invalid install receipt {}; reinstall Fractal",
+        bin.join(if finalized.is_some() { INSTALL_RECEIPT } else { INSTALL_RECEIPT_PENDING }).display(),
+    ))?;
     anyhow::ensure!(finalized.iter().chain(pending.iter())
         .any(|(receipt, _)| receipt["sha256"].as_str() == Some(digest.as_str())),
         "invalid install receipt {} or {}; reinstall Fractal: receipt does not match the installed executable",

@@ -29,6 +29,11 @@ reinstall guidance; restore the matching executable and receipt together before
 reinstalling through the original installer. The separate `RELEASE.json` is release
 display metadata, not an ownership receipt.
 
+The downloader verifies ownership receipts with Python 3, independently of the
+selected release's CLI protocol, so retained tags remain installable. It never
+executes the destination to verify ownership. Missing, dangling or unreadable
+receipt-bound executables are refused with the receipt path and reinstall guidance.
+
 ## Install and restart deliberately
 
 For an archive installation, use the [installer](https://github.com/compoundingtech/fractal/blob/main/install.sh) and its release-selection options. Install without opening the interface so you can inspect the selected build before restarting. For Home Manager, update the selected input and activate through the same configuration that owns the service.
