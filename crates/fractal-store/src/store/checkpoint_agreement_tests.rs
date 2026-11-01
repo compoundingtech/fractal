@@ -529,7 +529,7 @@ fn a_trim_that_would_change_the_graph_waits_for_a_person() {
     assert_eq!(status.trimmed, None);
     assert!(
         birch
-            .claims_for("daemon/birch", Some("daemon.diagnostic"))
+            .observations_for("daemon/birch", "daemon.diagnostic")
             .unwrap()
             .iter()
             .any(|claim| claim.body["fields"]["code"] == "checkpoint-trim-graph-changed")
@@ -590,7 +590,7 @@ fn a_repaired_original_held_by_one_node_does_not_split_the_verifications() {
     observe(&birch, 3);
     observe(&cedar, 2);
     let replacement = alder
-        .append_claim(&ClaimInput {
+        .append_as_older_build_for_test(&ClaimInput {
             subject: "daemon/alder".into(),
             kind: "daemon.diagnostic".into(),
             actor: None,
@@ -741,7 +741,7 @@ fn status_names_what_differs_between_verifications() {
         .unwrap()
         .pending
         .unwrap()
-        .terms;
+        .terms.unwrap();
     let (_, mut plan, proof) = birch
         .plan_checkpoint_through(cut, None, scratch.path())
         .unwrap();

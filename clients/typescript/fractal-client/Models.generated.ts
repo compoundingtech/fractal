@@ -16,7 +16,9 @@ export type ActionCommon = {
 
 };
   type: 
-  "arrangement.edit"
+  "harness.answer"
+  | "arrangement.edit"
+  | "arrangement.membership.edit"
   | "custom.reply"
   | "private-notes.write"
   | "prompt.respond"
@@ -80,7 +82,9 @@ export type ActionResult = {
   action_id: Id;
   affected_ids: Array<Id>;
   arrangement_revision?: Revision;
+  harness_answer?: HarnessAnswerResult;
   kind: "action-result";
+  membership_revision?: Revision;
   operation_id: Id;
   private_notes?: PrivateNotesFence;
   snapshot_id: Id;
@@ -177,7 +181,8 @@ export type AgentDeclaration = {
 export type AgentDelivery = {
   polled_seconds_ago?: number | null;
   reason?: string | null;
-  state: "current" | "outdated" | "legacy" | "stale" | "unknown";
+  since_unix_ms?: number | null;
+  state: "current" | "outdated" | "legacy" | "stale" | "refused" | "unknown";
   transport?: string | null;
 };
 
@@ -329,6 +334,7 @@ export type AgentResumeParameters = {
 
 export type AgentRetireParameters = {
   agent: Id;
+  expect_revision?: string;
   reason: string;
   successor?: Id;
 };
@@ -477,7 +483,9 @@ export type Arrangement = ResourceHeader & {
   resolved?: ArrangementResolved;
 };
 
-export type ArrangementBody = {
+export type ArrangementBody = (ArrangementBodyV1 | ArrangementBodyV2);
+
+export type ArrangementBodyV1 = {
   folders: {
   [key: string]: ArrangementFolder;
 };
@@ -488,10 +496,19 @@ export type ArrangementBody = {
   version: 1;
 };
 
+export type ArrangementBodyV2 = {
+  folders: {
+  [key: string]: ArrangementFolder;
+};
+  name: ArrangementNameRegister;
+  version: 2;
+};
+
 export type ArrangementEditParameters = {
   operations: Array<ArrangementOperation>;
   owner: ArrangementPerson;
   subject: ArrangementId;
+  version?: number;
 };
 
 export type ArrangementFolder = {
@@ -505,6 +522,12 @@ export type ArrangementFolderId = string;
 export type ArrangementId = string;
 
 export type ArrangementKey = string;
+
+export type ArrangementMembershipEditParameters = {
+  operations: Array<OrderedMembershipOperation>;
+  owner: ArrangementPerson;
+  subject: ArrangementId;
+};
 
 export type ArrangementName = string;
 
@@ -594,6 +617,11 @@ export type ArrangementSubject = string;
 export type ArrangementTombstoneRegister = {
   revision: Revision;
   value: true;
+};
+
+export type AskDefaultAnswer = {
+  id: string;
+  label: string;
 };
 
 export type AssistantAgentDetailRequest = {
@@ -950,6 +978,8 @@ export type Attention = ResourceHeader & {
   custom_form?: {
 
 };
+  deadline_at?: Timestamp;
+  default_answer?: AskDefaultAnswer;
   detail: string;
   episode?: string;
   fix?: {
@@ -1300,6 +1330,13 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   subject?: ArrangementId;
   trace?: SubscribeTraceContext;
 } & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; until_ms?: never; }) | ({
+  collection: "ordered-memberships";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  person: ArrangementPerson;
+  subject: ArrangementId;
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; trace?: never; until_ms?: never; }) | ({
   capability: string;
   collection: "terminal";
   id: string;
@@ -1318,8 +1355,8 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   kind: "unsubscribe";
 } & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; collection?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; trace?: never; until_ms?: never; }));
 
-export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; code?: never; header?: never; message?: never; older_cursor?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; value?: never; }) | (AgentsChanges & { chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; message?: never; older_cursor?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; value?: never; }) | ({
-  collection: CollectionName;
+export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; code?: never; header?: never; membership?: never; message?: never; older_cursor?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; value?: never; }) | (AgentsChanges & { chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; membership?: never; message?: never; older_cursor?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; value?: never; }) | ({
+  collection: ResourceCollectionName;
   has_more: boolean;
   id: string;
   items: Array<Resource>;
@@ -1327,8 +1364,8 @@ export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; c
   order: Array<Id>;
   snapshot: Snapshot;
   sync?: StreamSync;
-} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; message?: never; older_cursor?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; upserts?: never; value?: never; }) | ({
-  collection: CollectionName;
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; membership?: never; message?: never; older_cursor?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; upserts?: never; value?: never; }) | ({
+  collection: ResourceCollectionName;
   has_more: boolean;
   id: string;
   kind: "changes";
@@ -1337,13 +1374,32 @@ export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; c
   snapshot: Snapshot;
   sync?: StreamSync;
   upserts: Array<Resource>;
-} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; message?: never; older_cursor?: never; publication?: never; replace?: never; retryable?: never; session_id?: never; value?: never; }) | ({
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; membership?: never; message?: never; older_cursor?: never; publication?: never; replace?: never; retryable?: never; session_id?: never; value?: never; }) | ({
+  collection: "ordered-memberships";
+  has_more: boolean;
+  id: string;
+  items: Array<OrderedMembership>;
+  kind: "snapshot";
+  membership: OrderedMembershipState;
+  order: Array<Id>;
+  snapshot: Snapshot;
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; message?: never; older_cursor?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; value?: never; }) | ({
+  collection: "ordered-memberships";
+  has_more: boolean;
+  id: string;
+  kind: "changes";
+  membership: OrderedMembershipState;
+  order: Array<Id>;
+  removes: Array<Id>;
+  snapshot: Snapshot;
+  upserts: Array<OrderedMembership>;
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; message?: never; older_cursor?: never; publication?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; value?: never; }) | ({
   collection: "terminal";
   id: string;
   kind: "screen";
   snapshot: Snapshot;
   value: TerminalScreen;
-} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; has_more?: never; header?: never; items?: never; message?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; }) | ({
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; has_more?: never; header?: never; items?: never; membership?: never; message?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; }) | ({
   collection: "conversation";
   has_more?: boolean;
   header?: ConversationHeader;
@@ -1353,21 +1409,21 @@ export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; c
   older_cursor?: string;
   replace: boolean;
   session_id: Id;
-} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; message?: never; order?: never; publication?: never; removes?: never; retryable?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }) | ({
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; membership?: never; message?: never; order?: never; publication?: never; removes?: never; retryable?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }) | ({
   code?: ErrorCode;
   collection?: string;
   id: string;
   kind: "resync";
   message?: string;
   retryable?: boolean;
-} & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }) | ({
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; membership?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }) | ({
   code?: ErrorCode;
   collection?: string;
   id?: string;
   kind: "error";
   message: string;
   retryable?: boolean;
-} & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }));
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; membership?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }));
 
 export type CollectionName = 
   "missions"
@@ -1376,6 +1432,7 @@ export type CollectionName =
   | "work"
   | "glasses"
   | "arrangements"
+  | "ordered-memberships"
   | "summary"
   | "clients"
   | "usage"
@@ -1618,7 +1675,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -1631,6 +1688,8 @@ export type ErrorCode = (
   | "identity-unknown"
   | "lifecycle-unavailable"
   | "retirement-upgrade-required"
+  | "retire-revision-mismatch"
+  | "retire-incarnation-mismatch"
   | "invalid-custody-successor"
   | "custody-pending"
   | "attention-migrated"
@@ -1648,6 +1707,15 @@ export type ErrorCode = (
   | "invalid-arrangement-folder"
   | "invalid-arrangement-name"
   | "invalid-arrangement-key"
+  | "invalid-arrangement-version"
+  | "invalid-arrangement-body"
+  | "unsupported-membership-container"
+  | "membership-owner-forbidden"
+  | "invalid-membership-member"
+  | "invalid-membership-bucket"
+  | "invalid-membership-key"
+  | "invalid-membership-operations"
+  | "membership-edit-too-large"
   | "invalid-subject-reference"
   | "not-found"
   | "forbidden"
@@ -1694,6 +1762,8 @@ export type ErrorCode = (
   | "private-notes-unreachable"
   | "private-notes-carrier-conflict"
   | "private-notes-indeterminate"
+  | "invalid-answer"
+  | "not-answerable"
   | "internal"
  | string);
 
@@ -1787,6 +1857,37 @@ export type GlassTab = {
 
 export type GoldenResourceSet = Array<Resource>;
 
+export type HarnessAnswerInput = {
+  positions: Array<number>;
+};
+
+export type HarnessAnswerParameters = {
+  answers: {
+  [key: string]: HarnessAnswerInput;
+};
+  question: string;
+};
+
+export type HarnessAnswerResult = {
+  resolution: HarnessQuestionResolution;
+  status: ("accepted" | "already_resolved" | string);
+};
+
+export type HarnessInvalidAnswerDetails = {
+  reason: HarnessInvalidAnswerReason;
+};
+
+export type HarnessInvalidAnswerReason = 
+  "unknown_option"
+  | "too_many"
+  | "required_missing"
+  | "empty_single"
+  | "too_long"
+  | "unknown_question"
+  | "other_not_allowed"
+  | "note_not_allowed"
+;
+
 export type HarnessInventory = {
   agent_id: string;
   collection: "files" | "skills" | "skill-commands" | "slash-commands";
@@ -1822,9 +1923,54 @@ export type HarnessInventoryQuery = {
   session_id: string;
 };
 
+export type HarnessNotAnswerableDetails = {
+  reason: "adapter_missing" | "adapter_unavailable";
+};
+
 export type HarnessPhase = {
   name: string;
   tasks: Array<HarnessTask>;
+};
+
+export type HarnessQuestion = ResourceHeader & {
+  agent: AgentId;
+  answer: HarnessQuestionAnswerability;
+  id?: string;
+  kind: "harness-question";
+  native_id: string;
+  observed_at: number;
+  questions: Array<HarnessQuestionItem>;
+  resolution: (HarnessQuestionResolution | null);
+  runtime_incarnation: string;
+  session: string;
+};
+
+export type HarnessQuestionAnswerability = {
+  reason?: HarnessQuestionAnswerabilityReason;
+  state: ("available" | "unavailable" | string);
+};
+
+export type HarnessQuestionAnswerabilityReason = ("adapter_missing" | "adapter_unavailable" | "resolved" | string);
+
+export type HarnessQuestionItem = {
+  id: string;
+  multi: boolean;
+  options: number;
+  required: boolean;
+};
+
+export type HarnessQuestionResolution = {
+  answers: {
+  [key: string]: HarnessResolvedAnswer;
+};
+  resolved_at: number;
+  revision: Revision;
+  status: ("answered" | "answered_elsewhere" | "expired" | "cancelled" | string);
+};
+
+export type HarnessResolvedAnswer = {
+  positions: Array<number>;
+  timed_out: boolean;
 };
 
 export type HarnessTask = {
@@ -2366,6 +2512,47 @@ export type Operational = {
   runtime_incarnation?: string | null;
 };
 
+export type OrderedMembership = {
+  container: ArrangementId;
+  id: ArrangementSubject;
+  member: ArrangementSubject;
+  position: OrderedMembershipPosition;
+  revision: Revision;
+};
+
+export type OrderedMembershipOperation = ({
+  bucket: string | null;
+  key: ArrangementKey;
+  member: ArrangementSubject;
+  op: "place";
+} | {
+  member: ArrangementSubject;
+  op: "remove";
+});
+
+export type OrderedMembershipPage = {
+  collection: "ordered-memberships";
+  filters: {
+  [key: string]: string;
+};
+  items: Array<OrderedMembership>;
+  kind: "page";
+  page: PageInfo;
+  replicated?: ReplicatedNotice;
+  sync?: SyncNotice;
+};
+
+export type OrderedMembershipPosition = {
+  bucket: string | null;
+  key: ArrangementKey;
+};
+
+export type OrderedMembershipState = {
+  changed_index: number;
+  container: ArrangementId;
+  live_count: number;
+};
+
 export type OwnedSet = ResourceHeader & {
   blockers: Array<string>;
   claim: string;
@@ -2686,7 +2873,23 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
+export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
+
+export type ResourceCollectionName = 
+  "missions"
+  | "attention"
+  | "agents"
+  | "work"
+  | "glasses"
+  | "arrangements"
+  | "summary"
+  | "clients"
+  | "usage"
+  | "machines"
+  | "devices"
+  | "sessions"
+  | "terminals"
+;
 
 export type ResourceHeader = {
   id: Id;
@@ -2714,6 +2917,7 @@ export type ResourceHeader = {
   | "summary"
   | "connected-client"
   | "usage"
+  | "harness-question"
  | string);
   operational?: Operational;
   revision: Revision;
@@ -2907,11 +3111,14 @@ export type SloRow = {
   account?: string;
   current: string;
   explain: string;
+  forecast_basis_minutes?: number;
+  forecast_used_percent?: number;
   id: string;
   kind: "objective" | "budget";
   measured_at_unix_ms?: number;
   remaining_percent: number | null;
   resets_at_unix_ms?: number | null;
+  runs_out_at_unix_ms?: number;
   status: "met" | "missed" | "no-data" | "stale";
   target: string;
   window: string;
@@ -3221,6 +3428,7 @@ export type TimelineContentBody = {
   attachment_id?: Id;
   blocks?: Array<TimelineBlock>;
   media_type: string;
+  message_id?: string;
   text?: string;
 } & (unknown | unknown);
 
@@ -3908,12 +4116,14 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.stop'; parameters: AgentStopParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.suspend'; parameters: AgentSuspendParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.edit'; parameters: ArrangementEditParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.membership.edit'; parameters: ArrangementMembershipEditParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.resolve'; parameters: {
   attention_id: Id;
   outcome: string;
   reason?: string;
 }; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'custom.reply'; parameters: CustomReplyParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'harness.answer'; parameters: HarnessAnswerParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.approve'; parameters: {
   anchor_id?: Id;
   detail?: string;

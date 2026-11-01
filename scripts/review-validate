@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a review verdict against .st/review-verdict.schema.json and the rules a schema cannot say.
+"""Check a review verdict against .fractal/review-verdict.schema.json (.st only if absent) and the rules a schema cannot say.
 
   review-validate VERDICT.json [--schema FILE] [--previous FILE]     exit 0 when it parses and validates; otherwise print every problem, exit 1
 
@@ -16,7 +16,20 @@ import re
 import sys
 sys.dont_write_bytecode = True
 
-SCHEMA = Path(__file__).resolve().parent.parent / ".st/review-verdict.schema.json"
+ROOT = Path(__file__).resolve().parent.parent
+SCHEMA = ROOT / ".st/review-verdict.schema.json"
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config
+def schema_path():
+    new = ROOT / ".fractal/review-verdict.schema.json"
+    try:
+        new.lstat()
+    except FileNotFoundError:
+        return SCHEMA
+    return new
+
+
 ORDER = {"low": 0, "medium": 1, "high": 2}
 TYPES = {
     "object": lambda value: isinstance(value, dict),
@@ -85,6 +98,11 @@ def semantic(verdict, problems, previous=None):
     for reason in risk["deterministic"]["reasons"]:
         if ORDER[reason["level"]] > ORDER[risk["deterministic"]["level"]]:
             problems.append(f"risk.deterministic: level {risk['deterministic']['level']!r} is lower than the reason {reason['rule']!r} ({reason['level']!r})")
+    if "needs_factory_read" in risk:
+        wanted = risk["final"] == "medium" and bool(risk["deterministic"].get("factory_read"))
+        if risk["needs_factory_read"] != wanted:
+            problems.append(f"risk.needs_factory_read: {risk['needs_factory_read']!r} but final risk {risk['final']!r} with "
+                            f"{len(risk['deterministic'].get('factory_read') or [])} area(s) makes it {wanted!r}")
     blocking = [finding for finding in verdict["findings"] if finding["severity"] == "blocking"]
     if verdict["verdict"] == "GO" and blocking:
         problems.append(f"verdict: GO with {len(blocking)} blocking finding(s)")
@@ -106,7 +124,7 @@ def validate(verdict, schema, previous=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("verdict", type=Path)
-    parser.add_argument("--schema", type=Path, default=SCHEMA)
+    parser.add_argument("--schema", type=Path)
     parser.add_argument("--previous", type=Path, help="the earlier verdict this round follows")
     args = parser.parse_args()
     try:
@@ -119,7 +137,7 @@ def main():
     except (OSError, ValueError) as error:
         print(f"review-validate: {args.previous} does not parse: {error}", file=sys.stderr)
         return 1
-    problems = validate(verdict, json.loads(args.schema.read_text()), previous)
+    problems = validate(verdict, json.loads((args.schema or schema_path()).read_text()), previous)
     for problem in problems:
         print(f"review-validate: {problem}", file=sys.stderr)
     return 1 if problems else 0

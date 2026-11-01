@@ -352,11 +352,11 @@ def main():
         subprocess.run(['bash', 'scripts/ci-linux', 'conversation-model'], check=True)
         # The real-user gateway must retain the standalone production feature set.
         with (directory / 'production-build.json').open('w') as stream:
-            subprocess.run(['cargo', 'build', '--locked', '-p', 'fractal', '--bin', 'st3',
+            subprocess.run(['cargo', 'build', '--locked', '-p', 'fractal', '--bin', 'fractal',
                             '--message-format=json'], check=True, stdout=stream)
         artifacts = [json.loads(line) for line in (directory / 'production-build.json').read_text().splitlines()]
         binaries = [item for item in artifacts if item.get('reason') == 'compiler-artifact'
-                    and item['target']['name'] == 'st3' and item.get('executable')]
+                    and item['target']['name'] == 'fractal' and item.get('executable')]
         if len(binaries) != 1 or 'test-support' in binaries[0]['features'] or binaries[0]['profile']['test']:
             raise ValueError('standalone production gateway feature/profile identity required')
         import shutil

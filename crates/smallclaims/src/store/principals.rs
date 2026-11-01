@@ -157,6 +157,18 @@ const CANDIDATE_PAGE: usize = 32;
 /// The longest chain admission follows: a device, its person's root, and the node that vouched.
 const MAX_CHAIN_DEPTH: usize = 8;
 const VERDICT_ROOTS: &str = "claim_candidate_verdict_roots";
+/// While the verdicts linked to LINK are still being queued, `meta` holds `REQUEUE` + LINK with
+/// the last claim queued so far. A trust-root change once queued every verdict relying on the
+/// roots in one writer transaction (about 905k claims, 117 s, on a large member), and a changed
+/// long-lived delegation its dependents (up to 23 s); now each loan queues one page.
+const REQUEUE: &str = "claim_candidate_requeue:";
+/// The first key after every `REQUEUE` key.
+const REQUEUE_END: &str = "claim_candidate_requeue;";
+const REQUEUE_PAGE: usize = 1024;
+/// Loans one ordinary verdict pass takes (projection tail, admission, sealed export, startup).
+/// The rest stays due for the next pass and for the paced signature job, so a large backlog
+/// never holds the projection lock or the writer for long.
+pub const VERDICT_SLICE_LOANS: usize = 8;
 pub(super) const OWN_NODE_KEY: &str = "principal_node_key";
 
 /// A claim's position in the canonical order, as comparable values.
@@ -165,22 +177,16 @@ struct Position(Vec<SqlValue>);
 
 impl Position {
     fn compare(&self, other: &Self) -> CmpOrdering {
-        for (left, right) in self.0.iter().zip(&other.0) {
-            let ordering = match (left, right) {
-                (SqlValue::Integer(left), SqlValue::Integer(right)) => left.cmp(right),
-                (SqlValue::Text(left), SqlValue::Text(right)) => left.cmp(right),
-                (SqlValue::Null, SqlValue::Null) => CmpOrdering::Equal,
-                (SqlValue::Null, _) => CmpOrdering::Less,
-                (_, SqlValue::Null) => CmpOrdering::Greater,
-                (SqlValue::Integer(_), _) => CmpOrdering::Less,
-                (_, SqlValue::Integer(_)) => CmpOrdering::Greater,
-                _ => CmpOrdering::Equal,
-            };
-            if ordering != CmpOrdering::Equal {
-                return ordering;
+        use crate::principal::facts::{OrderComponent, compare_order};
+        fn component(value: &SqlValue) -> OrderComponent<'_> {
+            match value {
+                SqlValue::Integer(value) => OrderComponent::Integer(i128::from(*value)),
+                SqlValue::Text(value) => OrderComponent::Text(value),
+                SqlValue::Null => OrderComponent::Null,
+                _ => OrderComponent::Other,
             }
         }
-        CmpOrdering::Equal
+        compare_order(self.0.iter().map(component), other.0.iter().map(component))
     }
 }
 
@@ -336,40 +342,23 @@ fn signature_candidates(connection: &Connection, claim_id: &str) -> Result<Vec<C
 }
 
 fn signature_fields(row: &ClaimRow) -> Value {
-    let mut fields = row.body.get("fields").cloned().unwrap_or(Value::Null);
-    // A long message's claim holds a preview, and names its whole text in an `attachments` entry
-    // of type text/plain. A device that signs such a message names `body_sha256` and `body_bytes`
-    // among its signed fields; they are those entry's hash and size, not stored fields.
-    if row.kind == "message.sent"
-        && let Some(body) = fields
-            .get("attachments")
-            .and_then(crate::principal::message_body_entry)
-            .cloned()
-    {
-        fields["body_sha256"] = body.get("sha256").cloned().unwrap_or(Value::Null);
-        fields["body_bytes"] = body.get("size").cloned().unwrap_or(Value::Null);
-    }
-    fields
+    crate::principal::facts::signature_fields(&row.kind, &row.body)
 }
 
 fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
-    let fields = signature_fields(row);
-    signature.verifies(&crate::principal::Judged {
-        id: &row.id,
-        subject: &row.subject,
-        kind: &row.kind,
-        actor: row.actor.as_deref(),
-        content: content_digest(&row.subject, &row.kind, row.actor.as_deref(), &row.body),
-        fields: &fields,
-    })
+    crate::principal::facts::nonce_eligible(
+        &row.id, &row.subject, &row.kind, row.actor.as_deref(), &row.body, signature,
+    )
 }
 
 mod judging;
 mod legacy;
 mod migration;
 pub(crate) use migration::SignatureEnvelopeWork;
-pub use migration::SignatureMigration;
 pub(crate) use migration::initialize_schema;
+pub use migration::{
+    SignatureMigration, SignatureResume, SignatureResumeRequest, transient_storage_error,
+};
 
 /// Keep a signature a device made for the claim this node is about to write on `subject`, so the
 /// write stores it in its own transaction.
@@ -543,6 +532,13 @@ impl Store {
         {
             faults.push(SignatureStateFault { code:"signature-bootstrap-stalled".into(),subject:format!("host/{}",self.origin),detail:format!("no committed candidate bootstrap progress for at least 300s; inspect the writer queue and stopped-job logs; {}",migration.progress_description()) });
         }
+        if let Some(detail) = self.lasting_signature_retry() {
+            faults.push(SignatureStateFault {
+                code: "signature-storage-retrying".into(),
+                subject: format!("host/{}", self.origin),
+                detail,
+            });
+        }
         if let Some(fault) = &migration.legacy_fault {
             faults.push(SignatureStateFault {code:"signature-state-corrupt".into(),subject:format!("host/{}",self.origin),detail:format!("legacy authorization is unavailable: {fault}; repair the named local defect before explicit resume")});
         }
@@ -625,7 +621,8 @@ struct StoreFacts<'a> {
     memo: &'a RefCell<BTreeMap<String, Verdict>>,
     /// What the verdict relied on.
     links: RefCell<BTreeSet<String>>,
-    fault: RefCell<Option<String>>,
+    /// The first failed read, kept typed so a transient SQLite error stays retryable.
+    fault: RefCell<Option<anyhow::Error>>,
     incomplete: RefCell<bool>,
 }
 
@@ -634,9 +631,7 @@ impl StoreFacts<'_> {
         match result {
             Ok(value) => value,
             Err(error) => {
-                self.fault
-                    .borrow_mut()
-                    .get_or_insert_with(|| format!("{error:#}"));
+                self.fault.borrow_mut().get_or_insert(error);
                 neutral
             }
         }
@@ -662,10 +657,9 @@ impl StoreFacts<'_> {
         )
         .map(|(verdict, _, _)| verdict)
         .unwrap_or_else(|error| {
-            self.fault
-                .borrow_mut()
-                .get_or_insert_with(|| format!("{error:#}"));
-            Verdict::Held(format!("signature-state-corrupt: {error:#}"))
+            let verdict = Verdict::Held(format!("signature-state-corrupt: {error:#}"));
+            self.fault.borrow_mut().get_or_insert(error);
+            verdict
         });
         self.memo
             .borrow_mut()
@@ -696,7 +690,9 @@ impl Facts for StoreFacts<'_> {
 
     fn is_root(&self, subject: &str, key: &str) -> bool {
         self.links.borrow_mut().insert("root".into());
-        self.roots.contains(&(subject.to_owned(), key.to_owned()))
+        crate::principal::facts::root_eligible(
+            subject, key, crate::principal::facts::RootContext::Runtime(self.roots),
+        )
     }
 
     fn revoked_before(&self, principal: &str, key: &str) -> bool {
@@ -883,7 +879,7 @@ fn judge_candidates(
         }
     }
     if let Some(error) = facts.fault.into_inner() {
-        anyhow::bail!("signature-state-corrupt: {error}");
+        return Err(error.context("signature-state-corrupt"));
     }
     if facts.incomplete.into_inner() {
         return Ok((
@@ -988,16 +984,85 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
     Ok(rows)
 }
 
-/// Queue every verdict linked to `link`.
+/// Queue the verdicts linked to `link`: the first page now, and the rest a page per later loan.
+/// A change during an unfinished requeue starts it over; judging reads the current authority
+/// either way.
 fn queue_linked_tx(connection: &Connection, link: &str) -> Result<()> {
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h49b3f0ec0be5 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1 WHERE claim_id IN (SELECT claim_id FROM claim_verdict_links WHERE link=?1)")?.execute(/* sqlite-large-value: allow-for-now lv-h70b485176b21 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [link])?;
-    connection
-        .prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h223cb02a73f3 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id)
-             SELECT claim_id FROM claim_verdict_links WHERE link=?1",
-        )?
-        .execute(/* sqlite-large-value: allow-for-now lv-h166860a6fb5a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [link])?;
+    requeue_page_tx(connection, link, "")?;
     Ok(())
+}
+
+/// The trust roots changed: queue what relied on them from the start, all in later loans.
+fn start_root_requeue_tx(connection: &Connection, roots_digest: &str) -> Result<()> {
+    set_meta_tx(connection, VERDICT_ROOTS, roots_digest)?;
+    set_meta_tx(connection, &format!("{REQUEUE}root"), "")
+}
+
+/// Queue one page of the claims linked to `link` after `after`, in claim order, and keep or end
+/// its cursor. Returns whether more remain.
+fn requeue_page_tx(connection: &Connection, link: &str, after: &str) -> Result<bool> {
+    let page = params![link, after, REQUEUE_PAGE as i64];
+    let (last, count): (Option<String>, usize) = connection
+        .prepare_cached("SELECT MAX(claim_id), COUNT(*) FROM (SELECT claim_id FROM claim_verdict_links WHERE link=?1 AND claim_id>?2 ORDER BY claim_id LIMIT ?3)")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h26d9a509862a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ page, |row| Ok((row.get(0)?, row.get(1)?)))?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he8dea43d15fe owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1 WHERE claim_id IN (SELECT claim_id FROM claim_verdict_links WHERE link=?1 AND claim_id>?2 ORDER BY claim_id LIMIT ?3)")?.execute(/* sqlite-large-value: allow-for-now lv-h745c77576b29 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ page)?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc142559507cb owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) SELECT claim_id FROM claim_verdict_links WHERE link=?1 AND claim_id>?2 ORDER BY claim_id LIMIT ?3")?.execute(/* sqlite-large-value: allow-for-now lv-h86a60c947619 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ page)?;
+    let key = format!("{REQUEUE}{link}");
+    match last.filter(|_| count == REQUEUE_PAGE) {
+        Some(last) => {
+            set_meta_tx(connection, &key, &last)?;
+            Ok(true)
+        }
+        None => {
+            connection
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha0cfaa1ec5cc owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1")?
+                .execute(/* sqlite-large-value: allow-for-now lv-hdf404790377b owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [key])?;
+            Ok(false)
+        }
+    }
+}
+
+/// Queue the next page of the first unfinished requeue. Returns whether any requeue remains.
+fn advance_requeue_tx(connection: &Connection) -> Result<bool> {
+    let cursor = connection
+        .prepare_cached(
+            "SELECT key, value FROM meta WHERE key>=?1 AND key<?2 ORDER BY key LIMIT 1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h582e5366bbee owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [REQUEUE, REQUEUE_END], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?;
+    let Some((key, after)) = cursor else {
+        return Ok(false);
+    };
+    if requeue_page_tx(connection, &key[REQUEUE.len()..], &after)? {
+        return Ok(true);
+    }
+    requeue_pending(connection)
+}
+
+fn requeue_pending(connection: &Connection) -> Result<bool> {
+    Ok(connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM meta WHERE key>=?1 AND key<?2)")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hb771731d9c03 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [REQUEUE, REQUEUE_END], |row| row.get(0))?)
+}
+
+/// Where a claim relies on a link whose requeue cursor has not reached it yet, that link: the
+/// claim's page is not queued, so its cached verdict can predate the change and reads as held,
+/// as it did when one transaction queued every dependent.
+pub(super) fn requeue_ahead_of(connection: &Connection, claim_id: &str) -> Result<Option<String>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT l.link FROM meta m JOIN claim_verdict_links l
+               ON l.link=substr(m.key, ?3) AND l.claim_id=?4
+             WHERE m.key>=?1 AND m.key<?2 AND m.value<?4 ORDER BY m.key LIMIT 1",
+        )?
+        .query_row(
+            /* sqlite-large-value: allow-for-now lv-hd85da347d250 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */
+            params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, claim_id],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 /// The links a newly arrived signed claim can change: the claims waiting on it as a
@@ -1491,16 +1556,17 @@ impl Store {
         })
     }
 
-    /// Whether a pass has anything to judge: a newly signed claim, or a queued one. Two probes
-    /// of tiny tables on a reader.
-    fn verdicts_pending(&self) -> Result<bool> {
+    /// Whether a pass has anything to judge: a newly signed claim, a queued one, or a link whose
+    /// verdicts are still being queued. Three probes of small tables on a reader.
+    pub fn verdicts_pending(&self) -> Result<bool> {
         let connection = self.readers.get();
-        Ok(connection
+        let judging: bool = connection
             .prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM claim_verdict_fresh)
                      OR EXISTS(SELECT 1 FROM claim_verdict_queue)",
             )?
-            .query_row(/* sqlite-large-value: allow-for-now lv-ha76b0c3b2d8f owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-ha76b0c3b2d8f owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
+        Ok(judging || requeue_pending(&connection)?)
     }
 
     /// Judge every signed claim admitted since the last pass and every queued one. With
@@ -1513,16 +1579,39 @@ impl Store {
             // alone owns the historical shadow queue until activation.
             return legacy::judge_claims(self, check_roots);
         }
-        self.record_judgment_failure(self.judge_claims_inner(check_roots, false))
+        self.record_judgment_failure(self.judge_claims_inner(check_roots, None))
     }
 
-    /// One resumable shadow judgment loan for the paced bootstrap worker.
+    /// As [`Self::judge_claims`], bounded to [`VERDICT_SLICE_LOANS`] loans for the daemon's
+    /// ordinary passes. Work left over keeps `verdicts_due` set.
+    pub fn judge_claims_slice(&self, check_roots: bool) -> Result<usize> {
+        if legacy::active(&self.readers.get())? {
+            return legacy::judge_claims(self, check_roots);
+        }
+        let judged = self.record_judgment_failure(
+            self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS)),
+        )?;
+        if self.verdicts_pending()? {
+            self.verdicts_due.store(true, Ordering::Release);
+            // The paced signature job owns what a slice leaves; a faulted member waits for resume.
+            if self.signature_migration()?.fault.is_none() {
+                self.signature_job_wake.notify_one();
+            }
+        }
+        Ok(judged)
+    }
+
+    /// One resumable judgment loan for the paced signature worker: the bootstrap's shadow
+    /// judgment, and after it any backlog a resume or a trust-root change left.
     pub fn advance_signature_judgment(&self) -> Result<usize> {
-        self.record_judgment_failure(self.judge_claims_inner(true, true))
+        self.record_judgment_failure(self.judge_claims_inner(true, Some(1)))
     }
 
     fn record_judgment_failure(&self, result: Result<usize>) -> Result<usize> {
-        if let Err(error) = &result {
+        self.note_signature_retry(result.as_ref().err());
+        if let Err(error) = &result
+            && !migration::transient_storage_error(error)
+        {
             migration::record_fault(
                 &self.connection.write(),
                 &format!("verdict reconciliation: {error:#}"),
@@ -1530,7 +1619,7 @@ impl Store {
         }
         result
     }
-    fn judge_claims_inner(&self, check_roots: bool, one_loan: bool) -> Result<usize> {
+    fn judge_claims_inner(&self, check_roots: bool, max_loans: Option<usize>) -> Result<usize> {
         let migration = self.signature_migration()?;
         if migration.fault.is_some() || !matches!(migration.phase.as_str(), "done" | "judging") {
             return Ok(0);
@@ -1542,8 +1631,7 @@ impl Store {
             let roots = self.trust_roots(&transaction, &self.origin)?;
             let roots_digest = crate::hash::canonical_hash(&roots)?;
             if fleet_meta(&transaction, VERDICT_ROOTS)?.as_deref() != Some(roots_digest.as_str()) {
-                queue_linked_tx(&transaction, "root")?;
-                set_meta_tx(&transaction, VERDICT_ROOTS, &roots_digest)?;
+                start_root_requeue_tx(&transaction, &roots_digest)?;
             }
             transaction.commit()?;
         }
@@ -1551,7 +1639,9 @@ impl Store {
             return Ok(0);
         }
         let mut judged = 0;
+        let mut loans = 0;
         loop {
+            loans += 1;
             let mut connection = self.connection.write();
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1563,10 +1653,10 @@ impl Store {
                 if fleet_meta(&transaction, VERDICT_ROOTS)?.as_deref()
                     != Some(roots_digest.as_str())
                 {
-                    queue_linked_tx(&transaction, "root")?;
-                    set_meta_tx(&transaction, VERDICT_ROOTS, &roots_digest)?;
+                    start_root_requeue_tx(&transaction, &roots_digest)?;
                 }
             }
+            let requeuing = advance_requeue_tx(&transaction)?;
             let fresh = transaction
                 .prepare_cached("SELECT claim_id FROM claim_verdict_fresh LIMIT ?1")?
                 .query_map([JUDGE_CHUNK as i64], |row| row.get::<_, String>(0))?
@@ -1623,11 +1713,12 @@ impl Store {
             if track_bootstrap && candidates_judged != 0 {
                 migration::note_work(&transaction, candidates_judged)?;
             }
-            if fresh.is_empty() && queued.is_empty() {
+            let drained = fresh.is_empty() && queued.is_empty() && !requeuing;
+            if drained {
                 migration::finish_judging(&transaction)?;
             }
             transaction.commit()?;
-            if one_loan || (fresh.is_empty() && queued.is_empty()) {
+            if drained || max_loans.is_some_and(|max| loans >= max) {
                 return Ok(judged);
             }
         }
@@ -1636,7 +1727,7 @@ impl Store {
     /// Exercise a real bounded loan, then allow another real writer to change inputs.
     #[cfg(feature = "test-support")]
     pub fn judge_claim_page_for_test(&self, check_roots: bool) -> Result<usize> {
-        self.judge_claims_inner(check_roots, true)
+        self.judge_claims_inner(check_roots, Some(1))
     }
 
     pub fn signature_model(&self) -> Result<SignatureModel> {
@@ -1712,9 +1803,12 @@ impl Store {
                 })?
                 .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
         } else {
+            // A claim an unfinished requeue has not reached counts as held, as it reads. The
+            // per-row probe runs only while a requeue is pending.
+            let requeuing = requeue_pending(&connection)?;
             connection
-            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
-            .query_map([], |row| {
+            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
+            .query_map(params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, requeuing], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
@@ -1762,7 +1856,10 @@ impl Store {
                  DELETE FROM claim_verdict_queue;
                  INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) SELECT DISTINCT claim_id FROM claim_signature_candidates;",
             )?;
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-ha0cfaa1ec5cc owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", params![VERDICT_ROOTS])?;
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h4e5e7d6674c0 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1 OR (key>=?2 AND key<?3)",
+                params![VERDICT_ROOTS, REQUEUE, REQUEUE_END],
+            )?;
             transaction.commit()?;
         }
         self.judge_claims(true)?;
@@ -2052,5 +2149,183 @@ mod signature_alert_tests {
         assert!(faults[0].1.starts_with("65 distinct candidates retained;"));
         assert_eq!(faults[1].0, "claim/z-alert");
         assert!(faults[1].1.starts_with("64 distinct candidates retained;"));
+    }
+}
+
+#[cfg(test)]
+mod paced_verdict_tests {
+    use super::*;
+
+    /// A store whose roots changed under `count` verdicts that relied on them.
+    fn root_linked(count: usize) -> Store {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for i in 0..count {
+            tx.execute(
+                "INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)",
+                [format!("claim/{i:05}")],
+            )
+            .unwrap();
+        }
+        set_meta_tx(&tx, VERDICT_ROOTS, "roots-before-a-membership-change").unwrap();
+        tx.commit().unwrap();
+        drop(connection);
+        store
+    }
+
+    fn count(store: &Store, sql: &str) -> u64 {
+        store
+            .readers
+            .get()
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn cursor(store: &Store, link: &str) -> Option<String> {
+        fleet_meta(&store.readers.get(), &format!("{REQUEUE}{link}")).unwrap()
+    }
+
+    #[test]
+    fn a_root_change_queues_its_dependents_a_page_per_loan() {
+        let total = REQUEUE_PAGE * 2 + 100;
+        let store = root_linked(total);
+        store.advance_signature_judgment().unwrap();
+        // One loan queued one page, not every root-linked verdict in one transaction.
+        assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
+        assert!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue") <= REQUEUE_PAGE as u64);
+        assert!(store.verdicts_pending().unwrap());
+        let mut loans = 1;
+        while store.verdicts_pending().unwrap() {
+            store.advance_signature_judgment().unwrap();
+            loans += 1;
+            assert!(loans < 1_000, "the requeue and its queue drain");
+        }
+        assert!(loans >= total / JUDGE_CHUNK, "{loans}");
+        assert_eq!(cursor(&store, "root"), None);
+        assert_ne!(
+            fleet_meta(&store.readers.get(), VERDICT_ROOTS)
+                .unwrap()
+                .as_deref(),
+            Some("roots-before-a-membership-change")
+        );
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+    }
+
+    #[test]
+    fn an_ordinary_pass_takes_a_slice_and_leaves_the_rest_due() {
+        let store = root_linked(REQUEUE_PAGE * 2);
+        store.judge_claims_slice(true).unwrap();
+        assert!(store.verdicts_pending().unwrap());
+        assert!(
+            store.verdicts_due.load(Ordering::Acquire),
+            "the next pass takes the next slice"
+        );
+        // A full pass, as tests and rechecks use, still drains everything.
+        store.judge_claims(true).unwrap();
+        assert!(!store.verdicts_pending().unwrap());
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+    }
+
+    #[test]
+    fn a_verdict_past_any_unfinished_requeue_cursor_reads_as_held() {
+        for link in [
+            "root",
+            "key:person/ada|device-key",
+            "delegation:claim/grant",
+            "nonce:device-key|nonce-1",
+        ] {
+            let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+            {
+                let mut connection = store.connection.write();
+                let tx = connection.transaction().unwrap();
+                for claim in ["claim/00001", "claim/00002", "claim/00003", "claim/00004"] {
+                    tx.execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES (?1,'verified','host/studio')", [claim]).unwrap();
+                }
+                for claim in ["claim/00001", "claim/00002", "claim/00003"] {
+                    tx.execute(
+                        "INSERT INTO claim_verdict_links(link,claim_id) VALUES (?1,?2)",
+                        [link, claim],
+                    )
+                    .unwrap();
+                }
+                // claim/00004 relies on another link, whose requeue is not running.
+                tx.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES ('delegation:claim/other','claim/00004')", []).unwrap();
+                // The requeue of `link` has queued up to claim/00002.
+                set_meta_tx(&tx, &format!("{REQUEUE}{link}"), "claim/00002").unwrap();
+                tx.commit().unwrap();
+            }
+            let read = |claim: &str| store.claim_verdict(claim).unwrap();
+            assert_eq!(read("claim/00001"), Verdict::Verified, "{link}");
+            assert_eq!(read("claim/00002"), Verdict::Verified, "{link}");
+            assert!(
+                matches!(read("claim/00003"), Verdict::Held(reason) if reason.starts_with("signature-judgment-incomplete:") && reason.ends_with(link)),
+                "{link}"
+            );
+            assert!(store.claim_signature("claim/00003").is_err(), "{link}");
+            assert_eq!(read("claim/00004"), Verdict::Verified, "{link}");
+            let counts = store.claim_verdict_counts().unwrap();
+            assert_eq!(counts.get("verified"), Some(&3), "{link}");
+            assert_eq!(counts.get("held"), Some(&1), "{link}");
+            // A root change starts its requeue before any page: every dependent reads as held.
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            set_meta_tx(&tx, &format!("{REQUEUE}{link}"), "").unwrap();
+            tx.commit().unwrap();
+            drop(connection);
+            for claim in ["claim/00001", "claim/00002", "claim/00003"] {
+                assert!(matches!(read(claim), Verdict::Held(_)), "{link} {claim}");
+            }
+            assert_eq!(read("claim/00004"), Verdict::Verified, "{link}");
+        }
+    }
+
+    #[test]
+    fn a_changed_delegation_queues_its_dependents_a_page_now_and_the_rest_per_loan() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        let total = REQUEUE_PAGE * 2 + 100;
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for i in 0..total {
+                tx.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES ('delegation:claim/grant',?1)", [format!("claim/{i:05}")]).unwrap();
+            }
+            queue_linked_tx(&tx, "delegation:claim/grant").unwrap();
+            tx.commit().unwrap();
+        }
+        // The changed delegation queued one page in the judging transaction, not every dependent.
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"),
+            REQUEUE_PAGE as u64
+        );
+        assert_eq!(
+            cursor(&store, "delegation:claim/grant").as_deref(),
+            Some("claim/01023")
+        );
+        assert!(store.verdicts_pending().unwrap());
+        let mut loans = 0;
+        while store.verdicts_pending().unwrap() {
+            store.advance_signature_judgment().unwrap();
+            loans += 1;
+            assert!(loans < 1_000, "the requeue and its queue drain");
+        }
+        assert_eq!(cursor(&store, "delegation:claim/grant"), None);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+        // A small link is queued whole at once, as before, and leaves no cursor.
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        tx.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES ('delegation:claim/small','claim/00001')", []).unwrap();
+        queue_linked_tx(&tx, "delegation:claim/small").unwrap();
+        assert!(
+            fleet_meta(&tx, &format!("{REQUEUE}delegation:claim/small"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            tx.query_row("SELECT COUNT(*) FROM claim_verdict_queue", [], |row| row
+                .get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
     }
 }

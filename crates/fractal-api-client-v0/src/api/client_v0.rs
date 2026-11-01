@@ -23,6 +23,7 @@ use crate::SeatsStoreCore;
 use crate::EvidenceStore;
 use crate::PublishedViewsStore;
 use super::*;
+use crate::HarnessQuestionsStore;
 use crate::model::DesiredSubject;
 use axum::http::HeaderMap;
 use axum::http::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
@@ -40,6 +41,7 @@ pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
 pub mod harness_inventory;
+pub mod harness_questions;
 pub mod inventory;
 pub mod raw_terminal;
 pub mod private_notes;
@@ -89,6 +91,10 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             "/v1/client/arrangements/{person_name}/{uuid}",
             get(arrangements::get),
         )
+        .route(
+            "/v1/client/arrangements/{person_name}/{uuid}/memberships",
+            get(arrangements::memberships),
+        )
         .route("/v1/client/glasses", get(glasses_list))
         .route(
             "/v1/client/glasses/{id}",
@@ -126,6 +132,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/agent-queues/{*id}", get(agent_queue))
         .route("/v1/client/status-history/{*id}", get(status_history))
         .route("/v1/client/harness-inventory/{*id}", get(harness_inventory::read))
+        .route("/v1/client/harness-questions", get(harness_questions::list))
+        .route("/v1/client/harness-questions/{*id}", get(harness_questions::get))
         .route("/v1/client/lanes", get(lanes))
         .route("/v1/client/lanes/{*id}", get(lane_detail))
         .route(
@@ -515,10 +523,10 @@ async fn collection_items_with_windows(
     request: &CollectionSubscribe,
     read_permit: tokio::sync::OwnedSemaphorePermit,
     windows: Option<Arc<collection_windows::Windows>>,
-) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError> {
+) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
     if !matches!(
         request.collection.as_str(),
-        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary"
+        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships" | "summary"
             | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
     ) {
         return Err(validation("unknown collection subscription"));
@@ -532,10 +540,13 @@ async fn collection_items_with_windows(
     if request.status.is_some() && request.collection != "agents" {
         return Err(validation("status filters are supported for agents only"));
     }
-    if request.subject.is_some() && request.collection != "arrangements" {
+    if request.subject.is_some() && !matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") {
         return Err(validation(
-            "subject filters are supported for arrangements only",
+            "subject filters are supported for arrangements and ordered memberships only",
         ));
+    }
+    if request.collection == "ordered-memberships" && request.subject.is_none() {
+        return Err(validation("ordered memberships require an arrangement subject"));
     }
     validate_agent_selector(&request.collection, request.agent.as_deref())?;
     let limit = request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS);
@@ -545,13 +556,13 @@ async fn collection_items_with_windows(
     if request.collection == "glasses" && (request.person.is_some() || request.actor.is_some()) {
         return Err(validation("glasses select the session person"));
     }
-    if request.collection == "arrangements" && request.actor.is_some() {
+    if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") && request.actor.is_some() {
         return Err(validation("arrangements select an explicit person, not an actor"));
     }
     let mut gates = CollectionReadAdmission::new(read_permit);
     // Arrangement ownership and paired-window authority both read the store. Admit this
     // preliminary physical read with the same bare waits as the eventual window query.
-    let current = if request.collection == "arrangements"
+    let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships")
         || (windows.is_some() && session.transport != "unix")
     {
         Some(if state.store.readers.has_request_reader() {
@@ -581,7 +592,7 @@ async fn collection_items_with_windows(
     let current = current.as_ref().unwrap_or(session);
     let person = if request.collection == "glasses" {
         Some(glass_person(session, false)?)
-    } else if request.collection == "arrangements" {
+    } else if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") {
         let person = arrangements::person(current, request.person.as_deref(), false)?;
         if let Some(subject) = &request.subject {
             let owner = fractal_schema::arrangements::owner(subject)
@@ -609,7 +620,7 @@ async fn collection_items_with_windows(
     let status = request.status.clone();
     let collection = request.collection.clone();
     let custom_forms = session.custom_forms;
-    let arrangement_window = collection == "arrangements";
+    let arrangement_window = matches!(collection.as_str(), "arrangements" | "ordered-memberships");
     let mut admitted = collection != "agents";
     // Attribute the first frame, and any later cold root; never create a per-frame span.
     let traced = matches!(collection.as_str(), "agents" | "summary") && first_frame_current();
@@ -662,7 +673,7 @@ async fn collection_items_with_windows(
                     require_scope(&current, "read.projections")?;
                     let person = match collection.as_str() {
                         "glasses" => Some(glass_person(&current, false)?),
-                        "arrangements" => Some(arrangements::person(
+                        "arrangements" | "ordered-memberships" => Some(arrangements::person(
                             &current,
                             request.person.as_deref(),
                             false,
@@ -843,8 +854,8 @@ async fn collection_items_with_windows(
                 // Inventory invalidation is owner-scoped, independent of truncation and
                 // cached prefix equality. Read its projection counter under this same fence.
                 let owner_revision = if collection == "arrangements" && subject.is_none() {
-                    Some(store.arrangement_inventory_revision(
-                        person.as_deref().expect("explicit arrangement owner"))?)
+                    Some(CollectionRevision::Owner(store.arrangement_inventory_revision(
+                        person.as_deref().expect("explicit arrangement owner"))?))
                 } else {
                     None
                 };
@@ -894,6 +905,12 @@ async fn collection_items_with_windows(
                                 )?
                             }
                         }
+                        "ordered-memberships" => store.ordered_memberships(
+                            subject.as_deref().expect("selected arrangement subject"),
+                            index,
+                            None,
+                            limit.saturating_add(1),
+                        )?,
                         "attention" => match &published_rows {
                             Some(rows) => rows.clone(),
                             None => {
@@ -954,7 +971,20 @@ async fn collection_items_with_windows(
                     items.truncate(projection_limit);
                     Ok((items, has_more, valid_until))
                 };
-                let (mut items, mut has_more) = match windows.as_ref().filter(|_| published.is_none()) {
+                // An ordered-membership window pins its container state in the same snapshot as
+                // its rows; the shared window keeps it with the cached rows.
+                let compute_membership = || {
+                    let (items, has_more, valid_until) = compute()?;
+                    let membership = if collection == "ordered-memberships" {
+                        Some(store.ordered_membership_state(
+                            subject.as_deref().expect("selected arrangement subject"),
+                        )?)
+                    } else {
+                        None
+                    };
+                    Ok((items, has_more, valid_until, membership))
+                };
+                let (mut items, mut has_more, membership) = match windows.as_ref().filter(|_| published.is_none()) {
                     Some(windows) => windows.read(
                         &state,
                         &current,
@@ -965,11 +995,11 @@ async fn collection_items_with_windows(
                             commits: commits.expect("window commit sequence"),
                             prepared,
                         },
-                        compute,
+                        compute_membership,
                     )?,
                     None => {
-                        let (items, has_more, _) = compute()?;
-                        (items, has_more)
+                        let (items, has_more, _, membership) = compute_membership()?;
+                        (items, has_more, membership)
                     }
                 };
                 if matches!(collection.as_str(), "missions" | "attention") {
@@ -996,7 +1026,8 @@ async fn collection_items_with_windows(
                     has_more |= items.len() > limit;
                     items.truncate(limit);
                 }
-                Ok(Ok(Some((snapshot, items, has_more, owner_revision))))
+                let pinned = owner_revision.or(membership.map(CollectionRevision::Membership));
+                Ok(Ok(Some((snapshot, items, has_more, pinned))))
             });
             Ok::<_, anyhow::Error>((result?, read_permit, admission))
             })??;
@@ -1052,6 +1083,7 @@ fn collection_window_label(collection: &str) -> &'static str {
         "work" => "stream collection/work",
         "glasses" => "stream collection/glasses",
         "arrangements" => "stream collection/arrangements",
+        "ordered-memberships" => "stream collection/ordered-memberships",
         "summary" => "stream collection/summary",
         "clients" => "stream collection/clients",
         "usage" => "stream collection/usage",
@@ -1137,11 +1169,11 @@ fn sync_said(sync: &Value) -> (String, Vec<String>) {
 async fn deliver_collection(
     socket: &mut WebSocket,
     subscription: &mut CollectionSubscription,
-    read: Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>,
+    read: Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>,
     sync: Option<(Value, (bool, bool))>,
 ) -> Refreshed {
     let request = &subscription.request;
-    let (snapshot, mut items, has_more, owner_revision) = match read {
+    let (snapshot, mut items, has_more, pinned) = match read {
         Ok(read) => read,
         Err(error) => {
             let retryable = client_error_retryable(error.status, Some(&error.code));
@@ -1189,6 +1221,7 @@ async fn deliver_collection(
     let sync_changed = said.is_some() && said != subscription.sync;
     let sent = if !subscription.delivered {
         let mut frame = json!({"kind":"snapshot", "id":request.id, "collection":request.collection, "snapshot":snapshot, "items":items, "order":order, "has_more":has_more});
+        add_membership(&mut frame, request, pinned);
         if let Some((sync, _)) = &sync { frame["sync"] = sync.clone(); }
         send_collection(socket, frame).await
     } else {
@@ -1207,12 +1240,13 @@ async fn deliver_collection(
             && removes.is_empty()
             && order == subscription.order
             && has_more == subscription.has_more
-            && owner_revision == subscription.owner_revision
+            && pinned == subscription.pinned
             && !sync_changed
         {
             true
         } else {
             let mut frame = json!({"kind":"changes", "id":request.id, "collection":request.collection, "snapshot":snapshot, "upserts":upserts, "removes":removes, "order":order, "has_more":has_more});
+            add_membership(&mut frame, request, pinned);
             if let Some((sync, _)) = sync.as_ref().filter(|_| sync_changed) { frame["sync"] = sync.clone(); }
             send_collection(socket, frame).await
         }
@@ -1231,12 +1265,19 @@ async fn deliver_collection(
     subscription.previous = Arc::new(current);
     subscription.order = order;
     subscription.has_more = has_more;
-    subscription.owner_revision = owner_revision;
+    subscription.pinned = pinned;
     Refreshed::Current
 }
 
+/// The container state an ordered-membership frame carries beside its rows.
+fn add_membership(frame: &mut Value, request: &CollectionSubscribe, pinned: Option<CollectionRevision>) {
+    if let Some(CollectionRevision::Membership(membership)) = pinned {
+        frame["membership"] = json!({"container":request.subject, "live_count":membership.live_count, "changed_index":membership.changed_index});
+    }
+}
+
 enum CollectionRead {
-    Legacy(Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>),
+    Legacy(Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>),
     Ivm(Box<Result<collection_ivm::Candidate, ApiError>>),
     Revisioned(Result<agents_publication_stream::Delivery, ApiError>),
 }
@@ -1423,6 +1464,40 @@ async fn open_conversation_subscription(
     })
     .await
     .map_err(ApiError::internal)?
+}
+
+/// Whether `call` waits in `seat`'s conversation on this member: among its newest page, made
+/// with no result. `None` when the seat's session is owned by another member: an answer then
+/// waits on no live read of it.
+async fn prompt_call_waits(
+    state: &AppState,
+    session: &ClientSession,
+    seat: &str,
+    call: &str,
+) -> Result<Option<bool>, ApiError> {
+    let (reader, target) = (state.clone(), seat.to_owned());
+    let (session_id, elsewhere) = super::read_deadline::store_read(&state.store, move || {
+        let (session_id, resolved) = resolve_conversation(&reader, &target)?;
+        let elsewhere = resolved
+            .routing_owner
+            .as_ref()
+            .and_then(|(_, _, origin)| origin.as_deref())
+            .is_some_and(|origin| origin != reader.store.origin());
+        Ok::<_, ApiError>((session_id, elsewhere))
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    if elsewhere {
+        return Ok(None);
+    }
+    // The entries as the conversation keeps them, whatever this session's own reads negotiate.
+    let mut entries = session.clone();
+    entries.conversation_blocks = false;
+    let page = conversation_page(state, &entries, &session_id, None, CLIENT_MAX_PAGE_ITEMS).await?;
+    Ok(Some(crate::api::prompt_card::call_waits_among(
+        page["items"].as_array().map_or(&[][..], Vec::as_slice),
+        call,
+    )))
 }
 
 /// A conversation's newest page, read here or relayed from its owner. The limit is the
@@ -1972,7 +2047,7 @@ async fn collection_stream_socket_with_context<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>> + Send,
 {
     collection_stream_socket_with_admission(
         socket, state, session, presence, (sources, upgrade), read, open_conversation_subscription,
@@ -1989,7 +2064,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     admit: A,
 ) where
     F: Fn(AppState, ClientSession, CollectionSubscribe, tokio::sync::OwnedSemaphorePermit) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>> + Send,
     A: Fn(AppState, ClientSession, CollectionSubscribe, ConversationAdmissionPermits) -> Admission + Clone + Send + 'static,
     Admission: Future<Output = Result<(String, Option<String>, Option<ResolvedConversation>), ApiError>> + Send + 'static,
 {
@@ -2203,7 +2278,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         let ivm = if request.agents_publication_version.is_none() {
                             sources.as_ref().and_then(|sources| sources.adapter(&request.collection))
                         } else { None };
-                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm, cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, owner_revision: None, sync: None, sync_flags: (false, false), request });
+                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm, cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, pinned: None, sync: None, sync_flags: (false, false), request });
 
                     }
                     next = futures_util::FutureExt::now_or_never(socket.recv());
@@ -2366,9 +2441,11 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     let claims = state.store.claims_page(None, None, weighed, index.checked_add(1), false, 10_000).map(|page| page.claims);
                     let glasses_changed = subscriptions.values().any(|s| s.request.collection == "glasses") && state.store.glasses_changed(weighed, index).unwrap_or(true);
                     let arrangements_changed = subscriptions.values().any(|s| s.request.collection == "arrangements") && state.store.arrangements_changed(weighed, index).unwrap_or(true);
+                    let memberships_changed = subscriptions.values().any(|s| s.request.collection == "ordered-memberships") && state.store.ordered_memberships_changed(weighed, index).unwrap_or(true);
                     affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) && (
                         (glasses_changed && s.request.collection == "glasses")
                         || (arrangements_changed && s.request.collection == "arrangements")
+                        || (memberships_changed && s.request.collection == "ordered-memberships")
                         || match &claims {
                             Err(_) => true,
                             Ok(claims) => claims.len() >= 10_000
@@ -7330,17 +7407,33 @@ async fn import_external_session_action(
     Ok(vec![external.id, import.subject])
 }
 
+fn is_identity_selector(key: &str) -> bool {
+    matches!(key, "actor" | "credential" | "fleet_secret" | "shared_secret")
+}
+
 fn contains_identity_selector(value: &Value) -> bool {
     match value {
         Value::Object(object) => object.iter().any(|(key, value)| {
-            matches!(
-                key.as_str(),
-                "actor" | "credential" | "fleet_secret" | "shared_secret"
-            ) || contains_identity_selector(value)
+            is_identity_selector(key) || contains_identity_selector(value)
         }),
         Value::Array(values) => values.iter().any(contains_identity_selector),
         _ => false,
     }
+}
+
+fn action_parameters_select_identity(request: &ActionRequest) -> bool {
+    if request.action_type == "harness.answer"
+        && let Some(parameters) = request.parameters.as_object()
+    {
+        return parameters.iter().any(|(key, value)| {
+            if key == "answers" && let Some(answers) = value.as_object() {
+                // Canonical question ids are data keys, never authority selectors.
+                return answers.values().any(contains_identity_selector);
+            }
+            is_identity_selector(key) || contains_identity_selector(value)
+        });
+    }
+    contains_identity_selector(&request.parameters)
 }
 
 fn validate_work_fence(state: &AppState, target: &str, fence: &Fence) -> Result<(), ApiError> {
@@ -7504,6 +7597,10 @@ fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
             crate::external_sessions::find_fresh(state.native_session_home.as_deref(), subject)
                 .map_err(import_lookup_error)?
                 .map(|session| session.revision)
+        } else if subject.starts_with("harness-question/") {
+            state.store.harness_question(subject, client_now_ms())
+                .map_err(ApiError::internal)?
+                .map(|question| question.revision)
         } else {
             // The newest claim's id, by a seek: reading and sorting every claim of the subject
             // was 0.4 s for a busy seat (4.4 s cold) on every fenced action.
@@ -7858,15 +7955,39 @@ async fn dispatch_action(
                         .map_err(|_| validation("invalid delegation proof"))
                 })
                 .transpose()?;
+            let (seat, episode, answer) = (
+                parameter_string(p, "target_id")?,
+                parameter_string(p, "episode")?,
+                parameter_string(p, "answer")?,
+            );
+            // A card may have offered allow from a read before its call's result. When the seat
+            // runs on this member, whatever lets the named call through goes on only while its
+            // conversation here shows that call waiting: not once it has its result, and not when
+            // the conversation cannot be read. When it runs elsewhere the answer is recorded here
+            // with no live read of another member: the seat's hook releases only the answer to the
+            // very observation it published, while its harness is blocked on that call, so an
+            // answer to a prompt the seat has moved past releases nothing. Only the seat's person
+            // is told: anyone else is refused by the store as before.
+            let person = state.store.agent_person(&seat).map_err(ApiError::internal)?;
+            if delegation.is_none() && answer != "deny" && person.as_deref() == Some(authority_actor.as_str()) {
+                let call = state.store.native_prompt_call(&seat, &episode).map_err(ApiError::internal)?;
+                if let Some(call) = call {
+                    let refused = match prompt_call_waits(state, session, &seat, &call).await {
+                        Ok(None | Some(true)) => None,
+                        Ok(Some(false)) => Some("is no longer waiting: the call it asks about already has a result, or Fractal does not see it waiting in the seat's conversation".to_owned()),
+                        Err(error) => Some(format!("can only be answered in the seat's terminal: {}", error.message)),
+                    };
+                    if let Some(refused) = refused {
+                        return Err(ApiError::bad(St3Error::new(
+                            "stale-fence",
+                            format!("{}{refused}", fractal_client::PROMPT_REFUSAL_PREFIX),
+                        )));
+                    }
+                }
+            }
             let answered = state
                 .store
-                .respond_native_prompt(
-                    &parameter_string(p, "target_id")?,
-                    &parameter_string(p, "episode")?,
-                    &parameter_string(p, "answer")?,
-                    authority_actor,
-                    delegation.as_ref(),
-                )
+                .respond_native_prompt(&seat, &episode, &answer, authority_actor, delegation.as_ref())
                 .map_err(ApiError::bad)?;
             signal_changed(state);
             Ok(vec![answered.subject])
@@ -8468,19 +8589,18 @@ async fn dispatch_action(
                 .runtime_desired_revision
                 .as_deref()
                 .ok_or_else(|| validation("agent.retire needs fence.runtime_desired_revision"))?;
-            state
-                .store
-                .retire_agent_with_successor(
-                    &agent,
-                    authority_actor,
-                    &parameters.reason,
-                    token,
-                    request.fence.runtime_incarnation.as_deref(),
-                    &request.idempotency_key,
-                    &state.configured_peers,
-                    parameters.successor.as_deref(),
-                )
-                .map_err(ApiError::bad)?;
+            state.store.retire_agent_with_successor(
+                &agent, authority_actor, &parameters.reason, token,
+                request.fence.runtime_incarnation.as_deref(),
+                &request.idempotency_key, &state.configured_peers,
+                parameters.successor.as_deref(), parameters.expect_revision.as_deref(),
+            ).map_err(|error| {
+                if error.code == "idempotency-mismatch" {
+                    action_idempotency_conflict()
+                } else {
+                    ApiError::bad(error)
+                }
+            })?;
             signal_changed(state);
             Ok(vec![agent])
         }
@@ -8905,6 +9025,11 @@ fn action_request_digest(request: &ActionRequest) -> Result<String, ApiError> {
         .as_object_mut()
         .expect("an action is an object")
         .remove("fence");
+    if request.action_type == "agent.retire"
+        && let Some(incarnation) = request.fence.runtime_incarnation.as_deref()
+    {
+        content["fence"] = json!({"runtime_incarnation": incarnation});
+    }
     if request.action_type == "private-notes.write" {
         // The shared receipt reserves the cross-action key, not the private
         // mutation. Content matching and recovery stay in the owner-local ledger.
@@ -8917,6 +9042,64 @@ fn action_request_digest(request: &ActionRequest) -> Result<String, ApiError> {
     )))
 }
 
+/// Inspect both retained receipt families under the shared actor/key gate.
+/// Harness receipts remain solely in indefinitely retained compact resolutions.
+fn retained_action_receipt(
+    state: &AppState,
+    session: &ClientSession,
+    request: &ActionRequest,
+    request_digest: &str,
+    actor_key: &str,
+) -> Result<(String, Option<ClaimRecord>), ApiError> {
+    let receipt_digest = hex::encode(Sha256::digest(
+        format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
+    ));
+    let subject = format!("custom/client/action-{}", &receipt_digest[..32]);
+    // Legacy custom claims never prove server authorship, including null-actor ones.
+    if !state.store.claims_for(&subject, Some("custom.client.action-result"))
+        .map_err(ApiError::internal)?.is_empty()
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "legacy-action-receipt-untrusted".into(),
+            message: "this idempotency key has an unverifiable legacy receipt; inspect the original outcome before choosing a new key".into(),
+            details: Box::default(),
+        });
+    }
+    let receipt = state.store.observations_for(&subject, "client.action-result")
+        .map_err(ApiError::internal)?.into_iter()
+        .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none());
+    if receipt.as_ref().is_some_and(|receipt| {
+        receipt.body.pointer("/fields/request_digest").and_then(Value::as_str) != Some(request_digest)
+    }) {
+        return Err(action_idempotency_conflict());
+    }
+    if state.store.harness_question_receipt_conflicts(actor_key, request_digest)
+        .map_err(ApiError::internal)?
+    {
+        return Err(action_idempotency_conflict());
+    }
+    Ok((subject, receipt))
+}
+
+fn trusted_harness_receipt<'a>(
+    state: &AppState,
+    question: &'a harness_questions::HarnessQuestion,
+) -> Option<&'a fractal_schema::harness_questions::Receipt> {
+    let resolution = question.resolution.as_ref()?;
+    (resolution.origin == state.store.origin() && resolution.actor.is_none())
+        .then_some(resolution.receipt.as_ref()).flatten()
+}
+
+fn action_idempotency_conflict() -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "idempotency-conflict".into(),
+        message: "the idempotency key was already used for a different action".into(),
+        details: Box::default(),
+    }
+}
+
 fn validate_action_admission(
     session: &ClientSession,
     request: &ActionRequest,
@@ -8924,12 +9107,15 @@ fn validate_action_admission(
     if !super::wire_names::api_version(&request.api_version)
         || !request.id.starts_with("action/")
         || !(16..=256).contains(&request.idempotency_key.len())
+        || (request.action_type == "harness.answer"
+            && (request.id.len() > 256 || request.id == "action/"
+                || request.id.chars().any(char::is_whitespace)))
     {
         return Err(validation(
             "the action version, ID, or idempotency key is invalid",
         ));
     }
-    if contains_identity_selector(&request.parameters) {
+    if action_parameters_select_identity(request) {
         return Err(validation(
             "client actions cannot select an actor, credential, or fleet secret",
         ));
@@ -9070,6 +9256,9 @@ async fn action_inner(
     Json(mut request): Json<ActionRequest>,
     reserved_gate: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Json<Value>, ApiError> {
+    if request.action_type == "harness.answer" {
+        return harness_questions::answer(&state, &session, &request).await;
+    }
     // The message-send wrapper validates before reserving its gate and capacity.
     // Other actions retain their original admission order here.
     if reserved_gate.is_none() {
@@ -9087,41 +9276,10 @@ async fn action_inner(
             .map_err(|error| validation(error.to_string()))?;
     }
     let request_digest = action_request_digest(&request)?;
-    let receipt_digest = hex::encode(Sha256::digest(
-        format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
-    ));
-    let receipt_subject = format!("custom/client/action-{}", &receipt_digest[..32]);
-    // The old open custom namespace admitted client receipts with absent/null actors.
-    // Never dispatch an already-used legacy key or infer authorship from those fields.
-    if !state.store.claims_for(&receipt_subject, Some("custom.client.action-result"))
-        .map_err(ApiError::internal)?.is_empty()
-    {
-        return Err(ApiError {
-            status: StatusCode::CONFLICT,
-            code: "legacy-action-receipt-untrusted".into(),
-            message: "this idempotency key has an unverifiable legacy receipt; inspect the original outcome before choosing a new key".into(),
-            details: Box::default(),
-        });
-    }
-    if let Some(receipt) = state
-        .store
-        .observations_for(&receipt_subject, "client.action-result")
-        .map_err(ApiError::internal)?
-        .into_iter()
-        .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
-    {
-        let old_digest = receipt
-            .body
-            .pointer("/fields/request_digest")
-            .and_then(Value::as_str);
-        if old_digest != Some(request_digest.as_str()) {
-            return Err(ApiError {
-                status: StatusCode::CONFLICT,
-                code: "idempotency-conflict".into(),
-                message: "the idempotency key was already used for a different action".into(),
-                details: Box::default(),
-            });
-        }
+    let actor_key = fractal_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key);
+    let (receipt_subject, receipt) =
+        retained_action_receipt(&state, &session, &request, &request_digest, &actor_key)?;
+    if let Some(receipt) = receipt {
         if request.action_type == "private-notes.write" {
             // Never replay a private fence from the graph or bypass current
             // ownership checks and owner-local exact-request recovery.
@@ -9252,7 +9410,7 @@ async fn action_inner(
     }
     let mut reconciled_attachment = None;
     let mut checked_fence = request.fence.clone();
-    if request.action_type == "arrangement.edit" {
+    if matches!(request.action_type.as_str(), "arrangement.edit" | "arrangement.membership.edit") {
         // Layout revisions merge; fenced retirement and graph/launch identity revisions
         // are checked in the writer transaction. Attention episodes and external filesystem
         // sessions retain projected preflight checks (external state is outside SQLite).
@@ -9319,10 +9477,10 @@ async fn action_inner(
     } else {
         None
     };
-    let arrangement_claim = if request.action_type == "arrangement.edit" {
-        Some(arrangements::edit(&state, &session, &request).await?)
-    } else {
-        None
+    let arrangement_claim = match request.action_type.as_str() {
+        "arrangement.edit" => Some(arrangements::edit(&state, &session, &request).await?),
+        "arrangement.membership.edit" => Some(arrangements::edit_memberships(&state, &session, &request).await?),
+        _ => None,
     };
     if request.action_type == "private-notes.write" {
         return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
@@ -9345,7 +9503,7 @@ async fn action_inner(
         result["terminal_attachment"] = attachment;
     }
     if let Some(claim) = arrangement_claim {
-        result["arrangement_revision"] = json!(claim.id);
+        result[if request.action_type == "arrangement.membership.edit" { "membership_revision" } else { "arrangement_revision" }] = json!(claim.id);
     }
     if request.action_type == "agent.create"
         && let Some(subject) = affected.first()
@@ -9579,7 +9737,7 @@ pub async fn collection_items(
     session: &ClientSession,
     request: &CollectionSubscribe,
     read_permit: tokio::sync::OwnedSemaphorePermit,
-) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError> {
+) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
     collection_items_with_windows(state, session, request, read_permit, None).await
 }
 
@@ -9651,7 +9809,7 @@ pub async fn collection_stream_socket_with_reader<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>> + Send,
 {
     collection_stream_socket_with_context(socket, state, session, presence, None, None, read).await;
 }
@@ -9669,7 +9827,7 @@ pub async fn collection_stream_socket_with_sources<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>> + Send,
 {
     collection_stream_socket_with_context(socket, state, session, presence, sources, None, read).await;
 }
@@ -13352,19 +13510,24 @@ mission "differential" state="ready" {
     }
 
     pub fn test_state_named(root: &Path, node: &str) -> AppState {
-        AppState { owning_person: Some("person/operator".into()),
-        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: node.into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("unused-pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: crate::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+        AppState {
+            owning_person: Some("person/operator".into()),
+            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: node.into(),
+            state_dir: root.to_path_buf(),
+            pty_root: root.join("pty"),
+            pty_binary: root.join("unused-pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: crate::model::PlannerSpec::default(),
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+            harness_question_sink: None,
+        }
     }
 
     #[tokio::test]
@@ -19512,6 +19675,45 @@ mission "example/zero-run" state="ready" {
         }
     }
 
+    /// A mailbox message's content entry names its message, as its header does, on the native
+    /// projection and on the stored timeline, so a client pairs the two by identity rather than by
+    /// a sequence slot another message can share.
+    #[tokio::test]
+    async fn a_mailbox_messages_content_entry_names_its_message_on_both_timelines() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "content-names");
+        let owner = "agent/content-names";
+        let incarnation = "content-names-runtime:i1";
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+            fields: serde_json::from_value(json!({"status":"running", "runtime_id":"content-names-runtime", "incarnation_id":incarnation})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session_id = managed_session_id(owner, incarnation);
+        state.store.append_claim(&ClaimInput {
+            subject: "message/content-names".into(), kind: "message.sent".into(), actor: Some("person/alex".into()),
+            fields: serde_json::from_value(json!({"from":"person/alex", "to":owner, "session_id":session_id,
+                "status":"sent", "content":"named content"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let named = |items: &[Value]| items.iter()
+            .filter(|item| item["type"] == "message" || item["type"] == "content")
+            .map(|item| (item["type"].as_str().unwrap().to_owned(), item["body"]["message_id"].clone()))
+            .collect::<Vec<_>>();
+        let expected = vec![
+            ("message".to_owned(), json!("message/content-names")),
+            ("content".to_owned(), json!("message/content-names")),
+        ];
+        let snapshot = new_client_snapshot(&state);
+        let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
+        let mut native = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap();
+        native.reverse();
+        assert_eq!(named(&native), expected, "native: {native:?}");
+        let (_, stored) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
+        assert_eq!(named(stored["items"].as_array().unwrap()), expected, "stored: {stored}");
+    }
+
     #[test]
     fn managed_native_limit_one_pages_preserve_cross_source_ties() {
         let root = tempfile::tempdir().unwrap();
@@ -21868,6 +22070,18 @@ mission "example/zero-run" state="ready" {
             ]),
             "timeline-initialization",
         );
+        // An observability code stays in this node's local observation log; the seat's own
+        // timeline still shows it, after the claim it follows.
+        append(
+            "harness.diagnostic",
+            BTreeMap::from([
+                ("severity".into(), json!("warning")),
+                ("code".into(), json!("native-delivery-degraded")),
+                ("reason".into(), json!("delivery paused")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            "timeline-delivery-degraded",
+        );
         append(
             "harness.usage",
             BTreeMap::from([
@@ -21967,6 +22181,24 @@ mission "example/zero-run" state="ready" {
         );
         assert!(!entries.iter().any(|entry| entry["body"]["code"] == "claude-channel-initialized"));
         assert!(entries.iter().any(|entry| entry["body"]["code"] == "provider-warning"));
+        let position = |code: &str| {
+            entries
+                .iter()
+                .position(|entry| entry["body"]["code"] == code)
+                .unwrap_or_else(|| panic!("{code} is missing from {entries:?}"))
+        };
+        assert!(
+            position("provider-warning") < position("native-delivery-degraded"),
+            "the local diagnostic follows the claim before it"
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry["body"]["code"] == "native-delivery-degraded")
+                .count(),
+            1,
+            "the local diagnostic appears once across pages"
+        );
         let types = entries
             .iter()
             .filter_map(|entry| entry["type"].as_str())
@@ -23722,8 +23954,11 @@ mission "example/zero-run" state="ready" {
         for subject in ["agent/cedar", "agent/birch"] {
             append(subject, "runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
         }
+        // Both reports are an hour old, on the host as everywhere.
+        smallclaims::store::set_thread_clock(Some(client_now_ms() - 3_600_000));
         append("agent/cedar", "harness.observed", json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
         append("agent/birch", "harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        smallclaims::store::set_thread_clock(None);
         let index = state.store.index().unwrap();
         let mut cards = client_agent_resources(&state.store, false, "", index).unwrap();
         for card in &mut cards {
@@ -23740,6 +23975,54 @@ mission "example/zero-run" state="ready" {
         let birch = cards.iter().find(|item| item["id"] == "agent/birch").unwrap();
         assert_eq!(birch["harness_state"], "indeterminate");
         assert_eq!(birch["state"], "waiting");
+    }
+
+    /// A re-stamp that changes nothing stays in the seat's host's local log. The host's cards hear
+    /// it, so a resting seat stays current there; another member has only the replicated report,
+    /// and its card lapses as before. A local report of another incarnation says nothing.
+    #[test]
+    fn the_seats_host_hears_its_local_re_stamps_while_another_member_reads_the_replicated_report() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-host-heard");
+        let peer_root = tempfile::tempdir().unwrap();
+        let peer = test_state_named(peer_root.path(), "status-peer");
+        let subject = "agent/cedar";
+        let append = |kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        let index = state.store.index().unwrap();
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        assert_eq!(state.store.index().unwrap(), index, "the unchanged re-stamp stayed local");
+        peer.store.import_replication("status-host-heard", &state.store.export_replication(0).unwrap()).unwrap();
+        // The replicated report is an hour old; the host heard the re-stamp just now.
+        let card = |store: &Store, incarnation: &str| {
+            let index = store.index().unwrap();
+            let mut cards = client_agent_resources(store, false, "", index).unwrap();
+            for card in &mut cards {
+                let mut harness = store.observed_harness_at(subject, index).unwrap().unwrap();
+                harness.observed_at_unix_ms = client_now_ms() - 3_600_000;
+                harness.incarnation_id = incarnation.into();
+                card["_status_source"] = json!(harness);
+            }
+            overlay_agent_resources(store, &mut cards, "").unwrap();
+            cards.into_iter().find(|item| item["id"] == subject).unwrap()
+        };
+        let host = card(&state.store, "one");
+        assert_eq!(host["observation"], "current");
+        assert_eq!(host["harness_state"], "idle");
+        assert_eq!(host["state"], "running");
+        let elsewhere = card(&peer.store, "one");
+        assert_eq!(elsewhere["observation"], "stale");
+        assert_eq!(elsewhere["harness_state"], "indeterminate");
+        assert_eq!(elsewhere["state"], "waiting");
+        let other_incarnation = card(&state.store, "zero");
+        assert_eq!(other_incarnation["observation"], "stale", "the host heard another incarnation");
     }
 
     #[test]
@@ -23836,14 +24119,22 @@ mission "example/zero-run" state="ready" {
         assert_eq!(before["observation"], "current");
         assert_eq!(before["harness_state"], "idle");
         assert!(before.get("_status_source").is_none());
+        // Another member has only the card's time; aged, the card lapses.
+        let peer_root = tempfile::tempdir().unwrap();
+        let peer = test_state_named(peer_root.path(), "status-cache-peer");
+        peer.store.import_replication("status-cache", &state.store.export_replication(0).unwrap()).unwrap();
         let mut aged = vec![before.clone()];
         let mut cached_harness = state.store.observed_harness_at(subject, index).unwrap().unwrap();
         cached_harness.observed_at_unix_ms = client_now_ms() - 91_000;
         aged[0]["_status_source"] = json!(cached_harness);
-        overlay_agent_resources(&state.store, &mut aged, "").unwrap();
+        let mut on_host = aged.clone();
+        overlay_agent_resources(&peer.store, &mut aged, "").unwrap();
         assert_eq!(aged[0]["observation"], "stale");
         assert_eq!(aged[0]["harness_state"], "indeterminate");
         assert_eq!(aged[0]["since"], before["since"]);
+        // The seat's host heard the report itself just now, in its local log.
+        overlay_agent_resources(&state.store, &mut on_host, "").unwrap();
+        assert_eq!(on_host[0]["observation"], "current");
         append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":client_now_ms() as u64}));
         assert_eq!(state.store.index().unwrap(), index, "same state stays local within the publish interval");
         let after = client_agent_resources(&state.store, false, "", index).unwrap();

@@ -7,7 +7,7 @@ fn directory_is_empty(path: &Path) -> bool {
 }
 
 fn remove_uninstall_path(path: &Path, binary_aliases: &[&Path]) -> std::io::Result<()> {
-    if binary_aliases.contains(&path) && !fractal::owns_alias(path) {
+    if binary_aliases.contains(&path) && !fractal::may_remove(path) {
         return Ok(());
     }
     if path.is_dir() {
@@ -70,6 +70,10 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
         config.socket.clone(),
         config.client_gateway_socket.clone(),
     ];
+    if config.store_dir.is_some() {
+        let directory = fractal_daemon::config::store_dir(&config);
+        paths.extend(fractal_daemon::config::STORE_DATABASE_FILES.map(|name| directory.join(name)));
+    }
     paths.extend(fractal_daemon::startup::paths(&config.socket));
     paths.push(fractal_daemon::api::unix_reservation_path(&config.socket));
     paths.push(fractal_daemon::api::unix_reservation_path(&config.client_gateway_socket));
@@ -151,7 +155,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
     let local_only = config.fleet_id.is_none()
         && !config.state_dir.join("left-fleet.json").exists()
         && !config.state_dir.join("fleet").exists()
-        && config.state_dir.join("claims.sqlite3").exists();
+        && config.store_path().exists();
     anyhow::ensure!(
         !local_only || args.erase_local_graph,
         "this machine's graph exists nowhere else; pass --erase-local-graph to erase it"
@@ -187,7 +191,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
         eprintln!("could not unregister st's Claude plugin: {error:#}");
     }
     for path in &paths {
-        // Recheck ownership only for identified executable aliases, never state directories.
+        // Recheck ownership only for identified canonical executable entries, never state directories.
         let result = remove_uninstall_path(path, &binary_aliases);
         if let Err(error) = result
             && error.kind() != std::io::ErrorKind::NotFound
@@ -312,6 +316,52 @@ mod instance_uninstall_tests {
         std::os::unix::fs::symlink("st3", &alias).unwrap();
         remove_uninstall_path(&alias, &binary_aliases).unwrap();
         assert!(fs::symlink_metadata(&alias).is_err());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn canonical_executable_removal_uses_running_image_identity() {
+        const CASE: &str = "FRACTAL_CANONICAL_OWNERSHIP_CASE";
+        if let Some(case) = std::env::var_os(CASE) {
+            let canonical = std::env::current_exe().unwrap();
+            assert_eq!(canonical.file_name().unwrap(), "fractal");
+            assert!(fractal::may_remove(&canonical));
+            if case == "replaced" {
+                // Move the executing inode, then occupy its original pathname
+                // with a byte-identical but different-inode file.
+                let moved = canonical.with_file_name("running-image");
+                fs::rename(&canonical, &moved).unwrap();
+                fs::copy(&moved, &canonical).unwrap();
+                assert!(!fractal::may_remove(&canonical));
+                remove_uninstall_path(&canonical, &[canonical.as_path()]).unwrap();
+                assert!(canonical.is_file(), "the replacement is not the running image");
+            } else {
+                let alias_dir = canonical.parent().unwrap().join("aliases");
+                fs::create_dir(&alias_dir).unwrap();
+                let alias = alias_dir.join("fractal");
+                std::os::unix::fs::symlink(&canonical, &alias).unwrap();
+                assert!(fractal::may_remove(&alias));
+                remove_uninstall_path(&alias, &[alias.as_path()]).unwrap();
+                assert!(fs::symlink_metadata(&alias).is_err());
+                remove_uninstall_path(&canonical, &[canonical.as_path()]).unwrap();
+                assert!(!canonical.exists(), "the actual executing inode is removable");
+            }
+            return;
+        }
+        let running = std::env::current_exe().unwrap();
+        for case in ["owned", "replaced"] {
+            let root = tempfile::tempdir().unwrap();
+            let canonical = root.path().join("fractal");
+            fs::copy(&running, &canonical).unwrap();
+            let output = fractal_daemon::test_support::command(&canonical)
+                .args(["--exact",
+                    "uninstall_cli::instance_uninstall_tests::canonical_executable_removal_uses_running_image_identity",
+                    "--nocapture"])
+                .env(CASE, case)
+                .output().unwrap();
+            assert!(output.status.success(), "{case}: {output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "{output:?}");
+        }
     }
 }
 

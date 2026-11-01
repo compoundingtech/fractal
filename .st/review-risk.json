@@ -1,9 +1,10 @@
 {
   "version": 1,
-  "rule": "The deterministic risk floor of a review (docs/review.md): the highest level of any rule that fires on git diff BASE...HEAD. A review's final risk is the higher of this floor and the reviewing model's own score; the model may raise the risk above the floor and never lower it. `classes` gives the level of each class in .st/risky-classes.json (a class may lower the level of some paths with `paths`); `rules` are checks of their own; `large` is the size at which a change is at least medium. Globs match changed paths (** crosses directories); a content pattern matches an added (`added`), removed (`removed`) or either diff line of a file under its globs and not under `exclude`.",
+  "_config_dir_bridge": "arn:lmig:smalltalk:2026-10-27-dot-fractal-config",
+  "rule": "The deterministic risk floor of a review (docs/review.md): the highest level of any rule that fires on git diff BASE...HEAD. A review's final risk is the higher of this floor and the reviewing model's own score; the model may raise the risk above the floor and never lower it. `classes` gives the level of each class in .st/risky-classes.json (a class may lower the level of some paths with `paths`); `rules` are checks of their own; `factory_read` names areas where a MEDIUM change needs a read by Factory before it is queued: it never changes the level, only says that a medium change in one of them does not queue by itself (an area may carry `globs`, `exclude` and `content` like a rule); `large` is the size at which a change is at least medium. Globs match changed paths (** crosses directories); a content pattern matches an added (`added`), removed (`removed`) or either diff line of a file under its globs and not under `exclude`.",
   "classes": {
     "schema": "high",
-    "authorization": {"level": "high", "paths": [{"globs": [".st/**"], "level": "medium"}]},
+    "authorization": {"level": "high", "paths": [{"globs": [".st/**", ".fractal/**"], "level": "medium"}]},
     "claim-folding-and-replay": "high",
     "protocol": "medium",
     "generated-contracts": "medium",
@@ -36,18 +37,25 @@
     {
       "name": "trust-files",
       "level": "high",
-      "globs": [".st/evidence-keys", ".st/evidence-keys/**", ".st/evidence-log-key", ".st/evidence-authors.json", ".st/evidence-skip-policy.json", ".st/evidence-policy.json", ".st/required-lanes.json", ".st/review-risk.json", ".st/risky-classes.json", ".st/review-verdict.schema.json", ".st/review-harness.json", "scripts/review-risk", "scripts/review-validate", "scripts/classify-risk", "scripts/review"]
+      "globs": [".st/evidence-keys", ".st/evidence-keys/**", ".st/evidence-log-key", ".st/evidence-authors.json", ".st/evidence-skip-policy.json", ".st/evidence-policy.json", ".st/required-lanes.json", ".st/review-risk.json", ".st/risky-classes.json", ".st/review-verdict.schema.json", ".st/review-harness.json", ".fractal/evidence-keys", ".fractal/evidence-keys/**", ".fractal/evidence-log-key", ".fractal/evidence-authors.json", ".fractal/evidence-skip-policy.json", ".fractal/evidence-policy.json", ".fractal/required-lanes.json", ".fractal/review-risk.json", ".fractal/risky-classes.json", ".fractal/review-verdict.schema.json", ".fractal/review-harness.json", "scripts/review-risk", "scripts/review-validate", "scripts/classify-risk", "scripts/review"]
     },
     {
       "name": "skip-and-signing-machinery",
       "level": "medium",
-      "globs": ["scripts/st-test", "scripts/fractal-test", "scripts/evidence-*", "scripts/ci-evidence-*", "scripts/ci-local", "scripts/ci-linux", "scripts/review", "scripts/review-*", ".st/**"]
+      "globs": ["scripts/st-test", "scripts/fractal-test", "scripts/evidence-*", "scripts/ci-evidence-*", "scripts/ci-local", "scripts/ci-linux", "scripts/review", "scripts/review-*", ".st/**", ".fractal/**"]
     },
     {
       "name": "workflows",
       "level": "medium",
       "globs": [".github/**"]
     }
+  ],
+  "factory_read": [
+    {"name": "replication-and-sync", "globs": ["crates/smallclaims/src/replication.rs", "crates/smallclaims/src/sync/**", "crates/smallclaims/src/shards*", "crates/smallclaims/src/shards*/**", "crates/smallclaims/src/fleet/**", "crates/smallclaims/src/store/claim_ranges.rs", "crates/smallclaims/src/store/exchange*", "crates/smallclaims/src/store/exchange*/**", "crates/smallclaims/src/store/signature_backfill.rs", "crates/smallclaims/src/**/*inventor*", "crates/fractal-api-core/src/api/replication*", "crates/fractal-api-core/src/api/replication*/**", "crates/fractal-api-core/src/api/client_v0/inventory.rs", "crates/fractal-api-client-v0/src/api/client_v0/inventory.rs", "crates/fractal-store/src/replication_worker_build.rs", "crates/fractal/src/replication_cli.rs", "crates/fractal-peer/**"], "exclude": ["**/tests/**", "**/tests.rs", "**/*_tests.rs", "**/*_test.rs", "**/*-test"]},
+    {"name": "store-schema-trim-checkpoints", "globs": ["crates/smallclaims/src/store.rs", "crates/smallclaims/src/store/principals*", "crates/smallclaims/src/store/principals*/**", "crates/fractal-reconcile/src/reconcile/*plugin_store*.rs", "crates/smallclaims/src/store/checkpoint*", "crates/smallclaims/src/store/checkpoint*/**", "crates/smallclaims/src/store/retired*", "crates/smallclaims/src/store/retired*/**", "crates/smallclaims/src/store/*trim*", "crates/smallclaims/src/store/*trim*/**", "crates/fractal-store/src/store.rs", "crates/fractal-store/src/store/checkpoint*", "crates/fractal-store/src/store/checkpoint*/**", "crates/fractal-store/src/store/retired*", "crates/fractal-store/src/store/retired*/**", "crates/fractal-store/src/store/*trim*", "crates/fractal-store/src/store/*trim*/**", "crates/fractal-schema/**", "crates/fractal-storage-version/**", "crates/fractal-migrate/**", "docs/st3/schema.md"], "exclude": ["**/tests/**", "**/tests.rs", "**/*_tests.rs", "**/*_test.rs", "**/*-test"]},
+    {"name": "concurrency", "globs": ["crates/fractal-drivers/src/*lock*.rs", "crates/fractal-drivers/src/flock.rs", "crates/fractal-drivers/src/watch.rs", "crates/fractal-drivers/src/resync/**", "crates/fractal-drivers/src/resync.rs", "crates/fractal-github/src/watches.rs", "crates/fractal-github-base/src/github_watch.rs", "crates/fractal-api-core/src/graph_watch_ivm.rs", "crates/fractal-api-core/src/api/github_watch.rs", "crates/smallclaims/src/ivm/**", "crates/smallclaims/src/ivm.rs", "crates/fractal-reconcile/src/reconcile.rs", "crates/smallclaims/src/sync/worker*", "crates/smallclaims/src/sync/worker*/**"], "exclude": ["**/tests/**", "**/tests.rs", "**/*_tests.rs", "**/*_test.rs", "**/*-test"], "content": [{"globs": ["crates/**"], "exclude": ["**/tests/**", "**/tests.rs", "**/*_tests.rs", "**/*_test.rs", "**/*-test"], "only": "added", "pattern": "\\b(thread::spawn|tokio::spawn|task::spawn|spawn_blocking|Condvar|flock)\\b|\\b(Mutex|RwLock)(<|::)|\\.(try_)?lock\\(\\)|\\bstd::sync::mpsc\\b"}]},
+    {"name": "ci-and-signing-stages", "globs": [".github/**", "scripts/st-test", "scripts/fractal-test", "scripts/evidence-*", "scripts/ci-*", ".st/evidence-*", ".st/required-lanes.json", "flake.nix"], "exclude": ["**/tests/**", "**/tests.rs", "**/*_tests.rs", "**/*_test.rs", "scripts/ci-*-test", "scripts/evidence-*-test"]},
+    {"name": "wire-between-versions", "globs": ["crates/fractal-wire/**", "crates/fractal-resource-protocol/**", "crates/smallclaims/src/replication.rs", "crates/fractal-api-core/src/api/replication.rs", "crates/fractal-peer/src/peer.rs", "crates/fractal-peer/src/peer/**", "crates/fractal-api-client-v0/src/api/**", "docs/st3/client-v0/**", "wit/**"], "exclude": ["**/tests/**", "**/tests.rs", "**/*_tests.rs", "**/*_test.rs", "**/*-test"]}
   ],
   "large": {"changed_lines": 1500, "level": "medium"}
 }

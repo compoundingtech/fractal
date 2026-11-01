@@ -36,6 +36,8 @@ class Runner:
         self.files, self.lanes, self.files_fail = files, lanes, files_fail
 
     def __call__(self, command, **kwargs):
+        if command[:2] == ['git', 'ls-tree']:
+            return subprocess.CompletedProcess(command, 0, '', '')
         if command[:2] == ['git', 'show']:
             if self.lanes is None:
                 return subprocess.CompletedProcess(command, 128, '', 'fatal: path does not exist')
@@ -104,7 +106,13 @@ class PresignNotice(unittest.TestCase):
         self.assertIn('listed=- passed_over=-', text)
 
     def test_the_lanes_it_reads_are_the_required_lanes_file(self):
-        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+        path = ROOT / '.fractal/required-lanes.json'
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — missing-only checkout bridge.
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            path = ROOT / '.st/required-lanes.json'
+        lanes = json.loads(path.read_text())['lanes']
         self.assertEqual(set(notice.lanes_at('HEAD', Runner(lanes={'lanes': lanes}))), set(lanes))
         self.assertTrue(all(lane.get('definition_paths') for lane in lanes.values()))
 

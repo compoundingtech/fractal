@@ -468,6 +468,16 @@ impl CollectionStream {
         }
         self.send(&command).await
     }
+
+    pub async fn subscribe_ordered_memberships(
+        &mut self,
+        id: &str,
+        person: &str,
+        subject: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"ordered-memberships", "person":person, "subject":subject, "limit":limit})).await
+    }
     pub async fn subscribe(
         &mut self,
         id: &str,
@@ -688,6 +698,28 @@ pub enum CollectionEvent {
         /// This host's replication, only when it changed since the subscription's last frame.
         sync: Option<StreamSync>,
     },
+    /// An `ordered-memberships` subscription's first window, and again after a resubscribe.
+    /// `membership` describes the whole container, including members outside the window.
+    MembershipSnapshot {
+        id: String,
+        snapshot: Snapshot,
+        membership: OrderedMembershipState,
+        items: Vec<OrderedMembership>,
+        order: Vec<String>,
+        has_more: bool,
+    },
+    /// What changed in an `ordered-memberships` window, with its complete new order. A frame
+    /// whose rows, order, and `has_more` repeat the window still reports a new `membership`:
+    /// the container changed outside the window.
+    MembershipChanges {
+        id: String,
+        snapshot: Snapshot,
+        membership: OrderedMembershipState,
+        upserts: Vec<OrderedMembership>,
+        removes: Vec<String>,
+        order: Vec<String>,
+        has_more: bool,
+    },
     /// Stage contiguous chunks privately; install only after the final chunk.
     AgentsSnapshotChunk {
         id: String,
@@ -851,7 +883,26 @@ impl CollectionEvent {
                 ))),
             };
         }
+        let memberships = frame.get("collection").and_then(serde_json::Value::as_str)
+            == Some("ordered-memberships");
         match frame.get("kind").and_then(serde_json::Value::as_str) {
+            Some("snapshot") if memberships => Ok(Self::MembershipSnapshot {
+                snapshot: field(&frame, "snapshot")?,
+                membership: field(&frame, "membership")?,
+                items: field(&frame, "items")?,
+                order: field(&frame, "order")?,
+                has_more: field(&frame, "has_more")?,
+                id,
+            }),
+            Some("changes") if memberships => Ok(Self::MembershipChanges {
+                snapshot: field(&frame, "snapshot")?,
+                membership: field(&frame, "membership")?,
+                upserts: field(&frame, "upserts")?,
+                removes: field(&frame, "removes")?,
+                order: field(&frame, "order")?,
+                has_more: field(&frame, "has_more")?,
+                id,
+            }),
             Some("snapshot") => Ok(Self::Snapshot {
                 collection: field(&frame, "collection")?,
                 snapshot: field(&frame, "snapshot")?,
@@ -943,6 +994,9 @@ impl TerminalStream {
     }
 }
 
+/// The error a daemon's empty 404 decodes to: it has no such route.
+const MISSING_ROUTE: &str = "HTTP 404 with no body: the daemon has no such route";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("st client API error {0:?}: {1}")]
@@ -956,6 +1010,13 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// Whether the daemon has no such route: it answered 404 with no error body, as a daemon
+    /// from before the route does. A typed refusal, another status, or a malformed answer to a
+    /// route that exists is not this.
+    pub fn is_missing_route(&self) -> bool {
+        matches!(self, Self::Protocol(message) if message == MISSING_ROUTE)
+    }
+
     /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
     /// a fresh request is safe) or `"unknown"` (it may still complete; send the identical request,
     /// with the same key, again). Any other answer, or none, says nothing.
@@ -1141,6 +1202,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         }
         ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
+        | ErrorCode::InvalidAnswer
+        | ErrorCode::NotAnswerable
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
         | ErrorCode::AgentsPublicationRowTooLarge
@@ -1167,6 +1230,15 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::InvalidArrangementFolder
         | ErrorCode::InvalidArrangementName
         | ErrorCode::InvalidArrangementKey
+        | ErrorCode::InvalidArrangementVersion
+        | ErrorCode::InvalidArrangementBody
+        | ErrorCode::UnsupportedMembershipContainer
+        | ErrorCode::MembershipOwnerForbidden
+        | ErrorCode::InvalidMembershipMember
+        | ErrorCode::InvalidMembershipBucket
+        | ErrorCode::InvalidMembershipKey
+        | ErrorCode::InvalidMembershipOperations
+        | ErrorCode::MembershipEditTooLarge
         | ErrorCode::InvalidSubjectReference
         | ErrorCode::RecipientRetired
         | ErrorCode::IdentityCycle
@@ -1176,6 +1248,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
+        | ErrorCode::RetireRevisionMismatch
+        | ErrorCode::RetireIncarnationMismatch
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
         | ErrorCode::MessageSelectorsNotReady
@@ -1997,6 +2071,36 @@ impl Client {
         .await
     }
 
+    pub async fn harness_questions(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/client/harness-questions{suffix}"))
+            .await
+    }
+    pub async fn harness_question(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<HarnessQuestion>, ClientError> {
+        self.get(&format!(
+            "/v1/client/harness-questions/{}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
@@ -2398,6 +2502,26 @@ impl Client {
         ))
         .await
     }
+    /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
+    /// query, answered from that mirror alone, so a relayed read is never relayed again.
+    pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        // No segment may be only dots, so the path cannot step out of the plugin's routes.
+        let dot_segment = path
+            .split(['/', '?'])
+            .any(|part| !part.is_empty() && part.chars().all(|c| c == '.'));
+        if !path.starts_with("/v1/plugins/github/repos/") || dot_segment || path.contains('#') {
+            return Err(ClientError::Protocol(format!(
+                "not a GitHub plugin read: {path}"
+            )));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut body: serde_json::Value = self.get(&format!("{path}{separator}local=1")).await?;
+        // The daemon wraps the answer in its API envelope; the relay carries the answer alone.
+        Ok(body
+            .get_mut("value")
+            .map(serde_json::Value::take)
+            .unwrap_or(body))
+    }
     pub async fn runtimes_list(
         &self,
         cursor: Option<&str>,
@@ -2590,6 +2714,28 @@ impl Client {
         ))
         .await
     }
+    pub async fn arrangements_memberships(
+        &self,
+        person_name: &str,
+        uuid: &str,
+        person: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<OrderedMembershipPage>, ClientError> {
+        let mut path = format!(
+            "/v1/client/arrangements/{}/{}/memberships?person={}",
+            percent_encode(person_name),
+            percent_encode(uuid),
+            percent_encode(person)
+        );
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
+        }
+        self.get(&path).await
+    }
     pub async fn glasses_list(
         &self,
         cursor: Option<&str>,
@@ -2763,6 +2909,18 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn arrangement_membership_edit(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ArrangementMembershipEditParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request =
+            ActionRequest::arrangement_membership_edit(id, idempotency_key, fence, parameters)
+                .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn attention_resolve(
         &self,
         id: impl Into<String>,
@@ -2782,6 +2940,17 @@ impl Client {
         parameters: CustomReplyParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::custom_reply(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn harness_answer(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HarnessAnswerParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::harness_answer(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -3589,7 +3758,14 @@ impl Client {
     /// The fleet's membership as this host's daemon holds it, for finding a host's Fabric node.
     /// A read of the local store; only a Unix socket serves it.
     pub async fn fleet_membership(&self) -> Result<serde_json::Value, ClientError> {
-        self.get("/v1/internal/fleet/membership").await
+        // Internal routes refuse seat callers; a daemon from before the public route answers
+        // only the internal one.
+        match self.get("/v1/fleet/membership").await {
+            Err(error) if error.is_missing_route() => {
+                self.get("/v1/internal/fleet/membership").await
+            }
+            result => result,
+        }
     }
 
     /// Where `subject`'s running terminal lives, read from this host's daemon without any graph
@@ -4274,6 +4450,11 @@ impl Client {
                     error.message.clone(),
                     Box::new(error),
                 ));
+            }
+            // Any other route an older daemon does not have answers Axum's empty 404: say so
+            // distinctly, so a caller can fall back without mistaking a broken answer for it.
+            if status == 404 && bytes.is_empty() {
+                return Err(ClientError::Protocol(MISSING_ROUTE.into()));
             }
             let error: ErrorEnvelope = serde_json::from_slice(&bytes)
                 .or_else(|decode| core_api_error(&bytes).ok_or(decode))
@@ -5063,6 +5244,112 @@ mod tests {
     }
 
     #[test]
+    fn membership_frames_decode_as_typed_membership_events_and_resource_frames_stay_resources() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/ordered-memberships-v2.json"
+        ))
+        .unwrap();
+        let super::CollectionEvent::MembershipSnapshot {
+            id,
+            membership,
+            items,
+            order,
+            has_more,
+            ..
+        } = super::CollectionEvent::from_frame(fixture["snapshot_frame"].clone()).unwrap()
+        else {
+            panic!("a membership snapshot must decode as MembershipSnapshot");
+        };
+        assert_eq!(id, "sidebar");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].member, "agent/ada/worker");
+        assert_eq!(items[0].position.bucket, None);
+        assert_eq!(
+            items[1].position.bucket.as_deref(),
+            Some("019a0000-0000-7000-8000-000000000010")
+        );
+        assert_eq!(order, ["agent/ada/worker", "mission/m1"]);
+        assert!(!has_more);
+        assert_eq!(
+            membership,
+            super::OrderedMembershipState {
+                container: "arrangement/person/ada/019a0000-0000-7000-8000-000000000001".into(),
+                live_count: 2,
+                changed_index: 1842,
+            }
+        );
+        let super::CollectionEvent::MembershipChanges {
+            membership,
+            upserts,
+            removes,
+            order,
+            ..
+        } = super::CollectionEvent::from_frame(fixture["changes_frame"].clone()).unwrap()
+        else {
+            panic!("membership changes must decode as MembershipChanges");
+        };
+        assert_eq!(upserts[0].member, "mission/m1");
+        assert_eq!(upserts[0].position.key, "Zz");
+        assert_eq!(removes, ["agent/ada/worker"]);
+        assert_eq!(order, ["mission/m1"]);
+        assert_eq!((membership.live_count, membership.changed_index), (1, 1843));
+        // An edit outside the window leaves rows, order, and `has_more` as they were; only the
+        // container's state says it changed.
+        let super::CollectionEvent::MembershipChanges {
+            membership: outside,
+            upserts,
+            removes,
+            order,
+            has_more,
+            ..
+        } = super::CollectionEvent::from_frame(fixture["outside_window_changes_frame"].clone())
+            .unwrap()
+        else {
+            panic!("an outside-window edit must decode as MembershipChanges");
+        };
+        assert!(upserts.is_empty() && removes.is_empty() && !has_more);
+        assert_eq!(order, ["mission/m1"]);
+        assert_eq!(outside.container, membership.container);
+        assert_eq!(outside.live_count, membership.live_count);
+        assert!(outside.changed_index > membership.changed_index);
+        for frame in ["snapshot_frame", "changes_frame"] {
+            let mut missing_state = fixture[frame].clone();
+            missing_state.as_object_mut().unwrap().remove("membership");
+            assert!(matches!(
+                super::CollectionEvent::from_frame(missing_state),
+                Err(super::ClientError::Protocol(message)) if message.contains("membership")
+            ));
+            let mut missing_count = fixture[frame].clone();
+            missing_count["membership"]
+                .as_object_mut()
+                .unwrap()
+                .remove("live_count");
+            assert!(matches!(
+                super::CollectionEvent::from_frame(missing_count),
+                Err(super::ClientError::Protocol(message)) if message.contains("live_count")
+            ));
+        }
+        let mut missing_bucket = fixture["snapshot_frame"].clone();
+        missing_bucket["items"][0]["position"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bucket");
+        assert!(matches!(
+            super::CollectionEvent::from_frame(missing_bucket),
+            Err(super::ClientError::Protocol(message)) if message.contains("bucket")
+        ));
+        let mut resources = fixture["snapshot_frame"].clone();
+        resources["collection"] = serde_json::json!("agents");
+        resources["items"] = serde_json::json!([]);
+        resources["order"] = serde_json::json!([]);
+        resources.as_object_mut().unwrap().remove("membership");
+        assert!(matches!(
+            super::CollectionEvent::from_frame(resources).unwrap(),
+            super::CollectionEvent::Snapshot { items, .. } if items.is_empty()
+        ));
+    }
+
+    #[test]
     fn errors_read_as_sentences_and_say_whether_trying_again_may_help() {
         let stale = api(
             ErrorCode::StaleFence,
@@ -5102,6 +5389,8 @@ mod tests {
         assert!(!gone.is_transient());
         assert!(!api(ErrorCode::Forbidden, "no").is_transient());
         for code in [
+            ErrorCode::InvalidAnswer,
+            ErrorCode::NotAnswerable,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {

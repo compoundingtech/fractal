@@ -498,7 +498,34 @@ fn assistant_pairing_is_disjoint_from_person_delegation() {
 #[test]
 fn generated_resource_union_decodes_all_kinds() {
     let resources: Vec<Resource> = serde_json::from_slice(&fixture("resources.json")).unwrap();
-    assert_eq!(resources.len(), 18);
+    assert_eq!(resources.len(), 19);
+    let question = resources
+        .iter()
+        .find_map(|resource| match resource {
+            Resource::HarnessQuestion(question) => Some(question),
+            _ => None,
+        })
+        .expect("the fixture must decode a typed harness question, not an unknown resource");
+    assert_eq!(question.header.id, "harness-question/00ca25ee5d0da6af852c81a5ee4949df");
+    assert_eq!(question.header.revision, "claim/ada-observed");
+    assert_eq!(question.agent, "agent/ada");
+    assert_eq!(question.session, "ada-session");
+    assert_eq!(question.runtime_incarnation, "ada-incarnation-1");
+    assert_eq!(question.observed_at, 1793008800000);
+    assert_eq!(question.questions, vec![HarnessQuestionItem {
+        id: "q0".into(),
+        options: 2,
+        multi: false,
+        required: true,
+    }]);
+    assert!(question.resolution.is_none());
+    assert_eq!(question.answer.state, HarnessQuestionAnswerabilityState::Unavailable);
+    assert_eq!(question.answer.reason, Some(HarnessQuestionAnswerabilityReason::AdapterMissing));
+    let typed = Resource::HarnessQuestion(question.clone());
+    let encoded = serde_json::to_value(&typed).unwrap();
+    assert_eq!(encoded["kind"], "harness-question");
+    let round_trip: Resource = serde_json::from_value(encoded).unwrap();
+    assert_eq!(round_trip, typed);
     let lane = resources
         .iter()
         .find_map(|resource| match resource {
@@ -759,6 +786,26 @@ fn timeline_tool_result_preserves_timing_metadata_and_decodes_legacy_results() {
 }
 
 #[test]
+fn a_mailbox_content_entry_names_its_message_and_older_content_decodes_without() {
+    let mut wire = serde_json::json!({
+        "id": "timeline-entry/mailbox-content", "sequence": 3, "revision": 1,
+        "timestamp": "2026-09-20T12:00:00Z", "role": "user", "type": "content", "final": true,
+        "body": {"media_type": "text/plain", "text": "hello", "message_id": "message/first"}
+    });
+    let entry: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    let TimelineBody::Content(body) = &entry.body else {
+        panic!("content discriminator was not preserved");
+    };
+    assert_eq!(body.message_id.as_deref(), Some("message/first"));
+    assert_eq!(serde_json::to_value(&entry).unwrap(), wire);
+
+    wire["body"].as_object_mut().unwrap().remove("message_id");
+    let older: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(&older.body, TimelineBody::Content(body) if body.message_id.is_none()));
+    assert_eq!(serde_json::to_value(&older).unwrap(), wire);
+}
+
+#[test]
 fn timeline_models_tolerate_future_discriminators() {
     fn entry(entry_type: &str, body: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
@@ -983,6 +1030,82 @@ fn a_kind_this_client_does_not_know_reads_as_unknown_and_the_page_still_reads() 
 }
 
 #[test]
+fn ordered_membership_contract_preserves_root_remove_and_versioned_bodies() {
+    let value: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/clients/ordered-memberships-v2.json")).unwrap();
+    let parameters: ArrangementMembershipEditParameters = serde_json::from_value(value["edit"]["parameters"].clone()).unwrap();
+    assert!(matches!(&parameters.operations[0], OrderedMembershipOperation::Place { bucket: None, .. }));
+    assert!(matches!(&parameters.operations[1], OrderedMembershipOperation::Remove { .. }));
+    let fence: Fence = serde_json::from_value(value["edit"]["fence"].clone()).unwrap();
+    let serialized_fence = serde_json::to_value(&fence).unwrap();
+    let request = ActionRequest::arrangement_membership_edit(
+        "action/membership-edit", "membership-edit-ada-0001",
+        fence, parameters,
+    ).unwrap();
+    let mut expected = value["edit"].clone();
+    expected["fence"] = serialized_fence;
+    assert_eq!(serde_json::to_value(request).unwrap(), expected);
+    let page: OrderedMembershipPage = serde_json::from_value(value["page"].clone()).unwrap();
+    assert_eq!(page.items[0].id, page.items[0].member);
+    assert!(page.items[0].position.bucket.is_none());
+    let mut expected_page = value["page"].clone();
+    expected_page["page"]["next_cursor"] = serde_json::Value::Null;
+    expected_page["page"]["cursor_expires_at"] = serde_json::Value::Null;
+    assert_eq!(serde_json::to_value(page).unwrap(), expected_page);
+    let body: ArrangementBody = serde_json::from_value(value["body"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(body).unwrap(), value["body"]);
+    let legacy: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/clients/arrangements-v1.json")).unwrap();
+    let body: ArrangementBody = serde_json::from_value(legacy["resource"]["body"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(body).unwrap(), legacy["resource"]["body"]);
+    let mut invalid = value["body"].clone();
+    invalid["version"] = serde_json::json!(3);
+    assert!(serde_json::from_value::<ArrangementBody>(invalid).is_err());
+    let mut invalid = value["body"].clone();
+    invalid["placements"] = serde_json::json!({});
+    assert!(serde_json::from_value::<ArrangementBody>(invalid).is_err());
+    let parameters: ArrangementEditParameters = serde_json::from_value(legacy["edit"]["parameters"].clone()).unwrap();
+    assert_eq!(parameters.version, None);
+    assert_eq!(serde_json::to_value(parameters).unwrap(), legacy["edit"]["parameters"]);
+    for (raw, code) in [
+        ("unsupported-membership-container", ErrorCode::UnsupportedMembershipContainer),
+        ("membership-owner-forbidden", ErrorCode::MembershipOwnerForbidden),
+        ("invalid-membership-member", ErrorCode::InvalidMembershipMember),
+        ("invalid-membership-bucket", ErrorCode::InvalidMembershipBucket),
+        ("invalid-membership-key", ErrorCode::InvalidMembershipKey),
+        ("invalid-membership-operations", ErrorCode::InvalidMembershipOperations),
+        ("invalid-arrangement-version", ErrorCode::InvalidArrangementVersion),
+        ("invalid-arrangement-body", ErrorCode::InvalidArrangementBody),
+        ("membership-edit-too-large", ErrorCode::MembershipEditTooLarge),
+    ] {
+        assert_eq!(serde_json::from_value::<ErrorCode>(serde_json::json!(raw)).unwrap(), code);
+        assert_eq!(serde_json::to_value(code).unwrap(), raw);
+    }
+}
+
+#[test]
+fn ordered_membership_envelopes_decode_and_missing_buckets_fail_before_a_request_exists() {
+    let value: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/clients/ordered-memberships-v2.json")).unwrap();
+    let envelope: Envelope<OrderedMembershipPage> = serde_json::from_value(value["envelope"].clone()).unwrap();
+    assert_eq!(envelope.value.collection, "ordered-memberships");
+    assert!(envelope.value.items.is_empty());
+    let mut expected_page = value["envelope"]["value"].clone();
+    expected_page["page"]["next_cursor"] = serde_json::Value::Null;
+    expected_page["page"]["cursor_expires_at"] = serde_json::Value::Null;
+    assert_eq!(serde_json::to_value(&envelope.value).unwrap(), expected_page);
+    // A missing bucket is not the root: neither the edit nor a read row decodes without it.
+    let mut missing = value["edit"]["parameters"].clone();
+    missing["operations"][0].as_object_mut().unwrap().remove("bucket");
+    let error = serde_json::from_value::<ArrangementMembershipEditParameters>(missing).unwrap_err();
+    assert!(error.to_string().contains("missing field `bucket`"), "{error}");
+    let mut row = value["page"]["items"][0].clone();
+    row["position"].as_object_mut().unwrap().remove("bucket");
+    assert!(serde_json::from_value::<OrderedMembership>(row).is_err());
+    let mut explicit_root = value["page"]["items"][0].clone();
+    explicit_root["position"]["bucket"] = serde_json::Value::Null;
+    let decoded: OrderedMembership = serde_json::from_value(explicit_root).unwrap();
+    assert_eq!(decoded.position.bucket, None);
+}
+
+#[test]
 fn relay_omission_fixture_round_trips_without_inventing_nonnullable_fields() {
     let bytes = fixture("timeline-relay-omission.json");
     let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -1141,4 +1264,23 @@ fn optional_message_participants_preserve_legacy_scalar_types_and_typed_relay() 
         "items":raw["value"]["items"], "next_cursor":"conversation-cursor/participants/next"});
     let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
     assert_eq!(serde_json::to_value(typed).unwrap(),changes);
+}
+
+#[tokio::test]
+async fn a_relayed_plugin_read_refuses_paths_outside_the_plugin_routes() {
+    let client = Client::unix(Path::new("/nonexistent/fractal-plugin-read.sock"));
+    let refused = |result: &Result<serde_json::Value, ClientError>| {
+        matches!(result, Err(ClientError::Protocol(message)) if message.contains("not a GitHub plugin read"))
+    };
+    for path in [
+        "/v1/plugins/github/repos/acme/../garden/pulls",
+        "/v1/plugins/github/repos/./acme/garden/pulls",
+        "/v1/client/agents",
+        "/v1/plugins/github/repos/acme/garden/pulls#12",
+    ] {
+        assert!(refused(&client.github_plugin_read(path).await), "{path}");
+    }
+    // A dotted value in the query names no segment: the read is sent, and finds no daemon here.
+    let sent = client.github_plugin_read("/v1/plugins/github/repos/acme/garden/events?after=a..b").await;
+    assert!(sent.is_err() && !refused(&sent), "{sent:?}");
 }
