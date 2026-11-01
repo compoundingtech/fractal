@@ -75,7 +75,7 @@ fn exec_only_card_current_declaration_and_ownership_fences() {
     observe_exec_card(store, "first", "running");
     observe_exec_card(store, "second", "failed");
     assert_eq!(exec_card(store)["state"], "failed");
-    let only_first = r#"host "node"; exec "first" { id "first"; command "true"; }"#;
+    let only_first = r#"host "node"; workspace "/work/project"; exec "first" { id "first"; command "true"; }"#;
     declare_exec_card(store, only_first, "removed-second");
     let card = exec_card(store);
     assert_eq!(card["state"], "running");
@@ -98,14 +98,19 @@ fn exec_only_card_placement_does_not_guess_from_overridden_children() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let store = &state.store;
-    declare_exec_card(store, r#"
-        workspace "/work/root"
-        exec "first" { host "east"; workspace "/work/first"; id "first"; command "true"; }
-        exec "second" { host "west"; workspace "/work/second"; id "second"; command "true"; }
-    "#, "split-placement");
+    // Nested authored tasks inherit placement today; exercise divergent normalized
+    // members too, without pretending that task-local host syntax is supported.
+    let source = format!("version 2\nagent \"example/workers\" {{ {} }}", TWO_TASKS.replace("host \"node\"", ""));
+    let mut intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+    for (task, host) in [("first", "east"), ("second", "west")] {
+        let child = intent.subjects.get_mut(&format!("exec/example/workers/{task}")).unwrap();
+        child.member.as_mut().unwrap().host = host.into();
+    }
+    let planned = store.mission(&intent, IntentInput { kdl: source, source_name: None }).unwrap();
+    store.apply(&intent, &planned.subject_tokens, "split-placement").unwrap();
     let card = exec_card(store);
     assert!(card["host_id"].is_null());
-    assert_eq!(card["workspace"], "/work/root");
+    assert_eq!(card["workspace"], "/work/project");
     declare_exec_card(store, r#"exec "first" { id "first"; command "true"; }"#, "inherited-placement");
     let card = exec_card(store);
     assert_eq!(card["host_id"], "host/node");
