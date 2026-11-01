@@ -3,20 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Link, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { Components, ExtraProps } from 'react-markdown'
-import type { Root, RootContent as SyntaxNode } from 'hast'
-import { refractor } from 'refractor/core'
-import typescript from 'refractor/typescript'
-import tsx from 'refractor/tsx'
-import javascript from 'refractor/javascript'
-import json from 'refractor/json'
-import bash from 'refractor/bash'
-import diff from 'refractor/diff'
-import rust from 'refractor/rust'
-import nix from 'refractor/nix'
-import python from 'refractor/python'
-import yaml from 'refractor/yaml'
-import markdown from 'refractor/markdown'
-import css from 'refractor/css'
+import type { Root } from 'hast'
 import remarkGfm from 'remark-gfm'
 import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { Tooltip as CopyTooltip } from './Controls'
@@ -127,40 +114,25 @@ function InlineCode({ children }: React.ComponentProps<'code'>) {
   return rendered === undefined ? <code {...stylex.props(styles.inlineCode)}>{children}</code> : rendered
 }
 
-// Eager, fixed package grammars: authored fences never trigger a module request.
-const grammars = { typescript, tsx, javascript, json, bash, diff, rust, nix, python, yaml, markdown, css }
-for (const grammar of Object.values(grammars)) refractor.register(grammar)
-const languageAliases: Readonly<Record<string, keyof typeof grammars>> = {
+/** Only token coloring is deferred; parsed prose and the code box stay ready for the first frame. */
+const SyntaxSource = React.lazy(() => import('./SyntaxSource'))
+const languages: Readonly<Record<string, true>> = { typescript: true, tsx: true, javascript: true, json: true, bash: true, diff: true, rust: true, nix: true, python: true, yaml: true, markdown: true, css: true }
+const languageAliases: Readonly<Record<string, string>> = {
   ts: 'typescript', js: 'javascript', sh: 'bash', shell: 'bash', shellscript: 'bash',
   rs: 'rust', py: 'python', yml: 'yaml', md: 'markdown',
 }
 
-/** File-path language lookup uses the same eager grammar allowlist as fenced code. */
+/** File-path language lookup uses the same fixed grammar allowlist as fenced code. */
 export function languageFromPath(path: string): string {
   const extension = /\.([^.]+)$/.exec(path)?.[1]?.toLowerCase() ?? ''
   const canonical = Object.hasOwn(languageAliases, extension) ? languageAliases[extension]! : extension
-  return Object.hasOwn(grammars, canonical) ? canonical : ''
-}
-
-function SyntaxToken({ node }: { node: SyntaxNode }): React.ReactNode {
-  if (node.type === 'text') return node.value
-  if (node.type !== 'element') return null
-  const classes = Array.isArray(node.properties.className) ? node.properties.className.map(String) : []
-  return <span data-syntax-token={classes.filter(value => value !== 'token').join(' ')} {...stylex.props(
-    classes.some(value => ['comment', 'prolog', 'doctype', 'cdata'].includes(value)) && styles.syntaxComment,
-    classes.some(value => ['keyword', 'atrule', 'tag', 'selector'].includes(value)) && styles.syntaxKeyword,
-    classes.some(value => ['string', 'char', 'attr-value', 'inserted'].includes(value)) && styles.syntaxString,
-    classes.some(value => ['number', 'boolean', 'constant', 'symbol'].includes(value)) && styles.syntaxLiteral,
-    classes.some(value => ['function', 'class-name', 'builtin'].includes(value)) && styles.syntaxFunction,
-    classes.includes('deleted') && styles.syntaxDeleted,
-  )}>{node.children.map((child, index) => <SyntaxToken key={index} node={child} />)}</span>
+  return Object.hasOwn(languages, canonical) ? canonical : ''
 }
 
 export function HighlightedSource({ code, language }: { code: string; language: string }) {
   const normalized = language.toLowerCase()
   const canonical = Object.hasOwn(languageAliases, normalized) ? languageAliases[normalized]! : normalized
-  const nodes = React.useMemo(() => Object.hasOwn(grammars, canonical) ? refractor.highlight(code, canonical).children : undefined, [code, canonical])
-  return nodes === undefined ? code : <>{nodes.map((node, index) => <SyntaxToken key={index} node={node} />)}</>
+  return Object.hasOwn(languages, canonical) ? <React.Suspense fallback={code}><SyntaxSource code={code} language={canonical} /></React.Suspense> : code
 }
 
 const CodeBlock = React.memo(function CodeBlock({ code, language }: { code: string; language: string }) {
@@ -337,12 +309,6 @@ const styles = stylex.create({
   itemBlock: { marginBlockStart: { default: s.md, ':first-child': 0 } },
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
-  syntaxComment: { color: textColor.fgMuted, fontStyle: 'italic' },
-  syntaxKeyword: { color: status.runningFg },
-  syntaxString: { color: textColor.fgMuted },
-  syntaxLiteral: { color: `var(--fractal-diff-literal, ${status.attention})` },
-  syntaxFunction: { color: textColor.fg, fontWeight: t.weightMedium },
-  syntaxDeleted: { color: status.dangerFg },
   blockquote: { display: 'flex', flexDirection: 'column', gap: s.md, margin: 0, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.railStrong, color: textColor.fgMuted },
   tableScroll: { maxWidth: '100%', overflowX: 'auto', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit' },
