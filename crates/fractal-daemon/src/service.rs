@@ -1432,6 +1432,9 @@ mod tests {
         let arguments = spec.program_arguments();
         assert!(arguments.windows(2).any(|pair| pair[0] == "--config" && pair[1].ends_with("custom/config.toml")));
         assert!(arguments.windows(2).any(|pair| pair[0] == "--pty-binary" && pair[1].ends_with("/pty")));
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--client-gateway-socket" && pair[1].ends_with("/fractal-client.sock")));
+        assert!(render_systemd_user_unit(&spec).contains("fractal-client.sock"));
+        assert!(render_launchd_plist(&spec).contains("fractal-client.sock"));
         assert!(spec.replication_program_arguments().contains(&"--config".into()));
         Ok(())
     }
@@ -1443,8 +1446,8 @@ mod tests {
             fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
             shared_secret_file: Some("/var/lib/st3/fleet/secret".into()),
             state_dir: "/var/lib/st3".into(),
-            socket: "/run/user/1000/st3.sock".into(),
-            client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
+            socket: "/run/user/1000/fractal.sock".into(),
+            client_gateway_socket: "/run/user/1000/fractal-client.sock".into(),
             peer_listen: Some("127.0.0.1:31313".into()),
             peers: vec![PeerConfig {
                 name: "node-b".into(),
@@ -1495,8 +1498,9 @@ mod tests {
         state_dir: "/var/lib/st3".into(),
         store_dir: None,
         pty_root: Some("/var/lib/pty".into()),
-        socket: "/run/user/1000/st3.sock".into(),
-        client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
+        socket: "/run/user/1000/fractal.sock".into(),
+        socket_is_explicit: true,
+        client_gateway_socket: "/run/user/1000/fractal-client.sock".into(),
         peer_listen: Some("0.0.0.0:31313".into()),
         work_root: None,
         peer_listen_allow_plain_http: true,
@@ -1519,7 +1523,7 @@ mod tests {
         assert!(unit.contains("ExecStart=/usr/bin/st3 up --node node-a"));
         assert!(unit.contains("--state-dir /var/lib/st3"));
         assert!(unit.contains("--pty-root /var/lib/pty"));
-        assert!(unit.contains("--client-gateway-socket /run/user/1000/st3-client.sock"));
+        assert!(unit.contains("--client-gateway-socket /run/user/1000/fractal-client.sock"));
         assert!(unit.contains("--peer node-b=http://127.0.0.1:31314"));
         assert!(unit.contains("--peer-listen 0.0.0.0:31313 --peer-listen-allow-plain-http"));
         assert!(unit.contains("MemoryMax=1024M"));

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Rename default local sockets to fractal.sock and fractal-client.sock",
+  "replay": {"status": "none", "detail": "No event or replication replay change."},
+  "schema": {"status": "none", "detail": "No database or wire schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Default Rust readers resolve Fractal-first with legacy fallback at every connection attempt, including outage retries; daemon aliases keep older readers working. Explicit configured paths stay exact, including a legacy socket that is also the state discovery target. State directories, environment variables, protocol identifiers and service names remain unchanged."},
+  "downtime": {"status": "none", "detail": "No planned downtime; the daemon serves both default socket names during the migration. If only the shorter legacy filename fits the platform Unix socket address limit, it serves that name alone with a path-length diagnostic; default clients skip the overlong name."},
+  "manual": {"status": "none", "detail": "No action for default discovery. Explicit carrier paths remain explicit; choose fractal-client.sock for new paired gateway configurations."},
+  "recovery": {"status": "changed", "detail": "Legacy daemon readers remain supported through temporary socket aliases; default readers discover older daemons through legacy sockets. Seat attachment materialization retains discovery identity when adding actor authority, including legacy-only and published custom endpoints."}
+}

@@ -1114,7 +1114,7 @@ async fn agent_new_workspace(
     let answer: Result<Value> = if host == local {
         client.get(&path).await
     } else {
-        let Endpoint::Unix(socket) = endpoint else {
+        let Some(socket) = endpoint.unix_socket() else {
             anyhow::bail!(
                 "asking {host} for a workspace needs the local Unix endpoint; pass --workspace"
             );
@@ -1124,7 +1124,7 @@ async fn agent_new_workspace(
                 "asking {host} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the st config; or pass --workspace"
             )
         })?;
-        Client::unix_as(socket.clone(), person)?
+        Client::unix_as(socket.as_ref(), person)?.with_endpoint(endpoint.clone())
             .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
             .get(&path)
             .await

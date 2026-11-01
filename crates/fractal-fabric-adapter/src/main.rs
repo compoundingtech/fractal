@@ -82,11 +82,20 @@ fn home() -> Result<PathBuf> {
     ))
 }
 fn default_st_socket() -> Result<PathBuf> {
-    Ok(PathBuf::from(
+    let runtime = PathBuf::from(
         std::env::var_os("XDG_RUNTIME_DIR")
             .context("XDG_RUNTIME_DIR is unset; pass --st-socket")?,
-    )
-    .join("st3.sock"))
+    );
+    let primary = runtime.join("fractal.sock");
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction.
+    let legacy = runtime.join("st3.sock");
+    if std::os::unix::net::UnixStream::connect(&primary).is_err()
+        && std::os::unix::net::UnixStream::connect(&legacy).is_ok()
+    {
+        return Ok(legacy);
+    }
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+    Ok(primary)
 }
 
 /// Durable before any external mutation, including ownership discovery on first use.
