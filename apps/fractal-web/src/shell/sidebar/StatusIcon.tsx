@@ -5,21 +5,9 @@ import { tokens } from '../../ui-compat/tokens.stylex.ts'
 
 import type { Agent, Feed } from '../../data/source.ts'
 
-/** Accessible labels and visual tones for observed agent statuses. */
-export const statuses = {
-  working: { label: 'Working', tone: 'green' },
-  waiting: { label: 'Needs you', tone: 'amber' },
-  idle: { label: 'Idle', tone: 'gray' },
-  pending: { label: 'Pending', tone: 'gray' },
-  stale: { label: 'Stale observation', tone: 'gray' },
-  offline: { label: 'Offline', tone: 'gray' },
-  ended: { label: 'Ended', tone: 'gray' },
-  suspended: { label: 'Suspended', tone: 'gray' },
-  retired: { label: 'Retired', tone: 'gray' },
-  unobserved: { label: 'Not observed', tone: 'gray' },
-} as const
-/** Sidebar status derived from an agent observation and fleet freshness. */
-export type AgentStatus = keyof typeof statuses
+export { statuses } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+export type { AgentStatus } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { statuses, type AgentStatus } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 /** Resolves status without treating unavailable or stale observations as live state. */
 export const agentStatus = ({
   agent,
@@ -43,10 +31,11 @@ export const agentStatus = ({
               : !agent.connected
                 ? 'offline'
                 : agent.activity === 'errored'
-                  ? 'stale'
+                  ? 'failed'
                   : agent.activity
 
 const paths: Record<AgentStatus, ReactNode> = {
+  failed: <><path d="M10 4v8M10 15h.01" /></>,
   working: (
     <>
       <circle cx="10" cy="10" r="7" opacity=".45" />
@@ -106,6 +95,7 @@ const styles = stylex.create({
   icon: { display: 'inline-flex', flexShrink: 0, color: tokens['--ds-gray-900'] },
   green: { color: tokens['--ds-green-900'] },
   amber: { color: tokens['--ds-amber-900'] },
+  red: { color: tokens['--ds-red-900'] },
   spinner: {
     animationName: spin,
     animationDuration: '1s',
@@ -130,6 +120,7 @@ export const StatusIcon = ({
       styles.icon,
       statuses[status].tone === 'green' && styles.green,
       statuses[status].tone === 'amber' && styles.amber,
+      statuses[status].tone === 'red' && styles.red,
     )}
   >
     <svg

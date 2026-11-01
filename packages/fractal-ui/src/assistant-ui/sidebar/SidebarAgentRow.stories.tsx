@@ -276,18 +276,35 @@ const frozenRows: readonly Row[] = [
   { ...unreportedRow, ref: 'agent/frozen-idle', id: 'frozen-idle', title: 'Frozen idle session', status: 'idle', statusLabel: 'Last verified · idle', freshness: 'stale', needsMe: false, unread: 0 },
   { ...unreportedRow, ref: 'agent/frozen-stale', id: 'frozen-stale', title: 'Frozen stale session', status: 'stale', statusLabel: 'Stale observation', freshness: 'stale', needsMe: false, unread: 0 },
 ]
-export const FrozenWorkingVersusIdle: Story = { tags: ['critical'], name: 'Frozen observation · working vs idle', render: () => <main {...stylex.props(styles.root)}><div {...stylex.props(styles.list)}>{frozenRows.map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} />)}</div></main>, play: async ({ canvasElement }) => {
-  const glyphs = [...canvasElement.querySelectorAll<HTMLElement>('[data-row-column="status"] [data-status]')]
+export const FrozenWorkingVersusIdle: Story = { tags: ['critical'], name: 'Frozen observation · working vs idle', render: () => <main {...stylex.props(styles.root)}><div data-frozen-rows {...stylex.props(styles.list)}>{frozenRows.map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} />)}</div><div data-vocabulary {...stylex.props(styles.list)}>{vocabularyRows.map(item => <SidebarAgentRow key={item.ref} item={item} now={storyNow} />)}</div></main>, play: async ({ canvasElement }) => {
+  const glyphs = [...canvasElement.querySelectorAll<HTMLElement>('[data-frozen-rows] [data-row-column="status"] [data-status]')]
   await expect(glyphs.map(glyph => glyph.dataset.status)).toEqual(['working', 'idle', 'stale'])
   for (const glyph of glyphs) await expect(glyph).toHaveAttribute('data-frozen', 'true')
   // One muted tone: a frozen observation never reads as live and stale is never the danger red.
   await expect(new Set(glyphs.map(glyph => getComputedStyle(glyph).color)).size).toBe(1)
-  // Nothing spins.
-  for (const svg of canvasElement.querySelectorAll('[data-row-column="status"] svg')) await expect(getComputedStyle(svg).animationName).toBe('none')
-  // Without color, shape tells working from idle: working keeps its static ring, idle is the plain disc.
-  const [working, idle] = glyphs.map(glyph => glyph.querySelector('svg')!)
-  await expect(working!.querySelectorAll('circle, path').length).toBeGreaterThan(idle!.querySelectorAll('circle, path').length)
+  const marks = glyphs.map(glyph => glyph.querySelector('[data-agent-glyph]')!)
+  for (const mark of marks) await expect(getComputedStyle(mark).animationName).toBe('none')
+  // Retained activity keeps its exact glyph; an observation-only legacy state invents none.
+  await expect(marks.map(mark => mark.textContent)).toEqual(['●', '○', ''])
+  const rows = within(canvasElement.querySelector<HTMLElement>('[data-vocabulary]')!).getAllByTestId('taste-agent-row')
+  await expect(rows.map(row => row.querySelector('[data-agent-glyph]')?.textContent))
+    .toEqual(['●', '○', '○', '×', '×', '!', '~', '○', '', '●', '●'])
+  await expect(rows.slice(0, 9).every(row => row.querySelector('[data-row-column="attention"]') === null)).toBe(true)
+  const needs = rows[9]!.querySelector('[data-row-column="attention"]')!
+  const question = rows[10]!.querySelector('[data-row-column="attention"]')!
+  await expect(needs).toHaveTextContent('◆')
+  await expect(needs).toHaveAttribute('aria-label', 'Needs your attention')
+  await expect(question).toHaveTextContent('?')
+  await expect(question).toHaveAttribute('aria-label', 'Open question')
+  for (const row of rows.slice(9)) await expect(row.querySelector('[data-row-trailing-signals]')!.contains(row.querySelector('[data-row-column="attention"]'))).toBe(true)
 } }
+const vocabularyRows: readonly Row[] = [
+  ...(['working', 'idle', 'waiting', 'ended', 'retired', 'failed', 'pending', 'suspended', 'unobserved'] as const)
+    .map(status => ({ ...unreportedRow, ref: `agent/vocabulary-${status}`, id: status, title: status,
+      status, statusLabel: status, needsMe: false, unread: 0 })),
+  { ...unreportedRow, ref: 'agent/needs-you', id: 'needs-you', title: 'Needs you', needsMe: true, unread: 0 },
+  { ...unreportedRow, ref: 'agent/question', id: 'question', title: 'Question', asking: true, needsMe: true, unread: 0 },
+]
 export const QuickOpenAction: Story = { tags: ['critical'], name: 'Row hover · quick Open', render: () => <main {...stylex.props(styles.root)}><QuickOpenCohort /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const rows = canvas.getAllByTestId('taste-agent-row')
