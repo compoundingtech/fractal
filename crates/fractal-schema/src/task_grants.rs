@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 mod browser;
+mod canonical;
 mod locator;
 mod reveal;
 mod strict;
@@ -11,6 +12,7 @@ pub use browser::{
     TaskBrowserStepV1, TaskClickEffectV1, TaskHumanKindV1, TaskRevealSourceKindV1,
     TaskRevealTriggerV1, TaskTextNodeV1,
 };
+pub use canonical::{canonicalize_task_manifest_v1, digest_task_manifest_v1};
 pub use locator::{AriaRole, TaskLocatorV1, TaskNonFrameLocatorV1};
 
 /// Closed Manifest v1 document. Parsing types does not establish live authority.

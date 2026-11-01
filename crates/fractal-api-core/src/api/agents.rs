@@ -350,7 +350,10 @@ pub struct AgentLaneQuery {
 /// The slice this host's runtime gives the agent's lane, named by the daemon so no caller copies
 /// the naming: `st-test` puts a check that a seat started outside its lane (a unit of its own) back
 /// in it. The name says where the lane is when the seat has one; whether the slice exists and is
-/// capped is the kernel's to say, so a caller reads that from the cgroup tree.
+/// capped is the kernel's to say, so a caller reads that from the cgroup tree. `sccache_server_uds`
+/// is the lane's own sccache server, as a laned task's environment names it from the daemon's
+/// runtime directory (null without one): a job in the lane that names no server would compile in
+/// the host's, outside the lane.
 pub async fn agent_lane(
     State(state): State<AppState>,
     Query(query): Query<AgentLaneQuery>,
@@ -362,11 +365,17 @@ pub async fn agent_lane(
     let Some(member) = desired.and_then(|(desired, _)| desired.member) else {
         return Err(ApiError::not_found(format!("{subject} has no declaration with a runtime")));
     };
+    let slice = fractal_runtime::seat_slice(&member.runtime_id);
+    let sccache = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| fractal_runtime::lane_sccache_socket(&dir, &slice));
     Ok(Json(json!({
         "agent": subject,
         "host": member.host,
         "runtime_id": member.runtime_id,
-        "slice": fractal_runtime::seat_slice(&member.runtime_id),
+        "slice": slice,
+        "sccache_server_uds": sccache,
         "lanes_enforced": fractal_runtime::lanes_enforced(),
     })))
 }

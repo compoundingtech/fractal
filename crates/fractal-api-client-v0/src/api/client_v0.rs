@@ -1011,6 +1011,7 @@ async fn collection_items_with_windows(
                     // beside the others instead of behind them.
                     drop(admission.take());
                     overlay_agent_resources(&store, &mut items, &at)?;
+                    overlay_seat_admission(&state, &mut items, false);
                     if traced {
                         let path = match (status.is_some(), roster_path, folded.get()) {
                             (true, _, _) => "filtered_full",
@@ -7636,6 +7637,16 @@ fn creation_string(value: &str, field: &str, max: usize) -> Result<(), ApiError>
     Ok(())
 }
 
+fn creation_tag<'a>(
+    tags: &'a BTreeMap<String, String>,
+    legacy: &str,
+    current: &str,
+) -> Option<&'a String> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    tags.get(legacy).or_else(|| tags.get(current))
+    // LIVE-MIGRATION END
+}
+
 fn existing_creation(
     state: &AppState,
     session: &ClientSession,
@@ -7647,9 +7658,18 @@ fn existing_creation(
     ));
     for desired in state.store.desired_subjects().map_err(ApiError::internal)? {
         if let Some(member) = &desired.member
-            && member.tags.get("st3.client.create-key") == Some(&key)
+            && creation_tag(
+                &member.tags,
+                "st3.client.create-key",
+                "fractal.client.create-key",
+            ) == Some(&key)
         {
-            if member.tags.get("st3.client.create-parameters") != Some(&digest) {
+            if creation_tag(
+                &member.tags,
+                "st3.client.create-parameters",
+                "fractal.client.create-parameters",
+            ) != Some(&digest)
+            {
                 return Err(ApiError {
                     status: StatusCode::CONFLICT,
                     code: "idempotency-conflict".into(),
@@ -7715,11 +7735,13 @@ async fn publish_creation(
         .into_iter()
         .find(|member| member.subject == subject)
     {
-        if existing
-            .member
-            .as_ref()
-            .and_then(|member| member.tags.get("st3.client.create-key"))
-            == Some(&key)
+        if existing.member.as_ref().and_then(|member| {
+            creation_tag(
+                &member.tags,
+                "st3.client.create-key",
+                "fractal.client.create-key",
+            )
+        }) == Some(&key)
             && existing.desired
                 == intent
                     .subjects
@@ -11772,6 +11794,7 @@ mission "differential" state="ready" {
             .map_or(3000, |ms| ms.parse().unwrap()));
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            seat_admission: Default::default(),
             store: Arc::new(Store::open(&database, "bench-host").unwrap()),
             ..test_state(root.path())
         };
@@ -13511,6 +13534,7 @@ mission "differential" state="ready" {
 
     pub fn test_state_named(root: &Path, node: &str) -> AppState {
         AppState {
+            seat_admission: Default::default(),
             owning_person: Some("person/operator".into()),
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),
@@ -13940,6 +13964,29 @@ subscription "watch/source" {
         victim.kill().await.unwrap();
         victim.wait().await.unwrap();
         server.abort();
+    }
+
+    #[test]
+    fn creation_tags_select_each_spelling_independently_without_value_fallback() {
+        for (legacy, current) in [
+            ("st3.client.create-key", "fractal.client.create-key"),
+            (
+                "st3.client.create-parameters",
+                "fractal.client.create-parameters",
+            ),
+        ] {
+            let read = |tags: &BTreeMap<_, _>| creation_tag(tags, legacy, current).cloned();
+            let mut tags = BTreeMap::new();
+            assert_eq!(read(&tags), None);
+            tags.insert(format!("{current}.unknown"), "ignored".into());
+            assert_eq!(read(&tags), None);
+            tags.insert(current.into(), "current".into());
+            assert_eq!(read(&tags).as_deref(), Some("current"));
+            tags.insert(legacy.into(), "legacy".into());
+            assert_eq!(read(&tags).as_deref(), Some("legacy"));
+            tags.insert(legacy.into(), String::new());
+            assert_eq!(read(&tags).as_deref(), Some(""));
+        }
     }
 
     #[tokio::test]

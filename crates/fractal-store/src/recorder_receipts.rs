@@ -145,7 +145,11 @@ pub fn ingest_once(store: &Store, directory: &Path) -> Result<usize> {
 }
 
 fn claim_input(receipt: Receipt) -> Result<ClaimInput> {
-    ensure!(receipt.schema == "st3.recorder.receipt.v1", "unsupported recorder receipt schema");
+    let supported = receipt.schema == "fractal.recorder.receipt.v1";
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let supported = supported || receipt.schema == "st3.recorder.receipt.v1";
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+    ensure!(supported, "unsupported recorder receipt schema");
     chrono::DateTime::parse_from_rfc3339(&receipt.at).context("invalid recorder receipt timestamp")?;
     let url = reqwest::Url::parse(&receipt.url).context("invalid recorder receipt URL")?;
     ensure!(url.scheme() == "https" && url.host_str() == Some("github.com"), "receipt URL is not a GitHub resource");
@@ -205,6 +209,67 @@ mod tests {
             mission_run: run.map(str::to_owned),
             exit_code: Some(0),
             at: "2026-10-03T12:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn receipt_schema_spellings_produce_the_same_claim_and_reject_malformed_bodies() {
+        let expected = claim_input(receipt(
+            "https://github.com/acme/demo/issues/8",
+            "agent/builder",
+            Some("run"),
+        ))
+        .unwrap();
+        for schema in ["st3.recorder.receipt.v1", "fractal.recorder.receipt.v1"] {
+            let fixture = || {
+                let mut value = receipt(
+                    "https://github.com/acme/demo/issues/8",
+                    "agent/builder",
+                    Some("run"),
+                );
+                value.schema = schema.into();
+                value
+            };
+            let actual = claim_input(fixture()).unwrap();
+            assert_eq!(actual.subject, expected.subject);
+            assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.fields, expected.fields);
+            assert_eq!(actual.idempotency_key, expected.idempotency_key);
+            let mut value = fixture();
+            value.at = "not-a-timestamp".into();
+            assert!(
+                claim_input(value)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("timestamp")
+            );
+            let mut value = fixture();
+            value.url = "https://github.com/acme/demo/issues/not-a-number".into();
+            assert!(
+                claim_input(value)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("number")
+            );
+        }
+        for schema in [
+            "",
+            "fractal.recorder.receipt.v2",
+            "st3.recorder.receipt.v2",
+            "unknown",
+        ] {
+            let mut value = receipt(
+                "https://github.com/acme/demo/issues/8",
+                "agent/builder",
+                None,
+            );
+            value.schema = schema.into();
+            assert!(
+                claim_input(value)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unsupported recorder receipt schema")
+            );
         }
     }
 

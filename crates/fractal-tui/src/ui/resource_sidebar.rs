@@ -317,7 +317,9 @@ impl Sidebar {
         self.choices = self
             .path
             .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
+            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+            .and_then(|path| std::fs::read(fractal_client::product_dirs::tui_read_path(path)).ok())
+            // LIVE-MIGRATION END
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         self.seen
