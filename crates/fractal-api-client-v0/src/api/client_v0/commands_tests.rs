@@ -37,7 +37,7 @@ async fn phone_commands_scope_matrix_reuses_person_and_agent_authority() {
     let limited = pair(&state, "device/limited", "person/ada", &["read.projections"]);
     let owner = ClientSession::local(Some("person/ada")).unwrap();
     let agent = ClientSession::local(Some("agent/example/worker")).unwrap();
-    let stranger = ClientSession::local(Some("person/grace")).unwrap();
+    let stranger = ClientSession::local(Some("person/robin")).unwrap();
     for session in [&owner, &agent, &limited] {
         for kind in ["phone.inspect", "phone.navigate"] {
             let command = client_commands::issue(&state, session, request("device/target", kind)).unwrap();

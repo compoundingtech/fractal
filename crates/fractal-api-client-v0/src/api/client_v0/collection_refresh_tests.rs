@@ -1401,7 +1401,7 @@ async fn phone_commands_delivery_is_isolated_to_the_addressed_session_socket() {
     let state = super::tests::test_state_named(root.path(), "commands-delivery-isolation");
     let target = super::commands_tests::pair(&state, "device/target", "person/ada", &["read.projections"]);
     let other = super::commands_tests::pair(&state, "device/other", "person/ada", &["read.projections"]);
-    let stranger = super::commands_tests::pair(&state, "device/stranger", "person/grace", &["read.projections"]);
+    let stranger = super::commands_tests::pair(&state, "device/stranger", "person/robin", &["read.projections"]);
     let mut addressed = Fixture::open_as(state.clone(), target, true, None, &["commands"]).await;
     let mut unrelated = Fixture::open_as(state.clone(), other, true, None, &["commands"]).await;
     let mut private = Fixture::open_as(state.clone(), stranger, true, None, &["commands"]).await;

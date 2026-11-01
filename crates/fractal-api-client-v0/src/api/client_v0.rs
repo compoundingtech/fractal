@@ -543,8 +543,8 @@ async fn collection_items_with_windows(
         return crate::api::read_deadline::spawn_blocking(move || {
             let _permit = read_permit;
             let mut items = super::client_commands::collection_items(&state, &session)?;
-            let has_more = items.len() > limit as usize;
-            items.truncate(limit as usize);
+            let has_more = items.len() > limit;
+            items.truncate(limit);
             Ok((new_client_snapshot(&state), items, has_more, None))
         }).await.map_err(ApiError::internal)?;
     }
