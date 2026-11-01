@@ -124,7 +124,7 @@ fn read_code_without_echo() -> Result<String> {
     Ok(line.trim().to_owned())
 }
 
-const FABRIC_PAIRING_UNAVAILABLE: &str = "Fabric invitations need st-fabric-adapter installed and \
+const FABRIC_PAIRING_UNAVAILABLE: &str = "Fabric invitations need fractal-fabric-adapter installed and \
      Fabric running with --runtime-peers; use --via tailscale for a Tailscale-only invitation";
 
 /// A configured path that is not a file counts as no helper, so `auto` invitations
@@ -497,7 +497,7 @@ async fn bootstrap_fabric_invite(
     let output = child.wait_with_output().await?;
     anyhow::ensure!(
         output.status.success(),
-        "Fabric pairing failed; it needs st-fabric-adapter running on this machine and Fabric \
+        "Fabric pairing failed; it needs fractal-fabric-adapter running on this machine and Fabric \
          running with --runtime-peers"
     );
     #[derive(serde::Deserialize)]
