@@ -7,5 +7,5 @@
   "compatibility": { "status": "changed", "detail": "A valid receipt recognizes an existing executable without aliases. Invalid or symlinked receipts stop activation with their path and reinstall guidance. Existing aliases remain recognized and unchanged." },
   "downtime": { "status": "none", "detail": "No additional service restart requirement." },
   "manual": { "status": "changed", "detail": "Keep .fractal-install.json beside the matching executable; restore both together when recovering an installation." },
-  "recovery": { "status": "changed", "detail": "Activation rollback restores both the prior executable and receipt if publication or alias updates fail." }
+  "recovery": { "status": "changed", "detail": "Activation prepares a durable pending intent before replacing executable bytes, so interrupted publication can be retried without aliases. Rollback restores the prior executable, finalized receipt and pending intent together. Repeated activation repairs executable permissions without replacing unchanged bytes." }
 }

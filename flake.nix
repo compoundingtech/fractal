@@ -1176,21 +1176,35 @@
                 operation=$2
                 directory=$3
                 receipt="$directory/.fractal-install.json"
-                hash=$(${pkgs.coreutils}/bin/sha256sum "$directory/fractal")
-                hash=''${hash%% *}
+                pending="$receipt.pending"
+                matches() {
+                  test -f "$1" && test ! -L "$1" &&
+                    ${pkgs.jq}/bin/jq -e --arg hash "$hash" \
+                      '.schema == 1 and .name == "fractal" and .sha256 == $hash' "$1" >/dev/null
+                }
                 case "$operation" in
                   --receipt-verify)
-                    test -f "$receipt" && test ! -L "$receipt"
-                    ${pkgs.jq}/bin/jq -e --arg hash "$hash" \
-                      '.schema == 1 and .name == "fractal" and .sha256 == $hash' "$receipt" >/dev/null
+                    hash=$(${pkgs.coreutils}/bin/sha256sum "$directory/fractal")
+                    hash=''${hash%% *}
+                    test ! -L "$receipt" && test ! -L "$pending"
+                    matches "$receipt" || matches "$pending"
                     ;;
-                  --receipt-write)
+                  --receipt-prepare)
                     test "$4" = --receipt-installer && test "$5" = hm
+                    hash=$(${pkgs.coreutils}/bin/sha256sum "$0")
+                    hash=''${hash%% *}
                     temporary=$(${pkgs.coreutils}/bin/mktemp "$directory/.fractal-receipt.XXXXXX")
                     trap '${pkgs.coreutils}/bin/rm -f "$temporary"' EXIT
                     ${pkgs.jq}/bin/jq -n --arg hash "$hash" \
                       '{schema:1,name:"fractal",sha256:$hash,installer:"hm",version:"fixture-version",commit:"fixture-commit"}' > "$temporary"
-                    ${pkgs.coreutils}/bin/mv -f "$temporary" "$receipt"
+                    ${pkgs.coreutils}/bin/mv -f "$temporary" "$pending"
+                    ;;
+                  --receipt-write)
+                    test "$#" -eq 3
+                    hash=$(${pkgs.coreutils}/bin/sha256sum "$directory/fractal")
+                    hash=''${hash%% *}
+                    matches "$pending"
+                    ${pkgs.coreutils}/bin/mv -f "$pending" "$receipt"
                     ;;
                   *) exit 1 ;;
                 esac
@@ -1258,6 +1272,7 @@
             target=$binDir/fractal
             source=${fixturePackage}/bin/fractal
             receipt=$binDir/.fractal-install.json
+            pending=$receipt.pending
             writeReceipt() {
               hash=$(sha256sum "$target")
               ${pkgs.jq}/bin/jq -n --arg hash "''${hash%% *}" \
@@ -1269,6 +1284,7 @@
               ${pkgs.jq}/bin/jq -e --arg hash "''${hash%% *}" \
                 '.schema == 1 and .name == "fractal" and .sha256 == $hash and .installer == "hm" and .version == "fixture-version" and .commit == "fixture-commit"' \
                 "$receipt"
+              test ! -e "$pending" && test ! -L "$pending"
             }
             export DRY_RUN_CMD=
             for kind in regular same-bytes symlink dangling directory; do
@@ -1320,6 +1336,14 @@
             before=$(stat -c %i "$target")
             ${pkgs.runtimeShell} activate
             test "$(stat -c %i "$target")" = "$before"
+            assertReceipt
+            # A repeated activation repairs executable mode without replacing bytes.
+            chmod 644 "$target"
+            before=$(stat -c %i "$target")
+            ${pkgs.runtimeShell} activate
+            test "$(stat -c %i "$target")" = "$before"
+            test "$(stat -c %a "$target")" = 755
+            "$target"
             assertReceipt
             # Receipt ownership works with aliases present or absent, while a
             # missing receipt still accepts the historical alias layout.
@@ -1374,8 +1398,51 @@
               test "$(readlink "$binDir/st3")" = fractal
               if [ "$kind" = symlink ]; then test "$(readlink "$receipt")" = receipt-target; fi
             done
+            # Kill activation immediately after binary publication, before finalization.
+            # Pending ownership recovers both a fresh install and a stale final receipt,
+            # without relying on aliases (which have not been published yet).
+            cat > crash-mv <<'SH'
+            #!${pkgs.runtimeShell}
+            set -eu
+            ${pkgs.coreutils}/bin/mv "$@"
+            for arg in "$@"; do
+              case "$arg" in */bin/fractal) kill -KILL "$PPID" ;; esac
+            done
+            SH
+            chmod +x crash-mv
+            substitute activate activate-crash \
+              --replace-fail '${pkgs.coreutils}/bin/mv' "$PWD/crash-mv"
+            for prior in fresh receipt-only; do
+              rm -rf state
+              mkdir -p "$binDir"
+              if [ "$prior" = receipt-only ]; then
+                printf 'older managed bytes\n' > "$target"
+                chmod +x "$target"
+                writeReceipt
+                cp "$receipt" saved-receipt
+              fi
+              if ${pkgs.runtimeShell} activate-crash; then
+                echo 'activation survived injected crash' >&2; exit 1
+              fi
+              cmp "$source" "$target"
+              test -f "$pending" && test ! -L "$pending"
+              if [ "$prior" = receipt-only ]; then
+                cmp saved-receipt "$receipt"
+              else
+                test ! -e "$receipt"
+              fi
+              test ! -e "$binDir/st" && test ! -L "$binDir/st"
+              test ! -e "$binDir/st3" && test ! -L "$binDir/st3"
+              before=$(stat -c %i "$target")
+              ${pkgs.runtimeShell} activate
+              test "$(stat -c %i "$target")" = "$before"
+              assertReceipt
+              test "$(readlink "$binDir/st")" = fractal
+              test "$(readlink "$binDir/st3")" = fractal
+            done
             # Fail after both publications: restore the exact previous executable
             # inode and receipt, rather than leaving a half-installed generation.
+            for priorPending in absent present; do
             rm -rf state
             mkdir -p "$binDir"
             printf 'older managed bytes\n' > "$target"
@@ -1385,6 +1452,10 @@
             writeReceipt
             cp "$target" saved-binary
             cp "$receipt" saved-receipt
+            if [ "$priorPending" = present ]; then
+              cp "$receipt" "$pending"
+              cp "$pending" saved-pending
+            fi
             before=$(stat -c %i "$target")
             cat > fail-ln <<'SH'
             #!${pkgs.runtimeShell}
@@ -1403,6 +1474,12 @@
             cmp saved-receipt "$receipt"
             test "$(stat -c %i "$target")" = "$before"
             test "$(find "$binDir" -name '.fractal.*' -o -name '.fractal-backup.*' -o -name '.fractal-receipt.*' | wc -l)" -eq 0
+            if [ "$priorPending" = present ]; then
+              cmp saved-pending "$pending"
+            else
+              test ! -e "$pending" && test ! -L "$pending"
+            fi
+            done
             # Both historical raw forward-alias targets remain owned.
             for link in st3 "$binDir/st3"; do
               rm -rf state

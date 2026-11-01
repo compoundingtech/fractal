@@ -348,8 +348,9 @@ in
             source=${lib.escapeShellArg "${effectivePackage}/bin/fractal"}
             target=${lib.escapeShellArg executable}
             installReceipt="$binDir/.fractal-install.json"
+            pendingReceipt="$installReceipt.pending"
             receiptOwned=false
-            if [[ -e "$installReceipt" || -L "$installReceipt" ]]; then
+            if [[ -e "$installReceipt" || -L "$installReceipt" || -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
               # The incoming executable owns the receipt parser and checks it
               # against the prior installed payload before any replacement.
               if ! "$source" setup --receipt-verify "$binDir"; then
@@ -387,17 +388,25 @@ in
             backup=$(${pkgs.coreutils}/bin/mktemp -d "$binDir/.fractal-backup.XXXXXX")
             binaryPublished=false
             receiptPublished=false
+            pendingPublished=false
             rollback() {
               status=$?
               trap - EXIT
               if [[ "$status" -ne 0 ]]; then
                 if "$receiptPublished"; then
-                  if [[ -e "$backup/receipt" ]]; then
+                  if [[ -e "$backup/receipt" || -L "$backup/receipt" ]]; then
                     if [[ ! "$backup/receipt" -ef "$installReceipt" ]]; then
                       ${pkgs.coreutils}/bin/mv -f "$backup/receipt" "$installReceipt"
                     fi
                   else
                     ${pkgs.coreutils}/bin/rm -f "$installReceipt"
+                  fi
+                fi
+                if "$pendingPublished"; then
+                  if [[ -e "$backup/pending" || -L "$backup/pending" ]]; then
+                    ${pkgs.coreutils}/bin/mv -f "$backup/pending" "$pendingReceipt"
+                  else
+                    ${pkgs.coreutils}/bin/rm -f "$pendingReceipt"
                   fi
                 fi
                 if "$binaryPublished"; then
@@ -416,9 +425,16 @@ in
             if [[ -e "$target" || -L "$target" ]]; then
               ${pkgs.coreutils}/bin/ln -P "$target" "$backup/binary"
             fi
-            if [[ -e "$installReceipt" ]]; then
-              ${pkgs.coreutils}/bin/ln "$installReceipt" "$backup/receipt"
+            if [[ -e "$installReceipt" || -L "$installReceipt" ]]; then
+              ${pkgs.coreutils}/bin/ln -P "$installReceipt" "$backup/receipt"
             fi
+            if [[ -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
+              ${pkgs.coreutils}/bin/ln -P "$pendingReceipt" "$backup/pending"
+            fi
+            # Prepare ownership for the incoming bytes before publishing them.
+            # A crash after replacement can then be recognized on the next activation.
+            pendingPublished=true
+            "$source" setup --receipt-prepare "$binDir" --receipt-installer hm
             # Preserve the inode on no-op activation; replace symlinks even if bytes match.
             if [[ -L "$target" ]] || ! ${pkgs.diffutils}/bin/cmp -s "$source" "$target"; then
               temporary=$(${pkgs.coreutils}/bin/mktemp "$binDir/.fractal.XXXXXX")
@@ -427,10 +443,11 @@ in
               ${pkgs.coreutils}/bin/mv -f "$temporary" "$target"
               binaryPublished=true
             fi
-            # Mark before invoking the atomic writer so any failure restores the
-            # old receipt, including a writer failure after publication.
+            ${pkgs.coreutils}/bin/chmod 755 "$target"
+            # Finalization validates pending against the installed executable.
+            # Mark first so a failure after publication still restores the old receipt.
             receiptPublished=true
-            "$source" setup --receipt-write "$binDir" --receipt-installer hm
+            "$source" setup --receipt-write "$binDir"
             # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
             ${pkgs.coreutils}/bin/ln -sfn fractal "$binDir/st"
             ${pkgs.coreutils}/bin/ln -sfn fractal "$binDir/st3"
