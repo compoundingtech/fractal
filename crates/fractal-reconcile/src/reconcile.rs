@@ -6852,11 +6852,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // A run stops its owned agents in its cleanup phase, before it becomes terminal.
         let run_ended = match subject.owner_run.as_deref() {
             None => subject.kind == "stop",
-            Some(run) => self.store.mission_run(run)?.is_some_and(|run| {
-                matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
-                    || run.phase == "terminal"
-                    || run.phase.starts_with("cleanup-")
-            }),
+            Some(run) => self.store.mission_run(run)?.is_some_and(|run| run.ended().is_some()),
         };
         let stopped = self
             .store
@@ -7541,6 +7537,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 workspace.display()
             );
         }
+        // The runtime starts in `cwd`, which can lie inside the workspace. A launcher handed a
+        // directory that does not exist exits without saying why in its status.
+        let cwd = Path::new(&member.cwd);
+        anyhow::ensure!(
+            !cwd.is_absolute() || cwd.is_dir(),
+            "working directory {} does not exist",
+            member.cwd
+        );
         // Resolve authored Fractal-only selectors before cleanup and native-session selection.
         let normalized_member = member.environment.keys().any(|name| name.starts_with("FRACTAL_"))
             .then(|| {
@@ -8555,8 +8559,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             return Ok(false);
         };
+        self.retire_restart_request(&subject.subject, &request, reason)?;
+        Ok(true)
+    }
+
+    /// Retire a restart request without starting anything: its completion says why.
+    fn retire_restart_request(&self, subject: &str, request: &crate::model::ClaimRecord, reason: &str) -> Result<()> {
         self.store.append_claim(&ClaimInput {
-            subject: subject.subject.clone(),
+            subject: subject.to_owned(),
             kind: "runtime.reconcile-decision".into(),
             actor: None,
             fields: BTreeMap::from([
@@ -8569,7 +8579,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             idempotency_key: Some(format!("restart-retired-obsolete-request:{}", request.id)),
         })?;
         self.store.append_claim(&ClaimInput {
-            subject: subject.subject.clone(),
+            subject: subject.to_owned(),
             kind: "runtime.action.succeeded".into(),
             actor: Some(RECONCILER_ACTOR.into()),
             fields: BTreeMap::from([
@@ -8577,12 +8587,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ("operation_status".into(), Value::from("retired")),
                 ("reason".into(), Value::from(reason)),
             ]),
-            evidence: vec![request.id],
+            evidence: vec![request.id.clone()],
             expected_subject: None,
-            idempotency_key: Some(completion),
+            idempotency_key: Some(format!("agent-restart-completed:{}", request.id)),
         })?;
         self.signal_changed();
-        Ok(true)
+        Ok(())
     }
 
     /// Preflight the stale producer and runtime evidence. This never releases admission;
@@ -8642,6 +8652,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         };
         if self.retire_obsolete_failed_restart(subject, now_ms())? {
+            return Ok(true);
+        }
+        // A seat of an ended run is never started again. A request still open when the run ended
+        // is retired without a start; one already completed is neither retried nor raised again.
+        if let Some(run) = subject.owner_run.as_deref()
+            && let Some(view) = self.store.mission_run(run)?
+            && let Some(ended) = view.ended()
+        {
+            if self.store.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_some() {
+                return Ok(false);
+            }
+            self.retire_restart_request(
+                &subject.subject,
+                &request,
+                &format!("the seat's run {run} has ended ({ended})"),
+            )?;
             return Ok(true);
         }
         if self
@@ -26600,6 +26626,122 @@ agent "import/omp/fixture" {{
         let reason = last.body.pointer("/fields/reason").and_then(Value::as_str).unwrap();
         assert!(reason.contains("absent") && reason.contains("nothing was started"), "{reason}");
         assert!(!reason.contains("recovered"), "{reason}");
+    }
+
+    #[test]
+    fn a_stop_ends_an_earlier_member_fault_on_every_host_but_not_a_later_one() {
+        // `node` recorded a fault for a seat placed on `peer`; the seat is then stopped, and the
+        // stop is `peer`'s to carry out. No host answers the fault, as on a member whose
+        // recording host never reconciles the stop, and it still ends.
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, "version 2\nagent \"seat\" { host \"peer\"; command \"sleep 100\" }", "seat");
+        let subject = "agent/peer.seat";
+        let node = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let launcher = "start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)";
+        node.record_member_reconcile_result(subject, Err(anyhow::anyhow!(launcher))).unwrap();
+        assert_eq!(store.member_reconcile_fault(subject, None).unwrap().as_deref(), Some(launcher));
+        apply_source(&store, "version 2\nstop \"agent/peer.seat\"\n", "stop-seat");
+        assert_eq!(store.member_reconcile_fault(subject, None).unwrap(), None);
+        assert_eq!(store.member_reconcile_fault_origin(subject).unwrap(), None);
+        let at = store.index().unwrap();
+        assert!(store.member_reconcile_faults_for(&[subject.to_owned()], at).unwrap().is_empty());
+        // A fault that `peer` records after the stop is `peer`'s word, and it stands.
+        let peer_store = Arc::new(Store::open_memory("peer").unwrap());
+        peer_store.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        let peer = Reconciler::new(
+            peer_store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "peer".into(),
+            Arc::new(Notify::new()),
+        );
+        peer.record_member_reconcile_result(subject, Err(anyhow::anyhow!("stop member runtime: synthetic failure")))
+            .unwrap();
+        store.import_replication("peer", &peer_store.export_replication(0).unwrap()).unwrap();
+        assert_eq!(
+            store.member_reconcile_fault(subject, None).unwrap().as_deref(),
+            Some("stop member runtime: synthetic failure")
+        );
+        assert_eq!(store.member_reconcile_fault_origin(subject).unwrap().as_deref(), Some("peer"));
+    }
+
+    #[test]
+    fn a_task_whose_working_directory_is_missing_says_so_and_is_not_launched() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let missing = workspace.path().join("gone");
+        apply_source(
+            &store,
+            &format!("version 2\nexec \"job\" {{ workspace {:?}; cwd {:?}; command \"sleep 100\" }}", workspace.path(), missing),
+            "job",
+        );
+        let subject = store.desired_subjects().unwrap().into_iter().map(|desired| desired.subject).next().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.reconcile_once().unwrap();
+        let fault = store.member_reconcile_fault(&subject, None).unwrap().unwrap_or_default();
+        assert!(fault.contains(&format!("working directory {} does not exist", missing.display())), "{fault}");
+        assert!(runtime.starts.lock().unwrap().is_empty(), "{:?}", runtime.starts.lock().unwrap());
+    }
+
+    #[test]
+    fn a_restart_still_open_when_the_seats_run_ends_is_retired_once_without_a_start() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nmission \"ending\" state=\"ready\" {\n  goal \"End.\"\n  step \"one\" { assigned-to \"person/robin\" }\n}\nagent \"seat\" { workspace \"/tmp\"; command \"sleep 100\" }\n",
+            "ending",
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "ending".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "ending-run".into(),
+            })
+            .unwrap();
+        // The seat belongs to the run, and a restart was asked for while the run still ran.
+        let mut desired = store.desired_subjects().unwrap().into_iter()
+            .find(|desired| desired.kind == "agent" && desired.subject.ends_with("seat"))
+            .unwrap_or_else(|| panic!("{:?}", store.desired_subjects().unwrap().iter().map(|d| &d.subject).collect::<Vec<_>>()));
+        let seat = desired.subject.clone();
+        desired.owner_run = Some(run.subject.clone());
+        let member = desired.member.clone().unwrap();
+        let token = store.selected_desired_token(&seat).unwrap().unwrap();
+        let request = store.append_claim(&ClaimInput {
+            subject: seat.clone(), kind: "runtime.action.requested".into(),
+            actor: Some("person/robin".into()),
+            fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+            evidence: vec![token], expected_subject: None,
+            idempotency_key: Some("ending-restart".into()),
+        }).unwrap();
+        // The run then moves into cleanup, where it stops its seats.
+        store.connection.write()
+            .execute(/* sqlite-large-value: allow-for-now lv-h8010ab43152a owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='cleanup-seats' WHERE id=?1", [&run.id])
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        assert!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        // A later pass finds the request completed: nothing to retire, retry or raise again, and
+        // the member pass goes on as usual.
+        assert!(!reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        let retirements = store.claims_for(&seat, Some("runtime.reconcile-decision")).unwrap().into_iter()
+            .filter(|claim| claim.body["fields"]["decision"] == "restart-retired-obsolete-request")
+            .count();
+        assert_eq!(retirements, 1);
+        let completion = store.operation_claim(&format!("agent-restart-completed:{}", request.id)).unwrap().unwrap();
+        assert_eq!(completion.kind, "runtime.action.succeeded");
+        assert_eq!(completion.body["fields"]["operation_status"], "retired");
+        let reason = completion.body["fields"]["reason"].as_str().unwrap();
+        assert!(reason.contains(&run.subject) && reason.contains("(cleanup-seats)"), "{reason}");
+        assert!(runtime.starts.lock().unwrap().is_empty());
     }
 
     #[test]
