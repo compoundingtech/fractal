@@ -105,6 +105,7 @@ fn command(root: &Path) -> Command {
     command
         .current_dir(root)
         .env_clear()
+        .env("FRACTAL_SUPPRESS_DEPRECATION", "1")
         .env("HOME", root)
         .env("ST_AGENT", "agent/test/cli-inventory")
         .env("ST3_ENDPOINT", root.join("absent-daemon.sock"))
