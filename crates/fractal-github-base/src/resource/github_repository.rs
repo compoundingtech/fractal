@@ -141,14 +141,19 @@ fn content_digest(value: &Value) -> String {
     hex::encode(digest.0.finalize())
 }
 
+/// `started` is when the look began. A watermark never moves past it: GitHub can stamp a record
+/// in the future (on 2026-11-01 some comments were stamped an hour ahead), and a watermark at
+/// that stamp would hide every change stamped before it until the time came.
 fn finish_listing(
     scan: &mut Option<ListingScan>,
     watermark: &mut Option<String>,
     listing: &GithubListing,
+    started: &str,
 ) -> bool {
     let newest = newest_updated_at(&listing.values);
     if scan.is_none() && !listing.truncated {
         *watermark = newest.into_iter().chain(watermark.take()).max()
+            .map(|at| at.min(started.to_owned()))
             .or_else(|| Some(watermark_now()));
         return false;
     }
@@ -171,7 +176,8 @@ fn finish_listing(
             .saturating_add(1).min(IMMEDIATE_RECONCILIATION_SWEEPS);
         return progress.unstable_sweeps < IMMEDIATE_RECONCILIATION_SWEEPS;
     }
-    *watermark = progress.newest.take().into_iter().chain(watermark.take()).max();
+    *watermark = progress.newest.take().into_iter().chain(watermark.take()).max()
+        .map(|at| at.min(started.to_owned()));
     *scan = None;
     false
 }
@@ -1278,9 +1284,10 @@ fn merge(items: &mut BTreeMap<u64, Item>, item: Item) {
 }
 
 fn watermark_now() -> String {
-    let at = SystemTime::now()
-        .checked_sub(WATERMARK_SKEW)
-        .unwrap_or(UNIX_EPOCH);
+    watermark_at(SystemTime::now().checked_sub(WATERMARK_SKEW).unwrap_or(UNIX_EPOCH))
+}
+
+fn watermark_at(at: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(at)
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
@@ -1375,7 +1382,14 @@ pub async fn observe_at(
         .and_then(Value::as_str)
         .and_then(|name| name.split_once('/'))
         .unwrap_or((owner, repository));
+    let started = watermark_at(SystemTime::now());
     let mut cursor = RepositoryCursor::parse(request.cursor.as_deref());
+    // A cursor an earlier build moved past its look's start reads on from now instead.
+    for since in [&mut cursor.items_since, &mut cursor.comments_since].into_iter().flatten() {
+        if *since > started {
+            since.clone_from(&started);
+        }
+    }
     // How far the observer had read before this poll. Without one, this poll reads every open
     // item once; from then on it reads only what changed.
     let watermark = cursor.items_since.clone();
@@ -1494,7 +1508,7 @@ pub async fn observe_at(
                 }
             }
         }
-        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing);
+        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing, &started);
         if cursor.items_scan.is_none() {
             retain_boundary(&mut cursor.item_versions, cursor.items_since.as_deref());
         }
@@ -1585,7 +1599,7 @@ pub async fn observe_at(
                             merge(&mut items, item);
                         }
                     }
-                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments);
+                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments, &started);
                     if cursor.comments_scan.is_none() {
                         retain_boundary(&mut cursor.comment_versions, cursor.comments_since.as_deref());
                     }
@@ -3525,6 +3539,61 @@ mod tests {
                 .await.unwrap();
             assert_eq!(quiet.facts, json!({"repository_id": 7}));
         }).await;
+    }
+
+    /// GitHub can stamp a record in the future: on 2026-11-01, as US Pacific clocks fell back,
+    /// some were stamped an hour ahead. A watermark stops at the look's own start, so the next
+    /// look still sees a change stamped just after that start, and the future-stamped record
+    /// is not handed out twice.
+    #[tokio::test]
+    async fn a_future_stamp_holds_no_watermark_past_the_look() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let stamp = |offset: chrono::Duration| (chrono::Utc::now() + offset).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let earlier = stamp(chrono::Duration::minutes(-10));
+        let ahead = stamp(chrono::Duration::hours(1));
+        let listings = |since: &str| (
+            format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={}&per_page=100", inclusive_since(since)),
+            format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={}&per_page=100", inclusive_since(since)),
+        );
+        let comment = |id: u64, number: u64, at: &str| json!({
+            "id": id, "issue_url": format!("https://api.github.com/repos/acme/garden/issues/{number}"),
+            "html_url": format!("https://github.com/acme/garden/issues/{number}#issuecomment-{id}"),
+            "user": {"login": "fern"}, "body": "hello", "created_at": at, "updated_at": at,
+        });
+        let (issues, comments) = listings(&earlier);
+        github.route(&issues, json!([issue(1, &ahead, json!({}))]));
+        github.route(&comments, json!([comment(91, 1, &ahead)]));
+        let token = GithubAuth::test("future-stamp-token");
+        let cursor = json!({"items_since": earlier, "comments_since": earlier}).to_string();
+        let started = stamp(chrono::Duration::zero());
+        let first = observe_at(request(&["comments"], Some(&cursor), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(item(&first.facts, "issues", 1)["recent_comments"][0]["id"], 91);
+        let held = RepositoryCursor::parse(first.cursor.as_deref());
+        for since in [&held.items_since, &held.comments_since] {
+            let since = since.as_deref().unwrap();
+            assert!(since >= started.as_str() && since < ahead.as_str(), "{since} is not the look's start");
+        }
+
+        // A change stamped just after the first look began is still read, and the record
+        // stamped ahead is not handed out again.
+        let just_after = stamp(chrono::Duration::seconds(1));
+        let (issues, comments) = listings(held.items_since.as_deref().unwrap());
+        github.route(&issues, json!([issue(1, &ahead, json!({})), issue(2, &just_after, json!({}))]));
+        github.route(&comments, json!([comment(91, 1, &ahead), comment(92, 2, &just_after)]));
+        let next = observe_at(request(&["comments"], first.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(items(&next.facts, "issues").len(), 1, "{}", next.facts);
+        assert_eq!(item(&next.facts, "issues", 2)["recent_comments"][0]["id"], 92);
+
+        // A cursor an earlier build left at the future stamp reads on from the look's start.
+        let stuck = json!({"items_since": ahead, "comments_since": ahead}).to_string();
+        let resumed = observe_at(request(&["comments"], Some(&stuck), None), &base, Some(&token))
+            .await.unwrap();
+        let resumed = RepositoryCursor::parse(resumed.cursor.as_deref());
+        assert!(resumed.items_since.as_deref().unwrap() < ahead.as_str());
+        assert!(resumed.comments_since.as_deref().unwrap() < ahead.as_str());
     }
 
     #[tokio::test]

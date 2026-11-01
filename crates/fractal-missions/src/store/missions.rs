@@ -6976,6 +6976,53 @@ impl MissionsStore for Store {
                 } else {
                     None
                 };
+                // The changed fields each subscription this look delivers to selects, decided
+                // before the items are recorded. A plain message's key names the item claims it
+                // carries, so an item one delivers needs a claim of its own (#4553).
+                let selections = active_subscriptions
+                    .iter()
+                    .filter_map(|(subscription_subject, subscription)| {
+                        let (target_exists, ..) = subscription_states
+                            .get(subscription_subject)
+                            .copied()
+                            .expect("an active subscription has a computed state");
+                        if baseline || !target_exists || subscription.watch.is_some() {
+                            return None;
+                        }
+                        let selected = changed_fields
+                            .iter()
+                            .filter(|field| field.as_str() != crate::resource::github_workflows::PERFORMANCE_FAILURES_FIELD)
+                            .filter(|field| subscription.fields.contains(field))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if selected.is_empty() {
+                            return None;
+                        }
+                        if let Some(condition) = &subscription.condition {
+                            let condition_is_true =
+                                subscription_condition_matches(condition, &repository_facts);
+                            let condition_was_true = previous
+                                .as_ref()
+                                .is_some_and(|facts| subscription_condition_matches(condition, facts));
+                            if !condition_is_true || condition_was_true {
+                                return None;
+                            }
+                        }
+                        Some((subscription_subject.clone(), selected))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                // A batched message and a mission request key an item by its number and head, so
+                // only a plain message needs the claim.
+                let message_types = active_subscriptions
+                    .iter()
+                    .filter(|(_, subscription)| {
+                        subscription.delivery != "mission"
+                            && !(subscription.delivery == "message" && subscription.batch_every_ms.is_some())
+                    })
+                    .filter_map(|(subscription_subject, _)| selections.get(subscription_subject))
+                    .flatten()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
                 let mut collection_discoveries = BTreeMap::<String, Vec<(String, String)>>::new();
                 let mut item_claims = Vec::new();
                 let mut item_mentions = Vec::new();
@@ -7041,9 +7088,15 @@ impl MissionsStore for Store {
                         .map_err(internal)?;
                     let state_changed = compact_state.as_ref().is_some_and(|state| {
                         newest_state.as_ref().is_none_or(|(_, newest, _)| {
-                            // Which alias observer wrote it is no change of state.
-                            state.iter().filter(|(name, _)| *name != "observer")
-                                .ne(newest.iter().filter(|(name, _)| *name != "observer"))
+                            // Which alias observer wrote it is no change of state. The two compare
+                            // as maps: a stored state reads back with its keys in another order
+                            // than a new one is built in (#4553).
+                            let without_observer = |state: &serde_json::Map<String, Value>| {
+                                let mut state = state.clone();
+                                state.remove("observer");
+                                state
+                            };
+                            without_observer(state) != without_observer(newest)
                         })
                     });
                     let record_state = |transaction: &rusqlite::Transaction<'_>,
@@ -7077,8 +7130,12 @@ impl MissionsStore for Store {
                     let claim = match &compact_state {
                         Some(state) if compact && !delivery_changed => {
                             match &newest_state {
-                                // An unchanged state is pinned as it is, by every delivery of it.
-                                Some((id, _, _)) if !state_changed => {
+                                // An unchanged state is pinned as it is, unless a plain message
+                                // delivers the item: then the message gets a claim of its own.
+                                Some((id, _, _))
+                                    if !state_changed
+                                        && !data_types.iter().any(|name| message_types.contains(name)) =>
+                                {
                                     claim_by_id_tx(transaction, id).map_err(internal)?
                                         .ok_or_else(|| St3Error::new("internal", "the newest item state is gone"))?
                                 }
@@ -7309,30 +7366,9 @@ impl MissionsStore for Store {
                         .map(|claim| vec![claim.id.clone()])
                         .unwrap_or_default();
                     for (subscription_subject, subscription) in &active_subscriptions {
-                        if !available_subscriptions.contains(subscription_subject)
-                            || subscription.watch.is_some()
-                        {
+                        let Some(selected) = selections.get(subscription_subject) else {
                             continue;
-                        }
-                        let selected = changed_fields
-                            .iter()
-                            .filter(|field| field.as_str() != crate::resource::github_workflows::PERFORMANCE_FAILURES_FIELD)
-                            .filter(|field| subscription.fields.contains(field))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        if selected.is_empty() {
-                            continue;
-                        }
-                        if let Some(condition) = &subscription.condition {
-                            let condition_is_true =
-                                subscription_condition_matches(condition, &repository_facts);
-                            let condition_was_true = previous
-                                .as_ref()
-                                .is_some_and(|facts| subscription_condition_matches(condition, facts));
-                            if !condition_is_true || condition_was_true {
-                                continue;
-                            }
-                        }
+                        };
                         let selected_items = item_claims
                             .iter()
                             .filter(|(data_types, ..)| selected.iter().any(|name| data_types.contains(name)))
@@ -7369,7 +7405,7 @@ impl MissionsStore for Store {
                                 subscription,
                                 &subscription.to,
                                 &repository_identity,
-                                &selected,
+                                selected,
                                 &collection_discoveries,
                                 &item_claims,
                                 &item_mentions,
@@ -7446,7 +7482,7 @@ impl MissionsStore for Store {
                                 subscription,
                                 mission,
                                 &repository_identity,
-                                &selected,
+                                selected,
                                 &collection_discoveries,
                                 &item_claims,
                                 &item_mentions,
