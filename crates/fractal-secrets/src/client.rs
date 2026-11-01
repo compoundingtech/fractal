@@ -527,16 +527,9 @@ impl Client {
         Self::new(Endpoint::Unix(path.into()))
     }
 
-    /// The daemon's Unix socket, when this client talks to one.
-    pub fn socket_path(&self) -> Option<&std::path::Path> {
-        match &self.endpoint {
-            Endpoint::Unix(path) => Some(path),
-            Endpoint::DiscoveredUnix(discovery) => match discovery {
-                fractal_client::UnixSocketDiscovery::Explicit(path) => Some(path),
-                fractal_client::UnixSocketDiscovery::Defaults { runtime, .. } => Some(runtime),
-            },
-            Endpoint::Http(_) | Endpoint::Fabric(_) => None,
-        }
+    /// A current Unix socket snapshot. Request clients retain the endpoint's discovery identity.
+    pub fn socket_path(&self) -> Option<std::borrow::Cow<'_, Path>> {
+        self.endpoint.unix_socket()
     }
 
     /// Name the concrete human authority carried over the trusted Unix boundary.
