@@ -6857,8 +6857,54 @@ impl Drop for Guard {
             DisableMouseCapture,
             LeaveAlternateScreen
         );
+        discard_pending_input();
         let _ = disable_raw_mode();
     }
+}
+
+/// Throw away what the terminal sent before it heard we were done: mouse moves, focus changes,
+/// key releases. Left in the input queue, the shell reads them and prints them as `^[[<35;80;20M`.
+/// Asking the terminal for a status report and reading up to its answer takes everything it sent
+/// earlier, since it replies in order; the wait is capped in case it never does.
+fn discard_pending_input() {
+    use std::io::Write;
+    if unsafe { libc::isatty(0) } != 1 {
+        return;
+    }
+    let mut stdout = io::stdout();
+    if stdout
+        .write_all(b"\x1b[5n")
+        .and_then(|()| stdout.flush())
+        .is_err()
+    {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut seen: Vec<u8> = Vec::new();
+    while Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let mut fd = libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready =
+            unsafe { libc::poll(&mut fd, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+        if ready <= 0 || fd.revents & libc::POLLIN == 0 {
+            break;
+        }
+        let mut chunk = [0u8; 256];
+        let read = unsafe { libc::read(0, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if read <= 0 {
+            break;
+        }
+        seen.extend_from_slice(&chunk[..read as usize]);
+        if seen.windows(4).any(|window| window == b"\x1b[0n") {
+            break;
+        }
+    }
+    // The tail after the answer is only what arrived in the same instant; take it too.
+    unsafe { libc::tcflush(0, libc::TCIFLUSH) };
 }
 
 /// Which space to open: `fractal tui --space NAME` names one; otherwise (`None`) the last one used on
