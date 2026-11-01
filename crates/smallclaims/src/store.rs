@@ -6787,7 +6787,20 @@ impl Store {
     fn seal_local_batches_after_frontier(&self) -> Result<()> {
         // Capture the target once; concurrent writes belong to the next pass.
         let target = max_batch_rowid(&self.readers.get())?;
+        let sealed_before = self.seeded_batch_rowid.load(Ordering::Acquire);
         while self.seal_local_batch_chunk(target)? {}
+        // Sealing signs this node's claims and leaves each waiting for its first verdict, and no
+        // other work asks for it: a checkpoint, a status read or a proof seals without judging.
+        // Hand what is pending to the paced job, as a slice that leaves work does. A seal that
+        // committed nothing hands off nothing, so idle seals never wake the job.
+        if self.seeded_batch_rowid.load(Ordering::Acquire) > sealed_before
+            && let Err(error) = self.hand_off_pending_verdicts()
+        {
+            // The seal has committed: a failed hand-off must not fail it. The next ordinary pass
+            // judges whatever it left, and the job wakes if that pass leaves work.
+            self.verdicts_due.store(true, Ordering::Release);
+            eprintln!("st3: sealed claims were not handed to the signature job: {error:#}");
+        }
         Ok(())
     }
 
@@ -10423,6 +10436,8 @@ thread_local! {
     static SEAL_BEFORE_LOAN: std::cell::RefCell<Option<SealHook>> = const { std::cell::RefCell::new(None) };
     /// Sealing chunks this thread prepared again because their store changed before the loan.
     static SEALS_PREPARED_AGAIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Times this thread woke the paced signature job.
+    pub(crate) static SIGNATURE_JOB_WAKES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Signer selections sealing made under the writer on this thread.
     static SIGNERS_SELECTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One-shot: `apply_replication_repairs` stops after its next page, as a crash there would.

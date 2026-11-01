@@ -13734,3 +13734,42 @@ async fn doctor_reads_what_is_sealed_without_sealing() {
     assert!(!message.contains(" 0 not yet sealed"), "doctor sealed this node's batches to answer: {message}");
     assert!(checks.iter().all(|check| check["status"] != "timeout"), "{doctor}");
 }
+
+#[tokio::test]
+async fn a_restart_of_a_seat_whose_run_has_ended_names_the_run_and_its_state() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = r#"
+version 2
+mission "ended-restart" state="ready" {
+  goal "Exercise a restart after the run ends."
+  agent "worker" { workspace "/tmp"; command "true" }
+  step "queued" { assigned-to "agent/${ST_MISSION_RUN}/worker" }
+}
+"#;
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    state.store.apply(&intent, &planned.subject_tokens, "ended-restart-source").unwrap();
+    let run = state.store.create_mission_run(&MissionRunRequest {
+        mission: "ended-restart".into(),
+        revision: None,
+        workspace: "/tmp".into(),
+        requester: Some("person/test".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "ended-restart-run".into(),
+    }).unwrap();
+    materialize_run_agents(&state, &run);
+    let subject = format!("agent/{}/worker", run.id);
+    state.store.connection.write()
+        .execute(/* sqlite-large-value: allow-for-now lv-h04686002cc84 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='cancelled' WHERE id=?1", [&run.id])
+        .unwrap();
+    assert_eq!(state.store.mission_run(&run.subject).unwrap().unwrap().ended(), Some("cancelled"));
+    let (status, refused) = json_request(router(state.clone()), "/v1/agents/restart", json!({
+        "subject": subject, "actor": "person/robin", "idempotency_key": "ended-restart"
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "restart-run-ended", "{refused}");
+    let message = refused["message"].as_str().unwrap();
+    assert!(message.contains(&run.subject) && message.contains("(cancelled)"), "{message}");
+}

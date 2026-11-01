@@ -177,6 +177,11 @@ pub(super) fn read_message_body(
     };
     let limit = fractal_daemon::message_body::MAX_BYTES;
     anyhow::ensure!(body.len() <= limit, "message body exceeds {limit} UTF-8 bytes");
+    // An empty body reaches its recipient as a message with nothing in it (#4585).
+    anyhow::ensure!(
+        !body.trim().is_empty(),
+        "the message body is empty or only whitespace"
+    );
     Ok(body)
 }
 
@@ -389,6 +394,8 @@ pub(super) async fn run_message(
             Ok(())
         }
         MessageCommand::Reply(args) => {
+            // The body is read and checked first, so a refused one writes nothing.
+            let body = read_message_body(Some(args.body), None, std::io::stdin().lock())?;
             let original = read_message(client, &args.reference).await?;
             let recipient = message_reply_recipient(&original, &args.from)?;
             fractal_daemon::model::refuse_person_recipient(&normalize_message_subject(&recipient))
@@ -404,7 +411,7 @@ pub(super) async fn run_message(
                 MessageSendArgs {
                     to: recipient,
                     attach: Vec::new(),
-                    body: Some(args.body),
+                    body: Some(body),
                     body_file: None,
                     subject: args
                         .subject
