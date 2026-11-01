@@ -3141,6 +3141,47 @@ class PoolQueue(unittest.TestCase):
             order = [name for _, _, name in st_test.tree_queue(queue, now)]
         self.assertEqual(order, [names['overdue-3-older'], names['overdue-50'], names['overdue-12-newest'], names['p0-young'], names['young-50']])
 
+    def test_a_last_ticket_never_ages_or_goes_overdue(self):
+        """ST_TEST_POOL_RANK=last (the queue signer's seed): after every other ticket however long it has waited, and by arrival among the last."""
+        queue = Path(self.tmp.name) / 'queue-last'
+        queue.mkdir()
+        live = os.getpid()
+        now = 10_000_000 * 10**9
+        names = {'last-old': f'999.{now - 5 * 3600 * 10**9:019d}.{live}',   # five hours: past the maximum wait, still last
+                 'young-50': f'050.{now - 60 * 10**9:019d}.{live}',
+                 'fresh-50': f'050.{now:019d}.{live}',
+                 'last-new': f'999.{now - 10**9:019d}.{live}'}
+        for name in names.values():
+            (queue / name).touch()
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):
+            order = [name for _, _, name in st_test.tree_queue(queue, now)]
+        self.assertEqual(order, [names['young-50'], names['fresh-50'], names['last-old'], names['last-new']])
+
+    def test_a_last_waiter_leaves_a_free_tree_to_a_waiting_ticket_past_the_fallback(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        seat = queue / f'050.{time.time_ns():019d}.{os.getpid()}'
+        seat.write_text(f'rules {st_test.QUEUE_RULES}\n')  # a seat's live ticket whose waiter has not taken the free tree yet
+        got = []
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0), contextlib.redirect_stderr(io.StringIO()):
+            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=st_test.POOL_LAST_RANK)))
+            last.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])                                           # an ordinary waiter would try it now (the fallback)
+            seat.unlink()
+            last.join(5)
+        self.assertEqual(got[0][0], 0)
+        got[0][1].close()
+
+    def test_the_pool_rank_is_last_only_when_asked(self):
+        with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL_RANK': 'last'}, clear=True):
+            self.assertEqual(st_test.pool_rank(), st_test.POOL_LAST_RANK)
+        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), mock.patch.object(st_test, 'priority_rank', return_value=12):
+            self.assertEqual(st_test.pool_rank(), 12)
+        with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL_RANK': '3'}, clear=True):
+            with self.assertRaises(st_test.Failure):
+                st_test.pool_rank()                                             # a rank is the host's priority file's, not the caller's
+
     def test_a_ticket_whose_pid_was_reused_by_a_younger_process_is_dropped(self):
         queue = self.root / 'queue'
         queue.mkdir(parents=True)
