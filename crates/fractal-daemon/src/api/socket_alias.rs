@@ -2,6 +2,7 @@
 //! Legacy names are symlinks to one listener, preserving peer credentials and authorization.
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, symlink};
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -61,6 +62,12 @@ async fn reserve_alias(socket: &Path, existing: Option<&SocketAlias>) -> Result<
 }
 
 pub async fn reserve_unix_socket(socket: &Path, state_socket: Option<&Path>) -> Result<ReservedUnixSocket> {
+    let bound_socket = crate::config::socket_binding_path(socket);
+    let bound_state = state_socket.map(crate::config::socket_binding_path);
+    let changed = (bound_socket.as_ref() != socket).then_some((socket, bound_socket.as_ref()))
+        .or_else(|| state_socket.zip(bound_state.as_deref()).filter(|(original, bound)| original != bound));
+    let socket = bound_socket.as_ref();
+    let state_socket = bound_state.as_deref();
     let primary_alias = reserve_alias(socket, None).await?;
     // Old clients discover even a custom control socket through the state/run name.
     let discovery_alias = match state_socket {
@@ -69,6 +76,10 @@ pub async fn reserve_unix_socket(socket: &Path, state_socket: Option<&Path>) -> 
     };
     let mut aliases = [primary_alias, discovery_alias];
     let reserved = core::reserve_unix_socket(socket, state_socket).await?;
+    if let Some((original, bound)) = changed {
+        eprintln!("Fractal: socket path {} is {} bytes and exceeds sun_path; serving only legacy name {}",
+            original.display(), original.as_os_str().as_bytes().len(), bound.display());
+    }
     for alias in aliases.iter_mut().flatten() {
         match fs::symlink_metadata(&alias.path) {
             Ok(metadata) => {
