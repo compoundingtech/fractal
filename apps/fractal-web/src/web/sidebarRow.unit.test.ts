@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { sidebarRow, sidebarMissionFeeds } from './sidebarRow.ts'
-import { AgentRowDetails, sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
+import { sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
+import { AgentRowDetails } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx'
 import { sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/rowPresentation.tsx'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
