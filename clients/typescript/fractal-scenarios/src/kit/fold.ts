@@ -30,6 +30,7 @@ const COLLECTION_OF_KIND: Record<Resource['kind'], string> = {
   operation: 'operations',
   history: 'history',
   session: 'sessions',
+  'harness-question': 'harnessQuestions',
   glass: 'glasses',
   arrangement: 'arrangements',
   'owned-set': 'ownedSets',

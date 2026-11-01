@@ -6,9 +6,62 @@ order: 4
 
 # Missions and runs
 
+KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+
 A **mission** declares goals, constraints, inputs, and the steps and checks needed to finish. A **run** is one execution pinned to an immutable mission revision.
 
-```kdl
+```ts group=mission variant=effect
+import { Effect } from 'effect'
+import { Fractal } from 'fractal/effect'
+import { worker } from '../worker'
+
+const ada = Fractal.person({ id: 'ada' })
+
+export const mission = Fractal.mission(
+  {
+    id: 'example/first-note',
+    state: 'ready',
+    timeout: '1h',
+    reportTo: ada,
+    goal: 'A short project introduction exists in WELCOME.md.',
+  },
+  () => Effect.gen(function* () {
+    yield* Fractal.step({
+      id: 'write',
+      timeout: '15m',
+      goal: 'WELCOME.md contains the project introduction.',
+    }).pipe(Effect.provide(Fractal.Worker.layer(worker)))
+  }),
+)
+```
+
+```ts group=mission variant=ts
+import { Fractal } from 'fractal'
+import { worker } from '../worker'
+
+const ada = Fractal.person({ id: 'ada' })
+
+export const mission = Fractal.mission(
+  {
+    id: 'example/first-note',
+    state: 'ready',
+    timeout: '1h',
+    reportTo: ada,
+    goal: 'A short project introduction exists in WELCOME.md.',
+  },
+  async () => {
+    await Fractal.Worker.provide(worker, async () => {
+      await Fractal.step({
+        id: 'write',
+        timeout: '15m',
+        goal: 'WELCOME.md contains the project introduction.',
+      })
+    })
+  },
+)
+```
+
+```kdl group=mission variant=kdl
 version 2
 mission "example/first-note" state="ready" {
   goal "A short project introduction exists in WELCOME.md."

@@ -1576,6 +1576,7 @@ dependencies = [
  "libc",
  "notify",
  "opentelemetry",
+ "parking_lot",
  "pty-client",
  "pty-core",
  "reqwest",
@@ -1585,6 +1586,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smallclaims",
+ "socket2",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.27.0",
@@ -1617,6 +1619,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "inotify",
  "jsonschema",
  "kdl",
  "libc",
@@ -2029,6 +2032,7 @@ name = "fractal-feed"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "fractal-client",
  "fractal-conversation-ui",
  "serde",
@@ -2046,6 +2050,7 @@ dependencies = [
  "chrono",
  "fractal-evidence",
  "fractal-github",
+ "fractal-schema",
  "getrandom 0.3.4",
  "hex",
  "libc",
@@ -2222,6 +2227,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fractal-missions-base",
+ "fractal-runtime",
  "fractal-schema",
  "fractal-secrets",
  "hex",
@@ -2364,6 +2370,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -2378,6 +2385,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "toml 0.9.12+spec-1.1.0",
+ "url",
 ]
 
 [[package]]
@@ -2432,6 +2440,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "sha2 0.10.9",
+ "smallclaims",
  "tempfile",
  "tokio",
  "uuid",
@@ -2545,6 +2554,7 @@ dependencies = [
  "fractal-client",
  "fractal-drivers",
  "fractal-kernel",
+ "fractal-runtime",
  "futures-util",
  "hex",
  "libc",
@@ -2634,6 +2644,7 @@ name = "fractal-ui-model"
 version = "0.1.0"
 dependencies = [
  "fractal-client",
+ "fractal-schema",
  "serde",
  "serde_json",
 ]
@@ -3337,8 +3348,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cc00ea907cab49550b7da656f80ebb97be1b997d931fbcd28d39734e17ce592"
 dependencies = [
  "bitflags 2.13.1",
+ "futures-util",
  "inotify-sys",
  "libc",
+ "tokio",
 ]
 
 [[package]]

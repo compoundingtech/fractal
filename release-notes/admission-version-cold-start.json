@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Allow 20 seconds for the isolated admission version child to finish cold runtime startup under background scheduling, retaining a bounded indeterminate timeout.",
+  "replay": {"status": "none", "detail": "No replay, claim-fold or restart ordering changes."},
+  "schema": {"status": "none", "detail": "No cache, diagnostic, database or wire format changes."},
+  "rules": {"status": "changed", "detail": "Only the version deadline changes from 5 to 20 seconds. The contract deadline remains 45 seconds, with the same checks, inherited scheduling policy, cache order, identity algorithm, invalidations and operator override."},
+  "compatibility": {"status": "changed", "detail": "The existing source-based probeDigest changes, requiring fresh omp and OpenCode measurements at each host's next applicable launch. Deploy with the admission attempt diagnostics in one binary on macOS to remeasure once; background contract checks still must pass within 45 seconds."},
+  "downtime": {"status": "none", "detail": "Running providers are unaffected. An unresponsive version child can hold a new launch for up to 20 seconds instead of 5, then is killed and reaped as before."},
+  "manual": {"status": "none", "detail": "No cache edit, override or per-seat priority change is required by this update."},
+  "recovery": {"status": "none", "detail": "Revert the binary to restore the five-second version deadline; the earlier source identity requires its own exact measurement."}
+}

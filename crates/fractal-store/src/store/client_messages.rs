@@ -1509,12 +1509,16 @@ mod tests {
         }
         assert_commit_budget(&store);
         assert!(store.client_message_selectors_pending().unwrap());
-        let saved: String = store.readers.get().query_row(
+        // The commit's fold checks its 10 ms budget before each subject, so on a slow host it can
+        // stop before scanning anything and save no work: it then scanned no claim rows at all.
+        let saved: Option<String> = store.readers.get().query_row(
             "SELECT value FROM meta WHERE key=?1", [FOLD_MARKER], |row| row.get(0),
-        ).unwrap();
-        let work: FoldWork = serde_json::from_str(&saved).unwrap();
-        assert!(work.after <= u64::try_from(FOLD_CLAIMS).unwrap(),
-            "the first transaction cannot scan more than its claim-row allowance");
+        ).optional().unwrap();
+        if let Some(saved) = saved {
+            let work: FoldWork = serde_json::from_str(&saved).unwrap();
+            assert!(work.after <= u64::try_from(FOLD_CLAIMS).unwrap(),
+                "the first transaction cannot scan more than its claim-row allowance");
+        }
         let mut loans = 1;
         while store.client_message_selectors_pending().unwrap() {
             store.maintain_client_message_selectors().unwrap();
@@ -1580,6 +1584,9 @@ mod tests {
                 ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
         }
+        // A commit folds for at most BACKFILL_WORK_BUDGET of wall time, so on a loaded host the
+        // last seeded subjects can still be pending. Every caller starts from a folded seed.
+        while store.maintain_client_message_selectors().unwrap() {}
     }
 
     fn paged_backfill_rows(store: &Store, person: Option<&str>, actor: Option<&str>, history: bool) -> Vec<Value> {
@@ -2556,6 +2563,20 @@ mod tests {
                 deferred_claim(&transaction,"message/backfill-0001","custom.test.recorded",json!({"note":index}),None);
             }
             transaction.commit().unwrap();
+        }
+        // The first subject's header is retired by the fold, which the commit may have cut short
+        // before reaching it. Fold loan by loan until it is: pending work folds in subject order
+        // and one loan folds at most FOLD_CLAIMS claims, so the second subject's backlog is
+        // still pending and the retirement is not yet published.
+        let retired = |store: &Store| store.connection.write().query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 WHERE subject='message/backfill-0000' AND retired_index IS NOT NULL)",
+            [],|row|row.get::<_,bool>(0),
+        ).unwrap();
+        while !retired(&store) {
+            assert!(store.maintain_client_message_selectors().unwrap());
+        }
+        {
+            let connection = store.connection.write();
             assert!(has_pending(&connection).unwrap());
             connection.execute("UPDATE local_client_message_selectors_v1 SET retired_at_unix_ms=1 WHERE retired_index IS NOT NULL",[]).unwrap();
             connection.execute("UPDATE local_client_message_publications SET published_at_unix_ms=1",[]).unwrap();

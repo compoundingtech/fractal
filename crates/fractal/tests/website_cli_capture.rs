@@ -105,6 +105,7 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         let _ = std::fs::remove_file(format!("{}{suffix}", database.display()));
     }
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&database, "studio").unwrap()),
         notify: Arc::new(Notify::new()),
@@ -116,6 +117,7 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         fleet_id: None,
         configured_peers: Vec::new(),
         client_relay: None,
+        harness_question_sink: None,
         // The app seed's maintainer runs Codex. The daemon reads its native session from here.
         native_session_home: app.then(|| dir.join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
@@ -456,7 +458,7 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
 
 /// Runs the CLI against the fixture, as an agent or a person would, and fails on any error.
 fn fractal(dir: &Path, socket: &Path, args: &[&str]) -> Output {
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .env("HOME", dir.join("home"))
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_STATE_HOME")

@@ -37,15 +37,55 @@ class ReviewValidate(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="review-validate-")
         self.addCleanup(self.temporary.cleanup)
 
-    def run_validate(self, verdict):
+    def run_validate(self, verdict, previous=None):
         path = Path(self.temporary.name) / "verdict.json"
         path.write_text(verdict if isinstance(verdict, str) else json.dumps(verdict))
-        return subprocess.run([sys.executable, str(HERE / "review-validate"), str(path)], text=True, capture_output=True)
+        extra = []
+        if previous is not None:
+            extra = ["--previous", str(Path(self.temporary.name) / "previous.json")]
+            Path(extra[1]).write_text(json.dumps(previous))
+        return subprocess.run([sys.executable, str(HERE / "review-validate"), str(path), *extra], text=True, capture_output=True)
 
     def refused(self, verdict, text):
         done = self.run_validate(verdict)
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertIn(text, done.stderr)
+
+    def test_copied_checkout_reader_prefers_new_schema_and_keeps_explicit_schema(self):
+        import runpy
+        tool = runpy.run_path(str(HERE / "review-validate"))
+        root = Path(self.temporary.name)
+        scripts = root / "scripts"
+        scripts.mkdir()
+        copied = scripts / "review-validate"
+        copied.write_text((HERE / "review-validate").read_text())
+        (root / ".st").mkdir()
+        old = root / ".st/review-verdict.schema.json"
+        old.write_text(tool["schema_path"]().read_text())
+        verdict = root / "verdict.json"
+        verdict.write_text(json.dumps(good()))
+        command = [sys.executable, str(copied), str(verdict)]
+        self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+        (root / ".fractal").mkdir()
+        new = root / ".fractal/review-verdict.schema.json"
+        new.write_text("{")
+        self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+        self.assertEqual(subprocess.run([*command, "--schema", str(old)], capture_output=True).returncode, 0)
+        new.write_text(old.read_text())
+        later = good()
+        later["round"] = 2
+        verdict.write_text(json.dumps(later))
+        previous = root / "previous.json"
+        previous.write_text(json.dumps(good()))
+        after_go = [*command, "--previous", str(previous)]
+        self.assertEqual(subprocess.run(after_go, capture_output=True).returncode, 0)
+        self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+        new.write_text("{")
+        self.assertNotEqual(subprocess.run(after_go, capture_output=True).returncode, 0)
+        self.assertEqual(subprocess.run([*after_go, "--schema", str(old)], capture_output=True).returncode, 0)
+        new.unlink()
+        new.symlink_to("missing")
+        self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
 
     def test_a_good_verdict_validates(self):
         done = self.run_validate(good())
@@ -97,6 +137,27 @@ class ReviewValidate(unittest.TestCase):
         verdict["risk"]["final"] = "high"
         self.assertEqual(self.run_validate(verdict).returncode, 0)
 
+    def test_the_factory_read_flag_is_the_final_medium_with_an_area_and_nothing_else(self):
+        area = [{"area": "concurrency", "paths": ["crates/a.rs"], "lines": []}]
+        verdict = good()
+        verdict["risk"]["deterministic"].update(level="medium", factory_read=area)
+        verdict["risk"].update(final="medium", needs_factory_read=True)
+        verdict["risk"]["llm"]["level"] = "low"
+        self.assertEqual(self.run_validate(verdict).returncode, 0, self.run_validate(verdict).stderr)
+        verdict["risk"]["needs_factory_read"] = False
+        self.refused(verdict, "risk.needs_factory_read")
+        verdict["risk"].update(final="high", needs_factory_read=True)
+        verdict["risk"]["llm"]["level"] = "high"
+        self.refused(verdict, "risk.needs_factory_read")
+        plain = good()
+        plain["risk"]["deterministic"]["factory_read"] = []
+        plain["risk"]["needs_factory_read"] = False
+        self.assertEqual(self.run_validate(plain).returncode, 0)
+        malformed = good()
+        malformed["risk"]["deterministic"]["factory_read"] = [{"area": "x"}]
+        self.refused(malformed, "factory_read")
+        self.assertEqual(self.run_validate(good()).returncode, 0)
+
     def test_the_deterministic_level_cannot_be_lower_than_its_own_reasons(self):
         verdict = good()
         verdict["risk"]["deterministic"]["reasons"][0]["level"] = "high"
@@ -117,6 +178,19 @@ class ReviewValidate(unittest.TestCase):
         self.refused(verdict, "must say which change answers")
         verdict["answers"] = [{"finding": "docs/x.md:3", "change": SHA}]
         self.assertEqual(self.run_validate(verdict).returncode, 0)
+
+    def test_a_later_round_after_a_go_has_nothing_to_answer(self):
+        verdict = good()
+        verdict["round"] = 2
+        earlier = good()
+        earlier["round"] = 2
+        self.assertEqual(self.run_validate(verdict, previous=earlier).returncode, 0)
+        earlier["verdict"] = "CHANGES"
+        earlier["findings"][0]["severity"] = "blocking"
+        done = self.run_validate(verdict, previous=earlier)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("must say which change answers", done.stderr)
+        self.refused(verdict, "must say which change answers")
 
 
 if __name__ == "__main__":

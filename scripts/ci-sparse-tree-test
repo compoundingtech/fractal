@@ -77,6 +77,28 @@ class SparseTree(unittest.TestCase):
         (target / 'x').write_text('x')
         self.assertIn('is not empty', self.run_tool(into='full').stderr)
 
+    def test_config_directory_pair_selects_old_new_both_but_not_neither(self):
+        import runpy
+        select = runpy.run_path(str(TOOL))['select']
+        for files in (['.st/policy'], ['.fractal/policy'], ['.st/a', '.fractal/b']):
+            with self.subTest(files=files):
+                self.assertEqual(select(files, ['.st', '.fractal']), (sorted(files), []))
+        self.assertEqual(select([], ['.st', '.fractal']), ([], ['.st', '.fractal']))
+        self.assertEqual(select(['.st/a'], ['.fractal']), ([], ['.fractal']))
+
+    def test_new_default_wins_and_malformed_or_dangling_new_fails_closed(self):
+        new = self.repo / '.fractal/evidence-skip-policy.json'
+        new.parent.mkdir()
+        new.write_text(json.dumps({'checks': {'demo': {'inputs': ['top.txt']}}}))
+        self.assertEqual(self.run_tool(into='new').returncode, 0)
+        self.assertTrue((Path(self.tmp.name) / 'new/top.txt').is_file())
+        self.assertFalse((Path(self.tmp.name) / 'new/scripts').exists())
+        new.write_text('{')
+        self.assertNotEqual(self.run_tool(into='bad').returncode, 0)
+        new.unlink()
+        new.symlink_to('missing')
+        self.assertNotEqual(self.run_tool(into='dangling').returncode, 0)
+
     def test_the_real_policy_names_inputs_that_exist_for_ci_script_tests(self):
         done = subprocess.run([str(TOOL), '--repo', str(ROOT), '--check', 'ci-script-tests', '--into', str(Path(self.tmp.name) / 'real')],
                               capture_output=True, text=True, env=GIT_ENV)

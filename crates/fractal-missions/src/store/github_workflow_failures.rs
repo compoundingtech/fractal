@@ -8,7 +8,7 @@ pub use fractal_delivery::store::github_workflow_failures::*;
 pub fn deliver_tx(
     transaction: &Transaction<'_>,
     origin: &str,
-    batch: &str,
+    batches: &mut crate::store::missions::ObservationBatches,
     observer: &str,
     resource: &str,
     subscription: &str,
@@ -39,7 +39,7 @@ pub fn deliver_tx(
         append_claim_tx(transaction, origin, &baseline_subject, "resource.observed", None,
             &json!({"fields": {"kind": "custom.github.workflow-failure-baseline", "observer": observer,
                 "facts": {"recipient": recipient, "resource": resource, "repository_id": repository_id}}}),
-            &[], Some(batch)).map_err(claim_append_error)?;
+            &[], Some(&batches.for_kind(transaction, origin, "resource.observed")?)).map_err(claim_append_error)?;
     }
     for facts in failures {
         let Some(failure) = PerformanceFailure::from_facts(facts) else {
@@ -79,7 +79,7 @@ pub fn deliver_tx(
                 "facts": {"failure": failure, "recipient": recipient, "baseline": baseline},
             }}),
             &[],
-            Some(batch),
+            Some(&batches.for_kind(transaction, origin, "resource.observed")?),
         )
         .map_err(claim_append_error)?;
         if baseline {
@@ -96,7 +96,7 @@ pub fn deliver_tx(
                 "content": serde_json::to_string(&content).map_err(internal)?,
                 "status": "sent",
                 "tags": ["P0", "github-workflow-failure", subscription, resource],
-            }, "evidence": [record.id]}), &[], Some(batch)).map_err(claim_append_error)?;
+            }, "evidence": [record.id]}), &[], Some(&batches.for_kind(transaction, origin, "message.sent")?)).map_err(claim_append_error)?;
         messages.push(subject);
     }
     Ok(messages)

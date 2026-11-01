@@ -7,8 +7,8 @@ fn isolated_revision_preserves_completed_builder_declarations_and_cleanup() {
     let repo = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let result = fractal_daemon::test_support::command("env")
         .args(["-u", "ST_AGENT", "-u", "ST3_SUBJECT", "python3"])
-        .arg(repo.join("scripts/st3-revision-seat-eval/run"))
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(repo.join("scripts/fractal-revision-seat-eval/run"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg(&evidence)
         .output()
         .unwrap();

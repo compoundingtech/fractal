@@ -193,6 +193,7 @@ impl AttentionStore for Store {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         let removed = transaction.execute(/* sqlite-large-value: allow-for-now lv-h345fc67acafe owner=fractal_attention::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1 AND subject NOT LIKE 'resource/uri/%'", [owner_run])?;
+        fractal_store::store::ordered_membership::flush(&transaction)?;
         transaction.commit()?;
         Ok(removed)
     }

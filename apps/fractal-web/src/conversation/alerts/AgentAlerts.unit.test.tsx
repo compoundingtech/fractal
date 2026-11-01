@@ -18,7 +18,8 @@ import { gatewayPromptAnswers } from './prompt-answer-port.ts'
 
 const seat = 'agent/example/atlas'
 
-const alert = (id: string, answers: readonly string[], detail = 'Claude asks to use Bash'): Native.Attention =>
+// `callId` is the exact call st names; without it the prompt names none.
+const alert = (id: string, answers: readonly string[], detail = 'Claude asks to use Bash', callId?: string): Native.Attention =>
   ({
     id,
     kind: 'attention',
@@ -37,7 +38,7 @@ const alert = (id: string, answers: readonly string[], detail = 'Claude asks to 
     alert: true,
     actions: answers.length > 0 ? ['prompt.respond'] : [],
     action_parameters: answers.length > 0
-      ? { 'prompt.respond': { target_id: seat, episode: `${id}/episode`, answers } }
+      ? { 'prompt.respond': { target_id: seat, episode: `${id}/episode`, answers, ...(callId === undefined ? {} : { call_id: callId }) } }
       : {},
   }) as unknown as Native.Attention
 
@@ -58,7 +59,7 @@ describe('AgentAlerts', () => {
   })
 
   it('shows the one waiting call in full beside allow and deny', () => {
-    const html = render([alert('attention/one', ['allow', 'deny'])], [
+    const html = render([alert('attention/one', ['allow', 'deny'], undefined, 'c1')], [
       call('done', 'Bash', { command: 'ls' }, { status: 'ok' }),
       call('c1', 'Bash', { command: 'rm -rf build\necho done' }),
     ])
@@ -84,20 +85,22 @@ describe('AgentAlerts', () => {
   })
 
   it('withholds allow while it cannot say which call the prompt is about', () => {
-    const none = render([alert('attention/one', ['allow', 'deny'])], [])
+    const none = render([alert('attention/one', ['allow', 'deny'], undefined, 'c1')], [])
     expect(none).not.toContain('>Allow<')
     expect(none).toContain('>Deny<')
     expect(none).toContain('not in the conversation yet')
-    const two = render([alert('attention/one', ['allow', 'deny'])], [
-      call('c1', 'Bash', { command: 'make' }),
-      call('c2', 'Write', { file_path: 'notes.md' }),
-    ])
-    expect(two).not.toContain('>Allow<')
-    expect(two).toContain('2 calls are waiting')
+    // A prompt that names no call is only denied here, even beside a lone waiting call.
+    for (const waiting of [[call('c1', 'Bash', { command: 'make' })], [call('c1', 'Bash', { command: 'make' }), call('c2', 'Write', { file_path: 'notes.md' })]]) {
+      const unnamed = render([alert('attention/one', ['allow', 'deny'])], waiting)
+      expect(unnamed).not.toContain('>Allow<')
+      expect(unnamed).toContain('>Deny<')
+      expect(unnamed).not.toContain('command: make')
+      expect(unnamed).toContain('Fractal does not say which call this asks about')
+    }
   })
 
   it('offers a question\'s options to choose, and sends only once every question has a choice', () => {
-    const html = render([alert('attention/q', ['answer', 'deny'], 'Claude asks you a question')], [
+    const html = render([alert('attention/q', ['answer', 'deny'], 'Claude asks you a question', 'q1')], [
       call('q1', 'AskUserQuestion', { questions: [
         { question: 'Which color?', header: 'Color', multiSelect: false, options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }] },
         { question: 'Which pets?', header: 'Pets', multiSelect: true, options: [{ label: 'Cat', description: '' }, { label: 'Fish', description: '' }] },
@@ -111,13 +114,20 @@ describe('AgentAlerts', () => {
   })
 
   it('offers a plan\'s approval beside it, and a screen prompt\'s own answers', () => {
-    const plan = render([alert('attention/plan', ['approve', 'deny'])], [call('p1', 'ExitPlanMode', { plan: '1. Build\n2. Test' })])
+    const plan = render([alert('attention/plan', ['approve', 'deny'], undefined, 'p1')], [call('p1', 'ExitPlanMode', { plan: '1. Build\n2. Test' })])
     expect(plan).toContain('2. Test')
     expect(plan).toContain('>Approve plan<')
     const screen = render([alert('attention/mcp', ['use', 'use-all', 'skip'], 'New MCP server found in this project: probe-echo.')], [])
     for (const label of ['Use it', 'Use all', 'Skip']) expect(screen).toContain(`>${label}<`)
     const terminal = render([alert('attention/t', [], 'Codex asks a question')], [])
     expect(terminal).toContain('Answer it in the seat&#x27;s terminal.')
+  })
+
+  it('offers a trust prompt\'s own answers, and a denied call allowed once, for its kind or dismissed', () => {
+    const trust = render([alert('attention/trust', ['trust', 'exit'], 'Claude asks whether to trust its workspace /work/example.')], [])
+    for (const label of ['Trust', 'Exit']) expect(trust).toContain(`>${label}<`)
+    const denied = render([alert('attention/denied', ['approve-once', 'approve-kind', 'dismiss'], 'Auto mode denied a Bash call.')], [])
+    for (const label of ['Allow once', 'Allow this kind', 'Dismiss']) expect(denied).toContain(`>${label}<`)
   })
 })
 

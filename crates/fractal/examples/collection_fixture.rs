@@ -20,6 +20,8 @@ fn main() {
     // current requests to exercise an attention frame, not just its empty overhead.
     for request in 0..(28.0 * scale).round() as usize {
         store.ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/bench-operator".into(),
             title: format!("Invented open decision {request}"),

@@ -67,9 +67,11 @@ const START_MS: i64 = 4_102_489_800_000;
 const STEP_MS: i64 = 1_000;
 const PERSON: &str = "person/operator";
 
-/// The seeds CI runs. Every failing seed found by hand is added here.
+/// The seeds CI runs. Every failing seed found by hand is added here. The second row diverged in
+/// `resource_observations` until a rebuild kept items only compact states describe (#4426).
 const SEEDS: &[u64] = &[
     1, 2, 3, 5, 8, 13, 17, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597,
+    27, 74, 106, 121, 130, 133, 179, 209, 241, 246, 277, 281, 291, 293, 294,
 ];
 
 /// Both revisions draw the same kinds and fields. Native admission still uses each
@@ -77,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v10.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v12.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -997,6 +999,7 @@ impl World {
             "file" => format!("file/{}:/srv/example-{small}", self.nodes[index].name),
             "fleet-invite" => format!("fleet-invite/{}", self.fresh("invite")),
             "gate-operation" => format!("gate-operation/{}", self.fresh("gate")),
+            "github-event" => format!("github-event/convergence-{small}/pull-request/{small}/{}", self.fresh("event")),
             "host" => format!("host/{}", self.other_name(index)),
             "loop-run" => format!("loop-run/gen-0/loop-{small}"),
             "message" => format!("message/{}", self.fresh("message")),
@@ -1584,6 +1587,10 @@ fn append_generated_claim(
     store: &Store,
     input: &ClaimInput,
 ) -> Result<ClaimRecord, fractal_daemon::St3Error> {
+    // A fleet's checkpoints still trim the diagnostics its older builds replicated.
+    if input.kind == "daemon.diagnostic" {
+        return store.append_as_older_build_for_test(input);
+    }
     if input.kind != "mission.published" {
         return store.append_claim(input);
     }
@@ -1730,16 +1737,16 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v10,
-/// all 17 fixed seeds converge and trim a checkpoint, including seed 3.
-/// This measured characterization includes the three durable person-repair kinds.
-/// Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
-const NEVER_TRIMS: &[u64] = &[];
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v12, every fixed
+/// seed converges, and all but seeds 2, 34 and 106 trim a checkpoint: v12 adds
+/// `fault.dismissed`, which shifts the draws. Keep the exact per-seed equality: claim
+/// generation consumes the schedule's RNG.
+const NEVER_TRIMS: &[u64] = &[2, 34, 106];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v10 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v12 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -1792,6 +1799,21 @@ seed_tests! {
     seed_610_converges: 610,
     seed_987_converges: 987,
     seed_1597_converges: 1597,
+    seed_27_converges: 27,
+    seed_74_converges: 74,
+    seed_106_converges: 106,
+    seed_121_converges: 121,
+    seed_130_converges: 130,
+    seed_133_converges: 133,
+    seed_179_converges: 179,
+    seed_209_converges: 209,
+    seed_241_converges: 241,
+    seed_246_converges: 246,
+    seed_277_converges: 277,
+    seed_281_converges: 281,
+    seed_291_converges: 291,
+    seed_293_converges: 293,
+    seed_294_converges: 294,
 }
 
 #[test]
@@ -1953,7 +1975,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v10.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v12.json"
         }))
         .unwrap(),
     )

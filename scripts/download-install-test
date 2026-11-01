@@ -20,11 +20,11 @@ with tempfile.TemporaryDirectory() as d:
     root = Path(d)
     tools = root / 'tools'; tools.mkdir()
     payload = root / 'fractal-x86_64-unknown-linux-gnu'; (payload / 'bin').mkdir(parents=True)
-    for name in ['st3', 'pty']:
+    for name in ['fractal', 'pty']:
         p = payload / 'bin' / name
         p.write_text('#!/bin/sh\nif [ "${1:-}" = --version ]; then [ "${FAIL_RECEIPT:-}" != version ] || exit 1; printf \'{"machine_version":"0.3.17+abcdef123"}\\n\'; else printf "' + name + '-fixture\\n"; fi\n'); p.chmod(0o755)
-    (payload / 'bin/st').symlink_to('st3')
-    (payload / 'bin/fractal').symlink_to('st3')
+    (payload / 'bin/st').symlink_to('fractal')
+    (payload / 'bin/st3').symlink_to('fractal')
     (payload / 'share/fractal-web').mkdir(parents=True)
     (payload / 'share/fractal-web/index.html').write_text('<!doctype html><title>Fractal</title>')
     shutil.copy(repo / 'scripts/install-release', payload / 'install.sh')
@@ -69,18 +69,19 @@ exec "{real}" "$@"
         return subprocess.run(['sh', str(repo / 'install.sh'), *args], env={**env, **(extra or {})},
                               input='', text=True, capture_output=True, timeout=20)
     result = install('--no-run')
-    assert result.returncode == 0 and 'Installed st3' in result.stdout and result.stderr == '', result
+    assert result.returncode == 0 and 'Installed fractal' in result.stdout and result.stderr == '', result
     assert 'Upgrading Fractal' not in result.stdout, result
     installed = root / 'home/.local/bin'
-    assert (installed / 'st').readlink() == Path('st3')
-    assert (installed / 'fractal').readlink() == Path('st3')
+    assert (installed / 'st').readlink() == Path('fractal')
+    assert (installed / 'st3').readlink() == Path('fractal')
+    assert (installed / 'fractal').is_file() and not (installed / 'fractal').is_symlink()
     assert sorted(p.name for p in installed.iterdir()) == ['RELEASE.json', 'fractal', 'pty', 'st', 'st3']
     receipt = json.loads((installed / 'RELEASE.json').read_text())
     assert receipt['tag'] == 'v0.3.18' and receipt['commit'] == 'abcdef123', receipt
     assert receipt['target'] == 'x86_64-unknown-linux-gnu' and receipt['installed_at'].endswith('Z'), receipt
     assert (installed.parent / 'share/fractal-web/index.html').read_text() == '<!doctype html><title>Fractal</title>'
     result = install('--tag', 'v0.3.18')
-    assert result.returncode == 0 and result.stdout.endswith('st3-fixture\n') and result.stderr == '', result
+    assert result.returncode == 0 and result.stdout.endswith('fractal-fixture\n') and result.stderr == '', result
     assert 'Upgrading Fractal' in result.stdout and 'Installed CLI:' in result.stdout, result
     assert json.loads((installed / 'RELEASE.json').read_text())['tag'] == 'v0.3.18'
     # Optional metadata failures must not turn a committed installation into a
@@ -88,23 +89,23 @@ exec "{real}" "$@"
     previous_receipt = (installed / 'RELEASE.json').read_bytes()
     for failure in ['version', 'mktemp', 'mv']:
         result = install('--tag', 'v0.3.19', extra={'FAIL_RECEIPT': failure})
-        assert result.returncode == 0 and result.stdout.endswith('st3-fixture\n'), (failure, result)
+        assert result.returncode == 0 and result.stdout.endswith('fractal-fixture\n'), (failure, result)
         assert result.stderr == 'install: warning: release receipt unavailable; continuing with the installed binary\n', (failure, result)
         assert (installed / 'RELEASE.json').read_bytes() == previous_receipt
         assert not list(installed.glob('RELEASE.json.*')), failure
     (installed / 'fractal').unlink()
     (installed / 'fractal').write_text('foreign command')
+    (installed / 'fractal').chmod(0o644)
     result = install('--no-run')
-    assert result.returncode == 0 and 'Upgrading Fractal' in result.stdout, result
-    assert 'leaving fractal unchanged:' in result.stderr, result
+    assert result.returncode != 0 and 'foreign fractal command' in result.stderr, result
     assert (installed / 'fractal').read_text() == 'foreign command'
-    assert (installed / 'st').readlink() == Path('st3')
+    assert (installed / 'st').readlink() == Path('fractal')
     (installed / 'fractal').unlink()
     foreign_path = root / 'foreign-path'
     foreign_path.mkdir()
     (foreign_path / 'fractal').write_text('foreign PATH command')
     result = install('--no-run', extra={'PATH': str(foreign_path) + ':' + env['PATH']})
-    assert result.returncode == 0 and 'PATH contains a foreign command' in result.stderr, result
+    assert result.returncode != 0 and 'PATH contains a foreign fractal command' in result.stderr, result
     assert not (installed / 'fractal').exists() and not (installed / 'fractal').is_symlink()
     assert (foreign_path / 'fractal').read_text() == 'foreign PATH command'
     requests = (root / 'requests').read_text()
@@ -117,12 +118,12 @@ exec "{real}" "$@"
     assert json.loads((installed / 'RELEASE.json').read_text())['tag'] == 'edge'
     result = install('--edge', '--tag', 'v0.3.18', '--no-run')
     assert result.returncode == 2 and 'either --edge or --tag' in result.stderr, result
-    original = (installed / 'st3').read_bytes()
+    original = (installed / 'fractal').read_bytes()
     original_receipt = (installed / 'RELEASE.json').read_bytes()
     checksum.write_text('0' * 64 + '  ' + archive.name + '\n')
     result = install('--no-run')
     assert result.returncode != 0 and 'checksum mismatch' in result.stderr, result
-    assert (installed / 'st3').read_bytes() == original
+    assert (installed / 'fractal').read_bytes() == original
     assert (installed / 'RELEASE.json').read_bytes() == original_receipt
     checksum.write_text(correct.replace(archive.name, 'other.tar.gz'))
     result = install('--no-run')
@@ -142,11 +143,11 @@ exec "{real}" "$@"
         result = install('--tag', 'v0.3.18', '--bin-dir', str(ordinary), '--no-run')
         assert result.returncode == 0 and result.stderr == '', result
         assert (ordinary / 'st3').is_file()
-    (installed / 'st3').write_text('#!/bin/sh\ncase "$*" in\n--version) echo "fractal old-build";;\n"service status --json") echo \'{"services":[{"running":true}]}\';;\n*) exit 9;;\nesac\n')
+    (installed / 'fractal').write_text('#!/bin/sh\ncase "$*" in\n--version) echo "fractal old-build";;\n"service status --json") echo \'{"services":[{"running":true}]}\';;\n*) exit 9;;\nesac\n')
     result = install('--no-run')
     assert result.returncode == 0 and 'Upgrading Fractal fractal old-build' in result.stdout, result
     assert 'A daemon is running; it keeps its current build' in result.stderr, result
-    assert str(installed / 'st') + ' service restart' in result.stderr, result
+    assert str(installed / 'fractal') + ' service restart' in result.stderr, result
     (installed / 'st3').unlink()
     (installed / 'st3').symlink_to('/nix/store/missing-fractal/bin/st3')
     result = install('--no-run')
@@ -154,8 +155,7 @@ exec "{real}" "$@"
     assert 'docs/reference/home-manager' in result.stderr, result
     assert (installed / 'st3').readlink() == Path('/nix/store/missing-fractal/bin/st3')
     (installed / 'st3').unlink()
-    (installed / 'st3').write_bytes(original)
-    (installed / 'st3').chmod(0o755)
+    (installed / 'st3').symlink_to('fractal')
     # The managed generation can be a dangling ancestor, not the leaf symlink.
     for mode in ['default', 'custom', 'ancestor', 'relative']:
         state = root / ('xdg-' + mode)
@@ -214,6 +214,13 @@ exec "{real}" "$@"
     checksum.unlink()
     archive = root / (payload.name + '.tar.gz')
     checksum = Path(str(archive) + '.sha256')
+    # Reconstruct the immutable old payload shape; do not change its installer.
+    (payload / 'bin/st3').unlink()
+    (payload / 'bin/fractal').rename(payload / 'bin/st3')
+    retained = payload / 'bin/st3'
+    retained.write_text(retained.read_text().replace('fractal-fixture', 'retained-st3-fixture').replace('abcdef123', '012345678'))
+    (payload / 'bin/st').unlink()
+    (payload / 'bin/st').symlink_to('st3')
     for name in ['stui', 'st3-migrate']: shutil.copy(payload / 'bin/st3', payload / 'bin' / name)
     with tarfile.open(archive, 'w:gz') as t: t.add(payload, arcname=payload.name)
     checksum.write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + '  ' + archive.name + '\n')
@@ -222,6 +229,28 @@ exec "{real}" "$@"
     assert result.returncode == 0 and 'Installed st3' in result.stdout and result.stderr == '', result
     assert sorted(p.name for p in legacy_bin.iterdir()) == ['RELEASE.json', 'pty', 'st', 'st3', 'st3-migrate', 'stui']
     assert '/download/v0.3.17/smalltalk-x86_64-unknown-linux-gnu.tar.gz' in (root / 'requests').read_text()
+    # A retained forward alias is executable, but its installer preserves an
+    # existing physical fractal. Launch the newly installed st3, not that newer CLI.
+    (payload / 'bin/fractal').symlink_to('st3')
+    with tarfile.open(archive, 'w:gz') as t: t.add(payload, arcname=payload.name)
+    checksum.write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + '  ' + archive.name + '\n')
+    canonical_before = (installed / 'fractal').read_bytes()
+    assert not (installed / 'fractal').is_symlink()
+    assert all((installed / name).readlink() == Path('fractal') for name in ['st', 'st3'])
+    result = install('--tag', 'v0.3.17', '--bin-dir', str(installed))
+    assert result.returncode == 0 and result.stdout.endswith('retained-st3-fixture\n') and result.stderr == '', result
+    assert (installed / 'fractal').read_bytes() == canonical_before and not (installed / 'fractal').is_symlink()
+    assert not (installed / 'st3').is_symlink() and (installed / 'st').readlink() == Path('st3')
+    retained_receipt = json.loads((installed / 'RELEASE.json').read_text())
+    assert retained_receipt['tag'] == 'v0.3.17' and retained_receipt['commit'] == '012345678', retained_receipt
+    # Old installers must not bypass canonical collision refusal or launch st.
+    legacy_before = (legacy_bin / 'st3').stat().st_ino
+    (legacy_bin / 'fractal').write_text('foreign legacy collision')
+    result = install('--tag', 'v0.3.17', '--bin-dir', str(legacy_bin))
+    assert result.returncode != 0 and 'foreign fractal command' in result.stderr, result
+    assert (legacy_bin / 'fractal').read_text() == 'foreign legacy collision'
+    assert (legacy_bin / 'st3').stat().st_ino == legacy_before
+    (legacy_bin / 'fractal').unlink()
     # Even a retained archive without its own guard cannot replace Nix-owned commands.
     (legacy_bin / 'st3').unlink()
     (legacy_bin / 'st3').symlink_to('/nix/store/missing-fractal/bin/st3')

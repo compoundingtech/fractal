@@ -10,11 +10,11 @@ fn controller_death_cleanup() {
     let repo = std::path::PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = fractal_daemon::test_support::command("python3")
         .args(["-m", "unittest", "discover", "-s"])
-        .arg(repo.join("scripts/st3-messaging-faults-eval"))
+        .arg(repo.join("scripts/fractal-messaging-faults-eval"))
         .args(["-p", "test_*.py"])
         .env(
             "ST3_MFE_TEST_BINARY",
-            test_env!("CARGO_BIN_EXE_st3-fixture"),
+            test_env!("CARGO_BIN_EXE_fractal-fixture"),
         )
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .output()
@@ -99,8 +99,8 @@ fn run_case_at(case: &str, real_grace: bool) {
     // must never impersonate that sender. Captured pipes stay open until the eval exits.
     let mut eval = fractal_daemon::test_support::command("setsid");
     eval.args(["-f", "env", "-u", "ST_AGENT", "python3"])
-        .arg(repo.join("scripts/st3-messaging-faults-eval/run"))
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(repo.join("scripts/fractal-messaging-faults-eval/run"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg(&evidence)
         .arg("--old-binary")
         .arg(old)

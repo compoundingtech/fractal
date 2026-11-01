@@ -40,7 +40,7 @@ async fn authored_omp_resume_publishes_binding_from_an_empty_managed_directory()
         .find(|candidate| candidate.is_file())
         .expect("the OMP admission stand-in needs Node on the fixture PATH");
     let admission_host = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/st3-boot-canaries/stub-pi-family.mjs");
+        .join("../../scripts/fractal-boot-canaries/stub-pi-family.mjs");
     // The fake provider uses the actual spawned channel, not a direct API binding request.
     // Its admission mode loads the actual adapter against the loopback model fixture.
     std::fs::write(&provider, format!(r#"#!{bash}
@@ -103,19 +103,25 @@ agent "garden/worker" {{
         })
         .unwrap();
     let socket = root.path().join("api.sock");
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "resume-link-test".into(),
-    state_dir: root.path().into(),
-    pty_root: root.path().join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "resume-link-test".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let listener_socket = socket.clone();
     let state_socket = root.path().join("state.sock");
     let bound_store = state.store.clone();
@@ -137,7 +143,7 @@ agent "garden/worker" {{
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let hooks = fractal_daemon::hooks::ensure_installed(&root.path().join("hooks")).unwrap();
-    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     let stop = root.path().join("provider-stop");
     command
         .env_clear()
@@ -161,19 +167,24 @@ agent "garden/worker" {{
             .expect("native start completes")
             .unwrap()
     });
-    for _ in 0..1000 {
-        if store
-            .latest_claim(subject, Some("harness.session-file"))
-            .unwrap()
-            .is_some()
-        {
-            break;
-        }
+    // Wait for the event, not a fixed time: the driver writes its admission record before it claims
+    // the seat and publishes the binding, and a loaded host can take longer than any fixed poll.
+    // The driver exiting first, within its own 30 s bound, ends the wait too.
+    while store
+        .latest_claim(subject, Some("harness.session-file"))
+        .unwrap()
+        .is_none()
+        && !completion.is_finished()
+    {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let binding = store
         .latest_claim(subject, Some("harness.session-file"))
         .unwrap();
+    if binding.is_none() {
+        let output = completion.await.unwrap();
+        panic!("the driver exited without publishing its native binding: {output:?}");
+    }
     let admission_records = std::fs::read_dir(drivers.join("sessions/harness-admission"))
         .unwrap()
         .filter_map(Result::ok)

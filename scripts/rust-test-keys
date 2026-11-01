@@ -56,6 +56,16 @@ def show(repo, tree, path):
     return done.stdout if done.returncode == 0 else None
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — no unextracted sibling dependency.
+def config_path(repo, revision, legacy):
+    preferred = legacy.replace('.st/', '.fractal/', 1)
+    done = subprocess.run(['git', '-C', str(repo), 'ls-tree', '-z', '--full-tree', revision, '--', preferred, legacy], capture_output=True)
+    if done.returncode != 0:
+        raise Failure(f'cannot resolve configuration at {revision}: {done.stderr.decode(errors="replace").strip()}')
+    names = {entry.partition(b'\t')[2].decode() for entry in done.stdout.split(b'\0') if entry}
+    return preferred if preferred in names else legacy if legacy in names else None
+
+
 def manifest(repo, tree, directory):
     path = posixpath.normpath(posixpath.join(directory, 'Cargo.toml'))
     data = show(repo, tree, path)
@@ -155,7 +165,8 @@ def declared_paths(repo, tree, inputs):
 
 
 def read_inputs(repo, treeish):
-    data = show(repo, treeish, INPUTS_PATH)
+    path = config_path(repo, treeish, INPUTS_PATH)
+    data = show(repo, treeish, path) if path is not None else None
     if data is None:
         raise Failure(f'{treeish}:{INPUTS_PATH} is not readable')
     try:

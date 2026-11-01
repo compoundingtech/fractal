@@ -103,19 +103,25 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("st3.sock");
     let store = Arc::new(crate::store::Store::open_memory("message-retry").unwrap());
-    let state = crate::api::AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(tokio::sync::Notify::new()),
-    event_notify: tokio::sync::watch::channel(0).0,
-    node: "message-retry".into(),
-    state_dir: directory.path().into(),
-    pty_root: directory.path().join("pty"),
-    pty_binary: "pty".into(),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = crate::api::AppState {
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0).0,
+        node: "message-retry".into(),
+        state_dir: directory.path().into(),
+        pty_root: directory.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     let app = crate::api::router(state).layer(axum::middleware::from_fn(
@@ -185,7 +191,11 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
     server.abort();
 }
 
-#[tokio::test]
+// The clock is paused, so time passes only while every task waits on a timer. The client's
+// connect and request deadlines are then reached only once the server's handler has taken the
+// attempt and sleeps, never because a loaded host has not yet run this runtime's server task:
+// on the wall clock such a miss sent one request, or none, and the count could never reach 2.
+#[tokio::test(start_paused = true)]
 async fn unanswered_message_retries_are_bounded_and_report_the_reusable_key() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("st3.sock");
@@ -233,7 +243,11 @@ async fn unanswered_message_retries_are_bounded_and_report_the_reusable_key() {
     server.abort();
 }
 
-#[tokio::test]
+// The clock is paused, so time passes only while every task waits on a timer. The client's 30 ms
+// request deadline is then reached only by a daemon that does not answer, never by a loaded host
+// that has not yet run this runtime's server task: one such miss is a deadline gap, and the
+// follow backoff waits 5 to 15 s after it, past the read's bound below.
+#[tokio::test(start_paused = true)]
 async fn follow_reads_wait_for_a_typed_connect_outage_with_daemon_wait_zero() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("st3.sock");

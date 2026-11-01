@@ -8,6 +8,7 @@ fn sample(frames: i32, backfilled: i32) -> smallclaims::sqlite::WalCheckpointRep
         writer_wait_ms: 0,
         truncate_ms: None,
         recycled: false,
+        blocked_by: None,
     }
 }
 

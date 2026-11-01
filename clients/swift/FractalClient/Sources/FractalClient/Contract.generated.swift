@@ -11,8 +11,10 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case agentStop = "agent.stop"
     case agentSuspend = "agent.suspend"
     case arrangementEdit = "arrangement.edit"
+    case arrangementMembershipEdit = "arrangement.membership.edit"
     case attentionResolve = "attention.resolve"
     case customReply = "custom.reply"
+    case harnessAnswer = "harness.answer"
     case laneApprove = "lane.approve"
     case laneJoin = "lane.join"
     case laneLeave = "lane.leave"
@@ -63,6 +65,8 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
 }
 
 public enum ReadOperation: String, CaseIterable, Sendable {
+    case harnessQuestionsList = "harness-questions.list"
+    case harnessQuestionsGet = "harness-questions.get"
     case notesList = "notes.list"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
@@ -131,6 +135,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case terminalScreen = "terminal.screen"
     case arrangementsList = "arrangements.list"
     case arrangementsGet = "arrangements.get"
+    case arrangementsMemberships = "arrangements.memberships"
     case glassesList = "glasses.list"
     case glassesGet = "glasses.get"
     case assistantSummary = "assistant.summary"
@@ -146,6 +151,8 @@ public enum ReadOperation: String, CaseIterable, Sendable {
 }
 
 public let fractalClientReadPaths: [ReadOperation: String] = [
+    .harnessQuestionsList: "/v1/client/harness-questions",
+    .harnessQuestionsGet: "/v1/client/harness-questions/{id}",
     .notesList: "/v1/client/notes",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",
@@ -214,6 +221,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .terminalScreen: "/v1/client/terminals/{id}/screen",
     .arrangementsList: "/v1/client/arrangements",
     .arrangementsGet: "/v1/client/arrangements/{person_name}/{uuid}",
+    .arrangementsMemberships: "/v1/client/arrangements/{person_name}/{uuid}/memberships",
     .glassesList: "/v1/client/glasses",
     .glassesGet: "/v1/client/glasses/{id}",
     .assistantSummary: "/v1/client/assistant/summary",

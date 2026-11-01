@@ -45,6 +45,10 @@ pub struct AttentionPublication {
     /// The agents the rows' presentations read, from the newest published roster; `None`
     /// before the first.
     pub fleet: Option<Arc<AttentionFleet>>,
+    /// The ask deadline policy the rows' deadlines were folded with, from `meta`
+    /// (`person_work::ask_deadline_policy`). No claim records it, so a refresh that reads a
+    /// different one folds again.
+    pub ask_deadline_policy: (u128, u64),
 }
 
 /// What the attention presentation reads from an agents roster: each agent's label, the step

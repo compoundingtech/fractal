@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The post-commit feed test waits on the follower's wake and reads the step's state history instead of sampling its status every 10 ms against a 10 s deadline: the step is agentless, so the follower's next evaluation completes it, and under load one sleep could span both evaluations so the test never saw ready.",
+  "replay": {
+    "status": "none",
+    "detail": "Test-only change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage or schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule, permission or trust change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, CLI or client change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Nothing runs differently on installed machines."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the commit."
+  }
+}

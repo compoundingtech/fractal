@@ -40,7 +40,7 @@ fn a_waiting_seal_pass_reuses_the_unchanged_identity_digest() {
         let scope = SqliteWorkScope::start();
         let status = store.checkpoint_status(context.now_unix_ms, &context.configured_peers).unwrap();
         let work = scope.finish();
-        assert_eq!(status.pending.unwrap().terms.sealed_digest, walked.digest);
+        assert_eq!(status.pending.unwrap().terms.unwrap().sealed_digest, walked.digest);
         assert!(work.statements <= 14 && work.vm_steps <= 3_100, "status: {work:?}");
     }
     let (reused, work) = identities(&store, cut);
@@ -74,7 +74,13 @@ fn a_reused_identity_digest_is_the_walked_one_after_every_change_it_covers() {
                 &format!("diagnostic-{n}"),
             )
         };
-        claims.push(store.append_claim(&claim).unwrap().id);
+        // Warnings are written as an older build wrote them, before they became local.
+        let appended = if claim.kind == "daemon.diagnostic" {
+            store.append_as_older_build_for_test(&claim)
+        } else {
+            store.append_claim(&claim)
+        };
+        claims.push(appended.unwrap().id);
     }
     store.seal_local_batches().unwrap();
     // Envelope and tombstone writes below come from another connection, as from another
@@ -256,7 +262,7 @@ fn a_walk_a_fenced_change_interrupts_is_not_reused() {
     let cut: u128 = 1_000_000;
     for n in 0..100_u128 {
         store.set_write_clock_at(1_000 + n).unwrap();
-        store.append_claim(&input(
+        store.append_as_older_build_for_test(&input(
             "daemon/alder", "daemon.diagnostic", None,
             json!({"severity": "warning", "code": "slow-request", "reason": format!("slow {n}")}),
             &format!("diagnostic-{n}"),

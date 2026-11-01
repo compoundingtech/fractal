@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Exercise directory reads during the prompt transcript watcher's no-spurious-wakeup assertion and bound the test with a clear deadline, preserving the existing production fix for directory access notifications.",
+  "replay": {
+    "status": "none",
+    "detail": "Test coverage only; no replay or stored-data change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or projection rule change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No production API, CLI, wire or watcher behavior change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No runtime change or deployment required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No runtime or data recovery required."
+  }
+}

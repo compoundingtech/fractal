@@ -1,5 +1,5 @@
 //! A Claude seat on a machine with no st2 at all: no `st2` on the daemon's PATH and no st2 state
-//! directory under its private HOME. `scripts/st3-no-st2-eval/run` starts an isolated daemon and
+//! directory under its private HOME. `scripts/fractal-no-st2-eval/run` starts an isolated daemon and
 //! one Claude seat whose `claude` is a stand-in that drives the real hook, status-line and
 //! channel contracts (no model, no login). It requires observation, the native transcript in the
 //! client API timeline, the status-line record, message delivery and read, a passing
@@ -37,8 +37,8 @@ fn a_claude_seat_runs_with_no_st2_on_the_machine() {
             "ST3_SUBJECT",
             "python3",
         ])
-        .arg(repo.join("scripts/st3-no-st2-eval/run"))
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(repo.join("scripts/fractal-no-st2-eval/run"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg(&evidence)
         .output()
         .expect("run the no-st2 seat eval");

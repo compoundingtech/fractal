@@ -88,11 +88,24 @@ sealed set do not invalidate this record; fixing a rule or reader changes its id
 
 The rules identity covers projection inputs and replay as well as retention: the graph proof includes
 `arrangements` and `arrangement_registers`, even when empty, and replay rebuilds them from sealed claims.
+Version 21 adds raw and live ordered memberships, live counters, their authoritative member
+lifecycle dependencies and the shared reverse-edge projection to proof/replay. Absent winners,
+hidden memberships and folder tombstones remain retained: no ordered-membership drop rule exists.
+Retiring a member changes visibility, not its retained pair position; redeclaring a reusable stable
+identity can restore that position.
+Repairing a retained member's selected claim refreshes its lifecycle dependency from
+unrepaired authority in the repair transaction, so incremental and replay witnesses agree.
+Local membership repair watermarks survive projection rebuilds but are excluded from
+shared checkpoint/digest answers.
 Different builds' rules digests must match exactly, not by version ordering: a mixed-version fleet waits
 at sealing until its participants use the same rules, including during rollback. Verification also
 refuses seal terms whose rules digest differs from the running build, without consuming the node's first
 verification. The normal step replaces terms only for the newest due cut; quiet retries there do not
 establish verification of an older cut.
+For the required N/N-1 rolling window, a sealing wait must not block work or
+schedules, and retained history must remain readable by admitted older members.
+The [mixed-fleet design and open implementation](compatibility.md#checkpoints-in-a-mixed-fleet)
+preserve these exact-digest checks rather than weakening verification.
 
 A status-history proof mismatch logs bounded source diagnostics from the same scratch proof reads:
 the checkpoint, seal row, cut, build and rules/drop identities, array lengths and first differing
@@ -162,7 +175,8 @@ These claims are never dropped, whatever a rule says:
 - a claim whose record is not valid: invalid, unknown or repaired, or the replacement of a repair;
 - a claim a projection row references by ID: desired state, mission definitions and revisions,
   document bindings;
-- a claim another claim in the sealed set cites as evidence, or that a mission run pins as an input;
+- a claim another claim in the sealed set cites as evidence, that a mission run pins as an input,
+  or that a mission request names as its discovery;
 - a claim held in two envelopes, and a claim sharing an operation with a kept claim, so an
   operation is wholly kept or wholly dropped;
 - each writer's newest envelope in the sealed set, because sequence numbers and heads read it;
@@ -186,19 +200,19 @@ agree on a checkpoint only when they run the same rules. In summary:
 
 | Kind | Slot | Kept |
 |---|---|---|
-| `harness.observed` | subject, incarnation | the first claim; the first `ready`, `working` or `idle`, and the first of those that is not a credential state; the newest; the newest non-`working` claim and every `working` claim after it; the newest carrier of each optional field; the start of the current native credential episode |
+| `harness.observed` | subject, incarnation | the first claim; the first `ready`, `working` or `idle`, and the first of those that is not a credential state; the newest; the newest non-`working` claim and every `working` claim after it; the newest carrier of each optional field; the start of the current native credential episode and the credential report that ended the one before (rules version 24); the newest `working` claim and the newest `ended` claim (rules version 25) |
 | observed seat status history (`harness.observed` transitions and runtime resets) | seat | the last 200 transitions and runtime resets within seven days before the cut, ignoring stamped heartbeats; for each incarnation the transition before its first visible one, even when older; the start of the current state |
 | `harness.timeline` | subject, incarnation | the newest; only claims dated at least five days before the cut go |
 | `loop.state` | subject | the first and last claim of each run of equal (status, round); the first claim carrying the loop's items |
 | `subscription.mission-deferred` | subject, request | every claim while the request is open; once a start, failure, cancellation or release closes it, the newest |
 | `observer.observed`, `daemon.diagnostic`, `transport.observed` | subject (and code, or origin) | the newest |
-| `resource.observed` written by an observer | subject | the newest |
+| `resource.observed` written by an observer | subject | the newest; the newest of each `attribution_only` value; the earliest that names an opener; for a pull request, every observation back to and including the newest one that is not open outside the merge queue, or the newest 400 when there is none, and any accepted at the same time as that one (the merge-queue check walks back that far); every observation of a resource any of them describes in flat facts (rules version 23) |
 | `runtime.action.*` with no actor, `render.applied`, `runtime.readiness-deadline-reached` | subject (and action, incarnation, status) | the newest; only claims dated at least five days before the cut go |
 | `sekret.called`, `sekret.exited`, `sekret.refused`, `sekret.changed` written before they became local observations | subject | the newest; only claims dated at least five days before the cut go |
 | `harness.limits` | subject | the newest; the newest reading the account fold accepts, and any accepted at the same time; every reading measured within an hour of the newest reading of its account group (driver, account, declared account, weekly or five-hour only) across every seat |
-| `harness.todo.observed` | subject | the newest (a rule that predates its description line) |
+| `harness.todo.observed` | subject | the newest |
 | `runtime.reconcile-decision` | subject, decision key | the newest of each key; the reconciler asks whether a key was recorded, reads the newest member-reconcile decision and the subject's newest |
-| `harness-question.observed` | subject | every observation while pending; newest observation indefinitely once resolved at least a day before the cut (rules version 18, following #1473's allocated 17); the resolution is durable (see [Harness questions](harness-questions.md)) |
+| `harness-question.observed` | subject | every observation while pending; newest observation indefinitely once resolved at least a day before the cut; the resolution is durable (see [Harness questions](harness-questions.md)) |
 | `harness.usage`, response rollups | subject, incarnation, model, account, run, step, host | the last snapshot of each UTC hour in the seven days before the cut, the newest snapshot before that window, and the newest of all |
 | `harness.usage`, session cumulative | subject, incarnation | the newest and the last claim of the largest total |
 | `harness.usage`, context occupancy | subject, incarnation | the newest |

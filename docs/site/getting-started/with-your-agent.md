@@ -6,6 +6,8 @@ order: 3
 
 # Set up with your agent
 
+KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+
 Give this procedure to an AI coding agent that can run shell commands on the machine you want to use. It installs Fractal, starts its daemon, declares a worker, and runs a small mission. Use an ordinary coding-agent session operating with the user's authorization, **not an agent already managed by Fractal**: setup is a person-only operation and managed agents must not remove or override their bound identity to run it.
 
 ## 1. Establish prerequisites
@@ -63,14 +65,46 @@ fractal service status
 ```sh
 mkdir -p "$HOME/fractal/garden"
 cd "$HOME/fractal/garden"
-cat > worker.kdl <<EOF
+```
+
+Save the KDL variant as `worker.kdl`. Replace `/work/garden` with the absolute workspace path printed by `pwd`.
+
+```ts group=worker variant=effect
+import { Fractal } from 'fractal/effect'
+
+export const worker = Fractal.agent({
+  id: 'garden/worker',
+  lifecycle: 'standing',
+  host: 'local',
+  workspace: '/work/garden',
+  harness: { kind: 'claude', model: 'sonnet' },
+})
+```
+
+```ts group=worker variant=ts
+import { Fractal } from 'fractal'
+
+export const worker = Fractal.agent({
+  id: 'garden/worker',
+  lifecycle: 'standing',
+  host: 'local',
+  workspace: '/work/garden',
+  harness: { kind: 'claude', model: 'sonnet' },
+})
+```
+
+```kdl group=worker variant=kdl
 version 2
 agent "garden/worker" {
-  workspace "$PWD"
+  workspace "/work/garden"
   restart "always"
-  harness "claude" { model "sonnet"; }
+  harness "claude" {
+    model "sonnet"
+  }
 }
-EOF
+```
+
+```sh
 fractal apply worker.kdl --as "person/$PERSON" --dry-run
 fractal apply worker.kdl --as "person/$PERSON"
 fractal agents show agent/garden/worker
@@ -82,7 +116,68 @@ fractal agents show agent/garden/worker
 
 ```sh
 mkdir -p missions
-cat > missions/first-note.kdl <<'EOF'
+```
+
+Save the KDL variant as `missions/first-note.kdl`.
+
+```ts group=first-note variant=effect
+import { Effect } from 'effect'
+import { Fractal } from 'fractal/effect'
+import { worker } from '../worker'
+
+const ada = Fractal.person({ id: 'ada' })
+
+export const mission = Fractal.mission(
+  {
+    id: 'garden/first-note',
+    state: 'ready',
+    timeout: '1h',
+    reportTo: ada,
+    goal: 'WELCOME.md introduces this workspace in one short paragraph.',
+    constraints: [
+      'Only create WELCOME.md. Do not modify other files or publish anything.',
+    ],
+  },
+  () => Effect.gen(function* () {
+    yield* Fractal.step({
+      id: 'write',
+      timeout: '15m',
+      goal: 'WELCOME.md exists and contains a short introduction to this workspace.',
+    }).pipe(Effect.provide(Fractal.Worker.layer(worker)))
+  }),
+)
+```
+
+```ts group=first-note variant=ts
+import { Fractal } from 'fractal'
+import { worker } from '../worker'
+
+const ada = Fractal.person({ id: 'ada' })
+
+export const mission = Fractal.mission(
+  {
+    id: 'garden/first-note',
+    state: 'ready',
+    timeout: '1h',
+    reportTo: ada,
+    goal: 'WELCOME.md introduces this workspace in one short paragraph.',
+    constraints: [
+      'Only create WELCOME.md. Do not modify other files or publish anything.',
+    ],
+  },
+  async () => {
+    await Fractal.Worker.provide(worker, async () => {
+      await Fractal.step({
+        id: 'write',
+        timeout: '15m',
+        goal: 'WELCOME.md exists and contains a short introduction to this workspace.',
+      })
+    })
+  },
+)
+```
+
+```kdl group=first-note variant=kdl
 version 2
 mission "garden/first-note" state="ready" {
   goal "WELCOME.md introduces this workspace in one short paragraph."
@@ -92,7 +187,9 @@ mission "garden/first-note" state="ready" {
     goal "WELCOME.md exists and contains a short introduction to this workspace."
   }
 }
-EOF
+```
+
+```sh
 fractal apply missions/first-note.kdl --as "person/$PERSON" --dry-run
 fractal apply missions/first-note.kdl --as "person/$PERSON"
 fractal missions start garden/first-note --id garden/first-note/one \

@@ -1670,6 +1670,82 @@ version 2
 }
 
 #[test]
+fn a_pin_of_a_trimmed_observation_says_it_was_trimmed() {
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(
+        &store,
+        r#"
+version 2
+
+  resource "source" { kind "custom.st3.document-source" }
+  mission "pinned" state="ready" {
+    input "source" kind="resource"
+    concurrent-runs
+    goal "Use the pinned observation."
+  }
+
+"#,
+        "publish-pinned-mission",
+    );
+    let observe = |state: &str| {
+        store
+            .append_claim(&ClaimInput {
+                subject: "resource/source".into(),
+                kind: "resource.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([("state".into(), Value::String(state.into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    let first = observe("ready");
+    observe("changed");
+    // As a member that trims locally deletes it: retired with its rows.
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let tombstone = smallclaims::store::checkpoint::ClaimTombstone {
+            id: first.id.clone(),
+            writer: "node".into(),
+            sequence: 0,
+            envelope_hash: String::new(),
+            subject: "resource/source".into(),
+            kind: "resource.observed".into(),
+            actor: None,
+            predecessors: Vec::new(),
+            operation_id: None,
+            request_digest: None,
+            accepted_at_unix_ms: 0,
+        };
+        smallclaims::store::checkpoint::delete_dropped_rows_tx(&transaction, &[], &[tombstone]).unwrap();
+        transaction.commit().unwrap();
+    }
+    let run = |key: &str, source: String| {
+        store.create_mission_run(&MissionRunRequest {
+            mission: "pinned".into(),
+            revision: None,
+            workspace: ".".into(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::from([("source".into(), source)]),
+            idempotency_key: key.into(),
+        })
+    };
+    let trimmed = run("pin-trimmed", format!("resource/source@{}", first.id)).unwrap_err();
+    assert_eq!(trimmed.code, "trimmed-resource-input-version");
+    assert!(trimmed.message.contains(&format!("resource/source@{} was trimmed on this member", first.id)), "{}", trimmed.message);
+    // A claim this member never had may still arrive.
+    let unarrived = run("pin-unarrived", format!("resource/source@{}", "a".repeat(64))).unwrap_err();
+    assert_eq!(unarrived.code, "missing-resource-input-version");
+    // The subject pins its newest observation.
+    assert!(run("pin-subject", "resource/source".into()).is_ok());
+}
+
+#[test]
 fn child_runs_accept_inputs_and_revisions_cannot_change_them() {
     let store = Store::open_memory("node").unwrap();
     let source = r#"
@@ -2820,7 +2896,7 @@ fn work_extensions_upgrade_and_adopt_a_v5_certificate_without_changing_its_terms
     worker_work(&worker, &step, "claim", None, "historic-extension-claim");
     for index in 0..5 {
         controller
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/controller".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
@@ -3147,6 +3223,51 @@ fn work_extensions_sync_authority_with_previous_projection_rules_without_compari
             .unwrap()
             .authority_digest
     );
+}
+
+/// A step's end replicates the seat's held usage rollups with its receipt. The run is judged on its
+/// origin, maybe another member, as soon as the step ends, and a loop's token budget reads the
+/// seat's replicated usage then, before any `ended` flush could arrive.
+#[test]
+fn completing_a_step_replicates_the_seats_held_rollups_with_its_receipt() {
+    let (_controller, worker, step) = replicated_step_pair();
+    let seat = "agent/worker.one";
+    let request = |key: &str| WorkRequest {
+        wait_ms: None,
+        actor: Some(seat.into()),
+        incarnation: Some("worker-generation".into()),
+        summary: Some("done".into()), reason: None, evidence: Vec::new(),
+        idempotency_key: key.into(),
+    };
+    worker.work_action(&step, "claim", &request("held-usage-claim")).unwrap();
+    let hour = 3_600_000_u128;
+    let start = (now_ms() / hour + 1) * hour + 1_000;
+    let observe = |kind: &str, fields: Value, at: u128| {
+        worker
+            .append_latest_observation(
+                &ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("{kind}:{at}")),
+                },
+                at,
+            )
+            .unwrap();
+    };
+    observe("harness.observed", json!({"state": "working", "incarnation_id": "inc-1", "observed_at_ms": start as u64}), start);
+    for (tokens, at) in [(10, start + 1_000), (20, start + 60_000)] {
+        observe("harness.usage", json!({"semantics": "response_rollup", "driver": "codex", "incarnation_id": "inc-1",
+            "model": "example-model", "total_tokens": tokens, "observed_at_unix_ms": at as u64}), at);
+    }
+    let replicated = || worker.claims_for(seat, Some("harness.usage")).unwrap().iter()
+        .map(|claim| claim.body["fields"]["total_tokens"].as_u64().unwrap()).collect::<Vec<_>>();
+    assert_eq!(replicated(), [10], "the second waits for its hour");
+    worker.work_action(&step, "complete", &request("held-usage-complete")).unwrap();
+    assert_eq!(replicated(), [10, 20], "the step's end replicates it");
 }
 
 #[test]
@@ -4548,7 +4669,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
     let target = Store::open_memory("birch").unwrap();
     let observation = |reason: &str, key: &str| {
         source
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/alder".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
@@ -10856,4 +10977,96 @@ mod terminal_projection_date_tests {
     use super::*;
 
     /* sqlite-large-value: allow-for-now lv-h68fae53a4501 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("terminal_projection_date_tests.rs");
+}
+
+#[test]
+fn evaluation_snapshot_survives_revision_cutover_between_header_and_steps() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
+
+    struct Pause {
+        fired: AtomicBool,
+        reached: mpsc::SyncSender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+
+    let scratch = tempfile::tempdir().unwrap();
+    // WAL lets the real cutover commit while the evaluator holds its read snapshot.
+    let store = Arc::new(Store::open(&scratch.path().join("claims.sqlite3"), "node").unwrap());
+    let publish = |goal: &str, key: &str| {
+        crate::store::tests::publish_mission(
+            &store,
+            &format!(r#"version 2
+mission "snapshot-cutover" state="ready" {{
+ goal "Keep a revision evaluation coherent."
+ completion {{ when "all-steps-exhausted" }}
+ step "work" {{ assigned-to "person/test"; goal {goal:?} }}
+}}"#),
+            key,
+        )
+    };
+    let first = publish("First revision work.", "snapshot-first");
+    let original = store.create_mission_run(&MissionRunRequest {
+        mission: first.id.clone(),
+        revision: None,
+        workspace: scratch.path().to_str().unwrap().into(),
+        requester: Some("person/test".into()),
+        mode: None,
+        inputs: BTreeMap::new(),
+        idempotency_key: "snapshot-run".into(),
+    }).unwrap();
+    let subject = original.steps[0].subject.clone();
+    assert!(store.set_step_state(&subject, "ready", None).unwrap());
+    let second = publish("Replacement revision work.", "snapshot-second");
+    let (reached, at_steps) = mpsc::sync_channel(1);
+    let (resume, continue_steps) = mpsc::sync_channel(1);
+    let pause = Arc::new(Pause {
+        fired: AtomicBool::new(false),
+        reached,
+        resume: Mutex::new(continue_steps),
+    });
+    for connection in store.readers.idle.lock().unwrap().iter() {
+        let pause = pause.clone();
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            // The header SELECT has finished. Hold preparation of the next SELECT
+            // before any predecessor step state is read, without a production hook.
+            if matches!(context.action, AuthAction::Read { table_name, .. } if table_name == "step_runs")
+                && !pause.fired.swap(true, Ordering::AcqRel)
+            {
+                let _ = pause.reached.send(());
+                let _ = pause.resume.lock().unwrap().recv();
+            }
+            Authorization::Allow
+        }));
+    }
+    let reader_store = store.clone();
+    let id = original.id.clone();
+    let reader = std::thread::spawn(move || reader_store.mission_run_for_evaluation(&id));
+    at_steps.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let cutover = store.adopt_mission_revision(
+        &original.id,
+        &second,
+        "person/test",
+        "Replace the work during an evaluation read.",
+        "snapshot-cutover",
+    ).unwrap();
+    assert_ne!(cutover.generation, original.generation);
+    assert_eq!(store.step_run(&subject).unwrap().unwrap().status, "cancelled");
+    resume.send(()).unwrap();
+    let observed = reader.join().unwrap();
+    for connection in store.readers.idle.lock().unwrap().iter() {
+        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    }
+    let (view, mission) = observed.unwrap();
+    assert!(pause.fired.load(Ordering::Acquire), "the cutover interleaving must run");
+    assert_eq!(view.generation, original.generation);
+    assert_eq!(mission.unwrap().revision, original.revision);
+    assert_eq!(view.steps.len(), 1);
+    assert_eq!(view.steps[0].subject, subject);
+    assert_eq!(view.steps[0].status, "ready", "old header must retain its pre-cutover step state");
+    assert!(store.readers.get().is_autocommit(), "evaluation must release its read transaction");
+    let (current, _) = store.mission_run_for_evaluation(&original.id).unwrap();
+    assert_eq!(current.generation, cutover.generation);
+    assert_eq!(current.phase, "normal");
+    assert_eq!(current.steps[0].status, "pending");
 }

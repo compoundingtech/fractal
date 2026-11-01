@@ -6,13 +6,100 @@ order: 2
 
 # Missions in practice
 
+KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+
 Use the worker from [Your first agent](../getting-started/first-agent.md). The examples use `person/ada`; substitute your configured person.
 
 ## Plan the result and the review
 
 Save this as `missions/readme.kdl` in the worker workspace:
 
-```kdl
+```ts group=mission variant=effect
+import { Effect } from 'effect'
+import { Fractal } from 'fractal/effect'
+import { worker } from '../worker'
+
+const ada = Fractal.person({ id: 'ada' })
+
+export const mission = Fractal.mission(
+  {
+    id: 'garden/readme',
+    state: 'ready',
+    timeout: '1h',
+    reportTo: ada,
+    goal: 'README.md introduces this workspace and has a human approval.',
+    constraints: [
+      'Only edit README.md. Do not commit or publish changes.',
+    ],
+  },
+  () => Effect.gen(function* () {
+    yield* Fractal.step({
+      id: 'prepare',
+      timeout: '30m',
+      goal: 'README.md contains a clear one-paragraph workspace introduction.',
+    }).pipe(Effect.provide(Fractal.Worker.layer(worker)))
+
+    yield* Fractal.step(
+      { id: 'approve' },
+      Effect.gen(function* () {
+        const answer = yield* Fractal.ask({
+          name: 'Ada approves the README',
+          reviewer: ada,
+          question: 'Is the README ready to use?',
+        })
+        if (answer._tag === 'Rejected') {
+          yield* Effect.fail(new Error('README rejected'))
+        }
+      }),
+    )
+  }),
+)
+```
+
+```ts group=mission variant=ts
+import { Fractal } from 'fractal'
+import { worker } from '../worker'
+
+const ada = Fractal.person({ id: 'ada' })
+
+export const mission = Fractal.mission(
+  {
+    id: 'garden/readme',
+    state: 'ready',
+    timeout: '1h',
+    reportTo: ada,
+    goal: 'README.md introduces this workspace and has a human approval.',
+    constraints: [
+      'Only edit README.md. Do not commit or publish changes.',
+    ],
+  },
+  async () => {
+    await Fractal.Worker.provide(worker, async () => {
+      await Fractal.step({
+        id: 'prepare',
+        timeout: '30m',
+        goal: 'README.md contains a clear one-paragraph workspace introduction.',
+      })
+    })
+
+    await Fractal.step(
+      { id: 'approve' },
+      async () => {
+        const answer = await Fractal.ask({
+          name: 'Ada approves the README',
+          reviewer: ada,
+          question: 'Is the README ready to use?',
+        })
+        if (answer._tag === 'Rejected') {
+          throw new Error('README rejected')
+        }
+      },
+    )
+  },
+)
+```
+
+```kdl group=mission variant=kdl
 version 2
 mission "garden/readme" state="ready" {
   goal "README.md introduces this workspace and has a human approval."
@@ -45,7 +132,7 @@ The review waits without occupying the worker. Read the file and run result befo
 fractal alerts approve STEP_RUN_ID --as person/ada --reason 'The README is ready.'
 ```
 
-A rejected gate fails its condition. Use a feedback gate when changes should route back to the worker rather than end as rejection; see the [worked examples](https://github.com/compoundingtech/fractal/blob/main/examples/st3/README.md).
+A rejected gate fails its condition. Use a feedback gate when changes should route back to the worker rather than end as rejection; see the [worked examples](https://github.com/compoundingtech/fractal/blob/main/examples/fractal/README.md).
 
 ## Revise a live run explicitly
 

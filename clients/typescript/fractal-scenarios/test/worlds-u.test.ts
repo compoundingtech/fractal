@@ -118,6 +118,7 @@ describe('unknown-fields catalog world', () => {
       const stream = await client.collectionStream({ socket: replay.socket, onEnd: (error) => endings.push(error), onFrame: (frame) => {
         Schema.decodeUnknownSync(Schema.CollectionFrame, 'tolerant')(frame)
         frames.push(frame)
+        if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') throw new Error('Expected a resource collection window')
         if (frame.id === 'agents') window = applyWindow(window, frame)
       } })
       stream.subscribe('agents', 'agents', 200)

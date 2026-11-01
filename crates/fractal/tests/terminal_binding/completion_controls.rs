@@ -126,19 +126,25 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     declare_terminal(&store);
     let runtime = runtime();
     let socket = root.path().join("api.sock");
-    let state = fractal_daemon::api::AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: "orchid".into(),
-    state_dir: root.path().into(),
-    pty_root: root.path().join("pty"),
-    pty_binary: "pty".into(),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = fractal_daemon::api::AppState {
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: "orchid".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         let store = state.store.clone();
@@ -197,6 +203,7 @@ sys.exit(int(os.environ.get('FIXTURE_PROVIDER_EXIT', '0')))
         .map(|directory| directory.join("python3"))
         .find(|candidate| candidate.is_file())
         .expect("terminal provider fixture needs python3 on the executing runner");
+    let (_pinned, fixture) = pinned_fixture();
     let mut command = fractal_daemon::test_support::async_command(env!("ST3_FIXTURE_BASH"));
     command
         .env_clear()
@@ -206,7 +213,7 @@ sys.exit(int(os.environ.get('FIXTURE_PROVIDER_EXIT', '0')))
         .env("FIXTURE_SEAT", SEAT)
         .env("ST3_SUBJECT", TERMINAL)
         .env("ST3_ENDPOINT", root.path().join("api.sock"))
-        .env("ST3_BIN", test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .env("ST3_BIN", &fixture)
         .env("ST3_DRIVER_STATE_DIR", root.path().join("drivers"))
         .env("ST3_MAILBOX_TRANSPORT", "push")
         .env("FIXTURE_RECEIVED", &received)

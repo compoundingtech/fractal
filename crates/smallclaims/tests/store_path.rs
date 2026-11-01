@@ -3,9 +3,28 @@ use rusqlite::{Connection, OpenFlags};
 use smallclaims::{
     claim::ClaimInput,
     sqlite::ReadPool,
-    store::{Store, StoreCopy, runtime::Plain},
+    store::{AdmittedStore, Store, StoreCopy, runtime::Plain},
 };
 use std::{collections::BTreeMap, path::{Path, PathBuf}, sync::Arc};
+
+#[test]
+fn explicit_store_open_never_recreates_a_removed_parent_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("store");
+    std::fs::create_dir(&directory).unwrap();
+    let admitted = AdmittedStore::from_locked_directory(
+        &directory, std::fs::File::open(&directory).unwrap(),
+    ).unwrap();
+    std::fs::remove_dir(&directory).unwrap();
+    assert!(Store::open_admitted(admitted, "alder", Arc::new(Plain)).is_err());
+    assert!(!directory.exists());
+    std::fs::create_dir(&directory).unwrap();
+    let admitted = AdmittedStore::from_locked_directory(
+        &directory, std::fs::File::open(&directory).unwrap(),
+    ).unwrap();
+    let store = Store::open_admitted(admitted, "alder", Arc::new(Plain)).unwrap();
+    assert!(store.path.exists());
+}
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut path = path.as_os_str().to_os_string();
