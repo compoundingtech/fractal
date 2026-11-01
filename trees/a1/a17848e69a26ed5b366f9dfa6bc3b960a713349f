@@ -3,3 +3,7 @@ record 65eaf5f16a5a9e775c10a44833c131714b40e37f genie-freshness 0 host/forge 202
 record 5832d46890844852683951f8d52be686c6a7ccd7 ci-script-tests 0 host/forge 2026-11-01T01:01:21Z
 record 48c42b66445fb2b3411e8a33c32ecdb59ac7574d linux-clippy 0 host/forge 2026-11-01T01:28:16Z
 record 8ea19c9d3ec3b0216beb4807c0ba61e1d8b64719 linux-gate 0 host/forge 2026-11-01T01:27:36Z
+record 2e61a282548b723304d79d3067e9beabbc8ebe59 rust-tests 0 host/forge 2026-11-01T01:29:27Z
+record 7a40c059f1293739bc02ddc642b71834ff5cad32 rust-tests 0 host/forge 2026-11-01T01:29:19Z
+record 7a6cf89c46a3fee68a09fd5d2f8a07e1911a9905 rust-tests 0 host/forge 2026-11-01T01:29:27Z
+record e892792c54088206a00c490613ab60f5f8c8ae68 rust-tests 0 host/forge 2026-11-01T01:29:27Z
