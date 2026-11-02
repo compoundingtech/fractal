@@ -224,3 +224,37 @@ fn trimming_keeps_every_state_and_bounds_the_marks() {
         0
     );
 }
+
+/// The writer each lifecycle step holds, as a claim and as a mark, on a file store holding
+/// `ST_MARKS_MESSAGES` (2,000) messages. Each sample is the whole write, commit included.
+#[test]
+#[ignore = "writer hold per mark against its claim: run alone"]
+fn a_mark_holds_the_writer_no_longer_than_the_claim_it_replaces() {
+    let messages = std::env::var("ST_MARKS_MESSAGES").ok().and_then(|value| value.parse().ok()).unwrap_or(2_000);
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("claims.sqlite3"), "node").unwrap();
+    for index in 0..messages * 2 {
+        store.append_claim(&sent(&format!("message/hold-{index}"), RECIPIENT, &[])).unwrap();
+    }
+    let percentile = |samples: &mut Vec<f64>, percent: usize| {
+        samples.sort_by(f64::total_cmp);
+        samples[(samples.len() - 1) * percent / 100]
+    };
+    let mut report = BTreeMap::new();
+    for kind in message_marks::MARKS {
+        let (mut claimed, mut marked) = (Vec::new(), Vec::new());
+        for index in 0..messages {
+            let started = std::time::Instant::now();
+            store.append_claim(&lifecycle(&format!("message/hold-{index}"), kind, RECIPIENT)).unwrap();
+            claimed.push(started.elapsed().as_secs_f64() * 1000.0);
+            let started = std::time::Instant::now();
+            message_marks::record(&store, &format!("message/hold-{}", messages + index), kind, RECIPIENT).unwrap();
+            marked.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        report.insert(kind, json!({
+            "claim_p50_ms": percentile(&mut claimed, 50), "claim_p99_ms": percentile(&mut claimed, 99),
+            "mark_p50_ms": percentile(&mut marked, 50), "mark_p99_ms": percentile(&mut marked, 99),
+        }));
+    }
+    println!("{}", json!({"messages": messages, "per_kind": report}));
+}
