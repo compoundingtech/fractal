@@ -13,6 +13,7 @@ const upsert = <A extends Keyed>(list: readonly A[], value: A): A[] => {
 /** Complete client-v0 known-kind set; unsupported collections must not become future resources. */
 const COLLECTION_OF_KIND: Record<Resource['kind'], string> = {
   agent: 'agents',
+  note: 'notes',
   runtime: 'runtimes',
   machine: 'machines',
   mission: 'missions',

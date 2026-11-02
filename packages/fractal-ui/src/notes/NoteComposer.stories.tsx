@@ -14,15 +14,11 @@ function NoteComposerStory({ scheme, width, negativeControl }: NotesFrameArgs) {
   const [failingKey, setFailingKey] = React.useState(0)
   const refused = React.useRef(false)
   const record = async (text: string) => {
-    const { promise, resolve } = Promise.withResolvers<void>()
-    setTimeout(resolve, 150)
-    await promise
+    await new Promise<void>(resolve => setTimeout(resolve, 150))
     setSubmitted(current => [...current, text])
   }
   const refuse = async () => {
-    const { promise, resolve } = Promise.withResolvers<void>()
-    setTimeout(resolve, 150)
-    await promise
+    await new Promise<void>(resolve => setTimeout(resolve, 150))
     if (!refused.current) {
       refused.current = true
       if (negativeControl) setFailingKey(key => key + 1)
