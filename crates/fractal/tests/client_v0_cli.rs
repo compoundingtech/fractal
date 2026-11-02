@@ -5250,7 +5250,7 @@ async fn phone_command_cli_real_daemon_outcomes() {
     for (verb, outcome, exit) in [
         (vec!["inspect"], "completed", 0),
         (vec!["navigate", "Conversation", "agent/worker", "--session-id", "session/example"], "refused", 3),
-        (vec!["mark-read", "attention/example"], "failed", 1),
+        (vec!["mark-read", "message/example"], "failed", 1),
         (vec!["navigate", "Agents"], "expired", 4),
         (vec!["inspect"], "not-foreground", 5),
     ] {
@@ -5278,6 +5278,9 @@ async fn phone_command_cli_real_daemon_outcomes() {
         let row: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(row["value"]["state"], outcome);
         assert_eq!(row["value"]["issued_by"], "person/alex");
+        if row["value"]["command_kind"] == "phone.message.read" {
+            assert_eq!(row["value"]["args"], serde_json::json!({"message_id": "message/example"}));
+        }
         println!("{}", String::from_utf8_lossy(&output.stdout));
         drop(stream);
     }

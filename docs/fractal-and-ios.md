@@ -95,7 +95,7 @@ in the foreground and use the same member where it was paired:
 ```sh
 st devices --as person/ada command device/PHONE inspect
 st devices --as person/ada command device/PHONE navigate Agents
-st devices --as person/ada command device/PHONE mark-read attention/ITEM --json
+st devices --as person/ada command device/PHONE mark-read message/MESSAGE --json
 ```
 
 Each command waits for one correlated outcome, not an offline queue. `--ttl`

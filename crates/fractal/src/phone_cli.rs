@@ -22,8 +22,8 @@ enum Verb {
         #[command(subcommand)]
         screen: Screen,
     },
-    /// Run the phone's existing mark-read handler for an attention card.
-    MarkRead { attention_id: String },
+    /// Run the phone's existing mark-read handler for a message.
+    MarkRead { message_id: String },
 }
 
 #[derive(Subcommand)]
@@ -78,7 +78,7 @@ pub(super) async fn run(client: &GeneratedClient, args: CommandArgs, json_output
     let command = match args.verb {
         Verb::Inspect => PhoneCommand::Inspect(fractal_client::PhoneInspectArgs::default()),
         Verb::Navigate { screen } => PhoneCommand::Navigate(screen.into()),
-        Verb::MarkRead { attention_id } => PhoneCommand::MessageRead(fractal_client::PhoneMessageReadArgs { attention_id }),
+        Verb::MarkRead { message_id } => PhoneCommand::MessageRead(fractal_client::PhoneMessageReadArgs { message_id }),
     };
     let issued = client.device_command(&DeviceCommandRequest {
         api_version: CLIENT_V0_API_VERSION.into(), device: args.device,
@@ -109,6 +109,17 @@ pub(super) async fn run(client: &GeneratedClient, args: CommandArgs, json_output
 mod tests {
     use super::*;
 
+    #[test]
+    fn phone_command_mark_read_uses_message_id() {
+        let cli = Cli::try_parse_from(["fractal", "devices", "command", "device/a",
+            "mark-read", "message/example"]).unwrap();
+        let Command::Devices(DevicesArgs { command: Some(DevicesCommand::Command(args)), .. }) = cli.command else { panic!("not phone command") };
+        let Verb::MarkRead { message_id } = args.verb else { panic!("not mark-read") };
+        let command = PhoneCommand::MessageRead(fractal_client::PhoneMessageReadArgs { message_id });
+        assert_eq!(serde_json::to_value(command).unwrap(), serde_json::json!({
+            "kind": "phone.message.read", "args": {"message_id": "message/example"}
+        }));
+    }
     #[test]
     fn phone_command_cli_parses_typed_screens_and_bounded_ttl() {
         for screen in [

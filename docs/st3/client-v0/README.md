@@ -29,7 +29,7 @@ There is no polling or replay. The phone must be paired on this member.
 ```sh
 fractal devices --as person/alex command device/PHONE navigate Conversation agent/worker --session-id SESSION
 fractal devices --as person/alex command device/PHONE navigate Document docs/guide --trail docs/index
-fractal devices --as person/alex command device/PHONE --ttl 10000 mark-read attention/ITEM --json
+fractal devices --as person/alex command device/PHONE --ttl 10000 mark-read message/MESSAGE --json
 ```
 
 Navigation accepts the exact typed screen names; `navigate --help` lists them.
