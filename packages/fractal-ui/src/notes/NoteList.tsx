@@ -79,7 +79,7 @@ function NoteRow({ note, own, state, onArchive }: { readonly note: SubjectNote; 
       <span data-testid="note-author" {...stylex.props(styles.author)}>{own ? 'You' : note.author}</span>
       <span aria-hidden="true">·</span>
       <HumanTime at={DateTime.toEpochMillis(note.created_at)} aria-label="Added" />
-      {Option.isSome(note.session) && <span data-testid="note-session" {...stylex.props(styles.chip)}>This session</span>}
+      {note.target.startsWith('session/agent/') && <span data-testid="note-session" {...stylex.props(styles.chip)}>This session</span>}
       {expiresAt !== undefined && <HumanTime at={DateTime.toEpochMillis(expiresAt)} prefix="Expires " data-testid="note-expires" />}
       {own && onArchive !== undefined && <span {...stylex.props(styles.action)}>
         <Button isDisabled={pending || accepted} aria-describedby={textId} onPress={onArchive}>{pending ? 'Archiving…' : accepted ? 'Archived' : 'Archive'}</Button>

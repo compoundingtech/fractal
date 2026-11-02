@@ -11,7 +11,7 @@ export const target = 'agent/example/reviewer'
 
 const decode = decodeUnknownSync(SubjectNote)
 let sequence = 0
-const wire = (fields: { readonly author: string; readonly text: string; readonly audience: string; readonly created_at: string; readonly session?: string; readonly expires_at?: string; readonly target?: string }) => {
+const wire = (fields: { readonly author: string; readonly text: string; readonly audience: string; readonly created_at: string; readonly expires_at?: string; readonly target?: string }) => {
   sequence += 1
   const suffix = String(sequence).padStart(12, '0')
   return decode({
@@ -20,7 +20,6 @@ const wire = (fields: { readonly author: string; readonly text: string; readonly
     author: fields.author,
     text: fields.text,
     audience: fields.audience,
-    session: fields.session ?? null,
     created_at: fields.created_at,
     updated_at: fields.created_at,
     expires_at: fields.expires_at ?? null,
@@ -28,7 +27,7 @@ const wire = (fields: { readonly author: string; readonly text: string; readonly
   })
 }
 
-export const retireNote = wire({ author: viewer, audience: 'self', text: 'this agent session should be retired soon', session: 'incarnation/example', created_at: '2026-10-14T16:20:00Z' })
+export const retireNote = wire({ author: viewer, audience: 'self', text: 'this agent session should be retired soon', target: `session/${target}/1234%3A2026-10-14T15%3A57%3A40.016Z`, created_at: '2026-10-14T16:20:00Z' })
 export const diffNote = wire({ author: viewer, audience: 'agent', text: 'Prefer the smaller diff; the reviewer wants one pull request.', created_at: '2026-10-14T15:00:00Z', expires_at: '2026-10-15T09:00:00Z' })
 export const agentNote = wire({ author: target, audience: 'agent', text: 'Waiting on the schema regeneration before the next push.', created_at: '2026-10-14T12:00:00Z' })
 /** A future stored audience: readers present it like any other note and never show this raw value. */

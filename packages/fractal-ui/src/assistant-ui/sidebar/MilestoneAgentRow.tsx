@@ -38,6 +38,8 @@ export interface MilestoneAgentRowProps {
   readonly chevron?: React.ReactNode
   /** Touch tree hosts reserve a separate 44px disclosure track before the row-action button. */
   readonly touchDisclosure?: React.ReactNode
+  /** Selected-row host action, kept beside the existing trailing metadata. */
+  readonly noteAction?: React.ReactNode
   /** Host callbacks enable the corresponding actions; reported details are always available. */
   readonly onOpen?: (row: Row) => void
   /**
@@ -77,7 +79,7 @@ export const openAgentRowMenu = (element: Element): boolean => {
  * "? subagents" while unreported, nothing at zero; display-only rows carry none. The unreported "?" explains itself in
  * the kit tooltip on hover and keyboard focus, and to assistive tech as its description.
  */
-export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, reportedStatusOnly = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, onOpen, onSubagentsPress, actions, onMarkRead }: MilestoneAgentRowProps) {
+export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, reportedStatusOnly = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, noteAction, onOpen, onSubagentsPress, actions, onMarkRead }: MilestoneAgentRowProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const anchor = React.useRef<HTMLDivElement>(null)
   const touch = useTouchLayout()
@@ -96,7 +98,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
   const signal = row.needsMe === true && !attentionCovered
     ? <span data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenInk)}>!</span>
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread, frozen && styles.frozenInk)}>{row.unread}</span> : null
-  const hasTrailing = row.lastTurn._tag === 'Known' || signal !== null
+  const hasTrailing = row.lastTurn._tag === 'Known' || signal !== null || (!displayOnly && noteAction !== undefined)
   return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-display-only={displayOnly || undefined} data-narrow={narrow || undefined} data-touch={touchRow || undefined} data-touch-mission={touchMission || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
     onMouseEnter={displayOnly ? undefined : () => setHovered(true)} onMouseLeave={displayOnly ? undefined : () => setHovered(false)}
     onFocus={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(true) }} onBlur={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(false) }}
@@ -114,6 +116,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     {hasTrailing && <span data-row-column="trailing" {...stylex.props(styles.trailing)}>
       {row.lastTurn._tag === 'Known' && <span data-row-column="time" {...stylex.props(styles.time, frozen && styles.frozenInk)}><span data-row-field="last-turn"><SidebarTime at={row.lastTurn.at} now={now} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact /></span></span>}
       {signal !== null && <span data-row-column="signal" {...stylex.props(styles.signal)}>{signal}</span>}
+      {!displayOnly && noteAction}
     </span>}
     {!displayOnly && chevron !== undefined && <span data-row-column="chevron" {...stylex.props(styles.chevronSlot)}>{chevron}</span>}
     {!displayOnly && touchDisclosure !== undefined && <span data-row-column="touch-disclosure" {...stylex.props(styles.touchDisclosureSlot)}>{touchDisclosure}</span>}

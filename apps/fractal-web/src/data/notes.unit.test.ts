@@ -9,7 +9,7 @@ const note = decodeUnknownSync(SubjectNote)({
   id: 'note/person/example/0192f3c4-7a1e-7c3a-9b2d-4f5e6a7b8c9d',
   author: 'person/example', target: 'agent/example/planner', text: 'Keep the handoff short.', audience: 'self',
   created_at: '2026-10-14T16:20:00Z', updated_at: '2026-10-14T16:20:00Z',
-  session: null, expires_at: null, revision: 'claim/example',
+  expires_at: null, revision: 'claim/example',
 })
 const makePort = ({ actor = 'person/example', response }: {
   readonly actor?: string
@@ -35,6 +35,16 @@ describe('independent subject notes projection and generated writes', () => {
     expect(index.get('mission/example')).toEqual([rows[1]])
     expect(rows[0]).toBe(older)
     expect(notesByTarget([]).size).toBe(0)
+  })
+  it('shows session-targeted notes under their parent without changing their target', () => {
+    const sessionTarget = `session/${note.target}/1234%3A2026-10-14T15%3A57%3A40.016Z`
+    const sessionNote = { ...note, target: sessionTarget }
+    const otherSession = { ...note, target: 'session/agent/example/other/opaque%2Fincarnation' }
+    const index = notesByTarget([note, sessionNote, otherSession])
+    expect(index.get(note.target)).toEqual([note, sessionNote])
+    expect(index.get(sessionTarget)).toEqual([sessionNote])
+    expect(index.get('agent/example/other')).toEqual([otherSession])
+    expect(sessionNote.target).toBe(sessionTarget)
   })
   it('creates without an audience and archives using the encoded generated route', async () => {
     const { actions, requests } = makePort()

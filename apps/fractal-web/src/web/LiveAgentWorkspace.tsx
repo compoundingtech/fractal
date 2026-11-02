@@ -9,6 +9,7 @@ import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
 import { AlertsPopover } from './AlertsPopover.tsx'
+import { AgentNoteQuickAdd } from './AgentNotes.tsx'
 import { retainPane, workspaceHref, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
 import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
@@ -92,7 +93,7 @@ const LiveSidebarAgentRow = React.memo((props: {
     props.select(props.agentRef)
     requestThreadFocus(value => value + 1)
   }, [props.select, props.agentRef, requestThreadFocus])
-  return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} onSubagentsPress={props.childId === undefined ? onSubagentsPress : undefined} />
+  return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} noteAction={props.active ? <AgentNoteQuickAdd agentRef={props.agentRef} /> : undefined} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} onSubagentsPress={props.childId === undefined ? onSubagentsPress : undefined} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
