@@ -3577,14 +3577,16 @@ fn client_agent_resources_selected(
     snapshot_index: u64,
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
-        changed.map(|(subjects, _)| subjects), snapshot_index, history,
-    ))?;
-    client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+    pinned_unless_enclosed(store, || {
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
+            changed.map(|(subjects, _)| subjects), snapshot_index, history,
+        ))?;
+        client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+    })
 }
 
-/// Every agent card at `snapshot_index` of a quiet store, folded as the roster folds them but
-/// outside a read snapshot: on a store just opened, nothing is kept yet, as at a daemon start.
+/// Every agent card at `snapshot_index` of a quiet store, with no enclosing read snapshot
+/// and no retained cards, as at a daemon start. The selected fold pins its own snapshot.
 /// For load measurements; it returns how many cards it folded.
 #[doc(hidden)]
 pub fn cold_agent_roster_rebuild(store: &Store, snapshot_index: u64) -> anyhow::Result<usize> {

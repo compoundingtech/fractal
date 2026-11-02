@@ -9484,11 +9484,12 @@ fn roster_folds_outside_a_request_and_a_snapshot_read_faults_through_scheduling_
         let cut = store.index().unwrap();
         // Test folds call these directly, with no request budget and no pinned snapshot. A
         // pause past the 25 ms work allowance spends no query work: the card keeps its fault.
-        for name in ["cold", "cached", "exact", "page", "chunk"] {
+        for name in ["selected", "cold", "cached", "exact", "page", "chunk"] {
             store.forget_current_views();
             Store::stall_next_card_fault_read_for_test(std::time::Duration::from_millis(60));
             let started = std::time::Instant::now();
             let cards = match name {
+                "selected" => client_agent_resources_selected(store, history, cut, None),
                 "cold" => client_agent_resources_uncached(store, history, cut),
                 "cached" => client_agent_resources_cached(store, history, cut),
                 "exact" => client_exact_agent_resources(store, history, cut, subject),

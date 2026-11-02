@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Selected agent page and chunk folds now pin a read snapshot when called outside a request, matching full-roster and exact-agent folds so scheduling pauses do not turn a known mailbox fault into fault status unknown.",
+  "summary": "Selected agent card folds, including direct resource folds, pages and chunks, now pin a read snapshot when called outside a request, matching full-roster and exact-agent folds so scheduling pauses do not turn a known mailbox fault into fault status unknown.",
   "replay": { "status": "none", "detail": "No graph replay or backfill; faults are read at the same cut." },
   "schema": { "status": "none", "detail": "No database, claim kind, claim field or schema version changes." },
   "rules": { "status": "none", "detail": "No authority, write-rule, checkpoint or coordination changes." },
