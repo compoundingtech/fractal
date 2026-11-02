@@ -859,3 +859,28 @@ fn the_cache_rebuilds_every_five_minutes_then_every_half_hour_after_a_quiet_day(
     assert!(store.fault_snapshot(at + MINUTE).unwrap().iter()
         .all(|fault| !fault.item.title.starts_with("timed-")));
 }
+
+#[test]
+fn concurrent_snapshots_take_turns_at_the_cache_and_finish() {
+    // Six threads take turns at the cache's lock. Each holds its snapshot's pinned reader
+    // while it waits, and the holder reads only through its own pin, which the cache asserts:
+    // holding the lock never waits for another reader.
+    let (store, run, _step) = exhausted_snapshot_fixture();
+    fail_run(&store, &run, 8, "concurrent");
+    let store = std::sync::Arc::new(store);
+    let (done, finished) = std::sync::mpsc::channel();
+    for _ in 0..6 {
+        let store = store.clone();
+        let done = done.clone();
+        std::thread::spawn(move || {
+            for _ in 0..20 {
+                store.fault_snapshot(now_ms()).unwrap();
+            }
+            done.send(()).unwrap();
+        });
+    }
+    for _ in 0..6 {
+        finished.recv_timeout(std::time::Duration::from_secs(120))
+            .expect("concurrent fault snapshots stopped making progress");
+    }
+}

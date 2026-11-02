@@ -53,6 +53,12 @@ impl Store {
         &self,
         as_of: u128,
     ) -> Result<(Vec<AttentionItemView>, Vec<AttentionItemView>)> {
+        // Lock order: a caller takes its snapshot's reader before this lock, and every read
+        // under it uses that pinned reader, so holding the lock never waits for the pool.
+        debug_assert!(
+            self.readers.has_pinned_reader(),
+            "the fault cache reads only inside its snapshot's pinned cut"
+        );
         let failures = self.operational_failures()?;
         let kept = self.extension::<FaultCache>();
         let mut kept = kept.0.lock().unwrap_or_else(PoisonError::into_inner);
