@@ -203,6 +203,7 @@ pub mod roster_admission;
 pub mod adhoc_work;
 pub mod attention_history;
 pub mod attention_snapshot;
+pub mod fault_cache;
 pub use attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
     plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
@@ -5934,13 +5935,11 @@ impl Store {
 
     fn fault_snapshot_in_cut(&self, as_of: u128) -> Result<Vec<FaultView>> {
         let mut items = self.subscription_fault_items(as_of)?;
-        let (operational, failures) = self.operational_attention_items_with_failures(None, as_of)?;
+        items.extend(self.operational_fault_families(None, as_of)?);
+        // Failure episodes come from the fault cache, read again only where something changed.
+        let (operational, gates) = self.cached_failure_faults(as_of)?;
         items.extend(operational);
-        items.extend(
-            self.broken_gate_items_from_failures(None, as_of, failures)?
-                .into_iter()
-                .filter(|item| !item.person.starts_with("person/")),
-        );
+        items.extend(gates);
         items.extend(self.checkpoint_attention_items(None, as_of)?);
         items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
