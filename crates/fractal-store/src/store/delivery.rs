@@ -208,7 +208,7 @@ impl Store {
         let mut statement = connection.prepare_cached(
             "SELECT (SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1),
                     (SELECT claim_id FROM desired WHERE subject=?1),
-                    (SELECT COALESCE(SUM(CASE kind WHEN 'message.delivered' THEN 1 WHEN 'message.read' THEN 2
+                    (SELECT COALESCE(SUM(DISTINCT CASE kind WHEN 'message.delivered' THEN 1 WHEN 'message.read' THEN 2
                      WHEN 'message.closed' THEN 4 ELSE 0 END), 0) FROM local_message_marks WHERE message=?1)",
         )?;
         let (latest_claim_index, desired_claim_id, latest_mark) = statement.query_row(/* sqlite-large-value: allow-for-now lv-hbfd2a450de38 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ [subject], |row| {

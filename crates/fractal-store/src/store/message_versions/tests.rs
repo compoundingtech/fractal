@@ -5,7 +5,7 @@ fn point(connection: &Connection, subject: &str) -> Result<Version> {
     Ok(connection.query_row(
         "SELECT (SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1),
                 (SELECT claim_id FROM desired WHERE subject=?1),
-                (SELECT COALESCE(SUM(CASE kind WHEN 'message.delivered' THEN 1 WHEN 'message.read' THEN 2
+                (SELECT COALESCE(SUM(DISTINCT CASE kind WHEN 'message.delivered' THEN 1 WHEN 'message.read' THEN 2
                  WHEN 'message.closed' THEN 4 ELSE 0 END), 0) FROM local_message_marks WHERE message=?1)",
         [subject],
         |row| {
