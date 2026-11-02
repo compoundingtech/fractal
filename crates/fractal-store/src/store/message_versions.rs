@@ -7,13 +7,16 @@ pub const CHUNK: usize = 128;
 pub struct Version {
     pub latest_claim_index: u64,
     pub desired_claim_id: Option<String>,
+    /// The newest local mark (message_marks.rs): a mark changes the view as a claim does.
+    pub latest_mark: i64,
 }
 
 // Each supplied subject drives the same two existing indexed lookups as the point reader.
 // Keep duplicate subjects and their positions; no graph scan or membership filtering.
 const QUERY: &str = "SELECT requested.key,
     (SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=requested.value),
-    (SELECT claim_id FROM desired WHERE subject=requested.value)
+    (SELECT claim_id FROM desired WHERE subject=requested.value),
+    (SELECT COALESCE(MAX(rowid), 0) FROM local_message_marks WHERE message=requested.value)
     FROM json_each(?1) AS requested ORDER BY requested.key";
 
 pub fn read(connection: &Connection, subjects: &[&str]) -> Result<Vec<Version>> {
@@ -36,6 +39,7 @@ pub fn read(connection: &Connection, subjects: &[&str]) -> Result<Vec<Version>> 
         versions.push(Version {
             latest_claim_index: row.get(1)?,
             desired_claim_id: row.get(2)?,
+            latest_mark: row.get(3)?,
         });
     }
     anyhow::ensure!(

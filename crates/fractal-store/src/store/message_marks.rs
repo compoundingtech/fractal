@@ -1,0 +1,203 @@
+//! A consumer's delivery, read and close of a graph message, recorded on this member instead of as
+//! a lifecycle claim (db break-up step 4b). A mark is local: it never replicates and is outside
+//! every digest, like a local observation. A stream item's marks live in the messages shard's
+//! `stream_lifecycle` instead; both answer with the same receipt (`messages_shard::lifecycle_receipt`).
+//!
+//! A reader decides one state per message: its lifecycle claims or its marks, whichever is
+//! further along. The projections the lifecycle claims maintain (`message_index`, idle mail,
+//! unread mail, coordination holds, client selectors) are maintained by marks the same way, by
+//! the triggers below, in the mark's own transaction.
+
+use super::*;
+
+/// The marks a consumer records, in rank order: a later one is further along.
+pub const MARKS: [&str; 3] = ["message.delivered", "message.read", "message.closed"];
+
+/// How long a mark that something further along has superseded stays.
+pub const SUPERSEDED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// The table, before any projection backfill folds it in.
+pub fn create_table(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h4b1a00000001 owner=fractal_store::store::message_marks TODO=bound-or-reference-values-and-reclamation */ "
+CREATE TABLE IF NOT EXISTS local_message_marks (
+    message TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('message.delivered','message.read','message.closed')),
+    consumer TEXT NOT NULL,
+    recorded_at_unix_ms INTEGER NOT NULL,
+    receipt TEXT NOT NULL,
+    PRIMARY KEY(message, kind, consumer)
+);
+CREATE INDEX IF NOT EXISTS local_message_marks_consumer ON local_message_marks(consumer, message);
+CREATE INDEX IF NOT EXISTS local_message_marks_age ON local_message_marks(recorded_at_unix_ms);
+",
+    )?;
+    Ok(())
+}
+
+/// The triggers, once every projection they maintain exists.
+pub fn create_triggers(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "
+-- The same projection rows a lifecycle claim of the mark's kind writes (see the claim triggers
+-- in store.rs, idle_mail.rs, unread_mail.rs, coordination.rs and client_messages.rs).
+CREATE TRIGGER IF NOT EXISTS local_message_marks_insert AFTER INSERT ON local_message_marks
+BEGIN
+    UPDATE message_index SET closed=1
+    WHERE subject=NEW.message AND NEW.kind='message.closed' AND closed=0;
+    UPDATE local_idle_messages SET pending=0,
+        delivered=CASE WHEN NEW.kind IN ('message.delivered','message.read') THEN 1 ELSE delivered END
+    WHERE subject=NEW.message AND (pending<>0 OR
+        (delivered<>1 AND NEW.kind IN ('message.delivered','message.read')));
+    INSERT OR IGNORE INTO unread_mail_pending(subject)
+    SELECT NEW.message WHERE NEW.kind IN ('message.read','message.closed');
+    UPDATE coordination_sends SET held=0 WHERE subject=NEW.message AND held!=0;
+    INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+    VALUES(NEW.message,-1,1,CASE WHEN NEW.kind='message.closed' THEN 1 ELSE 0 END)
+    ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|excluded.dirty_flags,created_index=created_index+1;
+END;
+-- Retention removes only marks something else covers, but a removed mark is folded out as a
+-- removed claim is.
+CREATE TRIGGER IF NOT EXISTS local_message_marks_delete AFTER DELETE ON local_message_marks
+BEGIN
+    UPDATE message_index SET closed=(
+        EXISTS(SELECT 1 FROM claims WHERE subject=OLD.message AND kind='message.closed')
+        OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=OLD.message AND kind='message.closed'))
+    WHERE subject=OLD.message;
+    UPDATE local_idle_messages SET
+        pending=NOT (EXISTS(SELECT 1 FROM claims WHERE subject=OLD.message
+                         AND kind IN ('message.delivered','message.read','message.closed'))
+                  OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=OLD.message)),
+        delivered=(EXISTS(SELECT 1 FROM claims WHERE subject=OLD.message
+                         AND kind IN ('message.delivered','message.read'))
+                  OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=OLD.message
+                         AND kind IN ('message.delivered','message.read')))
+    WHERE subject=OLD.message;
+    INSERT OR IGNORE INTO unread_mail_pending(subject) VALUES(OLD.message);
+    INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+    VALUES(OLD.message,-1,1,2)
+    ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|2,created_index=created_index+1;
+END;
+",
+    )?;
+    Ok(())
+}
+
+/// Record `consumer`'s `kind` of the graph message `message` once, and answer its receipt: the
+/// first record, or this one. It takes the writer for one insert and its triggers, and touches no
+/// published list.
+pub fn record(
+    store: &Store,
+    message: &str,
+    kind: &str,
+    consumer: &str,
+) -> Result<(ClaimRecord, bool), St3Error> {
+    if !MARKS.contains(&kind) {
+        return Err(St3Error::new("invalid-message-mark", format!("`{kind}` is not a message mark")));
+    }
+    let fields = BTreeMap::from([("status".to_owned(), json!(kind.trim_start_matches("message.")))]);
+    let receipt = super::messages_shard::lifecycle_receipt(&store.origin, message, kind, Some(consumer), &fields);
+    let connection = store.connection.write();
+    let inserted = connection
+        .execute(
+            "INSERT OR IGNORE INTO local_message_marks(message, kind, consumer, recorded_at_unix_ms, receipt)
+             SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS(SELECT 1 FROM message_index WHERE subject=?1)",
+            params![message, kind, consumer, now_ms() as i64, receipt.id],
+        )
+        .map_err(internal)?;
+    if inserted == 0 {
+        let known: bool = connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)", [message], |row| row.get(0))
+            .map_err(internal)?;
+        if !known {
+            return Err(St3Error::new("missing-message", format!("`{message}` is not a message this member holds")));
+        }
+    }
+    Ok((receipt, inserted > 0))
+}
+
+/// The furthest-along mark of `message`, as its status ("delivered", "read" or "closed").
+pub fn status(connection: &Connection, message: &str) -> Result<Option<&'static str>> {
+    let kinds: Vec<String> = connection
+        .prepare_cached("SELECT kind FROM local_message_marks WHERE message=?1")?
+        .query_map([message], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(MARKS
+        .iter()
+        .rev()
+        .find(|mark| kinds.iter().any(|kind| kind == *mark))
+        .map(|mark| mark.trim_start_matches("message.")))
+}
+
+/// When `consumer` (any consumer, for `None`) recorded a mark of one of `kinds` for `message`: the
+/// earliest such record.
+pub fn recorded_at(connection: &Connection, message: &str, kinds: &[&str], consumer: Option<&str>) -> Result<Option<u128>> {
+    let at: Option<i64> = connection
+        .prepare_cached(
+            "SELECT MIN(recorded_at_unix_ms) FROM local_message_marks
+             WHERE message=?1 AND kind IN (SELECT value FROM json_each(?2)) AND (?3 IS NULL OR consumer=?3)",
+        )?
+        .query_row(params![message, serde_json::to_string(kinds)?, consumer], |row| row.get(0))?;
+    Ok(at.and_then(|at| u128::try_from(at).ok()))
+}
+
+/// What a message view's cache keys marks on: the newest mark of `message`.
+pub fn version(connection: &Connection, message: &str) -> Result<i64> {
+    Ok(connection
+        .prepare_cached("SELECT COALESCE(MAX(rowid), 0) FROM local_message_marks WHERE message=?1")?
+        .query_row([message], |row| row.get(0))?)
+}
+
+/// A status rank: sent, staged, delivered, read, closed.
+pub fn rank(status: &str) -> u8 {
+    match status {
+        "staged" => 1,
+        "delivered" => 2,
+        "read" => 3,
+        "closed" => 4,
+        _ => 0,
+    }
+}
+
+/// [`rank`] in SQL, for a column holding a lifecycle kind. Kinds do not sort by name.
+fn rank_sql(column: &str) -> String {
+    format!(
+        "CASE {column} WHEN 'message.staged' THEN 1 WHEN 'message.delivered' THEN 2
+         WHEN 'message.read' THEN 3 WHEN 'message.closed' THEN 4 ELSE 0 END"
+    )
+}
+
+/// Remove the marks that cannot change any state, so the table stays bounded by the messages it
+/// holds: every mark of a message this member no longer holds, and, once older than
+/// [`SUPERSEDED_RETENTION_MS`], a mark that a further-along mark or a lifecycle claim of the same
+/// or a later kind supersedes. Answers how many went.
+pub fn trim(store: &Store, now: u128, chunk: usize) -> Result<usize> {
+    let cutoff = now.saturating_sub(u128::from(SUPERSEDED_RETENTION_MS)).min(i64::MAX as u128) as i64;
+    let chunk = chunk.max(1) as i64;
+    let mut removed = 0;
+    loop {
+        let connection = store.connection.write_background();
+        let deleted = connection.execute(
+            &format!("DELETE FROM local_message_marks WHERE rowid IN (
+                SELECT mark.rowid FROM local_message_marks AS mark
+                WHERE NOT EXISTS(SELECT 1 FROM message_index WHERE subject=mark.message)
+                   OR (mark.recorded_at_unix_ms < ?1 AND (
+                        EXISTS(SELECT 1 FROM local_message_marks AS later
+                               WHERE later.message=mark.message AND {later} > {mark})
+                        OR EXISTS(SELECT 1 FROM claims WHERE claims.subject=mark.message
+                               AND claims.kind IN ('message.delivered','message.read','message.closed')
+                               AND {claim} >= {mark})))
+                LIMIT ?2)",
+                later = rank_sql("later.kind"),
+                mark = rank_sql("mark.kind"),
+                claim = rank_sql("claims.kind"),
+            ),
+            params![cutoff, chunk],
+        )?;
+        drop(connection);
+        removed += deleted;
+        if (deleted as i64) < chunk {
+            return Ok(removed);
+        }
+    }
+}

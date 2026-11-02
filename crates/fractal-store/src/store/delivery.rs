@@ -34,6 +34,10 @@ impl Store {
                AND NOT EXISTS (
                    SELECT 1 FROM claims consumed WHERE consumed.subject=claims.subject
                      AND consumed.kind IN ('message.read','message.closed')
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM local_message_marks consumed WHERE consumed.message=claims.subject
+                     AND consumed.kind IN ('message.read','message.closed')
                )"
         ))?;
         let mut candidates = BTreeMap::<String, (u64, u128)>::new();
@@ -203,10 +207,11 @@ impl Store {
         // desired row. Unrelated graph writes must not invalidate every native mailbox.
         let mut statement = connection.prepare_cached(
             "SELECT (SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1),
-                    (SELECT claim_id FROM desired WHERE subject=?1)",
+                    (SELECT claim_id FROM desired WHERE subject=?1),
+                    (SELECT COALESCE(MAX(rowid), 0) FROM local_message_marks WHERE message=?1)",
         )?;
-        let (latest_claim_index, desired_claim_id) = statement.query_row(/* sqlite-large-value: allow-for-now lv-hc58709d7ae65 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ [subject], |row| {
-            Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?))
+        let (latest_claim_index, desired_claim_id, latest_mark) = statement.query_row(/* sqlite-large-value: allow-for-now lv-hc58709d7ae65 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ [subject], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, i64>(2)?))
         })?;
         drop(statement);
         self.message_view_cached_at_version(
@@ -216,6 +221,7 @@ impl Store {
             message_versions::Version {
                 latest_claim_index,
                 desired_claim_id,
+                latest_mark,
             },
         )
     }
@@ -230,6 +236,7 @@ impl Store {
         let message_versions::Version {
             latest_claim_index,
             desired_claim_id,
+            latest_mark,
         } = version;
         if let Some(view) = self.fractal
             .message_cache
@@ -239,6 +246,7 @@ impl Store {
             .filter(|entry| {
                 entry.latest_claim_index == latest_claim_index
                     && entry.desired_claim_id == desired_claim_id
+                    && entry.latest_mark == latest_mark
                     && entry.view.created_index == created_index
             })
             .map(|entry| entry.view.clone())
@@ -258,6 +266,7 @@ impl Store {
             MessageCacheEntry {
                 latest_claim_index,
                 desired_claim_id,
+                latest_mark,
                 view: view.clone(),
             },
         );
@@ -331,6 +340,9 @@ impl Store {
                    AND (?6 OR NOT EXISTS (
                      SELECT 1 FROM claims closed
                      WHERE closed.subject=ranked.subject AND closed.kind='message.closed'
+                   ) AND NOT EXISTS (
+                     SELECT 1 FROM local_message_marks closed
+                     WHERE closed.message=ranked.subject AND closed.kind='message.closed'
                    ))
                  ORDER BY created_index, subject LIMIT ?5")
             } else {
@@ -354,6 +366,9 @@ impl Store {
                    AND (?6 OR NOT EXISTS (
                      SELECT 1 FROM claims closed
                      WHERE closed.subject=created.subject AND closed.kind='message.closed'
+                   ) AND NOT EXISTS (
+                     SELECT 1 FROM local_message_marks closed
+                     WHERE closed.message=created.subject AND closed.kind='message.closed'
                    ))
                  ORDER BY created_index, subject LIMIT ?5")
             })?;

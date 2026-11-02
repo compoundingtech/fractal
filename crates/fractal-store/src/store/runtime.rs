@@ -193,6 +193,8 @@ impl FractalRuntime {
         retirements::create_selection_triggers(connection)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
+        // Before the projection backfills, which fold marks in.
+        message_marks::create_table(connection)?;
         backfill_message_index(connection)?;
         idle_mail::create_schema(connection)?;
         unread_mail::create_schema(connection)?;
@@ -210,6 +212,8 @@ impl FractalRuntime {
         agent_messages::create_schema(connection)?;
         client_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
+        // After every projection its triggers maintain.
+        message_marks::create_triggers(connection)?;
         stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;

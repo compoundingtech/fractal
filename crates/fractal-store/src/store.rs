@@ -236,6 +236,7 @@ pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
 pub mod subagents;
 pub mod idle_mail;
+pub mod message_marks;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -1054,12 +1055,15 @@ BEGIN
         created_index = MIN(created_index, excluded.created_index),
         closed = MAX(closed, excluded.closed);
 END;
-CREATE TRIGGER IF NOT EXISTS message_index_claim_delete AFTER DELETE ON claims
+-- v2 also counts a closed mark (message_marks.rs): a store opened before marks has v1.
+DROP TRIGGER IF EXISTS message_index_claim_delete;
+CREATE TRIGGER IF NOT EXISTS message_index_claim_delete_v2 AFTER DELETE ON claims
 WHEN OLD.subject LIKE 'message/%'
 BEGIN
     DELETE FROM message_index WHERE subject = OLD.subject;
     INSERT INTO message_index(subject, created_index, closed)
     SELECT subject, MIN(store_index), MAX(kind = 'message.closed')
+        OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=OLD.subject AND kind='message.closed')
     FROM claims WHERE subject = OLD.subject GROUP BY subject;
 END;
 
@@ -2212,6 +2216,7 @@ pub const ACTUAL_CACHE_LIMIT: usize = 4096;
 pub struct MessageCacheEntry {
     latest_claim_index: u64,
     desired_claim_id: Option<String>,
+    latest_mark: i64,
     view: MessageView,
 }
 
@@ -2525,6 +2530,7 @@ fn backfill_message_index(connection: &Connection) -> Result<()> {
         /* sqlite-large-value: allow-for-now lv-heae1c0e34440 owner=fractal_store::store TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
          INSERT OR REPLACE INTO message_index(subject, created_index, closed)
          SELECT subject, MIN(store_index), MAX(kind = 'message.closed')
+             OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=claims.subject AND kind='message.closed')
          FROM claims WHERE subject LIKE 'message/%'
          GROUP BY subject;
          INSERT INTO meta(key, value) VALUES ('message_index', '1');
@@ -10628,6 +10634,13 @@ fn validate_message_transition(
         "message.closed" => "closed",
         _ => unreachable!("the SQL query selects message lifecycle kinds"),
     });
+    // A local mark (message_marks.rs) is this member's record of the same lifecycle: the
+    // message stands wherever the further along of the two puts it.
+    let current = match (current, message_marks::status(transaction, &input.subject).map_err(internal)?) {
+        (Some(claimed), Some(marked)) if message_marks::rank(marked) > message_marks::rank(claimed) => Some(marked),
+        (None, Some(marked)) => Some(marked),
+        (current, _) => current,
+    };
     let current = if current.is_some() {
         current
     } else {
@@ -11192,7 +11205,18 @@ fn message_view_at_with_desired(
     through: Option<u64>,
     desired_row: impl FnOnce() -> Result<Option<DesiredRow>>,
 ) -> Result<MessageView> {
-    let actual = latest_actual_at(connection, subject, through)?.unwrap_or(Value::Null);
+    let mut actual = latest_actual_at(connection, subject, through)?.unwrap_or(Value::Null);
+    // A consumer's local mark (message_marks.rs) counts as its lifecycle claim would: the view
+    // reads whichever is further along. Marks are this member's current record, at any `through`.
+    if let Some(marked) = message_marks::status(connection, subject)? {
+        let claimed = actual.get("status").and_then(Value::as_str).unwrap_or("sent");
+        if message_marks::rank(marked) > message_marks::rank(claimed) {
+            if !actual.is_object() {
+                actual = json!({});
+            }
+            actual["status"] = json!(marked);
+        }
+    }
     // Deletion of the current projection retires the declaration. A retained
     // intent.desired claim is not permission to resurrect it in a fresh page.
     let desired = if through.is_some() && !connection.prepare_cached(
@@ -19504,11 +19528,19 @@ pub fn enrich_step_wake_at(
                 EXISTS(SELECT 1 FROM claims consumed
                        WHERE consumed.subject=claims.subject
                          AND consumed.kind IN ('message.read','message.closed')
-                         AND consumed.accepted_at_unix_ms<=?1),
+                         AND consumed.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks consumed
+                       WHERE consumed.message=claims.subject
+                         AND consumed.kind IN ('message.read','message.closed')
+                         AND consumed.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
                 EXISTS(SELECT 1 FROM claims delivered
                        WHERE delivered.subject=claims.subject
                          AND delivered.kind='message.delivered'
-                         AND delivered.accepted_at_unix_ms<=?1),
+                         AND delivered.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks delivered
+                       WHERE delivered.message=claims.subject
+                         AND delivered.kind='message.delivered'
+                         AND delivered.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
                 EXISTS(SELECT 1 FROM claims staged
                        WHERE staged.subject=claims.subject
                          AND staged.kind='message.staged'

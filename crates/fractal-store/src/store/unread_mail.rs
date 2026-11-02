@@ -78,6 +78,9 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
              WHERE kind='message.sent' AND NOT EXISTS (
                  SELECT 1 FROM claims terminal WHERE terminal.subject=claims.subject
                  AND terminal.kind IN ('message.read','message.closed')
+             ) AND NOT EXISTS (
+                 SELECT 1 FROM local_message_marks mark WHERE mark.message=claims.subject
+                 AND mark.kind IN ('message.read','message.closed')
              ) GROUP BY subject;
              DELETE FROM unread_mail_pending;
              INSERT INTO meta(key,value) VALUES('unread_mail_prefixes','1');

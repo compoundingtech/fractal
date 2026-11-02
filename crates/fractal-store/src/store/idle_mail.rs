@@ -13,9 +13,12 @@ SELECT sent.subject,COALESCE(json_extract(sent.body,'$.fields.to'),''),
        CAST(sent.accepted_at_unix_ms AS INTEGER),
        NOT EXISTS(SELECT 1 FROM claims terminal
                   WHERE terminal.subject=sent.subject
-                    AND terminal.kind IN ('message.delivered','message.read','message.closed')),
+                    AND terminal.kind IN ('message.delivered','message.read','message.closed'))
+         AND NOT EXISTS(SELECT 1 FROM local_message_marks mark WHERE mark.message=sent.subject),
        EXISTS(SELECT 1 FROM claims terminal
               WHERE terminal.subject=sent.subject AND terminal.kind IN ('message.delivered','message.read'))
+         OR EXISTS(SELECT 1 FROM local_message_marks mark
+              WHERE mark.message=sent.subject AND mark.kind IN ('message.delivered','message.read'))
 FROM claims sent WHERE sent.store_index=(
     SELECT store_index FROM claims
     WHERE subject=SUBJECT AND kind='message.sent'
@@ -46,11 +49,15 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
 DROP TRIGGER IF EXISTS local_idle_messages_sent_v1;
 DROP TRIGGER IF EXISTS local_idle_messages_delete_v1;
 DROP TRIGGER IF EXISTS local_idle_messages_update_v1;
+DROP TRIGGER IF EXISTS local_idle_messages_sent_v2;
+DROP TRIGGER IF EXISTS local_idle_messages_delete_v2;
+DROP TRIGGER IF EXISTS local_idle_messages_update_v2;
 "#,
     )?;
     for (name, event, reference) in [
-        ("sent_v2", "AFTER INSERT", "NEW"),
-        ("delete_v2", "AFTER DELETE", "OLD"),
+        // v3 folds marks in (message_marks.rs).
+        ("sent_v3", "AFTER INSERT", "NEW"),
+        ("delete_v3", "AFTER DELETE", "OLD"),
     ] {
         let subject = format!("{reference}.subject");
         connection.execute_batch(&format!(
@@ -58,7 +65,7 @@ DROP TRIGGER IF EXISTS local_idle_messages_update_v1;
              WHEN {reference}.kind IN ({kinds})
              BEGIN DELETE FROM local_idle_messages WHERE subject={subject}; {} END;",
             FOLD.replace("SUBJECT", &subject),
-            kinds = if name == "sent_v2" {
+            kinds = if name == "sent_v3" {
                 "'message.sent'"
             } else {
                 "'message.sent','message.delivered','message.read','message.closed'"
@@ -77,7 +84,7 @@ DROP TRIGGER IF EXISTS local_idle_messages_update_v1;
     )?;
     // Claim bytes are immutable in normal admission; a migration can update them.
     connection.execute_batch(&format!(
-        /* sqlite-large-value: allow-for-now lv-h696035ca81b6 owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_update_v2
+        /* sqlite-large-value: allow-for-now lv-h696035ca81b6 owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_update_v3
          AFTER UPDATE OF subject,kind,body,accepted_at_unix_ms ON claims
          WHEN OLD.kind IN ('message.sent','message.delivered','message.read','message.closed')
            OR NEW.kind IN ('message.sent','message.delivered','message.read','message.closed')
@@ -240,7 +247,7 @@ mod tests {
             seed_messages(&store, 1);
             let connection = store.connection.write();
             for name in ["sent", "delete", "update"] {
-                let current = format!("local_idle_messages_{name}_v2");
+                let current = format!("local_idle_messages_{name}_v3");
                 let old = format!("local_idle_messages_{name}_v1");
                 let ddl: String = connection
                     .query_row(
@@ -262,7 +269,7 @@ mod tests {
         }
         let store = Store::open(&path, "node").unwrap();
         let connection = store.connection.write();
-        for (version, expected) in [(1, 0), (2, 3)] {
+        for (version, expected) in [(1, 0), (2, 0), (3, 3)] {
             let count: i64 = connection.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (?1,?2,?3)",
                 params![format!("local_idle_messages_sent_v{version}"),

@@ -27,6 +27,9 @@ fn flush_pending(connection: &Connection) -> Result<()> {
          AND NOT EXISTS (
              SELECT 1 FROM claims WHERE subject=?1
              AND kind IN ('message.read','message.closed')
+         ) AND NOT EXISTS (
+             SELECT 1 FROM local_message_marks WHERE message=?1
+             AND kind IN ('message.read','message.closed')
          ) HAVING COUNT(*)>0",
     )?;
     let mut clear =
@@ -52,6 +55,8 @@ pub fn count_in_snapshot(connection: &Connection, before_unix_ms: u128) -> Resul
             CASE WHEN (SELECT MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
                        WHERE subject=pending.subject AND kind='message.sent') < ?1
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE subject=pending.subject
+                                 AND kind IN ('message.read','message.closed'))
+                 AND NOT EXISTS (SELECT 1 FROM local_message_marks WHERE message=pending.subject
                                  AND kind IN ('message.read','message.closed'))
                  THEN 1 ELSE 0 END
             - CASE WHEN EXISTS (SELECT 1 FROM unread_mail

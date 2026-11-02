@@ -74,7 +74,7 @@ struct KeptWorkWakes {
 struct KeptWorkWake {
     subject: String,
     created_index: u64,
-    view: Option<((u64, Option<String>), MessageView)>,
+    view: Option<((u64, Option<String>, i64), MessageView)>,
 }
 
 #[cfg(test)]
@@ -531,7 +531,7 @@ impl DeliveryStore for Store {
                     gone.insert(kept.subject.clone());
                     continue;
                 }
-                let key = (version.latest_claim_index, version.desired_claim_id.clone());
+                let key = (version.latest_claim_index, version.desired_claim_id.clone(), version.latest_mark);
                 let message = match &kept.view {
                     Some((read_at, view)) if *read_at == key => view.clone(),
                     _ => {

@@ -314,6 +314,14 @@ impl AdhocWorkStore for Store {
                 // cites it without following it.
                 let receipt = receipt.clone().ok_or_else(|| St3Error::new("stale-handoff", "the handoff changed while it was acknowledged; acknowledge it again"))?;
                 (receipt, vec![handoff.id])
+            } else if let Some(marked) = tx.query_row(
+                "SELECT receipt FROM local_message_marks WHERE message=?1 AND consumer=?2
+                 AND kind IN ('message.read','message.closed') ORDER BY recorded_at_unix_ms LIMIT 1",
+                params![input.message, input.actor], |row| row.get::<_, String>(0),
+            ).optional().map_err(internal)? {
+                // The reader's local mark (message_marks.rs) is its read: the progress cites its
+                // receipt, which is not a graph claim and so no predecessor.
+                (marked, vec![handoff.id])
             } else {
                 let seen: Option<String> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h21741300df1e owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND actor=?2 AND kind IN ('message.read','message.closed') ORDER BY CANONICAL_ASC(claims) LIMIT 1"), params![input.message, input.actor], |row| row.get(0)).optional().map_err(internal)?;
                 let receipt = match seen {
