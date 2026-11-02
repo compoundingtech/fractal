@@ -702,6 +702,75 @@ class StTest(unittest.TestCase):
         self.assertTrue(any('receive-pack' in ' '.join(argv) for argv in children), children)
         self.assertFalse(any('maintenance' in argv or 'gc' in argv for argv in children), children)
 
+    def install_release_impact(self):
+        """A stand-in upgrade-impact check on main: it fails unless the merge it is given has the base as first parent and adds a
+        release-notes/*.json, and it imports its module from beside it, as scripts/check-release-impact does."""
+        (self.work / 'scripts/check-release-impact').write_text(
+            'import argparse, sys\nfrom release_notes import check\nparser = argparse.ArgumentParser()\n'
+            "for name in ('--repo', '--base', '--source'):\n    parser.add_argument(name)\n"
+            'args = parser.parse_args()\nsys.exit(check(args.repo, args.base, args.source))\n')
+        (self.work / 'scripts/release_notes.py').write_text(
+            'import subprocess, sys\n\ndef git(repo, *args):\n'
+            "    return subprocess.run(['git', *args], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()\n\n"
+            'def check(repo, base, source):\n'
+            "    if git(repo, 'rev-parse', source + '^1') != base:\n"
+            "        print('upgrade impact: the base is not the first parent', file=sys.stderr)\n        return 1\n"
+            "    if not git(repo, 'diff', '--name-only', '--diff-filter=A', base, source, '--', 'release-notes/'):\n"
+            "        print(f'upgrade impact: {source}: add a uniquely named release-notes/NAME.json for this PR', file=sys.stderr)\n        return 1\n"
+            '    return 0\n')
+        git(self.work, 'checkout', '-q', 'main')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'upgrade-impact')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        git(self.work, 'merge', '-q', 'main')
+
+    def test_a_branch_without_a_release_note_stops_the_whole_suite_before_it_runs_and_its_status_warns(self):
+        self.install_release_impact()
+        self.commit('b.txt', 'two')
+        code, out, err = self.run_st_test('--check', 'demo')  # demo is the whole suite here
+        self.assertIsInstance(code, str)
+        self.assertIn('the upgrade-impact check CI runs fails on the merge of this branch with origin/main', code)
+        self.assertIn('the merge: add a uniquely named release-notes/NAME.json', code)
+        self.assertIn('To fix: add release-notes/NAME.json', code)
+        self.assertEqual(self.statements(), [])
+        # Only the whole suite refuses: a run of some of its checks does not ask.
+        with mock.patch.dict(st_test.LOCAL, {'other': ['sh', '-c', 'exit 1']}):
+            self.assertIsInstance(self.run_st_test()[0], str)
+            self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.assertEqual(len(self.statements()), 1)
+        # A warning in --status, which leaves its exit code alone: the pre-push hook refuses on 3, and seats push work in progress.
+        code, out, err = self.run_st_test('--status')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'upgrade-impact +warning: no note +the upgrade-impact check')
+        (self.work / 'release-notes').mkdir()
+        self.commit('release-notes/b.json', '{}\n')
+        code, out, err = self.run_st_test('--status')
+        self.assertRegex(out, r'upgrade-impact +checked +the merge with the base has its release note')
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(len(self.statements()), 2)
+
+    def test_the_merge_is_checked_by_its_own_copy_and_a_branch_with_nothing_of_its_own_is_not_asked(self):
+        self.install_release_impact()
+        self.assertNotIn('upgrade-impact', self.run_st_test('--status')[1])  # feature holds main and nothing more: nothing to ask
+        # The branch's own copy, not main's: what CI runs is the merge's scripts/check-release-impact.
+        (self.work / 'scripts/release_notes.py').write_text('def check(repo, base, source):\n    return 0\n')
+        git(self.work, 'commit', '-q', '-am', 'a check that passes everything')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+
+    def test_with_keep_the_web_lane_keeps_its_scratch_and_the_run_names_it(self):
+        self.commit('b.txt', 'two')
+        web = ['sh', '-c', 'mkdir -p "$TMPDIR/web.1" && printf "%s\\n" "$TMPDIR/web.1" >> "$CI_LOCAL_KEEP"']
+        with mock.patch.dict(st_test.LOCAL, {st_test.WEB: web}), mock.patch.object(st_test, 'web_unchanged', return_value=None):
+            code, out, err = self.run_st_test('--check', st_test.WEB, '--keep')
+            kept = re.search(r"kept fractal-web's scratch (\S+) too", err)
+            self.assertTrue(kept, err)
+            self.assertTrue(Path(kept[1]).is_dir())
+            shutil.rmtree(Path(kept[1]).parent)
+            code, out, err = self.run_st_test('--check', st_test.WEB, '--rerun')
+            self.assertNotIn("fractal-web's scratch", err)  # without --keep nothing asks the lane to keep it
+
     def commit(self, name, content, branch=None):
         if branch:
             git(self.work, 'checkout', '-q', branch)
