@@ -8003,6 +8003,8 @@ impl MissionsStore for Store {
         // incarnation ran on the same host: a host that still holds a seat which has since
         // moved records its own old runtime ending, not the one on the seat's new host.
         let mut unnamed_ends = BTreeSet::new();
+        // Whether another incarnation's runtime ended, newer than any running record read so far.
+        let mut other_ended = false;
         for row in rows {
             let (origin, body) = row?;
             let body: Value = serde_json::from_str(&body)?;
@@ -8016,8 +8018,9 @@ impl MissionsStore for Store {
                 }
                 Some("exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
                     Some(ended) if ended == incarnation => return Ok(true),
-                    // Another incarnation's end says nothing about this one.
-                    Some(_) => {}
+                    // Another incarnation's end says nothing about this one, once this one is
+                    // known to have run.
+                    Some(_) => other_ended = true,
                     None => {
                         unnamed_ends.insert(origin);
                     }
@@ -8025,8 +8028,8 @@ impl MissionsStore for Store {
                 _ => {}
             }
         }
-        // With no record of where the incarnation ran, any end counts.
-        Ok(!unnamed_ends.is_empty())
+        // With no record that the incarnation ran, any end of the seat's runtime counts.
+        Ok(other_ended || !unnamed_ends.is_empty())
     }
 
     fn settle_runs_for_canonical_replay(&self) -> Result<Vec<String>> {
