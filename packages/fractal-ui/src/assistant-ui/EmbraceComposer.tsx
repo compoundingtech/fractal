@@ -478,11 +478,10 @@ function PlainComposer(props: EmbraceComposerProps & { readonly attachmentRefusa
   const sendLabel = onRequestSubmit === undefined ? 'Send' : submitLabel ?? 'Send'
   return (
     // Conversation-local controls are a group, not a page landmark; embeds may repeat the same conversation.
+    <div role="group" aria-label={conversationLabel === undefined ? 'Message composer' : `Message composer, ${conversationLabel}`} style={{ display: 'contents' }}>
     <ComposerPrimitive.Root
       ref={formRef}
-      role="group"
       tabIndex={-1}
-      aria-label={conversationLabel === undefined ? 'Message composer' : `Message composer, ${conversationLabel}`}
       {...stylex.props(styles.root, style, cold && styles.cold)}
       onSubmit={event => {
         if (readOnly || blocked || sendBlocked || onRequestSubmit !== undefined) event.preventDefault()
@@ -562,6 +561,7 @@ function PlainComposer(props: EmbraceComposerProps & { readonly attachmentRefusa
           : <Button isDisabled={readOnly || blocked || !canSend} onPress={() => onRequestSubmit(false)} aria-label={submitIcon === undefined ? undefined : submitLabel ?? 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? submitLabel ?? 'Send'}</Button>}
       </div>
     </ComposerPrimitive.Root>
+    </div>
   )
 }
 

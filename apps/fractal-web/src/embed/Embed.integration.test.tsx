@@ -98,13 +98,20 @@ it('keeps repeated embed work logs and composers as named groups, not duplicate 
   const root = createRoot(host)
   try {
     await act(async () => root.render(<><Embed fragment="web" scheme="light" /><Embed fragment="web-narrow" scheme="light" /></>))
-    await act(async () => {
-      await vi.waitFor(() => expect(host.querySelectorAll('form[aria-label^="Message composer"]')).toHaveLength(2))
+    await vi.waitFor(async () => {
+      await act(async () => {})
+      expect(host.querySelectorAll('[role="group"][aria-label^="Message composer"]')).toHaveLength(2)
     })
     const logs = host.querySelectorAll('[data-testid="work-log"]')
-    const composers = host.querySelectorAll('form[aria-label^="Message composer"]')
+    const composers = host.querySelectorAll('[role="group"][aria-label^="Message composer"]')
     expect(logs.length).toBeGreaterThan(1)
     expect(composers).toHaveLength(2)
+    for (const composer of composers) {
+      const form = composer.querySelector('form')
+      expect(form).not.toBeNull()
+      expect(form?.getAttribute('role')).toBeNull()
+      expect(form?.getAttribute('aria-label')).toBeNull()
+    }
     for (const element of [...logs, ...composers]) {
       expect(element.getAttribute('role')).toBe('group')
       expect(element.getAttribute('aria-label')).toBeTruthy()
