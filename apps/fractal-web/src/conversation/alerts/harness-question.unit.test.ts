@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ConversationCall } from './AgentAlerts.tsx'
 import { projectHarnessAsks } from './harness-question.ts'
-import { unavailableHarnessAnswers } from './harness-answer-port.ts'
 import { decodeConversationChunk } from '@fractal/sdk/effect'
 import { timelineItems } from '../fromTimeline.ts'
 import { harnessAskConversation, harnessAskWorld, harnessAskNow, harnessAskAtMs } from './HarnessAnswerAlert.scenario.ts'
@@ -89,8 +88,3 @@ describe('projectHarnessAsks', () => {
   })
 })
 
-it('never acknowledges or transports an answer while the harness adapter is unavailable', async () => {
-  expect(unavailableHarnessAnswers.availability).toBe('unavailable')
-  expect(await unavailableHarnessAnswers.answerHarnessQuestion({ callId: 'native-call', answers: { database: { positions: [0] } } }))
-    .toEqual({ _tag: 'Unavailable', detail: 'Web answers are not available yet. Answer in the terminal.' })
-})

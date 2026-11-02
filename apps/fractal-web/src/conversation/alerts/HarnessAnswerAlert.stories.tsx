@@ -36,8 +36,8 @@ const HarnessAnswerStory = ({ scheme, frame, allStates }: StoryArgs) => {
   return (
     <main data-scheme={scheme} style={{ width: frame }} {...stylex.props(styles.frame, scheme === 'dark' && assistantDarkTheme, scheme === 'light' && compositionLightTheme, liveAccentTheme)}>
       <div {...stylex.props(styles.lane)}>
-        {conversation.loading ? <p>Loading seat questions…</p> : ask === undefined ? <p>No pending seat questions.</p> : <>
-          <p {...stylex.props(styles.context)}>Pending omp ask · {source!.agent}</p>
+        {conversation.loading ? <p>Loading agent questions…</p> : ask === undefined ? <p>No pending agent questions.</p> : <>
+          <p {...stylex.props(styles.context)}>Question · {source!.agent}</p>
           <div data-testid="multi-question"><HarnessAnswerAlert key={ask.callId} ask={ask} onOpenTerminal={() => setTerminalHandoffs(count => count + 1)} /></div>
           <output aria-label="Terminal handoffs">Terminal handoffs: {terminalHandoffs}</output>
           {allStates ? <>
@@ -86,11 +86,11 @@ const interaction: NonNullable<Story['play']> = async ({ canvasElement, args }) 
   await expect(firstTab.firstElementChild).toHaveStyle({ overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' })
   await expect(firstTab).toHaveAttribute('aria-selected', 'true')
   await expect(secondTab).toHaveAttribute('aria-selected', 'false')
-  const send = alert.getByRole('button', { name: 'Send answers' })
+  await expect(alert.queryByRole('button', { name: 'Send answers' })).toBeNull()
   const terminal = alert.getByRole('button', { name: 'Open terminal' })
-  const unavailable = "Answering from the web is not available yet. Answer in the seat's terminal."
-  await expect(send).toBeDisabled()
-  await expect(send).toHaveAccessibleDescription(unavailable)
+  const unavailable = "Answering from the web is not available yet; selections are not sent. Answer in the agent's terminal."
+  await expect(alert.getAllByRole('button')).toHaveLength(1)
+  await expect(terminal).toHaveAccessibleDescription(unavailable)
   await expect(terminal).toBeVisible()
   await expect(terminal).toBeEnabled()
   await expect(alert.queryByRole('textbox')).toBeNull()
@@ -99,7 +99,7 @@ const interaction: NonNullable<Story['play']> = async ({ canvasElement, args }) 
   for (const radio of radios) await expect(radio).not.toBeChecked()
   const recommended = alert.getByRole('radio', { name: 'One seat first (recommended)' })
   await expect(recommended).toHaveAttribute('value', '1')
-  await expect(recommended).toHaveAccessibleDescription(`Start with the current seat, review its transcript, then expand the rollout. conversation_surface = "canary"\nseat = "${canvas.getByText(/^Pending omp ask · /).textContent!.replace('Pending omp ask · ', '')}"`)
+  await expect(recommended).toHaveAccessibleDescription(`Start with the current seat, review its transcript, then expand the rollout. conversation_surface = "canary"\nseat = "${canvas.getByText(/^Question · /).textContent!.replace('Question · ', '')}"`)
   await expect(alert.getByText('conversation_surface = "enabled" rollout_percent = 100', { exact: true })).toBeVisible()
   // Native radio interaction is keyboard-only; selecting one must clear the previous choice.
   radios[0]!.focus()
@@ -111,7 +111,7 @@ const interaction: NonNullable<Story['play']> = async ({ canvasElement, args }) 
   await expect(radios[0]).not.toBeChecked()
   await expect(firstTab).toHaveTextContent('How should we roll out the conversation update? ✓')
   await expect(firstTab).toHaveAccessibleName('How should we roll out the conversation update?')
-  await expect(send).toBeDisabled()
+  await expect(alert.queryByRole('button', { name: 'Send answers' })).toBeNull()
   firstTab.focus()
   await userEvent.keyboard('{ArrowRight}')
   await expect(secondTab).toHaveAttribute('aria-selected', 'true')
@@ -135,19 +135,19 @@ const interaction: NonNullable<Story['play']> = async ({ canvasElement, args }) 
   await expect(screenshots).not.toBeChecked()
   await expect(keyboard).toBeChecked()
   await expect(secondTab).toHaveTextContent('Which evidence should accompany the rollout? ✓')
-  await expect(send).toBeDisabled()
+  await expect(alert.queryByRole('button', { name: 'Send answers' })).toBeNull()
   await expect(terminal).toBeVisible()
   secondTab.focus()
   await userEvent.keyboard('{ArrowLeft}')
   await expect(firstTab).toHaveAttribute('aria-selected', 'true')
   await expect(alert.getByRole('radio', { name: 'One seat first (recommended)' })).toBeChecked()
-  await expect(send).toBeDisabled()
+  await expect(alert.queryByRole('button', { name: 'Send answers' })).toBeNull()
   terminal.focus()
   await userEvent.keyboard('{Enter}')
   await expect(canvas.getByLabelText('Terminal handoffs')).toHaveTextContent('Terminal handoffs: 1')
   await expect(alert.getByText(unavailable, { exact: true })).toBeVisible()
   await expect(alert.queryByRole('status')).toBeNull()
-  await expect(send).toBeDisabled()
+  await expect(alert.queryByRole('button', { name: 'Send answers' })).toBeNull()
 }
 
 export const NarrowLight: Story = { args: { frame: 440, scheme: 'light' }, play: interaction }
@@ -162,12 +162,15 @@ export const AllStates: Story = {
     const single = within(canvas.getByRole('region', { name: 'Single-question layout' }))
     await expect(single.queryByRole('tablist')).toBeNull()
     await expect(single.getAllByRole('radio')).toHaveLength(3)
-    await expect(single.getByRole('button', { name: 'Send answers' })).toBeDisabled()
+    await expect(single.queryByRole('button', { name: 'Send answers' })).toBeNull()
+    await expect(single.getByRole('button', { name: 'Open terminal' })).toBeEnabled()
     const unavailable = within(canvas.getByRole('region', { name: 'Terminal unavailable layout' }))
     await expect(unavailable.queryByRole('tablist')).toBeNull()
     await expect(unavailable.getAllByRole('checkbox')).toHaveLength(3)
     await expect(unavailable.getByRole('button', { name: 'Open terminal' })).toBeVisible()
     await expect(unavailable.getByRole('button', { name: 'Open terminal' })).toBeDisabled()
-    await expect(unavailable.getByRole('button', { name: 'Send answers' })).toBeDisabled()
+    await expect(unavailable.queryByRole('button', { name: 'Send answers' })).toBeNull()
+    await expect(unavailable.getByText("This agent's terminal is not available in this view.", { exact: true })).toBeVisible()
+    await expect(unavailable.getByRole('button', { name: 'Open terminal' })).toHaveAccessibleDescription("Answering from the web is not available yet; selections are not sent. Answer in the agent's terminal. This agent's terminal is not available in this view.")
   },
 }

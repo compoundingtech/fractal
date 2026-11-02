@@ -89,6 +89,7 @@ it('groups simultaneous native questions without creating duplicate navigation l
 it('shows native OMP asks without attention, opens the terminal and clears the draft on native settlement', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   data.attention = []
+  data.act.mockClear()
   const openTerminal = vi.fn()
   const container = document.createElement('div')
   document.body.append(container)
@@ -106,7 +107,10 @@ it('shows native OMP asks without attention, opens the terminal and clears the d
   expect(container.querySelector<HTMLInputElement>('input[type="radio"]')?.checked).toBe(false)
   await act(async () => container.querySelector<HTMLInputElement>('input[type="radio"]')!.click())
   expect(container.querySelector<HTMLInputElement>('input[type="radio"]')?.checked).toBe(true)
-  expect([...container.querySelectorAll('button')].find(button => button.textContent === 'Send answers')?.disabled).toBe(true)
+  expect([...container.querySelectorAll('button')].find(button => button.textContent === 'Send answers')).toBeUndefined()
+  expect(container.querySelectorAll('button')).toHaveLength(1)
+  expect(container.textContent).toContain("Answering from the web is not available yet; selections are not sent. Answer in the agent's terminal.")
+  expect(data.act).not.toHaveBeenCalled()
   await click(container, 'Open terminal')
   expect(openTerminal).toHaveBeenCalledOnce()
   await render([{ ...call, input: { questions: [{ id: 'storage', question: 'Changed?', options: [{ label: 'New choice', preview: '' }] }] } }])

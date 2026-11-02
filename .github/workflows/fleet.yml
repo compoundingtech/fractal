@@ -3993,7 +3993,6 @@ jobs:
               "apps/fractal-web/src/conversation/alerts/HarnessAnswerAlert.stories.tsx",
               "apps/fractal-web/src/conversation/alerts/HarnessAnswerAlert.scenario.ts",
               "apps/fractal-web/src/conversation/alerts/harness-question.ts",
-              "apps/fractal-web/src/conversation/alerts/harness-answer-port.ts",
               "apps/fractal-web/src/conversation/assistantFacts.ts",
               "apps/fractal-web/src/conversation/blocks.ts",
               "apps/fractal-web/src/conversation/fixtures.ts",

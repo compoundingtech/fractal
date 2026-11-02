@@ -4,16 +4,14 @@ import * as Aria from 'react-aria-components'
 
 import { colorVars as c, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { AlertButton } from './AlertButton.tsx'
-import { unavailableHarnessAnswers, type HarnessAnswerPort, type HarnessAnswers } from './harness-answer-port.ts'
 import type { HarnessAsk, HarnessOption, HarnessQuestion } from './harness-question.ts'
 
 // An omp `ask` the harness waits on, answered by option: one radio group or checkbox group per
 // question, tabbed when there are several. Only the options' positions are answers; a free-text
-// "Other" or note is answered in the terminal. While the web cannot deliver answers, Send stays
-// disabled with the reason beside it, and Open terminal is always there. Nothing here says the
-// ask was answered: only the harness moving on clears it.
+// "Other" or note is answered in the terminal. While the web cannot deliver answers, selections
+// stay local and Open terminal is the only action. Only the harness moving on clears the ask.
 
-const UNAVAILABLE = 'Answering from the web is not available yet. Answer in the seat\'s terminal.'
+const UNAVAILABLE = 'Answering from the web is not available yet; selections are not sent. Answer in the agent\'s terminal.'
 
 const styles = stylex.create({
   alert: { display: 'flex', flexDirection: 'column', gap: s.sm, fontFamily: t.fontSans, fontSize: t.metaSize, color: c.fg },
@@ -103,40 +101,24 @@ const Question = ({ question, name, picked, onPick }: {
 }
 
 /**
- * An omp ask's questions, answered by option. Nothing is chosen up front, the recommended option
- * included. Send is disabled while the port is unavailable; Open terminal always stays.
+ * An omp ask's questions, explored by option. Nothing is chosen up front, the recommended option
+ * included. Open terminal is the only action until web answer delivery is available.
  */
 export const HarnessAnswerAlert = ({
   ask,
-  port = unavailableHarnessAnswers,
   onOpenTerminal,
 }: {
   readonly ask: HarnessAsk
-  readonly port?: HarnessAnswerPort
   readonly onOpenTerminal?: () => void
 }): React.ReactNode => {
   const base = React.useId()
   const noteId = `${base}-note`
-  const [answers, setAnswers] = React.useState<HarnessAnswers>({})
+  const [selections, setSelections] = React.useState<Readonly<Record<string, readonly number[]>>>({})
   const [tab, setTab] = React.useState<string | undefined>(ask.questions[0]?.id)
-  const [status, setStatus] = React.useState<string>()
-  const [sending, setSending] = React.useState(false)
-  const picked = (question: HarnessQuestion) => answers[question.id]?.positions ?? []
   const fields = ask.questions.map((each) => (
-    <Question key={each.id} question={each} name={`${base}-${each.id}`} picked={picked(each)}
-      onPick={(positions) => setAnswers((previous) => ({ ...previous, [each.id]: { positions } }))} />
+    <Question key={each.id} question={each} name={`${base}-${each.id}`} picked={selections[each.id] ?? []}
+      onPick={(positions) => setSelections((previous) => ({ ...previous, [each.id]: positions }))} />
   ))
-  const complete = ask.questions.length > 0 && ask.questions.every((question) => question._tag === 'MultiSelect' || picked(question).length === 1)
-  const unavailable = port.availability === 'unavailable'
-  const send = () => {
-    if (unavailable || !complete) return
-    setSending(true)
-    void port.answerHarnessQuestion({ callId: ask.callId, answers }).then((result) => {
-      setSending(false)
-      // The port reports only why an answer did not go; it never reports one as delivered.
-      setStatus(result.detail)
-    })
-  }
   return (
     <section role="group" aria-label={ask.title} {...stylex.props(styles.alert)}>
       <div {...stylex.props(styles.title)}>◆ {ask.title}</div>
@@ -145,7 +127,7 @@ export const HarnessAnswerAlert = ({
           <Aria.TabList aria-label="Questions" {...stylex.props(styles.tabList)}>
             {ask.questions.map((each) => (
               <Aria.Tab key={each.id} id={each.id} aria-label={each.title} {...stylex.props(styles.tab)}>
-                <span {...stylex.props(styles.tabLabel)}>{each.title}{picked(each).length > 0 ? ' ✓' : ''}</span>
+                <span {...stylex.props(styles.tabLabel)}>{each.title}{(selections[each.id]?.length ?? 0) > 0 ? ' ✓' : ''}</span>
               </Aria.Tab>
             ))}
           </Aria.TabList>
@@ -155,16 +137,12 @@ export const HarnessAnswerAlert = ({
         </Aria.Tabs>
       ) : fields[0] ?? null}
       <div {...stylex.props(styles.actions)}>
-        <AlertButton tone="primary" isDisabled={unavailable || !complete || sending} aria-describedby={noteId} onPress={send}>
-          Send answers
-        </AlertButton>
-        <AlertButton tone="secondary" isDisabled={onOpenTerminal === undefined} aria-describedby={onOpenTerminal === undefined ? `${base}-terminal` : undefined} onPress={onOpenTerminal}>
+        <AlertButton tone="primary" isDisabled={onOpenTerminal === undefined} aria-describedby={onOpenTerminal === undefined ? `${noteId} ${base}-terminal` : noteId} onPress={onOpenTerminal}>
           Open terminal
         </AlertButton>
       </div>
-      <div id={noteId} {...stylex.props(styles.note)}>{unavailable ? UNAVAILABLE : 'Choose an option for every question, then send.'}</div>
-      {onOpenTerminal === undefined ? <div id={`${base}-terminal`} {...stylex.props(styles.note)}>This seat's terminal is not available in this view.</div> : null}
-      {status ? <div role="status" {...stylex.props(styles.note)}>{status}</div> : null}
+      <div id={noteId} {...stylex.props(styles.note)}>{UNAVAILABLE}</div>
+      {onOpenTerminal === undefined ? <div id={`${base}-terminal`} {...stylex.props(styles.note)}>This agent's terminal is not available in this view.</div> : null}
     </section>
   )
 }
