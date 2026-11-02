@@ -363,6 +363,20 @@ pub fn truncate_idle_wal(connection: &Connection) -> Result<bool> {
     Ok(busy == 0)
 }
 
+/// Wait up to `busy` for readers on older snapshots, then make the next write start the WAL from
+/// its beginning. RESTART takes SQLite's writer lock, so the daemon calls this only while it has
+/// borrowed the Store's sole writer; it keeps the file, unlike TRUNCATE, which costs a writer hold
+/// to free it.
+pub fn restart_wal(connection: &Connection, busy: std::time::Duration) -> Result<bool> {
+    connection.busy_timeout(busy)?;
+    let restarted = {
+        let _checkpoint = telemetry::CheckpointGuard::start(connection);
+        connection.query_row("PRAGMA wal_checkpoint(RESTART)", [], |row| row.get::<_, i32>(0))
+    };
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    Ok(restarted? == 0)
+}
+
 /// The store's only write connection, owned by one writer thread. Writes queue in front of it in
 /// foreground arrival order: a batched write runs on the writer thread with the others queued behind it, each
 /// in a savepoint of one transaction that commits once for all of them, and its caller hears back

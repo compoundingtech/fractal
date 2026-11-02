@@ -1547,7 +1547,7 @@ async fn run_pi_channel(
     } else {
         None
     };
-    let mut last_warning = None;
+    let mut last_warning = PiChannelWarnings::default();
     let mut todo_observations = None;
     if driver == "omp" && observer.is_none() {
         // A daemon stopping under this read can answer with an error instead of dropping the
@@ -1999,25 +1999,44 @@ async fn run_pi_channel(
     }
 }
 
+/// When a pi-family channel last noted each kind of failure. Each kind keeps its own 10 s limit,
+/// so an error from a stopping daemon cannot hide the outage note that follows it (#4733).
+#[derive(Default)]
+struct PiChannelWarnings {
+    outage: Option<std::time::Instant>,
+    failure: Option<std::time::Instant>,
+}
+
 /// Note a failed pi-family channel request and keep the channel running. The channel shares a
 /// terminal with its provider, so the note goes to the driver log, never to stderr.
-fn warn_pi_channel(
+fn warn_pi_channel(subject: &str, error: &anyhow::Error, warnings: &mut PiChannelWarnings) {
+    if let Some(line) = pi_channel_note(subject, error, warnings, std::time::Instant::now()) {
+        let _ = write_driver_log(subject, &line);
+    }
+}
+
+/// The note for `error` at `now`, unless its kind was noted in the last 10 s.
+fn pi_channel_note(
     subject: &str,
     error: &anyhow::Error,
-    last_warning: &mut Option<std::time::Instant>,
-) {
-    let now = std::time::Instant::now();
-    if last_warning.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(10)) {
-        let line = match fractal_daemon::client::daemon_unreachable(error) {
-            Some(outage) => format!(
-                "{}; the channel keeps running and retries every second until the daemon is back",
-                outage.summary()
-            ),
-            None => format!("`{subject}` pi-family channel request failed; retrying: {error:#}"),
-        };
-        let _ = write_driver_log(subject, &line);
-        *last_warning = Some(now);
+    warnings: &mut PiChannelWarnings,
+    now: std::time::Instant,
+) -> Option<String> {
+    let (line, last) = match fractal_daemon::client::daemon_unreachable(error) {
+        Some(outage) => (
+            format!("{}; the channel keeps running and retries every second until the daemon is back", outage.summary()),
+            &mut warnings.outage,
+        ),
+        None => (
+            format!("`{subject}` pi-family channel request failed; retrying: {error:#}"),
+            &mut warnings.failure,
+        ),
+    };
+    if last.is_some_and(|last| now.duration_since(last) < Duration::from_secs(10)) {
+        return None;
     }
+    *last = Some(now);
+    Some(line)
 }
 
 async fn latest_document_text(client: &Client, name: &str) -> Result<Option<String>> {
@@ -2855,6 +2874,31 @@ fn renewal_minute(subject: &str) -> Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A daemon that is stopping first answers with an error, then stops answering. Each kind of
+    /// note keeps its own 10 s limit, so the outage note still follows the error's (#4733).
+    #[tokio::test]
+    async fn a_stopping_daemons_error_does_not_hide_the_outage_note_after_it() {
+        let root = tempfile::tempdir().unwrap();
+        let unreachable = Client::unix(root.path().join("absent.sock"))
+            .get::<serde_json::Value>("/v1/health")
+            .await
+            .unwrap_err();
+        assert!(fractal_daemon::client::daemon_unreachable(&unreachable).is_some());
+        let stopping = anyhow::anyhow!("st API returned 500 internal: task 19 was cancelled");
+        let mut warnings = PiChannelWarnings::default();
+        let start = std::time::Instant::now();
+        let mut note = |error, at| pi_channel_note("agent/restart-omp", error, &mut warnings, start + at);
+
+        let failure = note(&stopping, Duration::ZERO).expect("the first error is noted");
+        assert!(failure.contains("request failed; retrying"), "{failure}");
+        let outage = note(&unreachable, Duration::from_millis(5)).expect("the outage after it is noted");
+        assert!(outage.contains("the channel keeps running"), "{outage}");
+        // Within its own 10 s, each kind stays quiet; after it, it is noted again.
+        assert_eq!(note(&stopping, Duration::from_secs(1)), None);
+        assert_eq!(note(&unreachable, Duration::from_secs(1)), None);
+        assert!(note(&unreachable, Duration::from_secs(11)).is_some());
+    }
 
     /// The idle-minute boot canary's property at its cause: an idle provider's driver tick reads
     /// no graph delivery control at all, and waiting mail reads it once per tick. Both mailbox

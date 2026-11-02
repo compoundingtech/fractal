@@ -422,8 +422,9 @@ pub enum CheckpointAction {
     TrimGraphChanged {
         checkpoint: String,
     },
-    /// A local trim deleted the day's claims (`[trim] daily_claims`) and stopped; the cut stays
-    /// `trimming` and goes on the next day. The counts are this step's.
+    /// A trim stopped before its end: a local trim deleted the day's claims (`[trim]
+    /// daily_claims`) and goes on the next day, or a trim could not restart the WAL (`TrimWal`)
+    /// and goes on at the next step. The cut stays `trimming`. The counts are this step's.
     TrimDeferred {
         checkpoint: String,
         envelopes: usize,

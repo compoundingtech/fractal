@@ -89,6 +89,7 @@ pub mod checkpoint_staging;
 mod checkpoint_completion;
 pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
+pub mod wal_escalation;
 pub mod document_index;
 mod document_pages;
 pub mod claim_ranges;
@@ -912,6 +913,8 @@ pub struct Store {
     pub trim_fault: Mutex<Option<checkpoint_trim::TrimFault>>,
     /// What a test runs after each chunk a trim deletes, given how many it has deleted.
     pub trim_chunk_hook: Mutex<Option<checkpoint_trim::TrimChunkHook>>,
+    /// What a test sees of the lines a trim writes to stderr.
+    pub trim_log_hook: Mutex<Option<checkpoint_trim::TrimLogHook>>,
     pub trim_chunk_envelopes: AtomicUsize,
     /// Minimum trim rest in microseconds; tests may set zero to disable pacing.
     pub trim_pause_micros: AtomicU64,
@@ -919,6 +922,10 @@ pub struct Store {
     pub trim_view_refold_micros: AtomicU64,
     /// Extra time each trimmed row takes. Tests only.
     pub trim_row_cost_micros: AtomicU64,
+    /// When a trim stops deleting to restart the WAL; only tests change it.
+    pub trim_wal: Mutex<checkpoint_trim::TrimWal>,
+    /// When the daemon's WAL recycle restarts a WAL that keeps growing; only tests change it.
+    pub wal_escalation: Mutex<wal_escalation::WalEscalation>,
     /// The last seal-identity digest, and the capture epoch it holds for; see
     /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
     pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
@@ -1303,10 +1310,13 @@ impl Store {
             shared_memory,
             trim_fault: Mutex::new(None),
             trim_chunk_hook: Mutex::new(None),
+            trim_log_hook: Mutex::new(None),
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
             trim_pause_micros: AtomicU64::new(checkpoint_trim::TRIM_MIN_PAUSE.as_micros() as u64),
             trim_view_refold_micros: AtomicU64::new(checkpoint_trim::TRIM_VIEW_REFOLD_INTERVAL.as_micros() as u64),
             trim_row_cost_micros: AtomicU64::new(0),
+            trim_wal: Mutex::new(checkpoint_trim::TRIM_WAL),
+            wal_escalation: Mutex::new(wal_escalation::WAL_ESCALATION),
             sealed_identity_memo: Mutex::new(None),
             runtime,
         })
@@ -4434,6 +4444,9 @@ pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
 /// A checkpoint that waits this long for the writer names the hold that held it up. The daemon
 /// reports the same wait as an abnormal checkpoint.
 const CHECKPOINT_HELD_UP_MS: u128 = 100;
+/// How long one WAL restart attempt copies off the writer, waiting for the readers on older
+/// snapshots to finish, before it gives up without taking the writer.
+const WAL_RESTART_COPY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Full-inventory answers since the daemon started: each lists every identity this node holds,
 /// which on a large store can pass `MAX_EXCHANGE_BYTES` and fail the peer's inflate.
@@ -8190,6 +8203,51 @@ impl Store {
             report.truncate_ms = Some(truncating.elapsed().as_millis());
         }
         Ok(report)
+    }
+
+    /// Restart the WAL while writes keep coming, as a trim needs when no reader ever lets the idle
+    /// recycle in. Pages are copied off the writer until no more than `remainder` frames are left;
+    /// none left means no reader is on an older snapshot. Only then are they flushed and the
+    /// writer taken, at its FIFO turn, to copy the rest and wait up to `busy` for readers on older
+    /// snapshots. Readers that begin after that see a fully copied WAL and read the database file,
+    /// so they do not hold the restart up. An attempt that cannot get down to `remainder` within
+    /// `WAL_RESTART_COPY` leaves the writer alone. `truncate_ms` is the time under the writer.
+    ///
+    /// A trim stops its own writes to restart, so it asks for every frame (`remainder` 0). The
+    /// recycle's escalation restarts under someone else's writes, which never leave every frame
+    /// copied while a reader is open, so it allows a small remainder: a bounded copy under the
+    /// writer.
+    pub fn restart_wal_report(&self, checkpoint: &Connection, busy: std::time::Duration, remainder: i32) -> Result<crate::sqlite::WalCheckpointReport> {
+        let copying = std::time::Instant::now();
+        let copied_enough = |report: &crate::sqlite::WalCheckpointReport| report.frames >= 0 && report.frames - report.backfilled <= remainder;
+        let mut copied = crate::sqlite::checkpoint_wal_report(checkpoint)?;
+        while !copied_enough(&copied) && copying.elapsed() < WAL_RESTART_COPY {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            copied = crate::sqlite::checkpoint_wal_report(checkpoint)?;
+        }
+        copied.passive_ms = copying.elapsed().as_millis();
+        if !copied_enough(&copied) {
+            // Under the writer the rest would be copied while every write waits.
+            return Ok(copied);
+        }
+        // SQLite syncs the database once a checkpoint copies every frame, which is under the
+        // writer here; flushing first leaves that sync only what arrived since.
+        std::fs::File::open(&self.path)?.sync_data()?;
+        let waiting = std::time::Instant::now();
+        let _writer = self.connection.write();
+        let writer_wait_ms = waiting.elapsed().as_millis();
+        let holding = std::time::Instant::now();
+        let last = crate::sqlite::checkpoint_wal_report(checkpoint)?;
+        let recycled = crate::sqlite::restart_wal(checkpoint, busy)?;
+        Ok(crate::sqlite::WalCheckpointReport {
+            frames: last.frames,
+            backfilled: last.backfilled,
+            passive_ms: copied.passive_ms,
+            writer_wait_ms,
+            truncate_ms: Some(holding.elapsed().as_millis()),
+            recycled,
+            blocked_by: None,
+        })
     }
 
     /// Replay the graph from nothing now, as a restored store does once its claims are back.
