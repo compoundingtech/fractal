@@ -1193,7 +1193,7 @@
     },
     {
       "command": "st fleet admit-without",
-      "description": "Let this member start, restart and retire its seats without peers it cannot reach, for its current daemon start only",
+      "description": "Let this member start, restart and retire its agents without peers it cannot reach, for its current daemon start only",
       "tests": [
         "crates/fractal/tests/placement_handoff.rs::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override"
       ],

@@ -610,9 +610,9 @@ enum FleetCommand {
         #[command(subcommand)]
         command: FleetTransportsCommand,
     },
-    /// Let this member start, restart and retire its seats without peers it cannot reach. With
+    /// Let this member start, restart and retire its agents without peers it cannot reach. With
     /// `wait_for_peers_after_start` on, a member waits after each start to catch up with a peer
-    /// before acting on its seats' placement; this releases the named peers for the current daemon
+    /// before acting on where its agents run; this releases the named peers for the current daemon
     /// start only. Run it on the member.
     AdmitWithout {
         /// A peer this member stops waiting for. Repeat it for several.
