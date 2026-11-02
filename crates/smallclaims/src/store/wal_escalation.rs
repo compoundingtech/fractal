@@ -16,16 +16,21 @@ pub struct WalEscalation {
     /// Checkpoints since it passed `frames` without a recycle, after which a WAL larger than at
     /// the crossing is restarted.
     pub samples: u32,
-    /// How long a restart waits, under the writer, for readers begun while it copied.
+    /// How long a restart waits, under the writer, for readers on older snapshots.
     pub busy: std::time::Duration,
+    /// Frames a restart may still have to copy when it takes the writer: other writes go on while
+    /// it copies, so with a reader open the copy never catches up entirely.
+    pub remainder: i32,
 }
 
 /// 262,144 frames is 1 GiB of 4 KiB pages, four times a trim's own bound, so a trim never
-/// escalates; twelve of the recycle's 5 s checkpoints is a minute of growth.
+/// escalates; twelve of the recycle's 5 s checkpoints is a minute of growth. 1,024 frames is
+/// 4 MiB to copy under the writer at most.
 pub const WAL_ESCALATION: WalEscalation = WalEscalation {
     frames: 262_144,
     samples: 12,
     busy: std::time::Duration::from_millis(200),
+    remainder: 1_024,
 };
 
 /// Checkpoints since the WAL passed the escalation's frames without being recycled since, and
@@ -81,7 +86,7 @@ impl Store {
         if self.shared_memory || !growth.observe(Some(&report), &limits) {
             return Ok((report, None));
         }
-        let restart = self.restart_wal_report(checkpoint, limits.busy)?;
+        let restart = self.restart_wal_report(checkpoint, limits.busy, limits.remainder)?;
         growth.escalated(restart.recycled);
         crate::windows::wal::escalated(&restart);
         Ok((report, Some(restart)))

@@ -8203,22 +8203,27 @@ impl Store {
     }
 
     /// Restart the WAL while writes keep coming, as a trim needs when no reader ever lets the idle
-    /// recycle in. Pages are copied off the writer until every frame is, which means no reader is
-    /// left on an older snapshot; only then are they flushed and the writer taken, at its FIFO
-    /// turn, to copy what arrived since and wait up to `busy` for readers begun in between. Readers
-    /// that begin after that see a fully copied WAL and read the database file, so they do not
-    /// hold the restart up. An attempt that cannot copy every frame within `WAL_RESTART_COPY`
-    /// leaves the writer alone. `truncate_ms` is the time under the writer.
-    pub fn restart_wal_report(&self, checkpoint: &Connection, busy: std::time::Duration) -> Result<crate::sqlite::WalCheckpointReport> {
+    /// recycle in. Pages are copied off the writer until no more than `remainder` frames are left;
+    /// none left means no reader is on an older snapshot. Only then are they flushed and the
+    /// writer taken, at its FIFO turn, to copy the rest and wait up to `busy` for readers on older
+    /// snapshots. Readers that begin after that see a fully copied WAL and read the database file,
+    /// so they do not hold the restart up. An attempt that cannot get down to `remainder` within
+    /// `WAL_RESTART_COPY` leaves the writer alone. `truncate_ms` is the time under the writer.
+    ///
+    /// A trim stops its own writes to restart, so it asks for every frame (`remainder` 0). The
+    /// recycle's escalation restarts under someone else's writes, which never leave every frame
+    /// copied while a reader is open, so it allows a small remainder: a bounded copy under the
+    /// writer.
+    pub fn restart_wal_report(&self, checkpoint: &Connection, busy: std::time::Duration, remainder: i32) -> Result<crate::sqlite::WalCheckpointReport> {
         let copying = std::time::Instant::now();
-        let copied_all = |report: &crate::sqlite::WalCheckpointReport| report.frames >= 0 && report.frames == report.backfilled;
+        let copied_enough = |report: &crate::sqlite::WalCheckpointReport| report.frames >= 0 && report.frames - report.backfilled <= remainder;
         let mut copied = crate::sqlite::checkpoint_wal_report(checkpoint)?;
-        while !copied_all(&copied) && copying.elapsed() < WAL_RESTART_COPY {
+        while !copied_enough(&copied) && copying.elapsed() < WAL_RESTART_COPY {
             std::thread::sleep(std::time::Duration::from_millis(20));
             copied = crate::sqlite::checkpoint_wal_report(checkpoint)?;
         }
         copied.passive_ms = copying.elapsed().as_millis();
-        if !copied_all(&copied) {
+        if !copied_enough(&copied) {
             // Under the writer the rest would be copied while every write waits.
             return Ok(copied);
         }
