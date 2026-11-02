@@ -67,12 +67,18 @@ pub type TrimChunkHook = Box<dyn FnMut(usize) + Send>;
 /// What a test sees of each line a trim writes to the daemon's stderr.
 pub type TrimLogHook = Box<dyn FnMut(&str) + Send>;
 
-/// How often a paced trim's run lets the views refold, while it goes on, unless a test sets
-/// another interval. They are forgotten once when the run stops.
+/// How often a paced trim's run lets the views refold and the replication snapshot catch up,
+/// while it goes on, unless a test sets another interval. Both are reset once when the run stops.
 pub const TRIM_VIEW_REFOLD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// What a trim's run owes the views: a refold at most every [`TRIM_VIEW_REFOLD_INTERVAL`] while
-/// it deletes, and one forget when it stops, however it stops.
+/// What a trim's run owes the views and the replication snapshot: a refold and a new snapshot at
+/// most every [`TRIM_VIEW_REFOLD_INTERVAL`] while it deletes, and when it stops, however it stops,
+/// one forget and a snapshot built from nothing.
+///
+/// A chunk deletes the payloads of envelopes the checkpoint still lists, so the inventory's
+/// identities and digests stay as they were; a snapshot from before the chunk still answers for
+/// them, and export skips a payload that is gone. Rebuilding after every chunk only made each
+/// exchange wait for an inventory build that the next chunk made stale again.
 struct TrimViews<'a> {
     store: &'a Store,
     interval: std::time::Duration,
@@ -86,21 +92,23 @@ impl<'a> TrimViews<'a> {
         Self { store, interval, refolded: std::time::Instant::now(), pending: false }
     }
 
-    /// A chunk deleted rows: replication reads the inventory again, and the views refold if
-    /// the last refold is an interval old.
+    /// A chunk deleted rows: if the last catch-up is an interval old, replication builds its
+    /// next snapshot on from the last one and the views refold.
     fn deleted(&mut self) {
-        self.store.replica_inventory_changed();
         self.pending = true;
         if self.refolded.elapsed() >= self.interval {
+            self.store.replica_inventory_changed();
             self.store.runtime.claims_trimmed();
             self.refolded = std::time::Instant::now();
         }
     }
 
-    /// The run stopped: forget the views once, if it deleted anything.
+    /// The run stopped: forget the views once, if it deleted anything, and build the next
+    /// replication snapshot from nothing, so which payloads it holds and its counts are exact.
     fn stopped(&mut self) {
         if std::mem::take(&mut self.pending) {
             self.store.replica_rows_changed();
+            self.store.forget_replication_snapshot();
         }
     }
 }

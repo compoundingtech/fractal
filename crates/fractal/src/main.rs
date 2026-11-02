@@ -7018,6 +7018,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fractal_daemon::otel::Unit::Daemon,
         Some(if state_identity.is_ok() { &config.node } else { &configured_node }),
     );
+    if config.logging.stderr_warnings && fractal_daemon::telemetry::stderr_warnings() {
+        stderr_message("st3", format_args!("[logging] stderr_warnings: WARN and ERROR lines go to stderr"));
+    }
     if fractal_daemon::otel::metrics_enabled() {
         fractal_daemon::reconcile::init_metrics();
     }
