@@ -34,22 +34,46 @@ session end or replacement. `--on session/…` targets one directly, while
 `--on agent/… --session current` resolves the authoritative running incarnation
 without falling back to an agent-wide note.
 
-The web placement decision keeps both entry points: detail-view Notes with
-**Add note**, plus the selected-row `n` popover, using one composer. The
-selected-row quick-add wiring is not implemented.
+The web implements both entry points: detail-view Notes with **Add note**,
+plus the selected-row `n` popover, using one composer. The composition Button
+exposes React Aria's ref contract for popover anchoring and focus restoration.
 
-Session/directive source changes and client schema/templates are implemented.
-Client regeneration, targeted tests and canonical clippy remain pending the
-permitted dev3 gate-slot window and completion of its SYS roll.
-Regenerate all nine `fractal-client-codegen` outputs:
+Generated clients and schema documentation use session targets and omit the
+removed note `session` field. Rich update codecs preserve omitted fields
+(unchanged), explicit null (clear), and supplied values, as declared by the
+schema's `x-st-preserve-omission` field annotation.
 
-- `crates/fractal-client/src/{contract.rs,generated.rs,lib.rs}`
-- `clients/typescript/fractal-client/{Client,Models,Schema}.generated.ts`
-- `clients/swift/FractalClient/Sources/FractalClient/{Client.swift,Models.swift,Contract.generated.swift}`
+Serial verification on 2026-11-02 covered implementation head
+`e0bec6178683129304f3616cab8f2133a71e676b`; the Rust notes and DQ8
+tests ran at `2314ef74d852dd7159289aaf7f0480c3a6f05b05`, before the
+subsequent codec-generator and Button typing fixes. All builds ran through
+resource admission; elapsed times exclude admission queue waits.
 
-The client schema, templates and synthetic contract fixtures use session
-targets and omit the removed note `session` field. Regenerate outputs in a
-separate commit before verifying consumers; no local build or codegen was run.
+| Run | Result | Peak RSS (KiB) | Elapsed |
+| --- | --- | ---: | ---: |
+| Client generation | Pass | 1,077,832 | 10.16 s |
+| Schema Markdown generation | Pass | 1,066,892 | 20.69 s |
+| Client generation `--check` | Pass | 720,736 | 4.62 s |
+| Eight-package `cargo test … note` | 73 passed (plus 2 child-process tests) | 5,892,168 | 7 m 37.73 s |
+| Schema `subject_notes::tests` | 6 passed | 1,068,940 | 17.61 s |
+| Exact participant dedicated-operation test | 1 passed | 1,123,952 | 2.88 s |
+| Exact note API authority roundtrip | 1 passed | 3,216,196 | 4 m 27.66 s |
+| Corrected codec generation | Pass | 713,048 | 7.36 s |
+| Codegen regression suite | 28 passed | 1,069,552 | 6.02 s |
+| Canonical clippy ratchet and generated freshness | Pass; 109 existing unique warnings | 1,064,004 | 3 m 31.21 s |
+| TypeScript client contract/schema tests | 116 passed | 1,173,980 | 5.04 s |
+| UI kit typecheck | Pass | 1,803,824 | 23.30 s |
+| Web typecheck | Pass | 2,070,000 | 40.43 s |
+| Web notes/live-source tests | 82 passed in 2 files | 1,166,604 | 6.79 s |
+| UI Storybook build | Pass | 2,176,332 | 31.95 s |
+| Both notes play families | 96/96 cases across 24 stories passed | 1,630,652 | 40.17 s |
+| Web entry-point negative control | Expected exit 1; 4/4 cases rejected | 1,169,524 | 9.08 s |
+
+Verification repaired two behavioral integration defects: rich patch decoding
+previously turned omitted fields into explicit clears, and the composition
+Button's public props omitted its underlying ref. The codegen regression suite
+also required the existing eight-case pairing scope enum to follow the schema's
+one-case-per-line invariant. No tests or gates were weakened.
 
 ## Scope
 
