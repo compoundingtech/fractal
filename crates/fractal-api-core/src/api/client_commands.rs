@@ -80,7 +80,7 @@ pub fn validate_args(kind: &str, args: &Value) -> Result<(), ApiError> {
     scope(kind)?;
     let valid = match kind {
         "phone.inspect" => fields(args, &[], &[]),
-        "phone.message.read" => fields(args, &["attention_id"], &[]) && bounded_string(&args["attention_id"]) && args["attention_id"].as_str().is_some_and(|s| s.starts_with("attention/") && s.len() > "attention/".len()),
+        "phone.message.read" => fields(args, &["message_id"], &[]) && bounded_string(&args["message_id"]) && args["message_id"].as_str().is_some_and(|s| s.starts_with("message/") && s.len() > "message/".len()),
         "phone.navigate" if fields(args, &["screen"], &["params"]) => {
             let empty = json!({});
             let params = args.get("params").unwrap_or(&empty);
@@ -268,7 +268,9 @@ mod tests {
         assert!(validate_args("phone.inspect", &json!({})).is_ok());
         for args in [json!({"screen":"Unknown"}), json!({"screen":"Conversation","params":{}}), json!({"screen":"NowRoot","params":{"id":"x"}}), json!({"screen":"Document","params":{"reference":"doc/a","trail":[false]}})] { assert!(validate_args("phone.navigate", &args).is_err()); }
         assert!(validate_args("phone.inspect", &json!({"actor":"person/other"})).is_err());
-        assert!(validate_args("phone.message.read", &json!({"attention_id":"x".repeat(9000)})).is_err());
+        assert!(validate_args("phone.message.read", &json!({"message_id":"x".repeat(9000)})).is_err());
+        assert!(validate_args("phone.message.read", &json!({"message_id":"message/example"})).is_ok());
+        assert!(validate_args("phone.message.read", &json!({"attention_id":"attention/example"})).is_err());
     }
     #[test]
     fn terminal_retention_is_bounded() {
