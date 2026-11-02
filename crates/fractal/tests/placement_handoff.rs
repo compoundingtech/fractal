@@ -526,6 +526,25 @@ agent "example/mover" {{
     fn pass(&self) {
         self.reconciler.reconcile_once().unwrap();
     }
+    /// The daemon starts again, with `peers` configured. Its runtimes keep what they hold.
+    fn restart(&mut self, peers: &[&str]) {
+        self.reconciler = Reconciler::new(
+            self.store.clone(),
+            self.runtime.clone(),
+            self.name.clone(),
+            Arc::new(Notify::new()),
+        )
+        .with_schedule_peers(peers.iter().map(|peer| peer.to_string()).collect());
+    }
+    /// This member's own records of the seat's runtime with `status`.
+    fn recorded(&self, status: &str) -> usize {
+        self.store
+            .claims_for(SEAT, Some("runtime.observed"))
+            .unwrap()
+            .iter()
+            .filter(|claim| claim.origin == self.name && claim.body["fields"]["status"] == status)
+            .count()
+    }
     fn running(&self) -> usize {
         self.runtime
             .observations
@@ -564,6 +583,41 @@ impl Drop for Node {
     fn drop(&mut self) {
         self.server.abort();
     }
+}
+
+#[tokio::test]
+async fn a_restarted_member_holding_a_moved_seat_waits_for_its_peer_then_lets_it_go() {
+    let mut amber = Node::new("amber").await;
+    let cobalt = Node::new("cobalt").await;
+    amber.declare("amber", true, "initial");
+    amber.pass();
+    amber.pass();
+    assert_eq!(amber.runtime.starts.lock().unwrap().len(), 1);
+    amber.sync_to(&cobalt);
+    // The seat moves while amber is away; amber's runtime ends meanwhile.
+    let moved = cobalt
+        .cli(&["agents", "start", SEAT, "--host", "cobalt", "--as", "person/avery"])
+        .await;
+    assert!(moved.status.success(), "{}", String::from_utf8_lossy(&moved.stderr));
+    amber.runtime.observations.lock().unwrap().clear();
+    let vanished = amber.recorded("vanished");
+
+    // amber comes back still holding the old declaration, which places the seat on amber.
+    amber.restart(&["cobalt"]);
+    amber.pass();
+    amber.pass();
+    assert_eq!(amber.runtime.starts.lock().unwrap().len(), 1, "a member that has not caught up relaunches nothing");
+    assert_eq!(amber.recorded("vanished"), vanished, "nor records the old runtime's end");
+
+    // Once it has caught up with cobalt, amber retires its copy and the seat starts on cobalt.
+    cobalt.sync_to(&amber);
+    amber.pass();
+    amber.pass();
+    assert_eq!(amber.runtime.starts.lock().unwrap().len(), 1);
+    amber.sync_to(&cobalt);
+    cobalt.pass();
+    cobalt.pass();
+    assert_eq!(cobalt.running(), 1, "{}", cobalt.show().await);
 }
 
 async fn move_running_seat(terminal: bool) {

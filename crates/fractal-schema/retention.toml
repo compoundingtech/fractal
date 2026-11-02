@@ -38,6 +38,7 @@
 "custom.client.action-result" = { class = "durable" }
 "client.action-result" = { class = "durable", log = "local" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
+"member.admission-override" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }
 "agent.queue.moved" = { class = "durable" }
 "agent.renamed" = { class = "durable" }

@@ -70,6 +70,7 @@ mod schedule_standby_selection_tests;
 #[cfg(test)]
 mod schedule_admission_tests;
 mod schedule_replication_block;
+pub mod member_admission;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -1281,6 +1282,7 @@ pub struct Reconciler<R = NativeRuntime> {
     /// A locally selected future standby tick is not a replicated scheduling claim.
     standby_due_ticks: Mutex<HashMap<String, (String, u64, i64)>>,
     schedule_replication_blocks: Mutex<HashMap<String, schedule_replication_block::BlockedTick>>,
+    member_admission: Mutex<member_admission::MemberAdmission>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
     /// never enters the replicated graph; durable diagnostic dedupe survives a restart.
@@ -1528,6 +1530,7 @@ impl Reconciler<NativeRuntime> {
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
             schedule_replication_blocks: Mutex::default(),
+            member_admission: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1725,6 +1728,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
             schedule_replication_blocks: Mutex::default(),
+            member_admission: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -2889,6 +2893,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn reconcile_pass(&self) -> Result<()> {
         self.refresh_seat_admission();
+        self.observe_member_admission()?;
         // Start completion can mutate the runtime-observation fence. Capture before
         // it can read the shared snapshot, so pre-completion evidence cannot later
         // be presented to planning as a post-completion observation.
@@ -3761,11 +3766,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 self.record_member(subject, &observation, false)?;
                             }
                             None if member.lifecycle == MemberLifecycle::AdoptOnly => {
-                                self.record_once(
-                                    &subject.subject,
-                                    "runtime.observed",
-                                    member_fields(member, "absent", None, false),
-                                )?;
+                                if self.member_admitted() {
+                                    self.record_once(
+                                        &subject.subject,
+                                        "runtime.observed",
+                                        member_fields(member, "absent", None, false),
+                                    )?;
+                                }
                             }
                             None => {
                                 let prior = self.store.latest_actual_value(&subject.subject)?;
@@ -7462,6 +7469,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             use crate::store::identities::{IdentityKind, IdentityStore as _};
             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
         }
+        // A member that has not caught up since it started may hold a placement that moved.
+        if !self.member_admitted() {
+            return Ok(false);
+        }
         if request.is_none() && self.store.runtime_start_for(&subject.subject)?.is_some() {
             return Ok(false);
         }
@@ -9188,6 +9199,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         observation: &RuntimeObservation,
     ) -> Result<()> {
+        if !self.member_admitted() { return Ok(()); }
         if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(()); }
         if subject.kind == "agent"
             && member.lifecycle == MemberLifecycle::Service
@@ -9932,6 +9944,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         observation: &RuntimeObservation,
         adopted: bool,
     ) -> Result<()> {
+        // An end is recorded only once the member knows the seat is still placed here; a
+        // runtime that is alive is recorded wherever the seat is placed.
+        if matches!(observation.status.as_str(), "exited" | "vanished" | "stopped" | "absent" | "failed")
+            && !self.member_admitted()
+        {
+            return Ok(());
+        }
         let mut fields = member_fields(
             member,
             &observation.status,

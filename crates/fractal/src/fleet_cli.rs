@@ -743,6 +743,25 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 Ok(())
             }
         },
+        FleetCommand::AdmitWithout { peers, reason, actor } => {
+            let claim: fractal_daemon::model::ClaimRecord = client
+                .post(
+                    "/v1/fleet/admission-override",
+                    &json!({
+                        "actor": actor,
+                        "peers": peers,
+                        "reason": reason,
+                        "idempotency_key": format!("admission-override:{}", uuid::Uuid::now_v7()),
+                    }),
+                )
+                .await?;
+            if json_output {
+                println!("{}", serde_json::to_string(&claim)?);
+            } else {
+                println!("admitted without\t{}", peers.join(","));
+            }
+            Ok(())
+        }
         FleetCommand::Join(args) => {
             let (code, code_path) = if args.fabric_inbox {
                 let path = wait_for_fabric_inbox_code(&fabric_home()?, FABRIC_INBOX_WAIT, json_output)?;

@@ -717,6 +717,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/agents/rollout", post(agents::rollout_agent))
         .route("/v1/agents/start", post(agents::start_mission_seat))
         .route("/v1/agents/source-offline", post(agents::override_placement_source))
+        .route("/v1/fleet/admission-override", post(fleet::admission_override))
         .route("/v1/agents/suspend", post(agents::suspend_agent))
         .route("/v1/agents/resume", post(agents::resume_agent))
         .route("/v1/agents/lane", get(agents::agent_lane))

@@ -610,6 +610,21 @@ enum FleetCommand {
         #[command(subcommand)]
         command: FleetTransportsCommand,
     },
+    /// Let this member start, restart and retire its seats without peers it cannot reach. After
+    /// each start a member waits to catch up with a peer before acting on its seats' placement;
+    /// this releases the named peers for the current daemon start only. Run it on the member.
+    AdmitWithout {
+        /// A peer this member stops waiting for. Repeat it for several.
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
+        /// Why the member may go on without them.
+        #[arg(long)]
+        reason: String,
+        /// The person or agent applying it.
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+        #[arg(long = "as")]
+        actor: String,
+    },
     /// Show this node, the fleet's members, and open invites.
     Status,
     /// Wait for this node's first sync to end: until it holds the same claims as the peer it
