@@ -9,7 +9,7 @@
 //!
 //! Catalog wrappers also own their status lease for the same reason Claude does: the extension lives
 //! only as long as the provider's process, and a measured SIGKILL of pi produces no terminal record
-//! at all (`docs/vrs/.experiments/2026-08-18-pi-harness-integration.md`). Presence therefore decays
+//! at all ([historical capture](https://github.com/compoundingtech/fractal/blob/bb51bdcb0cd549b06c298d81c1907a7fd35f0c83/docs/vrs/.experiments/2026-08-18-pi-harness-integration.md)). Presence therefore decays
 //! by staleness, exactly as for the other harnesses. Native launches omit that status transport
 //! and retain session-owned observed records and terminal fencing.
 //!
