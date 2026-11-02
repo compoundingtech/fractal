@@ -19,7 +19,7 @@
 #
 # Every time is measured and printed: the setup before the stages, each stage's start, end and seconds, and the time each stage spent
 # waiting in the build admission queue (the shim's "cargo: waiting in order" ... "cargo: got build slot" lines, which also get a UTC
-# stamp of their own), in a table at the end. Each stage's output is also kept in CI_LOCAL_LOG_DIR (default
+# stamp of their own; for the setup, the admission gate's waits too: queue_times), in a table at the end. Each stage's output is also kept in CI_LOCAL_LOG_DIR (default
 # ~/.cache/ci-local-logs/run-TIME-PID/STAGE.log; the latest 10 runs stay), after the scratch above is gone.
 set -euo pipefail
 real_home=$HOME  # the account's own, before the stages get a home of their own
@@ -199,19 +199,36 @@ queue_event() {
   [ -n "${CI_LOCAL_QUEUE_LOG:-}" ] || return 0
   printf '%s %s %s\n' "$1" "$(date +%s)" "$2" >> "$CI_LOCAL_QUEUE_LOG" 2>/dev/null || true
 }
-# Passes a stage's output through, stamping the build admission queue's lines and adding up the time spent in the queue.
+# Passes a stage's output through, stamping the build admission queue's lines and adding up the time spent in the queue, into
+# $log_dir/STAGE.queue or the file given second. With `gates` third, the waits that print no end line count too: the admission gate's
+# ("build-admission: LABEL waits to start", every minute while it waits, and the cargo shim's "next in order; waiting for the build
+# admission gate"), which end when the command prints anything else (its build has started) or ends. The setup's builds use it: their
+# waits are all the time a warm setup's swing came from (42 to 274 s on one tree, 2026-11-02), and they were counted as setup's running.
 queue_times() {
-  local stage=$1 line waiting=-1 count=0 total=0
+  local stage=$1 file=${2:-$log_dir/$1.queue} gates=${3:-} line waiting=-1 gate=0 count=0 total=0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      'cargo: waiting in order'*) if [ "$waiting" -lt 0 ]; then queue_event wait "$stage"; fi; waiting=$SECONDS; count=$((count + 1)); printf 'ci-local: [%s] %s: waiting for a build slot\n' "$(stamp)" "$stage" ;;
-      'cargo: got build slot'*) if [ "$waiting" -ge 0 ]; then total=$((total + SECONDS - waiting)); waiting=-1; queue_event slot "$stage"; fi; printf 'ci-local: [%s] %s: got a build slot\n' "$(stamp)" "$stage" ;;
+      'cargo: waiting in order'*)
+        if [ "$waiting" -lt 0 ]; then queue_event wait "$stage"; waiting=$SECONDS; count=$((count + 1)); fi
+        gate=0; printf 'ci-local: [%s] %s: waiting for a build slot\n' "$(stamp)" "$stage" ;;
+      'cargo: got build slot'*) if [ "$waiting" -ge 0 ]; then total=$((total + SECONDS - waiting)); waiting=-1; gate=0; queue_event slot "$stage"; fi; printf 'ci-local: [%s] %s: got a build slot\n' "$(stamp)" "$stage" ;;
+      'build-admission: '*' waits to start:'*|'cargo: next in order; waiting for the build admission gate'*)
+        if [ -n "$gates" ] && [ "$waiting" -lt 0 ]; then
+          queue_event wait "$stage"; waiting=$SECONDS; gate=1; count=$((count + 1)); printf 'ci-local: [%s] %s: waiting for build admission\n' "$(stamp)" "$stage"
+        fi ;;
+      *) if [ "$gate" = 1 ]; then total=$((total + SECONDS - waiting)); waiting=-1; gate=0; queue_event slot "$stage"; printf 'ci-local: [%s] %s: admitted\n' "$(stamp)" "$stage"; fi ;;
     esac
     printf '%s\n' "$line"
   done
   # A stage that ended while it waited (stopped, or its cargo gave up) waits no longer.
-  if [ "$waiting" -ge 0 ]; then queue_event slot "$stage"; fi
-  echo "$count $total" > "$log_dir/$stage.queue"
+  if [ "$waiting" -ge 0 ]; then total=$((total + SECONDS - waiting)); queue_event slot "$stage"; fi
+  echo "$count $total" > "$file"
+}
+# One of the setup's commands, its output through queue_times as setup's (the Nth setup command, so each keeps its own count).
+setup_queued=0
+setup_step() {
+  setup_queued=$((setup_queued + 1))
+  "$@" 2>&1 | queue_times setup "$log_dir/setup.$setup_queued.queue" gates
 }
 setup_started=$(stamp); setup_began=$SECONDS
 # clippy's ratchet compares with the base, as CI compares with the event's base: CLIPPY_BASE_SHA when given (scripts/fractal-test
@@ -231,7 +248,12 @@ export CLIPPY_BASE_SHA
 # and the previous release the messaging compatibility tests run against.
 if [[ " $* " == *" tests "* ]]; then
   system=$(nix eval --impure --raw --expr builtins.currentSystem)
-  components=$(nix build ".#checks.$system.provider-components" --no-link --print-out-paths)
+  # Built already (the usual case on a warm host), the components are used as they are: `nix build` of a valid path builds nothing, but
+  # it waited for a heavy build admission first, up to minutes on a busy host. A path nix does not have valid is built as before.
+  components=$(nix eval --raw ".#checks.$system.provider-components.outPath")
+  if ! nix path-info "$components" >/dev/null 2>&1; then
+    setup_step nix build ".#checks.$system.provider-components" --no-link --print-out-paths
+  fi
   for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
     wasm=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
     export "ST2_${provider}_COMPONENT=$components/share/st2/providers/st2_${wasm}_component.component.wasm"
@@ -239,9 +261,15 @@ if [[ " $* " == *" tests "* ]]; then
   compat=$(timeout 10m bash scripts/messaging-compat-binary)
   export FRACTAL_MESSAGING_COMPAT_BIN="$compat" ST3_MESSAGING_COMPAT_BIN="$compat"
 fi
-cargo build --locked -p fractal-drivers --bin ci-hooks-install
+setup_step cargo build --locked -p fractal-drivers --bin ci-hooks-install
 bash scripts/ci-install-built-hooks
 setup_ended=$(stamp); setup_seconds=$((SECONDS - setup_began))
+setup_waits=0; setup_waited=0
+for file in "$log_dir"/setup.*.queue; do
+  [ -f "$file" ] || continue
+  read -r queued waited < "$file" || continue
+  setup_waits=$((setup_waits + queued)); setup_waited=$((setup_waited + waited))
+done
 # A build host is shared and test binaries run outside the build admission gate: the stages' tests run 12 at a time unless
 # CI_TEST_THREADS says otherwise (CI's runners use 8 on a machine of their own), at low CPU and IO priority. On a 16-core build host
 # with the TMPDIR in RAM, 12 threads took the linux-gate tests from 849 s to 519 s at a peak of 18 GB used (2026-10-23); on disk,
@@ -344,6 +372,7 @@ for n in "${!stages[@]}"; do
   if [ "$status" -eq 0 ]; then status=$code; fi
 done
 echo "ci-local: timing (UTC)"
-printf 'ci-local:   %s\n' "$(printf '%-26s %s  %s  %6ss' setup "$setup_started" "$setup_ended" "$setup_seconds")"
+# setup has no exit (a failed setup ends the run before this table), only its waits.
+printf 'ci-local:   %s\n' "$(printf '%-26s %s  %s  %6ss  queue: %s waits, %ss' setup "$setup_started" "$setup_ended" "$setup_seconds" "$setup_waits" "$setup_waited")"
 for row in "${table[@]}"; do printf 'ci-local:   %s\n' "$row"; done
 exit "$status"

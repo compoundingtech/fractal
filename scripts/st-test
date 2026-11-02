@@ -2331,10 +2331,11 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
 
 
 # scripts/ci-local's closing stage table (one line per stage it ran: name, start, end, seconds, and for a stage its exit code and the build
-# queue it waited in), as `printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss'` prints it after the `ci-local:` prefix; setup has no exit.
+# queue it waited in), as `printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss'` prints it after the `ci-local:` prefix; setup has no exit,
+# and its queue (the setup's admission waits) since 2026-11-02.
 CI_LOCAL = 'scripts/ci-local'
 STAGE_LINE = re.compile(r'ci-local:\s+(\S+)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d+)s'
-                        r'(?:\s+exit\s+(\S+)(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?)?\s*')
+                        r'(?:\s+exit\s+(\S+))?(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?\s*')
 # How long a check's output is still copied after the check itself exited: a process it left behind may hold the pipe open.
 STREAM_GRACE = 5
 QUEUE_LIMIT = 14400  # default --queue-limit: the build-slot waits a check may spend, apart from its --time-limit
