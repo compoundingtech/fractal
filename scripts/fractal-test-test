@@ -718,6 +718,18 @@ class StTest(unittest.TestCase):
         git(self.work, 'commit', '-q', '-am', 'a check that passes everything')
         self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
 
+    def test_with_keep_the_web_lane_keeps_its_scratch_and_the_run_names_it(self):
+        self.commit('b.txt', 'two')
+        web = ['sh', '-c', 'mkdir -p "$TMPDIR/web.1" && printf "%s\\n" "$TMPDIR/web.1" >> "$CI_LOCAL_KEEP"']
+        with mock.patch.dict(st_test.LOCAL, {st_test.WEB: web}), mock.patch.object(st_test, 'web_unchanged', return_value=None):
+            code, out, err = self.run_st_test('--check', st_test.WEB, '--keep')
+            kept = re.search(r"kept fractal-web's scratch (\S+) too", err)
+            self.assertTrue(kept, err)
+            self.assertTrue(Path(kept[1]).is_dir())
+            shutil.rmtree(Path(kept[1]).parent)
+            code, out, err = self.run_st_test('--check', st_test.WEB, '--rerun')
+            self.assertNotIn("fractal-web's scratch", err)  # without --keep nothing asks the lane to keep it
+
     def commit(self, name, content, branch=None):
         if branch:
             git(self.work, 'checkout', '-q', branch)

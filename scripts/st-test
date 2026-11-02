@@ -1130,6 +1130,7 @@ def pool_base():
 TMP_NAMES = ('TMPDIR', 'TMP', 'TEMP')
 RUN_TMP_PREFIX = 'st-test.'
 KEPT = 'KEPT'  # in a run's TMPDIR that --keep kept: no later run removes it
+WEB_KEPT = 'ci-local-web-kept'  # in a kept run's TMPDIR: where scripts/ci-local-web left its scratch (CI_LOCAL_KEEP), one line each
 RUN_TMP_FRESH = 600  # seconds: a run TMPDIR younger than this is never swept, as its run may not have locked it yet
 
 
@@ -1201,6 +1202,9 @@ def run_tmpdir(keep=False):
         if keep:
             (path / KEPT).touch()
             print(f'fractal-test: kept this run\'s TMPDIR {path} (--keep): no later run removes it, so remove it when you are done', file=sys.stderr)
+            kept_web = (path / WEB_KEPT).read_text().split('\n') if (path / WEB_KEPT).exists() else []
+            for scratch in filter(None, kept_web):
+                print(f'fractal-test: kept fractal-web\'s scratch {scratch} too (its kit play receipts, browser traces and screenshots)', file=sys.stderr)
         else:
             remove_tree(path)
         os.close(fd)
@@ -2871,6 +2875,11 @@ def run_main(argv, cleanup):
                     environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                     if target and name in BUILDS:
                         environment['CARGO_TARGET_DIR'] = str(target)
+                    if args.keep and name == WEB:
+                        # scripts/ci-local-web removes its scratch (the kit play receipts, browser traces and screenshots) when it ends
+                        # unless CI_LOCAL_KEEP is set, and writes where it is to that file: the run's end names it (run_tmpdir). It stays
+                        # where it is, not in this TMPDIR, whose longer path would leave less room for the browsers' sockets.
+                        environment['CI_LOCAL_KEEP'] = str(Path(os.environ['TMPDIR']) / WEB_KEPT)
                     # The nix wrapper admits a `nix develop`/`nix shell` start as heavy unless told the shell compiles no Rust: a check that
                     # builds nothing starts as light (as the pre-sign worker starts .#web and .#genie), and one that builds never does.
                     if name in BUILDS:
