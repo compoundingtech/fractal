@@ -218,11 +218,13 @@ pub fn with_message_read<T>(
     let mut rows = ROWS.lock().map_err(|_| storage_error())?;
     let row = rows.get_mut(&(state.node.clone(), id.to_owned())).ok_or_else(|| denied("mismatch"))?;
     if !visible(row, &session) { return Err(denied("foreign")); }
-    if row.resource["state"] == "expired" || client_now_ms() >= row.expires {
+    if row.terminal() {
+        return Err(denied(if matches!(row.resource["state"].as_str(), Some("expired" | "not-foreground")) { "expired" } else { "not-pending" }));
+    }
+    if client_now_ms() >= row.expires {
         row.expire(client_now_ms(), super::client_presence::has_open_stream(&state.node, &session.actor));
         return Err(denied("expired"));
     }
-    if row.terminal() { return Err(denied("not-pending")); }
     if row.resource["command_kind"] != "phone.message.read" { return Err(denied("mismatch")); }
     let attention = super::client_attention_resources(&state.store, Some(&row.person), false)
         .map_err(ApiError::internal)?;

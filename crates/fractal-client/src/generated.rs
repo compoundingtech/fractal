@@ -3384,6 +3384,8 @@ pub struct ActionRequest {
     idempotency_key: String,
     fence: Fence,
     parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_command: Option<String>,
 }
 
 impl ActionRequest {
@@ -3405,6 +3407,7 @@ impl ActionRequest {
             idempotency_key: idempotency_key.into(),
             fence,
             parameters: serde_json::to_value(parameters)?,
+            device_command: None,
         })
     }
     pub fn agent_create(
