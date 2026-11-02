@@ -110,6 +110,41 @@ impl Drop for TrimViews<'_> {
 
 pub(super) const TRIM_MIN_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// When a trim stops deleting to restart the WAL. A trim writes nearly all the time, and a busy
+/// daemon nearly always has a reader on an older snapshot, so the idle recycle never finds the WAL
+/// fully copied and the WAL grows for as long as the trim runs.
+#[derive(Clone, Copy, Debug)]
+pub struct TrimWal {
+    /// Frames past which the trim stops deleting and restarts the WAL.
+    pub frames: i32,
+    /// How long one restart waits, under the writer, for readers on older snapshots.
+    pub busy: std::time::Duration,
+    /// How long the trim keeps trying before it stops for this run.
+    pub wait: std::time::Duration,
+    /// How often the trim looks at the WAL.
+    pub check: std::time::Duration,
+}
+
+/// 65,536 frames is 256 MiB of 4 KiB pages: about 25 s of a large member's trim. On a 57 GB
+/// store each restart held the writer at most about 100 ms.
+pub const TRIM_WAL: TrimWal = TrimWal {
+    frames: 65_536,
+    busy: std::time::Duration::from_millis(200),
+    wait: std::time::Duration::from_secs(30),
+    check: std::time::Duration::from_secs(1),
+};
+
+/// A trim waiting for the WAL to restart tries again after this.
+const TRIM_WAL_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A trim's run's look at the WAL: when it last looked, and the connection it checkpoints with,
+/// apart from the writer and the daemon's recycle.
+#[derive(Default)]
+struct TrimWalState {
+    checked: Option<std::time::Instant>,
+    connection: Option<Connection>,
+}
+
 /// A trim chunk that holds the writer longer than this logs one line saying what it did.
 pub const LOGGED_TRIM_CHUNK: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -340,6 +375,53 @@ impl Store {
         held.saturating_mul(4)
             .max(std::time::Duration::from_micros(micros))
             .min(std::time::Duration::from_secs(5))
+    }
+
+    pub fn set_trim_wal(&self, limits: TrimWal) {
+        *self.trim_wal.lock().unwrap_or_else(PoisonError::into_inner) = limits;
+    }
+
+    /// Whether a trim may delete its next chunk: the WAL is under its bound, or a restart brought
+    /// it back. Past the bound the trim deletes nothing and restarts the WAL, trying again until
+    /// `TrimWal::wait`; false means it gave up, and the run stops where it is.
+    fn trim_wal_allows(
+        &self,
+        wal: &mut TrimWalState,
+        pause: &mut impl FnMut(std::time::Duration),
+    ) -> Result<bool> {
+        let limits = *self.trim_wal.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.shared_memory || wal.checked.is_some_and(|at| at.elapsed() < limits.check) {
+            return Ok(true);
+        }
+        wal.checked = Some(std::time::Instant::now());
+        if wal.connection.is_none() {
+            wal.connection = Some(Connection::open(&self.path)?);
+        }
+        let Some(connection) = wal.connection.as_mut() else { return Ok(true) };
+        let frames = crate::sqlite::checkpoint_wal_report(connection)?.frames;
+        if frames <= limits.frames {
+            return Ok(true);
+        }
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+        let mut held_ms = 0;
+        loop {
+            attempts += 1;
+            let report = self.restart_wal_report(connection, limits.busy)?;
+            held_ms = held_ms.max(report.truncate_ms.unwrap_or(0));
+            if report.recycled || started.elapsed() >= limits.wait {
+                let restarted = report.recycled;
+                let pause_ms = started.elapsed().as_millis() as u64;
+                if restarted {
+                    tracing::info!(frames, attempts, pause_ms, held_ms = held_ms as u64, "a trim restarted the WAL");
+                } else {
+                    tracing::warn!(frames, attempts, pause_ms, held_ms = held_ms as u64, "a trim could not restart the WAL and stops until the next step");
+                }
+                wal.checked = Some(std::time::Instant::now());
+                return Ok(restarted);
+            }
+            pause(TRIM_WAL_RETRY);
+        }
     }
 
     fn pause_trim_chunk(&self, held: std::time::Duration) {
@@ -1082,11 +1164,13 @@ impl Store {
         let day = self.trim_day.load(Ordering::Relaxed);
         let mut left = cursor.local.is_some().then(|| self.local_trim_left_today()).transpose()?;
         let mut views = TrimViews::new(self);
+        let mut wal = TrimWalState::default();
         let delete = crate::profile::span("trim.delete");
         loop {
-            if left == Some(0) {
-                // The cut stays `trimming`, and the next day's first step goes on from here. What
-                // its deletes deferred is rebuilt now, so a deferral outlasts no day's run.
+            if left == Some(0) || !self.trim_wal_allows(&mut wal, &mut pause)? {
+                // The cut stays `trimming`, and the next step goes on from here: the next day's
+                // after the day's cap, the next one after a WAL that would not restart. What its
+                // deletes deferred is rebuilt now, so a deferral outlasts no run.
                 views.stopped();
                 self.rebuild_deferred_paced()?;
                 actions.push(CheckpointAction::TrimDeferred {
