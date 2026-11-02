@@ -152,34 +152,45 @@ impl Store {
         }
     }
 
-    /// The stream items a page lists after `after`, in shard order: those whose row matches
-    /// `recipients` and `senders` by any of their names (every item, for a party left out) and
-    /// that `keep` keeps, at most `limit` of them, and whether another follows them. A stream
+    /// The stream items a page lists after `after`, in shard order: those `filter` keeps and, when
+    /// given, `keep` keeps, at most `limit` of them, and whether another follows them. A stream
     /// item's index is past every graph index, so a page lists the graph's messages first, then
     /// the stream's. The shard only grows, so a page that has reached the stream misses none
-    /// that arrive.
-    pub fn stream_page_after(
+    /// that arrive. A page is full unless the stream is exhausted: it never ends early with more
+    /// to come.
+    ///
+    /// Without `keep` the shard's query decides alone: only an item the page lists is read, and
+    /// whether another follows is one EXISTS query on the same filter. A `keep` is for what the
+    /// query can't express, a title match: it reads every item the filter passes until the page is
+    /// full, so a match that hits nothing reads each one, as the graph's own title filter reads
+    /// every message its query lists.
+    pub fn stream_page_after<'keep>(
         &self,
-        recipients: Option<&[String]>,
-        senders: Option<&[String]>,
+        filter: super::messages_shard::Filter<'_>,
         after: u64,
         limit: usize,
-        mut keep: impl FnMut(&MessageView) -> bool,
+        mut keep: Option<&mut (dyn FnMut(&MessageView) -> bool + 'keep)>,
     ) -> Result<(Vec<MessageView>, bool)> {
         let mut after = after.saturating_sub(super::messages_shard::STREAM_INDEX_BASE);
-        // Filters can drop most rows, so a batch never shrinks to the page: a full graph page
-        // asks only whether one more item follows, and that must not cost a query per row.
-        let batch = limit.saturating_add(1).max(64);
         let mut output = Vec::new();
         loop {
-            let rows = super::messages_shard::page(self, recipients, senders, after, batch)?;
-            let exhausted = rows.len() < batch;
+            if keep.is_none() && output.len() == limit {
+                return Ok((output, super::messages_shard::any_after(self, filter, after)?));
+            }
+            // A `keep` can drop most rows, so its batch never shrinks to the page: asking whether
+            // one more item follows must not cost a query per row.
+            let wanted = match keep {
+                None => limit - output.len(),
+                Some(_) => limit.saturating_add(1).max(64),
+            };
+            let rows = super::messages_shard::page(self, filter, after, wanted)?;
+            let exhausted = rows.len() < wanted;
             for (subject, index) in rows {
                 after = index;
                 let Some(message) = super::messages_shard::message_view(self, &subject)? else {
                     continue;
                 };
-                if !keep(&message) {
+                if keep.as_mut().is_some_and(|keep| !keep(&message)) {
                     continue;
                 }
                 if output.len() == limit {
@@ -403,13 +414,12 @@ impl Store {
             // The graph's messages are all listed; the page goes on into the stream. A page the
             // graph filled ends at its last graph message, and the next page starts the stream.
             let names = recipient_names(&connection, recipient, bare_recipient)?;
-            let (stream, more) = self.stream_page_after(
-                Some(&names),
-                None,
-                after.unwrap_or(0),
-                limit - listed,
-                |message| message.to == recipient && (include_closed || message.status != "closed"),
-            )?;
+            let filter = super::messages_shard::Filter {
+                recipients: Some(&names),
+                senders: None,
+                open_only: !include_closed,
+            };
+            let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - listed, None)?;
             output.extend(stream);
             let next = stream_cursor(more, &output, last_listed);
             return Ok((output, next));
@@ -456,13 +466,8 @@ impl Store {
             return Ok((output, next_after));
         }
         // Every message, as the graph's are listed: the page goes on into the whole stream.
-        let (stream, more) = self.stream_page_after(
-            None,
-            None,
-            after.unwrap_or(0),
-            limit - listed,
-            |message| include_closed || message.status != "closed",
-        )?;
+        let filter = super::messages_shard::Filter { recipients: None, senders: None, open_only: !include_closed };
+        let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - listed, None)?;
         output.extend(stream);
         let next = stream_cursor(more, &output, last_listed);
         Ok((output, next))

@@ -135,56 +135,87 @@ pub fn message_view(graph: &super::Store, subject: &str) -> anyhow::Result<Optio
     super::message_view_from(&connection, subject, STREAM_INDEX_BASE + index, actual, None).map(Some)
 }
 
-/// The stream items after shard index `after`, oldest first, at most `limit` of them, with their
-/// shard indexes: those addressed to any of `recipients` and sent by any of `senders`, where a
-/// party left out matches every item.
-pub fn page(
-    graph: &super::Store,
-    recipients: Option<&[String]>,
-    senders: Option<&[String]>,
-    after: u64,
-    limit: usize,
-) -> anyhow::Result<Vec<(String, u64)>> {
+/// Which stream items a page lists: those addressed to any of `recipients` and sent by any of
+/// `senders` (a party left out matches every item), and, when `open_only`, not closed. Its query
+/// and its probe share [`Filter::sql`], so what one lists the other finds.
+#[derive(Clone, Copy)]
+pub struct Filter<'a> {
+    pub recipients: Option<&'a [String]>,
+    pub senders: Option<&'a [String]>,
+    pub open_only: bool,
+}
+
+impl Filter<'_> {
+    /// The stream items this filter keeps after shard index `:after`, as a WHERE clause over
+    /// `stream_messages AS item`, with `:recipients` and `:senders` as JSON arrays.
+    /// Only the parties given appear, so the recipient and sender indexes stay usable. A stream
+    /// item's view applies its lifecycle in [`lifecycle_rank`] order, closed last, so it reads
+    /// closed exactly when this member recorded a close for it: change the ranking and this
+    /// changes with it (page_tests compares the two). [`page`] and [`any_after`] both use it.
+    fn sql(&self) -> String {
+        let mut clause = String::from("item.store_index>:after");
+        if self.recipients.is_some() {
+            clause.push_str(" AND item.recipient IN (SELECT value FROM json_each(:recipients))");
+        }
+        if self.senders.is_some() {
+            clause.push_str(" AND item.sender IN (SELECT value FROM json_each(:senders))");
+        }
+        if self.open_only {
+            clause.push_str(
+                " AND NOT EXISTS (SELECT 1 FROM stream_lifecycle closed
+                    WHERE closed.subject=item.subject AND closed.kind='message.closed'
+                      AND json_extract(closed.fields, '$.status')='closed')",
+            );
+        }
+        clause
+    }
+
+    /// The values [`Filter::sql`] names, and only those.
+    fn params(&self, after: u64) -> anyhow::Result<Vec<(&'static str, Box<dyn rusqlite::ToSql>)>> {
+        let mut params: Vec<(&'static str, Box<dyn rusqlite::ToSql>)> = vec![(":after", Box::new(after))];
+        if let Some(recipients) = self.recipients {
+            params.push((":recipients", Box::new(serde_json::to_string(recipients)?)));
+        }
+        if let Some(senders) = self.senders {
+            params.push((":senders", Box::new(serde_json::to_string(senders)?)));
+        }
+        Ok(params)
+    }
+}
+
+/// The stream items `filter` keeps after shard index `after`, oldest first, at most `limit` of
+/// them, with their shard indexes.
+pub fn page(graph: &super::Store, filter: Filter<'_>, after: u64, limit: usize) -> anyhow::Result<Vec<(String, u64)>> {
     let Some(shard) = shard(graph) else {
         return Ok(Vec::new());
     };
     let connection = shard.readers.get();
-    let row = |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?));
-    let rows = match (recipients, senders) {
-        (recipients, Some(senders)) => connection
-            .prepare_cached(
-                "SELECT subject, store_index FROM stream_messages
-                 WHERE sender IN (SELECT value FROM json_each(?1)) AND store_index>?2
-                   AND (?3 IS NULL OR recipient IN (SELECT value FROM json_each(?3)))
-                 ORDER BY store_index LIMIT ?4",
-            )?
-            .query_map(
-                rusqlite::params![
-                    serde_json::to_string(senders)?,
-                    after,
-                    recipients.map(serde_json::to_string).transpose()?,
-                    limit
-                ],
-                row,
-            )?
-            .collect::<Result<Vec<_>, _>>()?,
-        (Some(recipients), None) => connection
-            .prepare_cached(
-                "SELECT subject, store_index FROM stream_messages
-                 WHERE recipient IN (SELECT value FROM json_each(?1)) AND store_index>?2
-                 ORDER BY store_index LIMIT ?3",
-            )?
-            .query_map(rusqlite::params![serde_json::to_string(recipients)?, after, limit], row)?
-            .collect::<Result<Vec<_>, _>>()?,
-        (None, None) => connection
-            .prepare_cached(
-                "SELECT subject, store_index FROM stream_messages
-                 WHERE store_index>?1 ORDER BY store_index LIMIT ?2",
-            )?
-            .query_map(rusqlite::params![after, limit], row)?
-            .collect::<Result<Vec<_>, _>>()?,
-    };
+    let mut params = filter.params(after)?;
+    params.push((":limit", Box::new(limit)));
+    let named: Vec<(&str, &dyn rusqlite::ToSql)> = params.iter().map(|(name, value)| (*name, value.as_ref())).collect();
+    let rows = connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hbb4d7ef8a2a5 owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT item.subject, item.store_index FROM stream_messages AS item
+             WHERE {} ORDER BY item.store_index LIMIT :limit",
+            filter.sql()
+        ))?
+        .query_map(named.as_slice(), |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// Whether `filter` keeps any stream item after shard index `after`: [`page`]'s answer to "is
+/// there more", without reading a message.
+pub fn any_after(graph: &super::Store, filter: Filter<'_>, after: u64) -> anyhow::Result<bool> {
+    let Some(shard) = shard(graph) else {
+        return Ok(false);
+    };
+    let connection = shard.readers.get();
+    let params = filter.params(after)?;
+    let named: Vec<(&str, &dyn rusqlite::ToSql)> = params.iter().map(|(name, value)| (*name, value.as_ref())).collect();
+    Ok(connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h9100df64bb20 owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS (SELECT 1 FROM stream_messages AS item WHERE {})", filter.sql()))?
+        .query_row(/* sqlite-large-value: allow-for-now lv-ha90d058d6c6a owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ named.as_slice(), |row| row.get(0))?)
 }
 
 /// What a lifecycle step for a stream item answers in place of a claim: a receipt that names the
@@ -677,6 +708,9 @@ impl Runtime for MessagesRuntime {
         Ok(Value::Null)
     }
 }
+
+#[cfg(test)]
+mod page_tests;
 
 #[cfg(test)]
 mod tests {
