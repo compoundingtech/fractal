@@ -38,9 +38,13 @@ A claim kind of `local` retention (`st schema show KIND`) is an observation that
 that made it reads. The daemon records it in `local_observations` instead of the claim log. It gets
 no batch, no envelope and no digest, so it never replicates and trimming it never changes what a
 peer holds. Every node computes the same graph from the same admitted claims. The daemon trims
-the table at startup and hourly: rows older than `[observations] retention` (default `7d`, at
-least `1h`) and rows beyond `max_per_subject_kind` (default 20,000) go. The newest row of each
-subject and kind stays. An older build that still writes such a kind as a claim replicates it as
+the table hourly, starting 10 to 15 minutes after it starts, when its seats have reconnected: rows
+older than `[observations] retention` (default `7d`, at least `1h`) and rows beyond
+`max_per_subject_kind` (default 20,000) go. The newest row of each subject and kind stays. A
+reader finds the rows that are due, and the writer deletes at most 500 of them per statement,
+checking each again; each pass logs one line with the rows it deleted, the free pages it gave
+back and its longest writer hold. Searching inside the writer's statement held the writer for
+20 seconds on a 57 GB member right after a restart (#4610). An older build that still writes such a kind as a claim replicates it as
 before, and readers merge those claims with the local rows. `daemon.diagnostic` is local: no
 control logic reads it, so a daemon's diagnostics (reconcile failures, kill survivors, checkpoint
 proof and trim failures) stay in its local log, and its OpenTelemetry logs carry them when a

@@ -84,6 +84,11 @@
   "fractal-chatgpt": {
    "extra": []
   },
+  "fractal-cli": {
+   "extra": [
+    "scripts/ci-test-paths.rs"
+   ]
+  },
   "fractal-client": {
    "extra": [
     "clients/typescript/fractal-scenarios/src/kit/wire.ts",

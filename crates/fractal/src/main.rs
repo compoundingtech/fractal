@@ -239,9 +239,9 @@ fn cli_command_with_bindings(
 
 /// The reconcile pass cap when the config sets none. The test fixture runs at the fastest
 /// supported cap, so integration tests check what converges without waiting out pass spacing;
-/// a test about spacing sets its cap in the config. The binary name is a compile-time value.
+/// a test about spacing sets its cap in the config.
 fn default_max_passes_per_minute() -> u32 {
-    if env!("CARGO_BIN_NAME") == "fractal-fixture" {
+    if fixture() {
         600
     } else {
         fractal_daemon::config::DEFAULT_MAX_PASSES_PER_MINUTE
@@ -5011,7 +5011,9 @@ fn deprecated_binary_name(
     }
 }
 
-fn main() -> ExitCode {
+/// The `fractal` executable's entry point. The fractal-cli package bakes the build identity and hands it
+/// over here, before anything reads the version: clap's `--version`, telemetry, the API, hook receipts, stui.
+pub fn main(cli_build_stamp: Option<&'static str>, local_build_stamp: Option<&'static str>) -> ExitCode {
     // CompleteEnv's dynamic callback uses COMPLETE; empty and "0" disable it.
     let completing = std::env::var_os("COMPLETE")
         .is_some_and(|value| !value.is_empty() && value != "0");
@@ -5021,11 +5023,28 @@ fn main() -> ExitCode {
     ) {
         eprintln!("warning: '{name}' is deprecated; use 'fractal' instead. '{name}' will be removed on 2026-11-16.");
     }
-    // Before anything reads the version: clap's `--version`, telemetry, the API, hook receipts, stui.
-    use fractal_build_stamp::{CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL};
-    fractal_drivers::version::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);
-    fractal_tui::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);
+    fractal_drivers::version::set_build_stamps(cli_build_stamp, local_build_stamp);
+    fractal_tui::set_build_stamps(cli_build_stamp, local_build_stamp);
     cli_output::finish(cli_main())
+}
+
+/// The test fixture's entry point (src/fixture.rs), the only caller. It exists only with test-support.
+#[cfg(feature = "test-support")]
+pub fn fixture_main() -> ExitCode {
+    FIXTURE.store(true, std::sync::atomic::Ordering::Relaxed);
+    cli_output::finish(cli_main())
+}
+
+#[cfg(feature = "test-support")]
+static FIXTURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the test fixture runs the CLI rather than `fractal`. Only `fixture_main` sets it, and nothing
+/// outside a test-support build can call that.
+fn fixture() -> bool {
+    #[cfg(feature = "test-support")]
+    return FIXTURE.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(feature = "test-support"))]
+    false
 }
 
 fn cli_main() -> ExitCode {
@@ -5109,10 +5128,10 @@ fn cli_main() -> ExitCode {
     {
         return run_driver_hook();
     }
-    // Cargo bakes the target name into each executable. The installed st3 binary cannot
-    // enable this with an argument, environment variable, or a different filename.
+    // Only the fixture's own entry point sets this. The installed fractal binary cannot enable it with an
+    // argument, environment variable, or a different filename.
     #[cfg(feature = "test-support")]
-    let _fixture_shell = (env!("CARGO_BIN_NAME") == "fractal-fixture")
+    let _fixture_shell = fixture()
         .then(fractal_daemon::test_support::initialize_fixture);
     // SAFETY: no other thread exists yet; the async runtime starts after this returns.
     unsafe { fractal_drivers::reexec::take_resume_environment() };
@@ -19044,7 +19063,7 @@ impl NativeMailbox {
             }
             Some(fractal_daemon::mailbox::Frame::Seat { seat }) => {
                 #[cfg(feature = "test-support")]
-                if env!("CARGO_BIN_NAME") == "fractal-fixture"
+                if fixture()
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
                     fs::write(PathBuf::from(root).join("title-stream-admitted"), b"seat")?;
@@ -20612,18 +20631,42 @@ async fn catch_up_account_limits(store: Arc<Store>, notify: Arc<Notify>) {
 #[cfg(test)]
 mod limits_catch_up_wake_tests;
 
+async fn sample_database_size(store: &Arc<Store>) {
+    let size_store = store.clone();
+    match size_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("observations.database_size", || size_store.record_database_size(now_ms()))).await {
+        Ok(Ok(size)) => fractal_daemon::slo::note_database_size(&size),
+        Ok(Err(error)) => stderr_message("st3", format_args!("database size sample failed: {error:#}")),
+        Err(error) => stderr_message("st3", format_args!("database size sample stopped: {error}")),
+    }
+}
+
+/// Ten to fifteen minutes: past the reconnects after a start, and spread so members restarted by
+/// one deploy do not trim in the same second.
+fn first_observation_trim_delay() -> Duration {
+    let mut share = [0_u8; 2];
+    let share = getrandom::fill(&mut share).map_or(0.5, |()| f64::from(u16::from_le_bytes(share)) / 65536.0);
+    Duration::from_secs(10 * 60) + Duration::from_secs(5 * 60).mul_f64(share)
+}
+
 async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon::config::ObservationsConfig) {
     const LOCAL_OBSERVATION_TRIM_INTERVAL: Duration = Duration::from_secs(60 * 60);
-    const LOCAL_OBSERVATION_TRIM_CHUNK: usize = 5_000;
+    // Rows one writer statement deletes: a short hold even with every index and trigger it touches.
+    const LOCAL_OBSERVATION_TRIM_CHUNK: usize = 500;
     let retention_ms = observations
         .retention_ms()
         .expect("the daemon validated its observation retention");
+    // Not in the first minutes after a start: every seat reconnects then, and the writer is at its
+    // busiest. A restart used to run this pass at once, and its writer hold starved writes (#4610).
+    // The size sample is a few pragmas and one small write; the database target needs one now.
+    sample_database_size(&store).await;
+    tokio::time::sleep(first_observation_trim_delay()).await;
     loop {
+        let pass_started = Instant::now();
         let observation_store = store.clone();
         let max_per_subject_kind = observations.max_per_subject_kind;
         let trimmed = observation_store.connection.write_workers().spawn_blocking(move || {
             fractal_daemon::task_cpu::profiled_blocking("observations.trim", || {
-                observation_store.trim_local_observations(
+                observation_store.trim_local_observations_pass(
                     now_ms().saturating_sub(u128::from(retention_ms)),
                     max_per_subject_kind,
                     LOCAL_OBSERVATION_TRIM_CHUNK,
@@ -20642,12 +20685,17 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         {
             stderr_message("st3", format_args!("usage response trim failed: {error:#}"));
         }
-        match trimmed {
-            Ok(Ok(0)) => {}
-            Ok(Ok(count)) => stderr_message("st3", format_args!("trimmed {count} local observations")),
-            Ok(Err(error)) => stderr_message("st3", format_args!("local observation trim failed: {error:#}")),
-            Err(error) => stderr_message("st3", format_args!("local observation trim stopped: {error}")),
-        }
+        let trim = match trimmed {
+            Ok(Ok(trim)) => Some(trim),
+            Ok(Err(error)) => {
+                stderr_message("st3", format_args!("local observation trim failed: {error:#}"));
+                None
+            }
+            Err(error) => {
+                stderr_message("st3", format_args!("local observation trim stopped: {error}"));
+                None
+            }
+        };
         // What these trims, checkpoints and response expiry freed goes back to the filesystem,
         // one short write at a time so other writes run between them.
         let mut released = 0;
@@ -20667,16 +20715,19 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if released > 0 {
+        // One line a pass, so a slow one shows without a blocked checkpoint to name it.
+        if let Some(trim) = trim {
+            stderr_message("st3", format_args!(
+                "local observation trim: deleted {} rows, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
+                trim.deleted,
+                trim.longest_writer_hold.as_millis(),
+                pass_started.elapsed().as_millis(),
+            ));
+        } else if released > 0 {
             stderr_message("st3", format_args!("gave {released} free pages back to the filesystem"));
         }
         // The database target's sample: after the trims, so it counts what they freed.
-        let size_store = store.clone();
-        match size_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("observations.database_size", || size_store.record_database_size(now_ms()))).await {
-            Ok(Ok(size)) => fractal_daemon::slo::note_database_size(&size),
-            Ok(Err(error)) => stderr_message("st3", format_args!("database size sample failed: {error:#}")),
-            Err(error) => stderr_message("st3", format_args!("database size sample stopped: {error}")),
-        }
+        sample_database_size(&store).await;
         tokio::time::sleep(LOCAL_OBSERVATION_TRIM_INTERVAL).await;
     }
 }

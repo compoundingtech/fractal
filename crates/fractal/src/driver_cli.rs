@@ -538,7 +538,7 @@ fn spawn_st3_provider(
         },
         };
         #[cfg(feature = "test-support")]
-        if env!("CARGO_BIN_NAME") == "fractal-fixture" {
+        if crate::fixture() {
             fractal_daemon::test_support::hold_provider_completion(&outcome)?;
         }
         outcome
@@ -688,7 +688,7 @@ async fn drive_st2_native(
             completion_announced |= fixture_terminal_completion_barrier(
                 &mut observations, client, subject, driver, &mut loop_state.ready, &task,
             ).await?;
-            if completion_announced && env!("CARGO_BIN_NAME") == "fractal-fixture"
+            if completion_announced && crate::fixture()
                 && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
             {
                 fs::write(PathBuf::from(root).join("awaiting-completion"), b"awaiting")?;
@@ -697,7 +697,7 @@ async fn drive_st2_native(
         tokio::select! {
             frame = mailbox.recv() => {
                 #[cfg(feature = "test-support")]
-                if env!("CARGO_BIN_NAME") == "fractal-fixture"
+                if crate::fixture()
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
@@ -1127,7 +1127,7 @@ async fn drive_st2_native(
 // The installed executable always enables the provider completion branch.
 fn fixture_completion_task_enabled() -> bool {
     #[cfg(feature = "test-support")]
-    if env!("CARGO_BIN_NAME") == "fractal-fixture"
+    if crate::fixture()
         && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from)
         && root.join("join-phase").exists()
         && !root.join("fence-received").exists()
@@ -1148,7 +1148,7 @@ async fn fixture_terminal_completion_barrier(
     ready: &mut bool,
     task: &tokio::task::JoinHandle<Result<()>>,
 ) -> Result<bool> {
-    if env!("CARGO_BIN_NAME") != "fractal-fixture" || driver != "claude" {
+    if !crate::fixture() || driver != "claude" {
         return Ok(false);
     }
     let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from) else {
@@ -2220,7 +2220,7 @@ fn spawn_codex_provider(
             }
         };
         #[cfg(feature = "test-support")]
-        if env!("CARGO_BIN_NAME") == "fractal-fixture" {
+        if crate::fixture() {
             fractal_daemon::test_support::hold_provider_completion(&outcome)?;
         }
         outcome
@@ -2364,7 +2364,7 @@ async fn drive_codex_native(
         tokio::select! {
             frame = mailbox.recv() => {
                 #[cfg(feature = "test-support")]
-                if env!("CARGO_BIN_NAME") == "fractal-fixture"
+                if crate::fixture()
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
@@ -2729,7 +2729,7 @@ async fn drive_codex_native(
 /// This fixture controls JoinHandle ordering; it performs no drain, claim or fence itself.
 #[cfg(feature = "test-support")]
 async fn fixture_codex_completion_phase(task: &tokio::task::JoinHandle<Result<()>>) -> Result<()> {
-    if env!("CARGO_BIN_NAME") != "fractal-fixture" { return Ok(()); }
+    if !crate::fixture() { return Ok(()); }
     let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from) else {
         return Ok(());
     };

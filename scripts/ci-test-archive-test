@@ -103,10 +103,13 @@ elif args[:1] == ['test']:
 elif args[:1] == ['tree']:
     print('standalone model -> std')
 elif args[:1] == ['build']:
+    assert args[args.index('-p') + 1] == 'fractal-cli' and args[args.index('--bin') + 1] == 'fractal', args
     binary = Path(os.environ['RUNNER_TEMP']) / 'production-fractal'
     binary.write_text('#!/bin/sh\\nexit 0\\n')
     binary.chmod(0o755)
-    print(json.dumps({'reason': 'compiler-artifact', 'target': {'name': 'fractal'}, 'executable': str(binary), 'features': [], 'profile': {'test': False}}))
+    library = [feature for feature in os.environ.get('LIBRARY_FEATURES', '').split(',') if feature]
+    print(json.dumps({'reason': 'compiler-artifact', 'target': {'name': 'fractal', 'kind': ['lib']}, 'features': library, 'profile': {'test': False}}))
+    print(json.dumps({'reason': 'compiler-artifact', 'target': {'name': 'fractal', 'kind': ['bin']}, 'executable': str(binary), 'features': [], 'profile': {'test': False}}))
 elif args[:2] == ['nextest', 'list']:
     target = Path(args[args.index('--extract-to') + 1]) / 'target'
     (target / 'nextest').mkdir(parents=True)
@@ -156,6 +159,10 @@ else:
     assert failed.returncode != 0 and 'manifest differs' in failed.stderr.decode()
     commands_after = calls.read_text()[len(before):]
     assert 'archive' not in commands_after and 'list' not in commands_after, 'reject before extracting or rebuilding'
+    # The fractal binary carries no features of its own: the gateway is refused when the CLI library it links has test-support.
+    environment['LIBRARY_FEATURES'] = 'test-support'
+    refused = subprocess.run([sys.executable, 'scripts/ci-test-archive', 'build'], cwd=ROOT, env=environment, capture_output=True)
+    assert refused.returncode != 0 and 'feature/profile identity' in refused.stderr.decode(), refused.stderr.decode()
 print('Archive entry-point controls passed: original selected targets in one archive, exact manifest, extraction/env export, tamper rejection before extraction; fake nextest only')
 
 # A completed, hash-bound ZIP is published atomically; transport/CRC/setup failures
