@@ -70,15 +70,18 @@ async fn device_push_summary_is_secret_free_and_pairing_revoke_deletes_the_local
     assert!(!debug.contains(TOKEN));
     assert!(!serialized.contains("org.example.push"));
     let snapshot = new_client_snapshot(&state);
-    let action = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-    id: "action/push-revoke".into(),
-    action_type: "pairing.revoke".into(),
-    idempotency_key: "push-revoke".into(),
-    fence: Fence {
-        snapshot_id: snapshot.id.clone(),
-        ..Default::default()
-    },
-    parameters: json!({"target_id":"device/phone"}), };
+    let action = ActionRequest {
+        device_command: None,
+        api_version: CLIENT_API_VERSION.into(),
+        id: "action/push-revoke".into(),
+        action_type: "pairing.revoke".into(),
+        idempotency_key: "push-revoke".into(),
+        fence: Fence {
+            snapshot_id: snapshot.id.clone(),
+            ..Default::default()
+        },
+        parameters: json!({"target_id":"device/phone"}),
+    };
     assert_eq!(
         dispatch_action(&state, &snapshot, &session, &action)
             .await

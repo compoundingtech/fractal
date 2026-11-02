@@ -420,15 +420,18 @@ mod tests {
         // The claim keeps its issuer origin while the API runs on another member.
         state.node = "other-member".into();
         let snapshot = new_client_snapshot(&state);
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/issuer-only".into(),
-        action_type: "pairing.revoke".into(),
-        idempotency_key: "issuer-only".into(),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            ..Default::default()
-        },
-        parameters: json!({"target_id":"device/issuer-only"}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/issuer-only".into(),
+            action_type: "pairing.revoke".into(),
+            idempotency_key: "issuer-only".into(),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                ..Default::default()
+            },
+            parameters: json!({"target_id":"device/issuer-only"}),
+        };
         let error = dispatch_action(&state, &snapshot, &session, &request)
             .await
             .unwrap_err();

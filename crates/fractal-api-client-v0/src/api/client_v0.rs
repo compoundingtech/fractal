@@ -13927,10 +13927,13 @@ subscription "watch/source" {
             let mut session = ClientSession::local(Some(launcher)).unwrap();
             session.peer_process = Some(fractal_runtime::PeerProcessIdentity::capture(std::process::id(), pidfd(std::process::id())).unwrap());
             let snapshot = new_client_snapshot(&state);
-            let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(), id: "action/helper".into(),
-            action_type: "agent.create".into(), idempotency_key: "create-helper-launcher-binding".into(),
-            fence: Fence { snapshot_id: snapshot.id.clone(), ..Default::default() },
-            parameters: json!({"name":"helper", "harness":"codex", "workspace":"/tmp"}), };
+            let request = ActionRequest {
+                device_command: None,
+                api_version: CLIENT_API_VERSION.into(), id: "action/helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "create-helper-launcher-binding".into(),
+                fence: Fence { snapshot_id: snapshot.id.clone(), ..Default::default() },
+                parameters: json!({"name":"helper", "harness":"codex", "workspace":"/tmp"}),
+            };
             let mut unproven = session.clone();
             unproven.peer_process = None;
             let refused = action(State(state.clone()), Extension(new_client_snapshot(&state)),
@@ -14086,15 +14089,18 @@ subscription "watch/source" {
             } else {
                 json!({"name":"Shell", "cwd":"/tmp"})
             };
-            let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-            id: "action/recovery".into(),
-            action_type: kind.into(),
-            idempotency_key: "creation-recovery-001".into(),
-            fence: Fence {
-                snapshot_id: snapshot.id.clone(),
-                ..Default::default()
-            },
-            parameters, };
+            let request = ActionRequest {
+                device_command: None,
+                api_version: CLIENT_API_VERSION.into(),
+                id: "action/recovery".into(),
+                action_type: kind.into(),
+                idempotency_key: "creation-recovery-001".into(),
+                fence: Fence {
+                    snapshot_id: snapshot.id.clone(),
+                    ..Default::default()
+                },
+                parameters,
+            };
             let ids = dispatch_action(&state, &snapshot, &session, &request)
                 .await
                 .unwrap();
@@ -14140,12 +14146,15 @@ subscription "watch/source" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "example");
         let session = ClientSession::local(Some("person/ada")).unwrap();
-        let request = |parameters: Value| ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/worktree".into(),
-        action_type: "agent.create".into(),
-        idempotency_key: "agent-worktree-fields".into(),
-        fence: Fence::default(),
-        parameters, };
+        let request = |parameters: Value| ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/worktree".into(),
+            action_type: "agent.create".into(),
+            idempotency_key: "agent-worktree-fields".into(),
+            fence: Fence::default(),
+            parameters,
+        };
         for parameters in [
             json!({"name":"parser", "harness":"codex", "branch":"parser"}),
             json!({"name":"parser", "harness":"codex", "remove_at_run_end":true}),
@@ -14382,17 +14391,20 @@ subscription "watch/source" {
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let snapshot = new_client_snapshot(&state);
         let desired = state.store.selected_desired_token(&owner).unwrap().unwrap();
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/stop-worker".into(),
-        action_type: "runtime.stop".into(),
-        idempotency_key: "stop-worker-client-0001".into(),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            runtime_incarnation: Some(incarnation.into()),
-            runtime_desired_revision: Some("stale-desired".into()),
-            ..Fence::default()
-        },
-        parameters: json!({"target_id": "runtime/client-control-runtime", "reason": "operator stop"}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/stop-worker".into(),
+            action_type: "runtime.stop".into(),
+            idempotency_key: "stop-worker-client-0001".into(),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                runtime_incarnation: Some(incarnation.into()),
+                runtime_desired_revision: Some("stale-desired".into()),
+                ..Fence::default()
+            },
+            parameters: json!({"target_id": "runtime/client-control-runtime", "reason": "operator stop"}),
+        };
         assert_eq!(
             dispatch_action(&state, &snapshot, &session, &request)
                 .await
@@ -14528,17 +14540,20 @@ subscription "watch/source" {
             .unwrap();
         let snapshot = new_client_snapshot(&state);
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/reset-worker".into(),
-        action_type: "runtime.reset".into(),
-        idempotency_key: "reset-worker-client-0001".into(),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            runtime_incarnation: Some(incarnation.into()),
-            runtime_desired_revision: state.store.selected_desired_token(&owner).unwrap(),
-            ..Fence::default()
-        },
-        parameters: json!({"target_id": "runtime/client-reset-runtime", "reason": "clear restart limit"}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/reset-worker".into(),
+            action_type: "runtime.reset".into(),
+            idempotency_key: "reset-worker-client-0001".into(),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                runtime_incarnation: Some(incarnation.into()),
+                runtime_desired_revision: state.store.selected_desired_token(&owner).unwrap(),
+                ..Fence::default()
+            },
+            parameters: json!({"target_id": "runtime/client-reset-runtime", "reason": "clear restart limit"}),
+        };
         assert_eq!(
             dispatch_action(&state, &snapshot, &session, &request)
                 .await
@@ -14593,19 +14608,22 @@ subscription "watch/source" {
         let current = state.store.step_run(&step.subject).unwrap().unwrap();
         let snapshot = new_client_snapshot(&state);
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        let mut request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/retry-check".into(),
-        action_type: "work.retry".into(),
-        idempotency_key: "client-retry-check-0001".into(),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            mission_generation: Some(current.generation.clone()),
-            step_definition: Some(current.definition_hash.clone()),
-            attempt: Some(current.attempt),
-            readiness_epoch: Some(u64::from(current.readiness_epoch)),
-            ..Fence::default()
-        },
-        parameters: json!({"target_id": step.subject, "reason": "check host recovered"}), };
+        let mut request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/retry-check".into(),
+            action_type: "work.retry".into(),
+            idempotency_key: "client-retry-check-0001".into(),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                mission_generation: Some(current.generation.clone()),
+                step_definition: Some(current.definition_hash.clone()),
+                attempt: Some(current.attempt),
+                readiness_epoch: Some(u64::from(current.readiness_epoch)),
+                ..Fence::default()
+            },
+            parameters: json!({"target_id": step.subject, "reason": "check host recovered"}),
+        };
         request.fence.attempt = Some(current.attempt + 1);
         assert_eq!(
             dispatch_action(&state, &snapshot, &session, &request)
@@ -15422,15 +15440,18 @@ subscription "watch/source" {
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let snapshot = new_client_snapshot(&state);
         let body = "A pasted page of notes. ".repeat(256 * 1024 / 24);
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/long-send".into(),
-        action_type: "message.send".into(),
-        idempotency_key: "long-send-idempotency-key".into(),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            ..Default::default()
-        },
-        parameters: json!({"to":"agent/worker","content":body}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/long-send".into(),
+            action_type: "message.send".into(),
+            idempotency_key: "long-send-idempotency-key".into(),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                ..Default::default()
+            },
+            parameters: json!({"to":"agent/worker","content":body}),
+        };
         let sent = action(
             State(state.clone()),
             Extension(snapshot.clone()),
@@ -15485,15 +15506,18 @@ subscription "watch/source" {
         let state = test_state(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let snapshot = new_client_snapshot(&state);
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/steady-send".into(),
-        action_type: "message.send".into(),
-        idempotency_key: "steady-send-idempotency-key".into(),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            ..Default::default()
-        },
-        parameters: json!({"to":"agent/blair","content":"Send once despite unrelated activity."}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/steady-send".into(),
+            action_type: "message.send".into(),
+            idempotency_key: "steady-send-idempotency-key".into(),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                ..Default::default()
+            },
+            parameters: json!({"to":"agent/blair","content":"Send once despite unrelated activity."}),
+        };
         state
             .store
             .append_claim(&ClaimInput {
@@ -15553,15 +15577,18 @@ subscription "watch/source" {
         let state = test_state(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let snapshot = new_client_snapshot(&state);
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/held-writer-send".into(),
-        action_type: "message.send".into(),
-        idempotency_key: "held-writer-send-exact-key".into(),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            ..Default::default()
-        },
-        parameters: json!({"to":"agent/blair","content":"Retain this exact send."}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/held-writer-send".into(),
+            action_type: "message.send".into(),
+            idempotency_key: "held-writer-send-exact-key".into(),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                ..Default::default()
+            },
+            parameters: json!({"to":"agent/blair","content":"Retain this exact send."}),
+        };
         let pending = Arc::new(tokio::sync::Semaphore::new(1));
         let writer = state.store.connection.write();
         let refused = tokio::time::timeout(
@@ -15666,15 +15693,18 @@ subscription "watch/source" {
         let state = test_state(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let snapshot = new_client_snapshot(&state);
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/one-held-key".into(),
-        action_type: "message.send".into(),
-        idempotency_key: "one-held-key-many-retries".into(),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            ..Default::default()
-        },
-        parameters: json!({"to":"agent/blair","content":"Only one retained worker."}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/one-held-key".into(),
+            action_type: "message.send".into(),
+            idempotency_key: "one-held-key-many-retries".into(),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                ..Default::default()
+            },
+            parameters: json!({"to":"agent/blair","content":"Only one retained worker."}),
+        };
         let pending = Arc::new(tokio::sync::Semaphore::new(16));
         let writer = state.store.connection.write();
         let first = action_with_send_wait(
@@ -15788,10 +15818,13 @@ subscription "watch/source" {
             let state = test_state(root.path());
             let session = ClientSession::local(Some("person/alex")).unwrap();
             // A valid creation must be refused before dispatch when a legacy receipt exists.
-            let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(), id: "action/forged-helper".into(),
-            action_type: "agent.create".into(), idempotency_key: "forged-helper-key".into(),
-            fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
-            parameters: json!({"name":"forged-helper", "harness":"codex", "workspace":root.path()}), };
+            let request = ActionRequest {
+                device_command: None,
+                api_version: CLIENT_API_VERSION.into(), id: "action/forged-helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "forged-helper-key".into(),
+                fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+                parameters: json!({"name":"forged-helper", "harness":"codex", "workspace":root.path()}),
+            };
             let digest = hex::encode(Sha256::digest(
                 format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
             let forged = ClaimInput {
@@ -15846,10 +15879,13 @@ subscription "watch/source" {
         source.bind_fleet(FLEET).unwrap();
         state.store.bind_fleet(FLEET).unwrap();
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(), id: "action/peer-cas".into(),
-        action_type: "agent.create".into(), idempotency_key: "peer-cas-idempotency-key".into(),
-        fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
-        parameters: json!({"name":"peer-cas-helper", "harness":"codex", "workspace":root.path()}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(), id: "action/peer-cas".into(),
+            action_type: "agent.create".into(), idempotency_key: "peer-cas-idempotency-key".into(),
+            fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+            parameters: json!({"name":"peer-cas-helper", "harness":"codex", "workspace":root.path()}),
+        };
         let digest = hex::encode(Sha256::digest(
             format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
         let subject = format!("custom/client/action-{}", &digest[..32]);
@@ -15901,15 +15937,18 @@ subscription "watch/source" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/legacy-send".into(),
-        action_type: "message.send".into(),
-        idempotency_key: "legacy-send-idempotency-key".into(),
-        fence: Fence {
-            snapshot_id: new_client_snapshot(&state).id,
-            ..Default::default()
-        },
-        parameters: json!({"to":"person/blair","content":"Do not send again."}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/legacy-send".into(),
+            action_type: "message.send".into(),
+            idempotency_key: "legacy-send-idempotency-key".into(),
+            fence: Fence {
+                snapshot_id: new_client_snapshot(&state).id,
+                ..Default::default()
+            },
+            parameters: json!({"to":"person/blair","content":"Do not send again."}),
+        };
         let legacy_digest = hex::encode(Sha256::digest(serde_json::to_vec(&request).unwrap()));
         assert_ne!(legacy_digest, action_request_digest(&request).unwrap());
         let key_digest = hex::encode(Sha256::digest(
@@ -15951,12 +15990,15 @@ subscription "watch/source" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/legacy-attach".into(),
-        action_type: "terminal.attach".into(),
-        idempotency_key: "legacy-attach-idempotency-key".into(),
-        fence: Fence::default(),
-        parameters: json!({"target_id":"terminal/agent/example"}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/legacy-attach".into(),
+            action_type: "terminal.attach".into(),
+            idempotency_key: "legacy-attach-idempotency-key".into(),
+            fence: Fence::default(),
+            parameters: json!({"target_id":"terminal/agent/example"}),
+        };
         let legacy_digest = hex::encode(Sha256::digest(serde_json::to_vec(&request).unwrap()));
         let current_digest = action_request_digest(&request).unwrap();
         assert_ne!(legacy_digest, current_digest);
@@ -16959,27 +17001,30 @@ mission "example/zero-run" state="ready" {
         let mut state = test_state_named(root.path(), "import-test");
         state.native_session_home = Some(home.clone());
         let session = ClientSession::local(Some("person/tester")).unwrap();
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/import-test".into(),
-        action_type: "session.import".into(),
-        idempotency_key: "session-import-test-0001".into(),
-        fence: Fence {
-            snapshot_id: new_client_snapshot(&state).id,
-            subject_revisions: BTreeMap::from([(
-                external.id.clone(),
-                external.revision.clone(),
-            )]),
-            mission_generation: None,
-            step_definition: None,
-            attempt: None,
-            readiness_epoch: None,
-            runtime_incarnation: None,
-            runtime_desired_revision: None,
-            terminal_sequence: None,
-            preview_token: None,
-            private_notes: None,
-        },
-        parameters: json!({"target_id": external.id}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/import-test".into(),
+            action_type: "session.import".into(),
+            idempotency_key: "session-import-test-0001".into(),
+            fence: Fence {
+                snapshot_id: new_client_snapshot(&state).id,
+                subject_revisions: BTreeMap::from([(
+                    external.id.clone(),
+                    external.revision.clone(),
+                )]),
+                mission_generation: None,
+                step_definition: None,
+                attempt: None,
+                readiness_epoch: None,
+                runtime_incarnation: None,
+                runtime_desired_revision: None,
+                terminal_sequence: None,
+                preview_token: None,
+                private_notes: None,
+            },
+            parameters: json!({"target_id": external.id}),
+        };
 
         // `st3 import run` submits through the action handler, so the generic fence check must
         // read a native session's revision from discovery rather than from the claim store.
@@ -17110,27 +17155,30 @@ mission "example/zero-run" state="ready" {
         let mut state = test_state_named(root.path(), "import-canary");
         state.native_session_home = Some(home.clone());
         let session = ClientSession::local(Some("person/eval")).unwrap();
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/import-canary".into(),
-        action_type: "session.import".into(),
-        idempotency_key: "session-import-canary-0001".into(),
-        fence: Fence {
-            snapshot_id: new_client_snapshot(&state).id,
-            subject_revisions: BTreeMap::from([(
-                external.id.clone(),
-                external.revision.clone(),
-            )]),
-            mission_generation: None,
-            step_definition: None,
-            attempt: None,
-            readiness_epoch: None,
-            runtime_incarnation: None,
-            runtime_desired_revision: None,
-            terminal_sequence: None,
-            preview_token: None,
-            private_notes: None,
-        },
-        parameters: json!({"target_id": external.id}), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/import-canary".into(),
+            action_type: "session.import".into(),
+            idempotency_key: "session-import-canary-0001".into(),
+            fence: Fence {
+                snapshot_id: new_client_snapshot(&state).id,
+                subject_revisions: BTreeMap::from([(
+                    external.id.clone(),
+                    external.revision.clone(),
+                )]),
+                mission_generation: None,
+                step_definition: None,
+                attempt: None,
+                readiness_epoch: None,
+                runtime_incarnation: None,
+                runtime_desired_revision: None,
+                terminal_sequence: None,
+                preview_token: None,
+                private_notes: None,
+            },
+            parameters: json!({"target_id": external.id}),
+        };
         let response = action(
             State(state.clone()),
             Extension(new_client_snapshot(&state)),
@@ -19437,24 +19485,27 @@ mission "example/zero-run" state="ready" {
         assert_eq!(agent["current_session_id"], session_id);
 
         let client_session = ClientSession::local(Some("person/alex")).unwrap();
-        let action = |key: &str, parameters: Value| ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: format!("action/{key}"),
-        action_type: "message.send".into(),
-        idempotency_key: format!("session-message-{key}"),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            subject_revisions: BTreeMap::new(),
-            mission_generation: None,
-            step_definition: None,
-            attempt: None,
-            readiness_epoch: None,
-            runtime_incarnation: None,
-            runtime_desired_revision: None,
-            terminal_sequence: None,
-            preview_token: None,
-            private_notes: None,
-        },
-        parameters, };
+        let action = |key: &str, parameters: Value| ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: format!("action/{key}"),
+            action_type: "message.send".into(),
+            idempotency_key: format!("session-message-{key}"),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                subject_revisions: BTreeMap::new(),
+                mission_generation: None,
+                step_definition: None,
+                attempt: None,
+                readiness_epoch: None,
+                runtime_incarnation: None,
+                runtime_desired_revision: None,
+                terminal_sequence: None,
+                preview_token: None,
+                private_notes: None,
+            },
+            parameters,
+        };
 
         let generic = action(
             "generic",
@@ -22783,24 +22834,27 @@ mission "example/zero-run" state="ready" {
             })
             .unwrap();
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/terminal-attach-crash".into(),
-        action_type: "terminal.attach".into(),
-        idempotency_key: "terminal-attach-crash-0001".into(),
-        fence: Fence {
-            snapshot_id: "snapshot/test".into(),
-            subject_revisions: BTreeMap::new(),
-            mission_generation: None,
-            step_definition: None,
-            attempt: None,
-            readiness_epoch: None,
-            runtime_incarnation: Some("terminal-runtime:i1".into()),
-            runtime_desired_revision: None,
-            terminal_sequence: Some(1),
-            preview_token: None,
-            private_notes: None,
-        },
-        parameters: json!({ "target_id": "terminal/agent/terminal-owner" }), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/terminal-attach-crash".into(),
+            action_type: "terminal.attach".into(),
+            idempotency_key: "terminal-attach-crash-0001".into(),
+            fence: Fence {
+                snapshot_id: "snapshot/test".into(),
+                subject_revisions: BTreeMap::new(),
+                mission_generation: None,
+                step_definition: None,
+                attempt: None,
+                readiness_epoch: None,
+                runtime_incarnation: Some("terminal-runtime:i1".into()),
+                runtime_desired_revision: None,
+                terminal_sequence: Some(1),
+                preview_token: None,
+                private_notes: None,
+            },
+            parameters: json!({ "target_id": "terminal/agent/terminal-owner" }),
+        };
         let first = create_terminal_attachment(&state, &session, &request, "request-digest")
             .expect("pre-receipt attachment");
         let capability = first["stream_capability"].as_str().unwrap().to_owned();
@@ -22857,24 +22911,27 @@ mission "example/zero-run" state="ready" {
         assert_eq!(consumed["ttl_s"], 300);
         assert!(consumed["retry_hint"].is_null());
         assert_eq!(consumed["stream_capability"], capability);
-        let detach = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/terminal-detach-after-consume".into(),
-        action_type: "terminal.detach".into(),
-        idempotency_key: "terminal-detach-after-consume-0001".into(),
-        fence: Fence {
-            snapshot_id: "snapshot/test".into(),
-            subject_revisions: BTreeMap::new(),
-            mission_generation: None,
-            step_definition: None,
-            attempt: None,
-            readiness_epoch: None,
-            runtime_incarnation: Some("terminal-runtime:i1".into()),
-            runtime_desired_revision: None,
-            terminal_sequence: None,
-            preview_token: None,
-            private_notes: None,
-        },
-        parameters: json!({ "target_id": attachment_id }), };
+        let detach = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/terminal-detach-after-consume".into(),
+            action_type: "terminal.detach".into(),
+            idempotency_key: "terminal-detach-after-consume-0001".into(),
+            fence: Fence {
+                snapshot_id: "snapshot/test".into(),
+                subject_revisions: BTreeMap::new(),
+                mission_generation: None,
+                step_definition: None,
+                attempt: None,
+                readiness_epoch: None,
+                runtime_incarnation: Some("terminal-runtime:i1".into()),
+                runtime_desired_revision: None,
+                terminal_sequence: None,
+                preview_token: None,
+                private_notes: None,
+            },
+            parameters: json!({ "target_id": attachment_id }),
+        };
         detach_terminal_attachment(&restarted, &session, &detach).unwrap();
         // Detaching revokes the lease: it opens nothing more and says to attach again.
         assert_eq!(
@@ -23013,12 +23070,15 @@ mission "example/zero-run" state="ready" {
         };
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let request =
-            |action_type: &str, key: &str, fence: Fence, parameters: Value| ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-            id: format!("action/{key}"),
-            action_type: action_type.into(),
-            idempotency_key: format!("terminal-fence-test-{key}"),
-            fence,
-            parameters, };
+            |action_type: &str, key: &str, fence: Fence, parameters: Value| ActionRequest {
+                device_command: None,
+                api_version: CLIENT_API_VERSION.into(),
+                id: format!("action/{key}"),
+                action_type: action_type.into(),
+                idempotency_key: format!("terminal-fence-test-{key}"),
+                fence,
+                parameters,
+            };
         // A graph update after the client read must not invalidate this terminal's view.
         state
             .store
@@ -23171,24 +23231,27 @@ mission "example/zero-run" state="ready" {
             })
             .unwrap();
         let snapshot = new_client_snapshot(&state);
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/concurrent-terminal-attach".into(),
-        action_type: "terminal.attach".into(),
-        idempotency_key: "concurrent-terminal-attach-key-0001".into(),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            subject_revisions: BTreeMap::new(),
-            mission_generation: None,
-            step_definition: None,
-            attempt: None,
-            readiness_epoch: None,
-            runtime_incarnation: Some("concurrent-terminal-runtime:i1".into()),
-            runtime_desired_revision: None,
-            terminal_sequence: Some(snapshot.store_index),
-            preview_token: None,
-            private_notes: None,
-        },
-        parameters: json!({ "target_id": "terminal/agent/concurrent-terminal-owner" }), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/concurrent-terminal-attach".into(),
+            action_type: "terminal.attach".into(),
+            idempotency_key: "concurrent-terminal-attach-key-0001".into(),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                subject_revisions: BTreeMap::new(),
+                mission_generation: None,
+                step_definition: None,
+                attempt: None,
+                readiness_epoch: None,
+                runtime_incarnation: Some("concurrent-terminal-runtime:i1".into()),
+                runtime_desired_revision: None,
+                terminal_sequence: Some(snapshot.store_index),
+                preview_token: None,
+                private_notes: None,
+            },
+            parameters: json!({ "target_id": "terminal/agent/concurrent-terminal-owner" }),
+        };
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let count = 8;
         let barrier = Arc::new(Barrier::new(count));
@@ -23452,15 +23515,18 @@ mission "example/zero-run" state="ready" {
             State(state.clone()), Extension(pinned.clone()), Extension(session.clone()),
             AxumPath("shared".into()),
         ).await.unwrap().0, expected);
-        let request_for = |target: &str, selected: &Value| ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(), id: "action/runtime-parity".into(),
-        action_type: "runtime.stop".into(), idempotency_key: "runtime-parity-control".into(),
-        fence: Fence {
-            snapshot_id: pinned.id.clone(),
-            runtime_incarnation: selected["incarnation_id"].as_str().map(str::to_owned),
-            runtime_desired_revision: selected["desired_revision"].as_str().map(str::to_owned),
-            ..Fence::default()
-        },
-        parameters: json!({"target_id": target}), };
+        let request_for = |target: &str, selected: &Value| ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(), id: "action/runtime-parity".into(),
+            action_type: "runtime.stop".into(), idempotency_key: "runtime-parity-control".into(),
+            fence: Fence {
+                snapshot_id: pinned.id.clone(),
+                runtime_incarnation: selected["incarnation_id"].as_str().map(str::to_owned),
+                runtime_desired_revision: selected["desired_revision"].as_str().map(str::to_owned),
+                ..Fence::default()
+            },
+            parameters: json!({"target_id": target}),
+        };
         assert_eq!(runtime_control_target(
             &state, &pinned, &session, &request_for("runtime/shared", &all[0]),
         ).unwrap(), all[0], "duplicate ids preserve the full scan's owner ordering");
@@ -23732,24 +23798,27 @@ mission "example/zero-run" state="ready" {
         assert_eq!(projected["state"], "running");
         assert_eq!(projected["owner_host_id"], "host/owner-node");
         assert_eq!(projected["terminal_access"]["read"], "granted");
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/fleet-terminal-attach".into(),
-        action_type: "terminal.attach".into(),
-        idempotency_key: "fleet-terminal-attach-0001".into(),
-        fence: Fence {
-            snapshot_id: new_client_snapshot(&owner).id,
-            subject_revisions: BTreeMap::new(),
-            mission_generation: None,
-            step_definition: None,
-            attempt: None,
-            readiness_epoch: None,
-            runtime_incarnation: Some("same-runtime-id:i1".into()),
-            runtime_desired_revision: None,
-            terminal_sequence: Some(owner.store.index().unwrap()),
-            preview_token: None,
-            private_notes: None,
-        },
-        parameters: json!({ "target_id": "terminal/agent/fleet-terminal" }), };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/fleet-terminal-attach".into(),
+            action_type: "terminal.attach".into(),
+            idempotency_key: "fleet-terminal-attach-0001".into(),
+            fence: Fence {
+                snapshot_id: new_client_snapshot(&owner).id,
+                subject_revisions: BTreeMap::new(),
+                mission_generation: None,
+                step_definition: None,
+                attempt: None,
+                readiness_epoch: None,
+                runtime_incarnation: Some("same-runtime-id:i1".into()),
+                runtime_desired_revision: None,
+                terminal_sequence: Some(owner.store.index().unwrap()),
+                preview_token: None,
+                private_notes: None,
+            },
+            parameters: json!({ "target_id": "terminal/agent/fleet-terminal" }),
+        };
         let attached =
             create_terminal_attachment(&owner, &session, &request, "fleet-request-digest").unwrap();
         assert_eq!(attached["owner_host_id"], "host/owner-node");

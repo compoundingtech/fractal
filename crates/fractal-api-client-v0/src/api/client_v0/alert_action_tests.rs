@@ -18,15 +18,18 @@ async fn delegated_prompt_actions_share_one_source_contract_and_cannot_choose_th
         let typed: fractal_client::PromptRespondParameters =
             serde_json::from_value(parameters.clone()).unwrap();
         assert_eq!(serde_json::to_value(typed).unwrap(), parameters);
-        let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: format!("action/{client}-dismiss"),
-        action_type: "prompt.respond".into(),
-        idempotency_key: format!("authored-{client}-delegated-dismiss"),
-        fence: Fence {
-            snapshot_id: snapshot.id.clone(),
-            ..Default::default()
-        },
-        parameters, };
+        let request = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: format!("action/{client}-dismiss"),
+            action_type: "prompt.respond".into(),
+            idempotency_key: format!("authored-{client}-delegated-dismiss"),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                ..Default::default()
+            },
+            parameters,
+        };
         // Main's ordinary answers remain text; supplying proof narrows the
         // source action to dismiss rather than granting those ordinary answers.
         let before = state.store.index().unwrap();
@@ -176,12 +179,15 @@ fn name_prompt_call(state: &AppState, seat: &str, call: &str) {
 async fn allow_prompt(state: &AppState, seat: &str, episode: &str, key: &str) -> Result<(), ApiError> {
     let session = ClientSession::for_tests_scoped("client/tui-answer-fixture", "person/avery", &["control.attention", "read.projections"]);
     let snapshot = new_client_snapshot(state);
-    let request = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-    id: format!("action/{key}"),
-    action_type: "prompt.respond".into(),
-    idempotency_key: format!("authored-answer-{key}"),
-    fence: Fence { snapshot_id: snapshot.id.clone(), ..Default::default() },
-    parameters: json!({"target_id": seat, "episode": episode, "answer": "allow"}), };
+    let request = ActionRequest {
+        device_command: None,
+        api_version: CLIENT_API_VERSION.into(),
+        id: format!("action/{key}"),
+        action_type: "prompt.respond".into(),
+        idempotency_key: format!("authored-answer-{key}"),
+        fence: Fence { snapshot_id: snapshot.id.clone(), ..Default::default() },
+        parameters: json!({"target_id": seat, "episode": episode, "answer": "allow"}),
+    };
     action_inner(State(state.clone()), Extension(snapshot), Extension(session), Json(request), None).await.map(|_| ())
 }
 

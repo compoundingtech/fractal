@@ -246,12 +246,15 @@ mod tests {
             let session = ClientSession::local(Some("person/ada")).unwrap();
             let notes = read(&state, &session).await;
             let request = action(&notes, "notes-cross-action-key-0001", "Private shared-key context.\n");
-            let send = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-            id: "action/notes-cross-action-send".into(),
-            action_type: "message.send".into(),
-            idempotency_key: request.idempotency_key.clone(),
-            fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
-            parameters: json!({"to":"agent/worker","content":"ordinary message"}), };
+            let send = ActionRequest {
+                device_command: None,
+                api_version: CLIENT_API_VERSION.into(),
+                id: "action/notes-cross-action-send".into(),
+                action_type: "message.send".into(),
+                idempotency_key: request.idempotency_key.clone(),
+                fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+                parameters: json!({"to":"agent/worker","content":"ordinary message"}),
+            };
             let (first, second) = if notes_first { (request.clone(), send) } else { (send, request) };
             invoke(&state, &session, first).await.unwrap();
             let index = state.store.index().unwrap();
@@ -297,12 +300,15 @@ mod tests {
             BEGIN SELECT RAISE(FAIL, 'completed audit refusal'); END;").unwrap();
         assert_eq!(invoke(&state, &session, request.clone()).await.unwrap_err().code, "private-notes-indeterminate");
         assert_eq!(std::fs::read_to_string(&carrier).unwrap(), "Private durable context.\n");
-        let conflicting = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(),
-        id: "action/pending-notes-cross-action".into(),
-        action_type: "message.send".into(),
-        idempotency_key: request.idempotency_key.clone(),
-        fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
-        parameters: json!({"to":"agent/worker","content":"must not steal a pending notes key"}), };
+        let conflicting = ActionRequest {
+            device_command: None,
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/pending-notes-cross-action".into(),
+            action_type: "message.send".into(),
+            idempotency_key: request.idempotency_key.clone(),
+            fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+            parameters: json!({"to":"agent/worker","content":"must not steal a pending notes key"}),
+        };
         let index = state.store.index().unwrap();
         assert_eq!(invoke(&state, &session, conflicting).await.unwrap_err().code, "idempotency-conflict");
         assert_eq!(state.store.index().unwrap(), index);
