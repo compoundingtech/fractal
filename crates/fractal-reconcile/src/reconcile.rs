@@ -15434,7 +15434,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.clear_schedule_replication_block(schedule)?;
             return Ok(());
         }
-        if self.schedule_has_open_work(&schedule.subject)? {
+        if self.schedule_has_open_work(&schedule.subject, spec.host != self.host)? {
             if self.store.schedule_has_active_started_run(&schedule.subject)? {
                 self.clear_schedule_replication_block(schedule)?;
             }
@@ -15841,11 +15841,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn schedule_has_open_work(&self, schedule: &str) -> Result<bool> {
-        Ok(!self
+    fn schedule_has_open_work(&self, schedule: &str, on_standby: bool) -> Result<bool> {
+        // A standby starts only its own requests. A primary's request it will never start must
+        // not hold it either, or a primary that stops between requesting and starting its work
+        // holds every later occurrence until it returns.
+        Ok(self
             .store
             .pending_schedule_work_requests(schedule)?
-            .is_empty()
+            .iter()
+            .any(|request| !on_standby || request.origin == self.host)
             || self.store.schedule_has_active_started_run(schedule)?)
     }
 
