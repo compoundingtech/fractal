@@ -1938,11 +1938,11 @@ fn native_client_decodes_device_command_fixtures_and_preserves_discriminators() 
     let fractal_client::Resource::DeviceCommand(command) = &decoded.value else {
         panic!("device command must decode as a known resource");
     };
-    assert!(matches!(&command.command, fractal_client::DeviceCommandBody::Navigate(_)));
+    assert!(matches!(&command.command, fractal_client::DeviceCommandBody::MessageRead(args) if args.message_id == "message/example"));
     assert_eq!(command.state, fractal_client::DeviceCommandState::Pending);
     let encoded = serde_json::to_value(&decoded.value).unwrap();
     assert_eq!(encoded["kind"], "device-command");
-    assert_eq!(encoded["command_kind"], "phone.navigate");
+    assert_eq!(encoded["command_kind"], "phone.message.read");
     assert_eq!(encoded["args"], wire["value"]["args"]);
     let result: fractal_client::DeviceResult =
         serde_json::from_value(fixture("device-command-result.json")).unwrap();
