@@ -135,7 +135,13 @@ fences both subscriptions and receipts to the live runtime
 incarnation and replacement owner; reconnecting an older channel cannot retake ownership, including
 after a daemon restart. A stream item's receipt is the exception: its fence is read on the graph
 just before the record goes to the messages shard, so a token revoked between them can still
-record one step. Socket loss creates no delivered or read receipt. Native ledgers retain
+record one step. A delegated step on a stream item (an agent closing a person's notice for them)
+is checked the same way: its delegation rules read a graph snapshot, and the item's sent claim in
+the shard, without either store's writer, so a policy replaced between the check and the record can
+still admit that one step. The person's instruction it cites is always a graph claim, because the
+shard refuses a person's message. A handoff note that is a stream item is read only after its
+acknowledgment commits, so an acknowledgment the step refuses leaves the note unread. Socket loss
+creates no delivered or read receipt. Native ledgers retain
 uncertain handoffs, and successful handoffs retry lost receipt acknowledgements with stable IDs.
 No push component projects message bodies into `resources/inbox` or `resources/archive`.
 
