@@ -1518,10 +1518,37 @@ def tree_users(directory, proc='/proc', execution_only=False):
     return sorted(found)
 
 
-def clear_tree_orphans(directory, grace=2.0, proc='/proc'):
-    """With the flock held, terminate only execution-backed orphans; argv-only references block reuse without authorizing a signal."""
-    users = tree_users(directory, proc, execution_only=True)
-    references = set(tree_users(directory, proc)) - set(users)
+def sibling_sizing(pid, proc='/proc'):
+    """Whether `pid` is another st-test's du_gb: `du -sk [--] PATH` whose parent's argv runs an st-test. It names a pool tree only to
+    size it (evict_to_cap, the closing target line), for seconds, and refusing a tree for it failed a run that had waited an hour for
+    one (2026-11-02)."""
+    try:
+        argv = Path(proc, str(pid), 'cmdline').read_text(errors='surrogateescape').split('\0')
+        status = Path(proc, str(pid), 'status').read_text()
+        parent = int(next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:')))
+        parent_argv = Path(proc, str(parent), 'cmdline').read_text(errors='surrogateescape').split('\0')
+    except (OSError, StopIteration, ValueError, IndexError):
+        return False
+    argv = [arg for arg in argv if arg]
+    sizing = len(argv) in (3, 4) and os.path.basename(argv[0]) == 'du' and argv[1] == '-sk' and argv[2:-1] in ([], ['--'])
+    return sizing and any(os.path.basename(arg) == 'st-test' for arg in parent_argv[:2])
+
+
+ARGV_SETTLE = 30.0  # seconds an argv-only reference may take to go away before the tree is refused for it
+
+
+def clear_tree_orphans(directory, grace=2.0, proc='/proc', settle=ARGV_SETTLE):
+    """With the flock held, terminate only execution-backed orphans; argv-only references block reuse without authorizing a signal.
+    Another st-test sizing the tree (sibling_sizing) is no reference, and any other must still be there after `settle` seconds."""
+    def argv_only():
+        users = tree_users(directory, proc, execution_only=True)
+        return users, {pid for pid in set(tree_users(directory, proc)) - set(users) if not sibling_sizing(pid, proc)}
+
+    deadline = time.monotonic() + settle
+    users, references = argv_only()
+    while references and time.monotonic() < deadline:
+        time.sleep(0.5)
+        users, references = argv_only()
     if references:
         commands = {}
         for pid in sorted(references):
@@ -2331,10 +2358,11 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
 
 
 # scripts/ci-local's closing stage table (one line per stage it ran: name, start, end, seconds, and for a stage its exit code and the build
-# queue it waited in), as `printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss'` prints it after the `ci-local:` prefix; setup has no exit.
+# queue it waited in), as `printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss'` prints it after the `ci-local:` prefix; setup has no exit,
+# and its queue (the setup's admission waits) since 2026-11-02.
 CI_LOCAL = 'scripts/ci-local'
 STAGE_LINE = re.compile(r'ci-local:\s+(\S+)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d+)s'
-                        r'(?:\s+exit\s+(\S+)(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?)?\s*')
+                        r'(?:\s+exit\s+(\S+))?(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?\s*')
 # How long a check's output is still copied after the check itself exited: a process it left behind may hold the pipe open.
 STREAM_GRACE = 5
 QUEUE_LIMIT = 14400  # default --queue-limit: the build-slot waits a check may spend, apart from its --time-limit
