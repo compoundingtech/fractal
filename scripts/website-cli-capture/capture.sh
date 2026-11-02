@@ -3,7 +3,7 @@
 # byte for byte (CRLF line ends and ANSI colours included). run.sh adds --endpoint, which the "$" lines omit.
 #
 #   nix develop --command cargo test -p fractal --features test-support --test website_cli_capture --no-run
-#   nix develop --command cargo build -p fractal --bin fractal
+#   nix develop --command cargo build -p fractal-cli --bin fractal
 #   CAPTURE_DIR=/tmp/cli-capture <website_cli_capture test binary> --ignored --nocapture &   # until CAPTURE READY
 #   CAPTURE_DIR=/tmp/cli-capture scripts/website-cli-capture/capture.sh > cli.ansi
 #   touch /tmp/cli-capture/stop
