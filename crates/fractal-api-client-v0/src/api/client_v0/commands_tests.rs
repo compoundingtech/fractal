@@ -134,9 +134,9 @@ async fn phone_commands_expiry_and_not_foreground_wake_blocking_result_read() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phone_command_message_read_admission_uses_daemon_state() {
-    for case in ["pending", "delivered", "expired", "verb", "message", "foreign", "terminal", "race"] {
+    for case in ["pending", "delivered", "expired", "verb", "message", "foreign", "terminal", "admission-first", "expiry-first", "pair-expired", "pair-revoked"] {
         let root = tempfile::tempdir().unwrap();
         let state = tests::test_state_named(root.path(), &format!("command-admission-{case}"));
         let phone = pair(&state, "device/target", "person/ada", &["read.projections", "control.messages"]);
@@ -151,7 +151,7 @@ async fn phone_command_message_read_admission_uses_daemon_state() {
         }).unwrap();
         let mut request = request("device/target", if case == "verb" { "phone.inspect" } else { "phone.message.read" });
         if case != "verb" { request.args = json!({"message_id":sent.subject}); }
-        if matches!(case, "expired" | "race") { request.ttl_ms = Some(1); }
+        if case == "expired" { request.ttl_ms = Some(1); }
         let command = client_commands::issue(&state, &owner, request).unwrap();
         let id = command["id"].as_str().unwrap();
         if case == "delivered" { client_commands::collection_items(&state, &phone).unwrap(); }
@@ -174,17 +174,56 @@ async fn phone_command_message_read_admission_uses_daemon_state() {
             "device_command":id, "fence":{"snapshot_id":snapshot.id},
             "parameters":{"target_id":if case == "message" { "message/other" } else { &sent.subject }}
         })).unwrap();
-        let expiry = (case == "race").then(|| {
-            let (state, owner, id) = (state.clone(), owner.clone(), id.to_owned());
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                client_commands::read(&state, &owner, &id).unwrap()
-            })
+        let gate = || {
+            let (attempt_tx, attempt) = std::sync::mpsc::channel();
+            let (locked_tx, locked) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            ((attempt_tx, locked_tx, release_rx), (attempt, locked, release))
+        };
+        let (admission_gate, (attempt, locked, release)) = gate();
+        let (expiry_gate, (expiry_attempt, expiry_locked, expiry_release)) = gate();
+        let mut expiry_gate = Some(expiry_gate);
+        let paused = matches!(case, "admission-first" | "expiry-first" | "pair-expired" | "pair-revoked");
+        if paused { client_commands::pause_admission_for_test(&state, id, admission_gate); }
+        let expiry = |gate| {
+            let (state, id) = (state.clone(), id.to_owned());
+            std::thread::spawn(move || client_commands::expire_for_test(&state, &id, gate))
+        };
+        let mut expiry_thread = None;
+        if case == "expiry-first" {
+            expiry_thread = Some(expiry(expiry_gate.take().unwrap()));
+            assert!(!expiry_attempt.recv_timeout(Duration::from_secs(5)).unwrap());
+            expiry_locked.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let action_state = state.clone();
+        let action_phone = if case == "foreign" { foreign } else { phone.clone() };
+        let action = tokio::spawn(async move {
+            action_inner(State(action_state), Extension(snapshot), Extension(action_phone), Json(action), None).await
         });
-        let result = action_inner(State(state.clone()), Extension(snapshot),
-            Extension(if case == "foreign" { foreign } else { phone.clone() }), Json(action), None).await;
-        if let Some(expiry) = expiry { expiry.await.unwrap(); }
-        if matches!(case, "pending" | "delivered") || case == "race" && result.is_ok() {
+        if paused {
+            assert_eq!(attempt.recv_timeout(Duration::from_secs(5)).unwrap(), case == "expiry-first");
+            if case == "expiry-first" { expiry_release.send(()).unwrap(); }
+            locked.recv_timeout(Duration::from_secs(5)).unwrap();
+            if case == "admission-first" {
+                expiry_thread = Some(expiry(expiry_gate.take().unwrap()));
+                assert!(expiry_attempt.recv_timeout(Duration::from_secs(5)).unwrap(), "expiry must contend on the held admission lock");
+            }
+            if matches!(case, "pair-expired" | "pair-revoked") {
+                let grant = phone.pairing_grant.as_ref().unwrap();
+                let mut fields = state.store.newest_claim_for_subject_kind(grant, "custom.client.pairing-completed").unwrap().unwrap().body["fields"].clone();
+                fields["expires_at_unix_ms"] = json!(0);
+                state.store.append_claim(&ClaimInput {
+                    subject: grant.clone(), kind: if case == "pair-expired" { "custom.client.pairing-completed" } else { "custom.client.pairing-revoked" }.into(),
+                    actor: Some("person/ada".into()), fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![], expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            release.send(()).unwrap();
+        }
+        let result = action.await.unwrap();
+        if case == "admission-first" { expiry_locked.recv_timeout(Duration::from_secs(5)).unwrap(); expiry_release.send(()).unwrap(); }
+        if let Some(expiry) = expiry_thread { expiry.join().unwrap(); }
+        if matches!(case, "pending" | "delivered" | "admission-first") {
             assert!(result.is_ok(), "{case}: {result:?}");
             assert_eq!(state.store.message(&sent.subject).unwrap().unwrap().status, "read");
             let settled = client_commands::read(&state, &owner, id).unwrap();
@@ -198,10 +237,10 @@ async fn phone_command_message_read_admission_uses_daemon_state() {
             let error = result.unwrap_err();
             assert_eq!(error.code, "forbidden", "{case}");
             assert_eq!(error.details["reason"], match case {
-                "expired" | "race" => "expired", "foreign" => "foreign", "terminal" => "not-pending", _ => "mismatch",
+                "expired" | "expiry-first" => "expired", "foreign" | "pair-expired" | "pair-revoked" => "foreign", "terminal" => "not-pending", _ => "mismatch",
             });
             assert_ne!(state.store.message(&sent.subject).unwrap().unwrap().status, "read");
-            if case == "race" { assert_eq!(client_commands::read(&state, &owner, id).unwrap()["state"], "not-foreground"); }
+            if case == "expiry-first" { assert_eq!(client_commands::read(&state, &owner, id).unwrap()["state"], "not-foreground"); }
         }
     }
 }
