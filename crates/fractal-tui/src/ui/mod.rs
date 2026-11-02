@@ -24,6 +24,7 @@ pub mod doc;
 mod documents;
 pub mod checklist;
 mod edit;
+mod frame_budget;
 mod glass;
 mod hover;
 mod hyperlinks;
@@ -9586,7 +9587,7 @@ mod tests {
         let mut waiting = voice::VoiceState::stand_in(&input);
         waiting.started = Instant::now() - Duration::from_secs(30);
         ui.voice = Some(waiting);
-        ui.step_voice();
+        assert!(ui.step_voice(), "voice timeout invalidates even after voice is removed");
         assert!(ui.voice.is_none(), "a helper silent for 30 s is given up");
         assert!(
             ui.flash.as_ref().is_some_and(|(text, _)| text.contains("keys work again")),
@@ -9613,8 +9614,9 @@ mod tests {
         let mut away = voice::VoiceState::stand_in("agent/example/someone-else");
         away.device = "Built-in microphone".into();
         ui.voice = Some(away);
-        ui.step_voice();
+        assert!(ui.step_voice(), "leaving voice invalidates the old overlay");
         assert!(ui.voice.is_none());
+        assert!(!ui.step_voice(), "an already inactive voice does not repaint");
     }
 
     #[test]

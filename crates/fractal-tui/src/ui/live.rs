@@ -220,21 +220,23 @@ pub(super) fn answer_open_requests(
     ui: &mut Ui,
     inbox: &mut super::requests::Inbox,
     ready: bool,
-) {
+) -> bool {
     inbox.read();
     if !ready || !matches!(ui.world.link, super::view::Link::Live) {
-        return;
+        return false;
     }
     let waiting = inbox
         .waiting()
         .map(|(request, since)| (request.clone(), since.elapsed()))
         .collect::<Vec<_>>();
+    let mut changed = false;
     for (request, waited) in waiting {
         let Ok(pane) = super::requests::pane_for(&request.subject) else {
             inbox.answer(&request.id, &super::requests::Answer::NotFound);
             continue;
         };
         if ui.inventory_has(&pane) {
+            changed = true;
             let answer = ui.open_requested(
                 pane,
                 request.place,
@@ -246,6 +248,7 @@ pub(super) fn answer_open_requests(
             inbox.answer(&request.id, &super::requests::Answer::NotFound);
         }
     }
+    changed
 }
 
 fn cancel_initial_subject(subject: &mut Option<String>, input: &Event) {
@@ -608,6 +611,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.hide_cursor()?;
     let started = Instant::now();
+    let mut frames = super::frame_budget::FrameBudget::new(started);
     let mut changed = true;
     let mut offline_drawn = false;
     // When st is next asked how long a message it takes: on connecting, then now and then, since
@@ -681,11 +685,12 @@ pub fn run(context: Context) -> Result<()> {
             .as_ref()
             .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(4))
         {
+            frames.invalidate();
             ui.flash = None;
         }
         let (_, selected) = ui.focus();
         attach.select(&mut ui, selected.as_deref());
-        attach.tick(&mut ui);
+        if attach.tick(&mut ui) { frames.invalidate(); }
         if extras.live && Instant::now() >= limit_next {
             limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
             let client = client.clone();
@@ -704,7 +709,8 @@ pub fn run(context: Context) -> Result<()> {
             sync_read_at = Some(Instant::now());
             read_sync(&runtime, &client, &fetched_tx);
         }
-        while let Ok(update) = incoming.try_recv() {
+        while frames.drain(Instant::now(), turn_started) && let Ok(update) = incoming.try_recv() {
+            frames.invalidate();
             match update {
                 feed::Update::GlassesVersion(version) => {
                     super::set_glasses_version(version);
@@ -989,7 +995,8 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::Terminal { generation, update } => attach.apply_terminal_update(&mut ui, generation, update, &mut attached),
             }
         }
-        while let Ok(result) = fetched.try_recv() {
+        while frames.drain(Instant::now(), turn_started) && let Ok(result) = fetched.try_recv() {
+            frames.invalidate();
             match result {
                 Fetched::Content(key, result) => {
                     content_reads.complete(&key);
@@ -1486,6 +1493,7 @@ pub fn run(context: Context) -> Result<()> {
         }
         let mut effects = Vec::new();
         for effect in std::mem::take(&mut ui.effects) {
+            frames.invalidate();
             // A glass change is kept until st confirms it, and goes once st is reachable.
             if let Effect::SaveGlass(write) = effect {
                 if extras.live {
@@ -1914,6 +1922,7 @@ pub fn run(context: Context) -> Result<()> {
                 }
             }
             ui.set_world(adapt::world(&model, &person, &extras));
+            frames.invalidate();
             // An ask's images, from the attention just adapted (not the previous world's).
             if let Load::Ready(items) = &ui.world.attention {
                 ui.content.index_requests(
@@ -1944,8 +1953,11 @@ pub fn run(context: Context) -> Result<()> {
             missions_sent = wanted;
             let _ = commands.send(Command::Missions { follow: wanted });
         }
-        answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready);
+        if answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready) {
+            frames.invalidate();
+        }
         for typed in playback.iter().flat_map(super::playback::Playback::typed) {
+            frames.input();
             match typed {
                 super::playback::Typed::Text(text) => ui.paste(text),
                 super::playback::Typed::Send => {
@@ -1953,108 +1965,117 @@ pub fn run(context: Context) -> Result<()> {
                 }
             }
         }
-        ui.step_voice();
+        if ui.step_voice() { frames.invalidate(); }
         ui.step_terminal_hold();
         ui.step_default_view();
         ui.step_terminal_tabs();
         attach.opens.retain(|target, _| ui.terminal_view(target).is_some());
         ui.step_drafts();
-        execute!(io::stdout(), BeginSynchronizedUpdate)?;
-        let mut links = Vec::new();
-        let draw_started = Instant::now();
-        terminal.draw(|frame| {
-            ui.render(frame);
-            if hyperlinks {
-                links = ui.link_cells(frame.buffer_mut());
-            }
-        })?;
-        // A message just sent is on screen from this draw on: the time from pressing send to it.
-        for entry in pending.iter_mut().filter(|entry| !entry.echoed) {
-            entry.echoed = true;
-            super::slo::METRICS.observe("send_echo_ms", entry.since.elapsed());
+        for native in ui.terminal.iter().chain(ui.parked.iter()).filter_map(|view| view.native.as_ref()) {
+            if native.take_changed() { frames.invalidate(); }
         }
-        // A slow draw, or a whole turn that took long before it waited for input, is written
-        // down with what was on screen, so that "it was slow" can be explained afterwards.
-        let (drew, turn) = (draw_started.elapsed(), turn_started.elapsed());
-        if drew >= SLOW_DRAW || turn >= SLOW_TURN {
-            super::lastrun::note_slow(
-                &format!("draw {} ms, turn {} ms", drew.as_millis(), turn.as_millis()),
-                &ui.slow_context(),
-                &crate::version::short(crate::version::now()),
-            );
-        }
-        if hyperlinks && !links.is_empty() {
-            super::hyperlinks::write_links(terminal.backend_mut(), &links)?;
-        }
-        // Image encodings the draw asked for, built off the draw path; the frame after one
-        // arrives draws it.
-        if let Some(picker) = ui.picker.clone() {
-            for (key, width, height, image) in ui.content.protocol_jobs() {
-                if !encoding.insert((key.clone(), width, height)) {
-                    continue;
+        let flowing = ui.voice.is_some()
+            || ui.terminal.iter().chain(ui.parked.iter())
+                .filter_map(|view| view.native.as_ref()).any(|native| native.flowing());
+        if frames.due(Instant::now(), flowing) {
+            execute!(io::stdout(), BeginSynchronizedUpdate)?;
+            let mut links = Vec::new();
+            let draw_started = Instant::now();
+            terminal.draw(|frame| {
+                ui.render(frame);
+                if hyperlinks {
+                    links = ui.link_cells(frame.buffer_mut());
                 }
-                let picker = picker.clone();
-                let tx = fetched_tx.clone();
-                runtime.spawn_blocking(move || {
-                    if let Some(protocol) = super::content::encode(&picker, &image, width, height) {
-                        let _ = tx.send(Fetched::Protocol(key, width, height, protocol));
+            })?;
+            // A message just sent is on screen from this draw on: the time from pressing send to it.
+            for entry in pending.iter_mut().filter(|entry| !entry.echoed) {
+                entry.echoed = true;
+                super::slo::METRICS.observe("send_echo_ms", entry.since.elapsed());
+            }
+            // A slow draw, or a whole turn that took long before it waited for input, is written
+            // down with what was on screen, so that "it was slow" can be explained afterwards.
+            let (drew, turn) = (draw_started.elapsed(), turn_started.elapsed());
+            if drew >= SLOW_DRAW || turn >= SLOW_TURN {
+                super::lastrun::note_slow(
+                    &format!("draw {} ms, turn {} ms", drew.as_millis(), turn.as_millis()),
+                    &ui.slow_context(),
+                    &crate::version::short(crate::version::now()),
+                );
+            }
+            if hyperlinks && !links.is_empty() {
+                super::hyperlinks::write_links(terminal.backend_mut(), &links)?;
+            }
+            // Image encodings the draw asked for, built off the draw path; the frame after one
+            // arrives draws it.
+            if let Some(picker) = ui.picker.clone() {
+                for (key, width, height, image) in ui.content.protocol_jobs() {
+                    if !encoding.insert((key.clone(), width, height)) {
+                        continue;
                     }
+                    let picker = picker.clone();
+                    let tx = fetched_tx.clone();
+                    runtime.spawn_blocking(move || {
+                        if let Some(protocol) = super::content::encode(&picker, &image, width, height) {
+                            let _ = tx.send(Fetched::Protocol(key, width, height, protocol));
+                        }
+                    });
+                }
+            }
+            ui.release_far_images();
+            if extras.live
+                && let Some(key) = ui.next_content_read(&mut content_reads)
+            {
+                let client = client.clone();
+                let tx = fetched_tx.clone();
+                runtime.spawn(async move {
+                    let result = super::content::fetch(&client, &key).await;
+                    let _ = tx.send(Fetched::Content(key, result));
                 });
             }
-        }
-        ui.release_far_images();
-        if extras.live
-            && let Some(key) = ui.next_content_read(&mut content_reads)
-        {
-            let client = client.clone();
-            let tx = fetched_tx.clone();
-            runtime.spawn(async move {
-                let result = super::content::fetch(&client, &key).await;
-                let _ = tx.send(Fetched::Content(key, result));
+            // The attached terminal's cursor shape (vim's bar while inserting), and the person's
+            // own shape back once it is gone.
+            let style = ui.cursor_style();
+            if style != cursor_style {
+                let _ = crossterm::execute!(
+                    std::io::stdout(),
+                    style.unwrap_or(crossterm::cursor::SetCursorStyle::DefaultUserShape)
+                );
+                cursor_style = style;
+            }
+            super::open_timing::present(
+                &mut open_timing,
+                || execute!(io::stdout(), EndSynchronizedUpdate),
+                |target| ui.conversation_entry_visible(target),
+            )?;
+            ui.quality.live(extras.live);
+            let top = u8::from(extras.live)
+                | (u8::from(extras.offline.is_some()) << 1)
+                | (u8::from(extras.degraded.is_some()) << 2);
+            let placeholders = u8::from(matches!(ui.world.attention, Load::Loading))
+                | (u8::from(matches!(ui.world.agents, Load::Loading)) << 1);
+            let visible_quality = ui.quality_visible();
+            ui.quality
+                .presented(ui.world.settled, top, placeholders, visible_quality);
+            opens.retain(|target, at| {
+                if ui.conversation_entry_visible(target) {
+                    super::slo::METRICS.observe("conversation_open_ms", at.elapsed());
+                    false
+                } else {
+                    true
+                }
             });
-        }
-        // The attached terminal's cursor shape (vim's bar while inserting), and the person's
-        // own shape back once it is gone.
-        let style = ui.cursor_style();
-        if style != cursor_style {
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                style.unwrap_or(crossterm::cursor::SetCursorStyle::DefaultUserShape)
-            );
-            cursor_style = style;
-        }
-        super::open_timing::present(
-            &mut open_timing,
-            || execute!(io::stdout(), EndSynchronizedUpdate),
-            |target| ui.conversation_entry_visible(target),
-        )?;
-        ui.quality.live(extras.live);
-        let top = u8::from(extras.live)
-            | (u8::from(extras.offline.is_some()) << 1)
-            | (u8::from(extras.degraded.is_some()) << 2);
-        let placeholders = u8::from(matches!(ui.world.attention, Load::Loading))
-            | (u8::from(matches!(ui.world.agents, Load::Loading)) << 1);
-        let visible_quality = ui.quality_visible();
-        ui.quality
-            .presented(ui.world.settled, top, placeholders, visible_quality);
-        opens.retain(|target, at| {
-            if ui.conversation_entry_visible(target) {
-                super::slo::METRICS.observe("conversation_open_ms", at.elapsed());
-                false
-            } else {
-                true
+            attach.opens.retain(|target, at| {
+                if ui.terminal_ready_visible(target) {
+                    super::slo::METRICS.observe("terminal_open_ms", at.elapsed());
+                    false
+                } else {
+                    true
+                }
+            });
+            for at in landed_answers.drain(..) {
+                super::slo::METRICS.observe("alert_landed_ms", at.elapsed());
             }
-        });
-        attach.opens.retain(|target, at| {
-            if ui.terminal_ready_visible(target) {
-                super::slo::METRICS.observe("terminal_open_ms", at.elapsed());
-                false
-            } else {
-                true
-            }
-        });
-        for at in landed_answers.drain(..) {
-            super::slo::METRICS.observe("alert_landed_ms", at.elapsed());
+            frames.submitted(draw_started);
         }
         let visible = ui.visible_messages();
         let incoming: HashSet<_> = timelines
@@ -2125,11 +2146,12 @@ pub fn run(context: Context) -> Result<()> {
                 .filter_map(|view| view.native.as_ref())
                 .any(|native| native.flowing());
         super::hover::poll_input(
+            // Polling remains independent of painting; accepted input bypasses the drain.
             Duration::from_millis(if flowing { 16 } else { 80 }),
             &stopping,
             |input| {
                 cancel_initial_subject(&mut initial_subject, &input);
-                match input {
+                let changed = match input {
                     Event::Key(key)
                         if playback.as_ref().is_some_and(|playback| playback.take(&key)) =>
                     {
@@ -2140,7 +2162,9 @@ pub fn run(context: Context) -> Result<()> {
                         true
                     }
                     input => ui.input_event(input),
-                }
+                };
+                if changed { frames.input(); }
+                changed
             },
         )?;
     }
@@ -3835,11 +3859,11 @@ mod tests {
         assert!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o077 == 0);
 
         // Cached inventory is not a reason to open anything.
-        answer_open_requests(&mut ui, &mut inbox, false);
+        assert!(!answer_open_requests(&mut ui, &mut inbox, false));
         assert_eq!(ui.live_conversations().iter().filter(|id| **id == known).count(), 0);
         assert!(dir.join(format!("{early}.json")).exists());
 
-        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(answer_open_requests(&mut ui, &mut inbox, true));
         assert_eq!(ui.focus(), (1, Some(known.clone())));
         assert!(!dir.join(format!("{early}.json")).exists());
         let answer = std::fs::read(dir.join(format!("{early}.answer"))).unwrap();
@@ -3847,15 +3871,21 @@ mod tests {
             serde_json::from_slice::<Answer>(&answer).unwrap(),
             Answer::Opened { focused: true }
         );
+        ui.effects.clear();
+        requests::enqueue(&dir, &known, Place::Tab, true, Some("agent/test/requester".into())).unwrap();
+        inbox = Inbox::new(Some(dir.clone()));
+        assert!(answer_open_requests(&mut ui, &mut inbox, true), "keep-focus flashes also invalidate");
+        assert!(ui.flash.is_some());
+        assert!(!ui.effects.iter().any(|effect| matches!(effect, Effect::SaveGlass(_))));
 
         // An agent that is not in the inventory yet waits, and is not found once the grace ends.
         let later = requests::enqueue(&dir, "agent/garden/not-yet", Place::Tab, false, None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(350));
-        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(!answer_open_requests(&mut ui, &mut inbox, true));
         assert!(dir.join(format!("{later}.json")).exists(), "still waiting for Fractal to know it");
         assert_eq!(inbox.waiting().count(), 1);
         inbox.waiting_since_for_test(&later, requests::GRACE);
-        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(!answer_open_requests(&mut ui, &mut inbox, true));
         let answer = std::fs::read(dir.join(format!("{later}.answer"))).unwrap();
         assert_eq!(serde_json::from_slice::<Answer>(&answer).unwrap(), Answer::NotFound);
         assert_eq!(inbox.waiting().count(), 0);

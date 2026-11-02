@@ -115,7 +115,7 @@ impl State {
             && self.pending.get(agent) == Some(&generation)
     }
 
-    pub(super) fn tick(&mut self, ui: &mut Ui) {
+    pub(super) fn tick(&mut self, ui: &mut Ui) -> bool {
         for (agent, task) in &self.tasks {
             if ui.terminal_view(agent).is_none() {
                 task.abort();
@@ -124,7 +124,7 @@ impl State {
             }
         }
         self.tasks.retain(|_, task| !task.is_finished());
-        let Some(started) = self.started else { return; };
+        let Some(started) = self.started else { return false; };
         if started.elapsed() >= DEADLINE {
             if let Some(agent) = self.selected.take() {
                 self.cancel(&agent);
@@ -133,6 +133,7 @@ impl State {
             }
             self.started = None;
             self.note = None;
+            return true;
         } else if let Some(agent) = self.selected.as_deref()
             && let Some(view) = ui.terminal_view_mut(agent)
             && view.native.is_none() && view.ended.is_none()
@@ -142,6 +143,7 @@ impl State {
                 None => connecting_text(started.elapsed()),
             });
         }
+        false
     }
 
     // This is the actual receive dispatch called by the live loop and by regression tests.
@@ -540,7 +542,8 @@ mod tests {
             }));
             started_rx.await.unwrap();
             state.started = Some(Instant::now() - DEADLINE);
-            state.tick(&mut ui);
+            assert!(state.tick(&mut ui), "attach timeout invalidates its failure status");
+            assert!(!state.tick(&mut ui), "the same failure does not repaint repeatedly");
             tokio::time::timeout(Duration::from_secs(1), dropped_rx).await.unwrap().unwrap();
             use tokio::io::AsyncReadExt;
             let mut byte = [0];
