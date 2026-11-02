@@ -6960,7 +6960,7 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
 /// run and never delays a WAL restart for long. The store keeps the result for doctor.
 async fn audit_operations(store: &Arc<Store>) -> anyhow::Result<Vec<String>> {
     let store = store.clone();
-    tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("operations.audit", || {
+    tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("operations.audit", || {
         store.operation_projection_drift()
     }))
     .await
@@ -6972,7 +6972,7 @@ async fn audit_operations(store: &Arc<Store>) -> anyhow::Result<Vec<String>> {
 /// doctor; a failure is kept there too, and doctor reports it.
 async fn count_fleet_residue(store: &Arc<Store>) {
     let counting = store.clone();
-    if let Err(error) = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("fleet.admission_residue", || {
+    if let Err(error) = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("fleet.admission_residue", || {
         counting.audit_fleet_admission_residue()
     }))
     .await
@@ -6992,7 +6992,7 @@ async fn repair_operation_drift(store: &Arc<Store>, audit: anyhow::Result<Vec<St
         }
     };
     let store = store.clone();
-    match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("operations.repair_drift", || {
+    match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("operations.repair_drift", || {
         store.repair_operation_projection_drift_from_audit(&drift)
     }))
     .await
