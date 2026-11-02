@@ -1975,7 +1975,10 @@ On timeout or interruption the web process group is killed together with its slo
 TERM unwind through the same cleanup. A cancelled run also stops a web process that starts during cancellation. Hosts with a cargo
 admission shim must support `--stage-slot`; an unsupported shim fails the check. The web changelog registry writer's generated
 `registry.generated.ts` and its atomic `.tmp` siblings are ignored so they cannot transiently dirty the shared tree for another lane.
-`ST_EVIDENCE_SERIAL=1` restores the listed check order, with web still holding its stage slot.
+Web and `typescript-client` hold the same per-worktree file lock for their entire check, including every install and dependency
+reader: their different HOME and store settings can otherwise replace the shared `node_modules` while tests use it. The parent
+runner holds the lock in Git's worktree metadata, and web acquires it before taking a heavy slot. Rust and the other light checks
+remain concurrent. `ST_EVIDENCE_SERIAL=1` restores the listed check order, with web still holding its stage slot.
 
 An explicitly authorized candidate-runner measurement uses `--out` in a disposable directory, never `--push`; its exported packs are
 deleted after measurement. When `ST_TEST_REEXEC` is set outside a base copy's `st-test-base-*` directory, the ledger records the tested

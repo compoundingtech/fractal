@@ -1373,6 +1373,60 @@ class StTest(unittest.TestCase):
         self.assertNotIn('--stage-slot', commands[0][1])  # Rust's detached guardian must never inherit the web slot
         self.assertEqual([group for _, _, group in commands], [False, True, False])
 
+    def test_web_and_client_installs_and_dependency_readers_share_the_worktree_lock(self):
+        self.commit('b.txt', 'two')
+        marks = Path(self.tmp.name) / 'pnpm-events'
+        fixture = Path(self.tmp.name) / 'pnpm-fixture.py'
+        fixture.write_text(textwrap.dedent('''\
+            from pathlib import Path
+            import sys, time
+            owner, events = sys.argv[1:]
+            modules = Path('node_modules')
+            modules.mkdir(exist_ok=True)
+            def mark(phase):
+                with open(events, 'a') as stream:
+                    stream.write(owner + ' ' + phase + '\\n')
+            mark('install-start')
+            (modules / 'dependency').write_text(owner)
+            time.sleep(0.1)
+            mark('install-end')
+            # Releasing an install-only lock here would let the other installer replace our dependency during its use.
+            mark('reader-start')
+            time.sleep(0.1)
+            assert (modules / 'dependency').read_text() == owner, 'dependency replaced under its reader'
+            mark('reader-end')
+        '''))
+        attempts, commands = threading.Barrier(2), []
+        original_lock = st_test.node_workspace_lock
+
+        @contextlib.contextmanager
+        def simultaneous_installs(directory):
+            attempts.wait(5)  # both lanes attempt the same fixture installation before either takes the real file lock
+            with original_lock(directory):
+                yield
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            commands.append(name)
+            if name not in ('typescript-client', st_test.WEB):
+                return 0
+            return subprocess.run([sys.executable, str(fixture), name, str(marks)], cwd=options['cwd'],
+                                  stdout=options.get('stdout'), stderr=subprocess.STDOUT).returncode
+
+        with mock.patch.dict(st_test.LOCAL, {'typescript-client': ['true'], 'demo': ['true'], st_test.WEB: ['true']}, clear=True), \
+                mock.patch.object(st_test, 'BUILDS', frozenset({'demo', st_test.WEB})), \
+                mock.patch.object(st_test, 'node_workspace_lock', side_effect=simultaneous_installs), \
+                mock.patch.object(st_test, 'run_limited', side_effect=run):
+            code, out, err = self.run_st_test()
+        self.assertEqual(code, 0, out + err)
+        self.assertCountEqual(commands, ['typescript-client', 'demo', st_test.WEB])
+        events = [line.split() for line in marks.read_text().splitlines()]
+        self.assertEqual([phase for _, phase in events], ['install-start', 'install-end', 'reader-start', 'reader-end'] * 2)
+        self.assertEqual(len({owner for owner, _ in events[:4]}), 1)
+        self.assertEqual(len({owner for owner, _ in events[4:]}), 1)
+        self.assertNotEqual(events[0][0], events[4][0])
+        self.assertFalse((self.work / 'st-test-pnpm.lock').exists(), 'lock stays outside the checked tree')
+
     def test_a_crashed_web_lane_is_a_failed_check_in_the_summary_and_ledger(self):
         def run(argv, limit, **options):
             if argv[argv.index('--check') + 1] == st_test.WEB:

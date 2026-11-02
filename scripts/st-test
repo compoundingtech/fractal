@@ -2546,6 +2546,17 @@ def join_lanes(lanes):
         thread.join()
 
 
+@contextlib.contextmanager
+def node_workspace_lock(directory):
+    """Keep installs from replacing dependencies under the other JavaScript check's readers, without holding a build slot."""
+    path = Path(text(git('rev-parse', '--git-path', 'st-test-pnpm.lock', cwd=directory)))
+    if not path.is_absolute():
+        path = Path(directory) / path
+    with path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def wait_limited(process, limit, group=False):
     """The exit code, or 124 after killing the process (with its group when requested) once `limit` has run out."""
     while True:
@@ -2905,7 +2916,7 @@ def run_main(argv, cleanup):
                 ran = set()  # the checks whose command ran in this round (linux-gate's tells linux-clippy and linux-fleet-compat where their stages ran)
                 stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
                 web_groups = ProcessGroups()
-                def run_one(name, output=None):
+                def run_check(name, output=None):
                     """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
                     edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in unsignable else []
                     if edits:
@@ -3041,6 +3052,15 @@ def run_main(argv, cleanup):
                         if args.push and is_covered and record:
                             CLAIMED.extend(record_refs(directory, record))
                     return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
+
+                def run_one(name, output=None):
+                    if name in ('typescript-client', WEB):
+                        # Both install into this tree with different HOME/store settings. Protect their readers as well as installs;
+                        # an install-only lock still lets one check replace dependencies while the other's tests use them.
+                        # The parent owns the descriptor, so children cannot leak it, and web takes its heavy slot only afterwards.
+                        with node_workspace_lock(directory):
+                            return run_check(name, output)
+                    return run_check(name, output)
 
                 # Three lanes: Rust builds and their report readers stay ordered, web holds its own heavy slot, and light checks run
                 # one after another. Print each background check's output whole after the build lane. SERIAL keeps the listed order.
