@@ -235,7 +235,12 @@ The normal daemon opens `state_dir/claims.sqlite3` in `main.rs::run_up`
 through `Store::open` (the function's startup `open-store` phase). That constructor
 pairs `GraphStore::open` with a file-backed reader pool. `Store::open_memory`
 also uses a file-backed WAL store, with its scratch lifetime owned by the
-connections. Both it and `Store::open_shared_memory` are available only under
+connections. On Linux it first uses TMPDIR when that directory is already on
+tmpfs, so run cleanup also reclaims scratch left by a process that exits without
+dropping its stores. Otherwise it selects executable /dev/shm with at least 2 GiB
+free, or the ordinary temporary directory. Normal file-backed initialization also
+starts the resource-reference backfill for downstream test-support binaries,
+matching Store::open; unit-test builds keep that worker disabled. Both it and `Store::open_shared_memory` are available only under
 `cfg(test)` or the `test-support` feature. The compile gate prevents production
 callers from depending on fixture constructors. Existing callers, including the
 replica in `tests/log_diet.rs::run_workload`, keep their `open_memory` calls and
