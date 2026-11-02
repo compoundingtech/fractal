@@ -45,6 +45,19 @@ const HARD_MAX_RESPONSE_BYTES: usize = 8 * 1_048_576;
 pub const DEFAULT_ASSISTANT_RESPONSE_BYTES: usize = 4096;
 pub const MAX_ASSISTANT_RESPONSE_BYTES: usize = 16384;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
+// DeviceCommandRequest.ttl_ms maximum in client-v0.schema.json; checked below.
+const DEVICE_COMMAND_MAX_TTL_MS: u64 = 60_000;
+const DEVICE_COMMAND_WAIT_MARGIN: Duration = Duration::from_secs(5);
+
+fn request_deadline(method: &Method, path: &str) -> Duration {
+    if *method == Method::GET && path.starts_with("/v1/client/device-commands/")
+        && path.ends_with("?wait=true")
+    {
+        Duration::from_millis(DEVICE_COMMAND_MAX_TTL_MS) + DEVICE_COMMAND_WAIT_MARGIN
+    } else {
+        REQUEST_DEADLINE
+    }
+}
 const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
 const RAW_TERMINAL_SUBPROTOCOL: &str = "fractal.client.pty.v0";
@@ -2676,6 +2689,7 @@ impl Client {
         let limit = read_authorization.map_or_else(|| self.response_limit(), |(_, limit)| limit);
         // Measured only when someone asked: no timer and no copy otherwise.
         let guard = RequestGuard::begin(&method, path);
+        let deadline = request_deadline(&method, path);
         let request = async {
             match &self.transport_endpoint(path).await? {
                 TransportEndpoint::Unix(socket) => {
@@ -2729,7 +2743,7 @@ impl Client {
                 }
             }
         };
-        let outcome = tokio::time::timeout(REQUEST_DEADLINE, request).await;
+        let outcome = tokio::time::timeout(deadline, request).await;
         if let Some(guard) = guard {
             match &outcome {
                 Ok(Ok((status, _))) => guard.finish(RequestOutcome::Completed, Some(*status)),
@@ -3008,6 +3022,20 @@ fn wire_protocol_matches(selected: &str, expected: &str) -> bool {
 #[cfg(test)]
 mod wire_receiver_tests {
     use super::*;
+
+    #[test]
+    fn phone_command_wait_deadline_covers_contract_maximum() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        )).unwrap();
+        for variant in schema["$defs"]["DeviceCommandRequest"]["oneOf"].as_array().unwrap() {
+            assert_eq!(variant["properties"]["ttl_ms"]["maximum"], DEVICE_COMMAND_MAX_TTL_MS);
+        }
+        assert_eq!(request_deadline(&Method::GET, "/v1/client/device-commands/device-command%2Fa?wait=true"),
+            Duration::from_millis(DEVICE_COMMAND_MAX_TTL_MS) + DEVICE_COMMAND_WAIT_MARGIN);
+        assert_eq!(request_deadline(&Method::GET, "/v1/client/device-commands/a?wait=false"), REQUEST_DEADLINE);
+        assert_eq!(request_deadline(&Method::POST, "/v1/client/device-commands"), REQUEST_DEADLINE);
+    }
 
     #[test]
     fn stream_receivers_accept_both_spellings_but_only_one_selected_protocol() {
