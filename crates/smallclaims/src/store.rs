@@ -4437,10 +4437,9 @@ pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
 /// A checkpoint that waits this long for the writer names the hold that held it up. The daemon
 /// reports the same wait as an abnormal checkpoint.
 const CHECKPOINT_HELD_UP_MS: u128 = 100;
-/// A WAL restart copies off the writer until fewer frames than this are left, or for at most
-/// `WAL_RESTART_COPY`, so its hold under the writer copies little.
-const WAL_RESTART_REMAINDER: i32 = 1024;
-const WAL_RESTART_COPY: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long one WAL restart attempt copies off the writer, waiting for the readers on older
+/// snapshots to finish, before it gives up without taking the writer.
+const WAL_RESTART_COPY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Full-inventory answers since the daemon started: each lists every identity this node holds,
 /// which on a large store can pass `MAX_EXCHANGE_BYTES` and fail the peer's inflate.
@@ -8200,21 +8199,28 @@ impl Store {
     }
 
     /// Restart the WAL while writes keep coming, as a trim needs when no reader ever lets the idle
-    /// recycle in. Pages are copied and flushed off the writer; then, at the writer's FIFO turn,
-    /// what arrived since is copied and the restart waits up to `busy` for readers on older
-    /// snapshots. Readers that begin meanwhile see a fully copied WAL and read the database file,
-    /// so they do not hold it up. `truncate_ms` is the time under the writer.
+    /// recycle in. Pages are copied off the writer until every frame is, which means no reader is
+    /// left on an older snapshot; only then are they flushed and the writer taken, at its FIFO
+    /// turn, to copy what arrived since and wait up to `busy` for readers begun in between. Readers
+    /// that begin after that see a fully copied WAL and read the database file, so they do not
+    /// hold the restart up. An attempt that cannot copy every frame within `WAL_RESTART_COPY`
+    /// leaves the writer alone. `truncate_ms` is the time under the writer.
     pub fn restart_wal_report(&self, checkpoint: &Connection, busy: std::time::Duration) -> Result<crate::sqlite::WalCheckpointReport> {
         let copying = std::time::Instant::now();
+        let copied_all = |report: &crate::sqlite::WalCheckpointReport| report.frames >= 0 && report.frames == report.backfilled;
         let mut copied = crate::sqlite::checkpoint_wal_report(checkpoint)?;
-        while copied.frames - copied.backfilled >= WAL_RESTART_REMAINDER && copying.elapsed() < WAL_RESTART_COPY {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        while !copied_all(&copied) && copying.elapsed() < WAL_RESTART_COPY {
+            std::thread::sleep(std::time::Duration::from_millis(20));
             copied = crate::sqlite::checkpoint_wal_report(checkpoint)?;
         }
-        // SQLite syncs the database only once a checkpoint copies every frame, which is under
-        // the writer here; flushing first leaves that sync only what arrived since.
+        copied.passive_ms = copying.elapsed().as_millis();
+        if !copied_all(&copied) {
+            // Under the writer the rest would be copied while every write waits.
+            return Ok(copied);
+        }
+        // SQLite syncs the database once a checkpoint copies every frame, which is under the
+        // writer here; flushing first leaves that sync only what arrived since.
         std::fs::File::open(&self.path)?.sync_data()?;
-        let passive_ms = copying.elapsed().as_millis();
         let waiting = std::time::Instant::now();
         let _writer = self.connection.write();
         let writer_wait_ms = waiting.elapsed().as_millis();
@@ -8224,7 +8230,7 @@ impl Store {
         Ok(crate::sqlite::WalCheckpointReport {
             frames: last.frames,
             backfilled: last.backfilled,
-            passive_ms,
+            passive_ms: copied.passive_ms,
             writer_wait_ms,
             truncate_ms: Some(holding.elapsed().as_millis()),
             recycled,

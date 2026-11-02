@@ -404,10 +404,13 @@ impl Store {
         }
         let started = std::time::Instant::now();
         let mut attempts = 0;
+        // Attempts that took the writer, and the longest of them.
+        let mut held = 0;
         let mut held_ms = 0;
         loop {
             attempts += 1;
             let report = self.restart_wal_report(connection, limits.busy)?;
+            held += u32::from(report.truncate_ms.is_some());
             held_ms = held_ms.max(report.truncate_ms.unwrap_or(0));
             if report.recycled || started.elapsed() >= limits.wait {
                 let restarted = report.recycled;
@@ -416,7 +419,7 @@ impl Store {
                 eprintln!(
                     "st3: {} {}",
                     if restarted { "a trim restarted the WAL" } else { "a trim could not restart the WAL and stops until the next step" },
-                    serde_json::json!({"frames": frames, "attempts": attempts, "pause_ms": started.elapsed().as_millis(), "held_ms": held_ms}),
+                    serde_json::json!({"frames": frames, "attempts": attempts, "held": held, "held_ms": held_ms, "pause_ms": started.elapsed().as_millis()}),
                 );
                 wal.checked = Some(std::time::Instant::now());
                 return Ok(restarted);
