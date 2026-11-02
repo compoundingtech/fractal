@@ -21,7 +21,7 @@ impl Store {
             &normalize_message_party(recipient),
         )?;
         smallclaims::touched::note_read(|| format!("mailbox:{recipient}"));
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h69bd7a4056c3 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ concat!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h3219948c367c owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ concat!(
             "WITH candidates AS (
                  SELECT DISTINCT subject FROM claims INDEXED BY claims_message_to_index
                  WHERE kind='message.sent' AND ", message_sent_recipient_match!(), "
@@ -210,7 +210,7 @@ impl Store {
                     (SELECT claim_id FROM desired WHERE subject=?1),
                     (SELECT COALESCE(MAX(rowid), 0) FROM local_message_marks WHERE message=?1)",
         )?;
-        let (latest_claim_index, desired_claim_id, latest_mark) = statement.query_row(/* sqlite-large-value: allow-for-now lv-hc58709d7ae65 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ [subject], |row| {
+        let (latest_claim_index, desired_claim_id, latest_mark) = statement.query_row(/* sqlite-large-value: allow-for-now lv-hbfd2a450de38 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ [subject], |row| {
             Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, i64>(2)?))
         })?;
         drop(statement);
@@ -311,7 +311,7 @@ impl Store {
         let fast_recipient = recipient.as_deref();
         let bare_recipient = fast_recipient.map(message_bare_recipient);
         if let (Some(recipient), Some(bare_recipient)) = (fast_recipient, bare_recipient) {
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h06b5186b1e2e owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ if delivery {
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hb1df5e67cfcb owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ if delivery {
                 concat!("WITH candidates(subject) AS (
                      SELECT subject FROM claims INDEXED BY claims_message_to_index
                      WHERE kind='message.sent'

@@ -2,7 +2,7 @@
 //! populate it. Startup backfill commits at most 64 message subjects at a time.
 use super::*;
 
-const FOLD: &str = /* sqlite-large-value: allow-for-now lv-h30eb7719f37c owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ r#"
+const FOLD: &str = /* sqlite-large-value: allow-for-now lv-ha7aee23534ce owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ r#"
 INSERT OR REPLACE INTO local_idle_messages(subject,recipient,wait_tag,source_prefix,sent_at,pending,delivered)
 SELECT sent.subject,COALESCE(json_extract(sent.body,'$.fields.to'),''),
        json_extract(sent.body,'$.fields.tags[1]'),
@@ -27,7 +27,7 @@ FROM claims sent WHERE sent.store_index=(
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h1651b33950e6 owner=fractal_store::store::idle_mail TODO=chunk-or-reference-variable-columns */ r#"
+        /* sqlite-large-value: allow-for-now lv-h101804fb64a1 owner=fractal_store::store::idle_mail TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_idle_messages (
     subject TEXT PRIMARY KEY,
     recipient TEXT NOT NULL,
@@ -84,7 +84,7 @@ DROP TRIGGER IF EXISTS local_idle_messages_update_v2;
     )?;
     // Claim bytes are immutable in normal admission; a migration can update them.
     connection.execute_batch(&format!(
-        /* sqlite-large-value: allow-for-now lv-h696035ca81b6 owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_update_v3
+        /* sqlite-large-value: allow-for-now lv-hd99a5bd1eed2 owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_update_v3
          AFTER UPDATE OF subject,kind,body,accepted_at_unix_ms ON claims
          WHEN OLD.kind IN ('message.sent','message.delivered','message.read','message.closed')
            OR NEW.kind IN ('message.sent','message.delivered','message.read','message.closed')

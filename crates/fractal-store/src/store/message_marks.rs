@@ -21,7 +21,7 @@ pub const SUPERSEDED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The table, before any projection backfill folds it in.
 pub fn create_table(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h4b1a00000001 owner=fractal_store::store::message_marks TODO=bound-or-reference-values-and-reclamation */ "
+        /* sqlite-large-value: allow-for-now lv-h5e219940ed04 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_message_marks (
     message TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('message.delivered','message.read','message.closed')),
@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS local_message_marks_age ON local_message_marks(record
 /// The triggers, once every projection they maintain exists.
 pub fn create_triggers(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        "
+        /* sqlite-large-value: allow-for-now lv-h101527c32d2e owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "
 -- The same projection rows a lifecycle claim of the mark's kind writes (see the claim triggers
 -- in store.rs, idle_mail.rs, unread_mail.rs, coordination.rs and client_messages.rs). A lifecycle
 -- claim carries a status field, so it always marks the client selector dirty; a mark does too.
@@ -98,7 +98,7 @@ pub fn record(
     let transaction = connection.transaction().map_err(internal)?;
     let inserted = transaction
         .execute(
-            "INSERT OR IGNORE INTO local_message_marks(message, kind, consumer, recorded_at_unix_ms, receipt)
+            /* sqlite-large-value: allow-for-now lv-h3644dd9ee6f6 owner=fractal_store::store::message_marks TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_message_marks(message, kind, consumer, recorded_at_unix_ms, receipt)
              SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS(SELECT 1 FROM message_index WHERE subject=?1)",
             params![message, kind, consumer, now_ms() as i64, receipt.id],
         )
@@ -140,7 +140,7 @@ pub fn recorded_at(connection: &Connection, message: &str, kinds: &[&str], consu
             "SELECT MIN(recorded_at_unix_ms) FROM local_message_marks
              WHERE message=?1 AND kind IN (SELECT value FROM json_each(?2)) AND (?3 IS NULL OR consumer=?3)",
         )?
-        .query_row(params![message, serde_json::to_string(kinds)?, consumer], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h0f3ce9d1ee52 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ params![message, serde_json::to_string(kinds)?, consumer], |row| row.get(0))?;
     Ok(at.and_then(|at| u128::try_from(at).ok()))
 }
 
@@ -148,7 +148,7 @@ pub fn recorded_at(connection: &Connection, message: &str, kinds: &[&str], consu
 pub fn version(connection: &Connection, message: &str) -> Result<i64> {
     Ok(connection
         .prepare_cached("SELECT COALESCE(MAX(rowid), 0) FROM local_message_marks WHERE message=?1")?
-        .query_row([message], |row| row.get(0))?)
+        .query_row(/* sqlite-large-value: allow-for-now lv-he19a16a9018a owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?)
 }
 
 /// A status rank: sent, staged, delivered, read, closed.
@@ -175,7 +175,7 @@ pub fn trim(store: &Store, now: u128, chunk: usize) -> Result<usize> {
     loop {
         let connection = store.connection.write_background();
         let deleted = connection.execute(
-            "DELETE FROM local_message_marks WHERE rowid IN (
+            /* sqlite-large-value: allow-for-now lv-h27dff5da4dff owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_message_marks WHERE rowid IN (
                 SELECT mark.rowid FROM local_message_marks AS mark
                 WHERE NOT EXISTS(SELECT 1 FROM message_index WHERE subject=mark.message)
                    OR (mark.recorded_at_unix_ms < ?1 AND (

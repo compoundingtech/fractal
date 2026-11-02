@@ -6272,6 +6272,127 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
 }
 
+/// Delivery and read state this build records as local marks (db break-up step 4b) reads beside
+/// the lifecycle claims the previous release wrote, on one node upgraded in place, backed up and
+/// rolled back. The release's claims read the same throughout; a mark replicates nothing and
+/// writes no claim. A backup that carries marks is version 4, which the release refuses to restore
+/// with a clear error. Rolled back, the release runs on the same store and reads its own claims;
+/// upgraded again, the marks still count.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    let send = |node: &Node, key: &str| {
+        let client = node.client();
+        let key = key.to_owned();
+        async move {
+            let receipt: Value = client
+                .post("/v1/messages", &json!({
+                    "idempotency_key": key, "from": PERSON, "to": "agent/fleet-reader",
+                    "content": format!("graph mail {key}"),
+                }))
+                .await
+                .unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    let read = |node: &Node, subject: &str, key: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+        let key = key.to_owned();
+        async move {
+            for lifecycle in ["delivered", "read"] {
+                let _: Value = client
+                    .post(&path, &json!({
+                        "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                        "idempotency_key": format!("{key}-{lifecycle}"),
+                    }))
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+    let listed = |node: &Node| {
+        let client = node.client();
+        async move {
+            let page: MessagePage = client
+                .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true")
+                .await
+                .unwrap();
+            page.items.into_iter().map(|item| (item.subject, item.status)).collect::<Vec<_>>()
+        }
+    };
+    let state = |listed: &[(String, String)]| listed.iter().map(|(_, status)| status.clone()).collect::<Vec<_>>();
+    let first = send(&o, "release-first").await;
+    let second = send(&o, "release-second").await;
+    let third = send(&o, "release-third").await;
+    read(&o, &first, "release-read").await;
+    let before = listed(&o).await;
+    assert_eq!(state(&before), ["read", "sent", "sent"]);
+
+    // Upgrade in place: the release's claims read the same; marks count beside them.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
+    for kind in ["message.delivered", "message.read"] {
+        let receipt: Value = o
+            .client()
+            .post("/v1/internal/test/message-marks", &json!({"message": second, "kind": kind, "consumer": "agent/fleet-reader"}))
+            .await
+            .unwrap();
+        assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{receipt}");
+    }
+    assert_eq!(state(&listed(&o).await), ["read", "read", "sent"]);
+    assert!(
+        o.claims().await.iter().all(|claim| !(claim["subject"] == second && claim["kind"] != "message.sent")),
+        "a mark wrote a lifecycle claim"
+    );
+
+    // A backup with marks is version 4; the release refuses it, naming the version.
+    let archive = root.path().join("marks.jsonl");
+    let created = o.command(&["backup", "create", archive.to_str().unwrap()]).output().unwrap();
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let header: Value = serde_json::from_str(fs::read_to_string(&archive).unwrap().lines().next().unwrap()).unwrap();
+    assert_eq!(header["data"]["version"], 4, "{header}");
+    o.binary = old.clone();
+    let target = root.path().join("restored-by-release.db");
+    let refused = o
+        .command(&["backup", "restore", "--database", target.to_str().unwrap(), archive.to_str().unwrap()])
+        .output()
+        .unwrap();
+    o.binary = PathBuf::from(st3());
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(error.contains("unsupported claim backup format/version"), "{error}");
+    assert!(!target.exists());
+
+    // Roll back: the release runs on this store and reads its own claims. A mark is this build's
+    // record only, so the release sees that message as sent, as the release note says.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    assert_eq!(state(&listed(&o).await), ["read", "sent", "sent"]);
+    read(&o, &third, "rolled-back-read").await;
+    let fourth = send(&o, "rolled-back-send").await;
+    assert_eq!(state(&listed(&o).await), ["read", "sent", "read", "sent"]);
+
+    // Upgrade again: the mark still counts beside every claim either build wrote.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    let after = listed(&o).await;
+    assert_eq!(state(&after), ["read", "read", "read", "sent"]);
+    assert_eq!(after.last().map(|(subject, _)| subject.clone()), Some(fourth));
+}
+
 /// A seat's conversation and `conversations wait` across the previous release and this build, on
 /// one node upgraded in place and rolled back. The release's mail reads the same after the
 /// upgrade, a stream item joins the conversation behind the graph claim it arrived after, and a

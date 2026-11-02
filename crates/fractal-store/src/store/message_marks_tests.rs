@@ -79,7 +79,7 @@ fn twins() -> (tempfile::TempDir, Store, Store) {
 fn projections(store: &Store) -> BTreeMap<&'static str, Vec<String>> {
     let connection = store.readers.get();
     let rows = |sql: &str| -> Vec<String> {
-        let mut statement = connection.prepare(sql).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h1e9a7dd429b3 owner=fractal_store::store::message_marks_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
         let count = statement.column_count();
         statement
             .query_map([], |row| {
@@ -202,7 +202,7 @@ fn trimming_keeps_every_state_and_bounds_the_marks() {
     let before = projections(&marks);
     let statuses = |store: &Store| messages().into_iter().map(|(subject, _, _)| store.message(&subject).unwrap().unwrap().status).collect::<Vec<_>>();
     let status_before = statuses(&marks);
-    marks.connection.write().execute("UPDATE local_message_marks SET recorded_at_unix_ms=1", []).unwrap();
+    marks.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h6fc07a0220dd owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_message_marks SET recorded_at_unix_ms=1", []).unwrap();
     let trimmed = message_marks::trim(&marks, now_ms(), 3).unwrap();
     // A read supersedes a delivery; a close supersedes neither, since unread and idle mail count
     // a read apart from a close.
@@ -217,7 +217,7 @@ fn trimming_keeps_every_state_and_bounds_the_marks() {
         assert_eq!(before[table], after[table], "{table}");
     }
     // A message this member no longer holds takes its marks with it.
-    marks.connection.write().execute("DELETE FROM claims WHERE subject='message/marks-0-3'", []).unwrap();
+    marks.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h73c967a7b6a2 owner=fractal_store::store::message_marks_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE subject='message/marks-0-3'", []).unwrap();
     message_marks::trim(&marks, now_ms(), 3).unwrap();
     assert_eq!(
         marks.readers.get().query_row("SELECT COUNT(*) FROM local_message_marks WHERE message='message/marks-0-3'", [], |row| row.get::<_, i64>(0)).unwrap(),

@@ -142,7 +142,7 @@ const LEDGERS: &[Ledger] = &[
         key: 3,
         implied: None,
         // A consumer's mark of a kind is recorded once; its triggers fold it into the projections.
-        union: "INSERT OR IGNORE INTO local_message_marks(message, kind, consumer, recorded_at_unix_ms, receipt) \
+        union: /* sqlite-large-value: allow-for-now lv-h8928d49246cd owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_message_marks(message, kind, consumer, recorded_at_unix_ms, receipt) \
                 VALUES ({0}, {1}, {2}, {3}, {4})",
     },
 ];

@@ -49,6 +49,14 @@ before, and readers merge those claims with the local rows. `daemon.diagnostic` 
 control logic reads it, so a daemon's diagnostics (reconcile failures, kill survivors, checkpoint
 proof and trim failures) stay in its local log, and its OpenTelemetry logs carry them when a
 collector is configured. `/v1/claims` and `st trace show` list only those older builds wrote.
+A consumer's delivery, read or close of a message may be a local mark instead of a
+lifecycle claim (`local_message_marks`): like a local observation it never replicates and is
+outside every digest. A reader takes a message's lifecycle claims or its marks, whichever is
+further along. Marks maintain the member-local projections (idle and unread mail, coordination
+holds, client selectors) by trigger, in their own transaction; the shared `message_index` never
+takes one, so its readers also ask for a closed mark. The hourly trim removes a mark a further-
+along record stands in for once it is seven days old, and the marks of a message the member no
+longer holds.
 `harness.diagnostic` is split by code (`local_codes` in retention.toml): its observability codes
 are local in the same way, and the seat's conversation timeline on its own node still shows them.
 Its control codes stay claims.
