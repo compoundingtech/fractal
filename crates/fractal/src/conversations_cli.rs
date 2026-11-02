@@ -728,13 +728,28 @@ async fn print_message_key_status(client: &Client, key: &str, json_output: bool)
     Ok(())
 }
 
-/// The earliest message to `actor` from `sender` that arrived after `after`.
+use fractal_store::store::messages_shard::STREAM_INDEX_BASE;
+
+/// Whether a message at `created_index` came after the message at `after`. Within one store its
+/// index says so. A graph message and a stream item have no common order this CLI can read, so
+/// one in the other store counts as later: a wait only takes a message that is still unread.
+fn came_after(created_index: u64, after: u64) -> bool {
+    if (created_index >= STREAM_INDEX_BASE) == (after >= STREAM_INDEX_BASE) {
+        created_index > after
+    } else {
+        true
+    }
+}
+
+/// The first message to `actor` from `sender` after `after`, by index: a graph reply before a
+/// stream item, since a stream item's index is past every graph index, and within a store the
+/// earliest.
 fn earliest_reply(messages: Vec<MessageView>, sender: &str, after: u64) -> Option<MessageView> {
     messages
         .into_iter()
         .filter(|message| {
             message.from == sender
-                && message.created_index > after
+                && came_after(message.created_index, after)
                 && matches!(message.status.as_str(), "sent" | "staged" | "delivered")
         })
         .min_by_key(|message| message.created_index)
@@ -785,13 +800,24 @@ async fn wait_for_reply(
     let started = health["store_index"]
         .as_u64()
         .context("the daemon health response has no store index")?;
+    // A daemon that holds the messages stream says how far it has come; the wait then reads the
+    // stream's message events beside the graph's. Without it there is only the graph.
+    let stream_started = health["messages_store_index"].as_u64();
     let floor = after.unwrap_or(started);
     if after.is_some()
         && let Some(message) = unread_replies(client, actor, sender, floor).await?
     {
         return Ok(Some(message));
     }
+    // Each store's events are read past the wait's start in that store, or past `after` when it
+    // names a message there. A floor in one store never filters the other's events.
+    let graph_floor = after.filter(|after| *after < STREAM_INDEX_BASE).unwrap_or(started);
+    let stream_floor = after
+        .filter(|after| *after >= STREAM_INDEX_BASE)
+        .map(|after| after - STREAM_INDEX_BASE)
+        .or(stream_started);
     let mut cursor = started;
+    let mut stream_cursor = stream_started;
     let mut event_feed = LocalEventFeed::default();
     let mut last_read: Option<tokio::time::Instant> = None;
     loop {
@@ -808,17 +834,24 @@ async fn wait_for_reply(
         }
         last_read = Some(tokio::time::Instant::now());
         let wait_ms = remaining.as_millis().clamp(1, 30_000);
+        let stream_query = stream_cursor.map(|after| format!("&messages_after={after}")).unwrap_or_default();
         let page = event_feed
-            .read(client, &format!("after={cursor}&wait=true&timeout_ms={wait_ms}"))
+            .read(client, &format!("after={cursor}&wait=true&timeout_ms={wait_ms}{stream_query}"))
             .await?;
-        for event in &page.items {
-            if event.store_index <= floor || !may_be_reply(event, actor, sender) {
+        let graph_events = page.items.iter().filter(|event| event.store_index > graph_floor);
+        let stream_events = page
+            .stream_items
+            .iter()
+            .flatten()
+            .filter(|event| stream_floor.is_none_or(|floor| event.store_index > floor));
+        for event in graph_events.chain(stream_events) {
+            if !may_be_reply(event, actor, sender) {
                 continue;
             }
             let message = read_message(client, &event.subject).await?;
             if message.from == sender
                 && message.to == actor
-                && message.created_index > floor
+                && came_after(message.created_index, floor)
                 && matches!(message.status.as_str(), "sent" | "staged" | "delivered")
             {
                 return Ok(Some(message));
@@ -827,8 +860,11 @@ async fn wait_for_reply(
         if let Some(scanned) = page.next_after {
             cursor = cursor.max(scanned);
         }
+        if let Some(scanned) = page.messages_next_after {
+            stream_cursor = Some(stream_cursor.unwrap_or(0).max(scanned));
+        }
         // A full page means more events are waiting: read the next one without a pause.
-        if page.items.len() >= 200 {
+        if page.items.len() >= 200 || page.stream_items.as_ref().is_some_and(|items| items.len() >= 200) {
             last_read = None;
         }
     }

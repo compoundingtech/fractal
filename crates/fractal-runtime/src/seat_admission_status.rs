@@ -40,6 +40,10 @@ pub struct State {
     /// Lanes admitted to start that no observation shows running yet, with when, so two starts in
     /// one pass cannot both take the same room.
     pub lane_starts: BTreeMap<String, (crate::Capacity, u64)>,
+    /// The lane each seat holds above its own while it holds a step that raises it.
+    pub lane_raised: BTreeMap<String, crate::Capacity>,
+    /// The lane this daemon last set on each seat's slice, and the incarnation it set it for.
+    pub lane_applied: BTreeMap<String, (String, crate::Capacity)>,
 }
 
 pub struct Status(Mutex<State>);
@@ -55,6 +59,8 @@ impl Default for Status {
             replacements: BTreeSet::new(),
             lane_waits: VecDeque::new(),
             lane_starts: BTreeMap::new(),
+            lane_raised: BTreeMap::new(),
+            lane_applied: BTreeMap::new(),
         }))
     }
 }

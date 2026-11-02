@@ -34,7 +34,7 @@ fn scopes_memory(app_slice: &std::path::Path) -> u64 {
 }
 
 /// `anon` plus `kernel` from a cgroup's `memory.stat`.
-fn unreclaimable(stat: &str) -> u64 {
+pub(crate) fn unreclaimable(stat: &str) -> u64 {
     stat.lines()
         .filter_map(|line| line.split_once(' '))
         .filter(|(key, _)| matches!(*key, "anon" | "kernel"))
