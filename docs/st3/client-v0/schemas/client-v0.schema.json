@@ -3910,7 +3910,16 @@
           "minItems": 1,
           "uniqueItems": true,
           "description": "Narrows the default limited grant. Must not be combined with full_control.",
-          "items": { "type": "string", "enum": ["read.projections", "write.client-diagnostics", "read.glasses", "control.glasses", "control.notes", "terminal.read", "control.attention", "control.launches"] }
+          "items": { "type": "string", "enum": [
+            "read.projections",
+            "write.client-diagnostics",
+            "read.glasses",
+            "control.glasses",
+            "control.notes",
+            "terminal.read",
+            "control.attention",
+            "control.launches"
+          ] }
         }
       }
     },
