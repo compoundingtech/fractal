@@ -10929,6 +10929,65 @@ fn work_orphaning_requires_terminal_or_replacement_runtime_evidence() {
     assert!(store.work_claim_is_orphaned(&work).unwrap());
 }
 
+#[test]
+fn a_host_the_seat_moved_away_from_cannot_end_its_claim() {
+    // The seat ran on birch, moved to cedar, and holds its step there; alder judges the claim.
+    let (alder, birch, cedar) = (
+        Store::open_memory("alder").unwrap(),
+        Store::open_memory("birch").unwrap(),
+        Store::open_memory("cedar").unwrap(),
+    );
+    let subject = "agent/node.worker";
+    let work: StepRunView = serde_json::from_value(serde_json::json!({
+        "subject": "step-run/run/work", "run": "mission-run/run", "generation": "run-generation/run",
+        "step": "work", "definition_hash": "definition", "status": "working", "attempt": 1,
+        "assigned_to": subject, "agentless": false, "title": null, "worker_reported": false,
+        "claimant": subject, "claim_incarnation": "on-cedar", "claim_expires_at_unix_ms": 10,
+        "execution_elapsed_ms": 0, "readiness_epoch": 1, "blocked_reason": null,
+        "not_before_unix_ms": null, "created_at_unix_ms": 1, "updated_at_unix_ms": 1
+    }))
+    .unwrap();
+    let observe = |host: &Store, status: &str, incarnation: Option<&str>, key: &str| {
+        let mut fields = BTreeMap::from([("status".into(), Value::String(status.to_owned()))]);
+        if let Some(incarnation) = incarnation {
+            fields.insert("incarnation_id".into(), Value::String(incarnation.into()));
+        }
+        host.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: None, fields,
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some(key.into()),
+        })
+        .unwrap();
+        receive_and_project(&alder, &host.origin, &exchange_from(host, &ReplicationInventory::default()));
+    };
+
+    observe(&birch, "running", Some("on-birch"), "birch-running");
+    observe(&cedar, "running", Some("on-cedar"), "cedar-running");
+    assert!(!alder.work_claim_is_orphaned(&work).unwrap());
+    // birch comes back and records its own old runtime ending, with and without its incarnation.
+    observe(&birch, "stopped", Some("on-birch"), "birch-stopped");
+    observe(&birch, "exited", None, "birch-exited");
+    assert!(!alder.work_claim_is_orphaned(&work).unwrap());
+    // An end of the claim's own incarnation still ends it, whichever host records it.
+    observe(&birch, "exited", Some("on-cedar"), "birch-names-cedar");
+    assert!(alder.work_claim_is_orphaned(&work).unwrap());
+
+    // An end that names no incarnation counts on the host where the incarnation runs.
+    let (alder2, cedar2) = (Store::open_memory("alder").unwrap(), Store::open_memory("cedar").unwrap());
+    for (status, incarnation, key) in [("running", Some("on-cedar"), "running"), ("vanished", None, "vanished")] {
+        let mut fields = BTreeMap::from([("status".into(), Value::String(status.to_owned()))]);
+        if let Some(incarnation) = incarnation {
+            fields.insert("incarnation_id".into(), Value::String(incarnation.into()));
+        }
+        cedar2.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: None, fields,
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some(key.into()),
+        })
+        .unwrap();
+        receive_and_project(&alder2, "cedar", &exchange_from(&cedar2, &ReplicationInventory::default()));
+        assert_eq!(alder2.work_claim_is_orphaned(&work).unwrap(), status == "vanished");
+    }
+}
+
 mod seat_queue_purity_tests {
     use super::*;
     /* sqlite-large-value: allow-for-now lv-hb914ffd15eec owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("seat_queue_purity_tests.rs");
