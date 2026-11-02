@@ -52,18 +52,9 @@ fn protocol_schema_gate_accepts_codex_0164_error_union() {
 // not a two-second performance bound.
 const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The stop flag is process-global, so every test that exercises a reader of it —
-/// [`initialize_control`] above all — holds this lock against the one test that flips
-/// the flag: parallel readers would otherwise observe the raised flag and fail their
-/// `no stop raised in tests` expectations.
-fn stop_flag_tests() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
-        std::sync::LazyLock::new(std::sync::Mutex::default);
-    match LOCK.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
+// The stop flag is process-global, so every test that exercises a reader of it —
+// [`initialize_control`] above all — holds this lock against the tests that flip it.
+use crate::provider_session::stop_flag_tests;
 
 #[test]
 fn a_stop_during_the_websocket_handshake_ends_startup_gracefully() {
