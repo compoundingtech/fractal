@@ -176,7 +176,9 @@ pub struct WaitWake {
 
 impl Store {
     /// Refuse unless `actor`'s incarnation holds a live lease on `subject`, as a work action
-    /// would, before a wait sets anything up outside the step.
+    /// would, before a wait sets anything up outside the step. It restates the lease and
+    /// incarnation checks of `work_action_with_handoff`, which still decides inside the writer;
+    /// keep the two together.
     pub fn check_work_holder(
         &self,
         subject: &str,

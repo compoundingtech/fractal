@@ -426,7 +426,7 @@ impl Store {
         let mut held_ms = 0;
         loop {
             attempts += 1;
-            let report = self.restart_wal_report(connection, limits.busy)?;
+            let report = self.restart_wal_report(connection, limits.busy, 0)?;
             held += u32::from(report.truncate_ms.is_some());
             held_ms = held_ms.max(report.truncate_ms.unwrap_or(0));
             if report.recycled || started.elapsed() >= limits.wait {

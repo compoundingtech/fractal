@@ -1248,7 +1248,7 @@ enum MissionViewCommand {
     WaitingOn {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
         run: String,
-        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 15m).
         #[arg(long)]
         quiet: Option<String>,
     },
@@ -1258,7 +1258,7 @@ enum MissionViewCommand {
     /// Reads the same published lists as `missions waiting-on`; a run is blocked when a step
     /// is stuck, or when nothing in it moves and a step waits on a person or a hold.
     Blocked {
-        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 15m).
         #[arg(long)]
         quiet: Option<String>,
     },
@@ -1443,7 +1443,7 @@ struct MissionRunStartArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
     after: Option<String>,
     /// Tell this agent when the run fails, is cancelled or stalls, replacing the mission's own
-    /// `report-to`. A run that sits 30 minutes without progress counts as stalled unless the
+    /// `report-to`. A run that sits 3 hours without progress counts as stalled unless the
     /// mission sets `stalled-after`.
     #[arg(long, value_name = "AGENT")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
@@ -1488,7 +1488,7 @@ struct MissionReportToArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     agent: Option<String>,
     /// How long the run may go without progress before it counts as stalled, such as `1h`.
-    /// Defaults to the mission's `stalled-after`, else 30 minutes.
+    /// Defaults to the mission's `stalled-after`, else 3 hours.
     #[arg(long, value_name = "DURATION", requires = "agent", conflicts_with = "clear")]
     #[arg(value_parser = parse_stalled_after)]
     stalled_after: Option<u64>,
@@ -7308,7 +7308,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // The policy reads `[limits]` again on every pass, so an edit applies without a restart.
     fractal_daemon::config::set_daemon_config(args_config.as_deref());
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.enforce", enforce_account_limits(store.clone(), config.limits.clone(), reconciler)));
-    recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
+    // Five seconds finds gaps between short readers without polling on every write.
+    recycle_idle_wal(store.path.clone(), Arc::downgrade(&store), Duration::from_secs(5));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
@@ -11716,6 +11717,16 @@ fn render_performance(view: &Value) -> String {
             );
         }
     }
+    if let Some(count) = view["wal_escalations"]["count"].as_u64() {
+        let last = &view["wal_escalations"]["last"];
+        let _ = write!(out, "WAL ESCALATIONS  {count} since start");
+        if let Some(age) = last["age_ms"].as_u64() {
+            let held = last["held_ms"].as_u64().map_or_else(|| "did not take the writer".to_owned(), |ms| format!("held the writer {ms} ms"));
+            let restarted = if last["restarted"].as_bool() == Some(true) { "restarted" } else { "did not restart" };
+            let _ = write!(out, " · last {}s ago at {} frames, {held}, {restarted}", age / 1000, last["frames"]);
+        }
+        let _ = writeln!(out);
+    }
     if let Some(note) = view["query_time_note"].as_str() {
         let _ = writeln!(out, "{note}");
     }
@@ -14646,6 +14657,17 @@ fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bo
             })
             .unwrap_or_default();
         let _ = writeln!(output, "Waiting on: {waiting_on}{since}");
+    }
+    if let Some(stalled) = work
+        .stalled_at_unix_ms
+        .and_then(|at| chrono::DateTime::from_timestamp_millis(i64::try_from(at).ok()?))
+    {
+        let at = stalled.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let _ = writeln!(
+            output,
+            "Stalled: {at} ({}), no progress and no declared wait; the run's report-to was told",
+            ago(&at, now_ms())
+        );
     }
     if let Some(reason) = &work.blocked_reason {
         // The store keeps the reason for any state change here, such as a failure or an
@@ -20045,11 +20067,13 @@ mod wal_pin_tracker_tests;
 #[cfg(test)]
 mod wal_checkpoint_reporting_tests;
 
+#[cfg(test)]
+mod wal_escalation_tests;
+
 /// Page copying runs off the writer queue; TRUNCATE joins it before taking SQLite's writer
 /// lock. Recycling has no SQLite busy wait for readers; it can wait its FIFO turn.
-fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
-    // Five seconds finds gaps between short readers without polling on every write.
-    const WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+/// A WAL that keeps growing past `WalEscalation::frames` is restarted (`Store::recycle_wal`).
+fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>, interval: Duration) {
     const WAL_CHECKPOINT_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
     // Backfill can take tens of seconds even with a zero busy timeout. A detached native
@@ -20066,13 +20090,14 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
             };
             let mut connection = None;
             let mut last_error_log: Option<Instant> = None;
-            let mut retry_interval = WAL_CHECKPOINT_INTERVAL;
             let mut ordinary_outcomes = WalCheckpointLogBucket::default();
             let mut abnormal_outcomes = WalCheckpointLogBucket::default();
             let mut pin = WalPinTracker::default();
+            let mut growth = smallclaims::store::wal_escalation::WalGrowth::default();
+            let mut retry_interval = interval;
             loop {
                 std::thread::sleep(retry_interval);
-                retry_interval = WAL_CHECKPOINT_INTERVAL;
+                retry_interval = interval;
                 let started = Instant::now();
                 let trace_started = std::time::SystemTime::now();
                 // A weak reference does not keep the Store alive between attempts at shutdown.
@@ -20086,14 +20111,23 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                         None => rusqlite::Connection::open(&path)
                             .context("open WAL checkpoint connection")?,
                     };
-                    let result = store.checkpoint_idle_wal_report(&connection);
+                    let result = store.recycle_wal(&connection, &mut growth);
                     Ok::<_, anyhow::Error>((connection, result))
                     })
                 }));
                 let result = match attempt {
                     Ok(Ok((returned, result))) => {
                         connection = Some(returned);
-                        result.context("recycle idle WAL")
+                        result.context("recycle idle WAL").map(|(report, restart)| {
+                            if let Some(restart) = restart {
+                                stderr_message("st3", format_args!("WAL checkpoint escalated to a restart {}", json!({
+                                    "frames": restart.frames, "restarted": restart.recycled,
+                                    "copy_ms": restart.passive_ms, "writer_wait_ms": restart.writer_wait_ms,
+                                    "held_ms": restart.truncate_ms,
+                                })));
+                            }
+                            report
+                        })
                     }
                     Ok(Err(error)) => Err(error),
                     Err(_) => {

@@ -118,6 +118,10 @@ idle_min_minutes = 10
 # daemon_load's bound in CI under its synthetic load, which is not the production target.
 load_max_cores = 2.0
 
+[stalled]
+about = "Runs with a stalled step: held, no progress past the run's stalled-after and 30 minutes after its holder's fault, and no declared wait"
+max_runs = 0
+
 # Closed UTC minutes reported by paired clients; distinct from daemon response timing.
 
 [[latency]]
