@@ -144,13 +144,6 @@ pub fn recorded_at(connection: &Connection, message: &str, kinds: &[&str], consu
     Ok(at.and_then(|at| u128::try_from(at).ok()))
 }
 
-/// What a message view's cache keys marks on: the newest mark of `message`.
-pub fn version(connection: &Connection, message: &str) -> Result<i64> {
-    Ok(connection
-        .prepare_cached("SELECT COALESCE(MAX(rowid), 0) FROM local_message_marks WHERE message=?1")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-he19a16a9018a owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?)
-}
-
 /// A status rank: sent, staged, delivered, read, closed.
 pub fn rank(status: &str) -> u8 {
     match status {

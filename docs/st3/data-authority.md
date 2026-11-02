@@ -56,7 +56,8 @@ further along. Marks maintain the member-local projections (idle and unread mail
 holds, client selectors) by trigger, in their own transaction; the shared `message_index` never
 takes one, so its readers also ask for a closed mark. The hourly trim removes a mark a further-
 along record stands in for once it is seven days old, and the marks of a message the member no
-longer holds.
+longer holds. A mark has no graph index, so a read at an earlier `through` still shows a message's
+current marks; only its claims are cut at that index.
 `harness.diagnostic` is split by code (`local_codes` in retention.toml): its observability codes
 are local in the same way, and the seat's conversation timeline on its own node still shows them.
 Its control codes stay claims.

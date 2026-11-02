@@ -314,21 +314,23 @@ impl AdhocWorkStore for Store {
                 // cites it without following it.
                 let receipt = receipt.clone().ok_or_else(|| St3Error::new("stale-handoff", "the handoff changed while it was acknowledged; acknowledge it again"))?;
                 (receipt, vec![handoff.id])
-            } else if let Some(marked) = tx.query_row(
-                "SELECT receipt FROM local_message_marks WHERE message=?1 AND consumer=?2
-                 AND kind IN ('message.read','message.closed') ORDER BY recorded_at_unix_ms LIMIT 1",
-                params![input.message, input.actor], |row| row.get::<_, String>(0),
-            ).optional().map_err(internal)? {
-                // The reader's local mark (message_marks.rs) is its read: the progress cites its
-                // receipt, which is not a graph claim and so no predecessor.
-                (marked, vec![handoff.id])
             } else {
                 let seen: Option<String> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h21741300df1e owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND actor=?2 AND kind IN ('message.read','message.closed') ORDER BY CANONICAL_ASC(claims) LIMIT 1"), params![input.message, input.actor], |row| row.get(0)).optional().map_err(internal)?;
-                let receipt = match seen {
-                    Some(receipt) => receipt,
-                    None => append_claim_tx(tx, &self.origin, &input.message, "message.read", Some(&input.actor), &json!({"fields": {"status": "read"}}), &[], None).map_err(claim_append_error)?.id,
-                };
-                (receipt.clone(), vec![receipt, handoff.id])
+                // Without a graph read, the reader's local mark (message_marks.rs) is its read: the
+                // progress cites its receipt, which is not a graph claim and so no predecessor.
+                let marked: Option<String> = if seen.is_some() { None } else { tx.query_row(
+                    "SELECT receipt FROM local_message_marks WHERE message=?1 AND consumer=?2
+                     AND kind IN ('message.read','message.closed') ORDER BY recorded_at_unix_ms LIMIT 1",
+                    params![input.message, input.actor], |row| row.get::<_, String>(0),
+                ).optional().map_err(internal)? };
+                match (seen, marked) {
+                    (Some(receipt), _) => (receipt.clone(), vec![receipt, handoff.id]),
+                    (None, Some(marked)) => (marked, vec![handoff.id]),
+                    (None, None) => {
+                        let receipt = append_claim_tx(tx, &self.origin, &input.message, "message.read", Some(&input.actor), &json!({"fields": {"status": "read"}}), &[], None).map_err(claim_append_error)?.id;
+                        (receipt.clone(), vec![receipt, handoff.id])
+                    }
+                }
             };
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.progress", Some(&input.actor), &json!({"fields": {
                 "attempt": view.attempt, "status": "ready", "summary": "Handoff acknowledged", "worker_reported": view.worker_reported,

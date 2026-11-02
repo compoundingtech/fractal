@@ -7,7 +7,8 @@ pub const CHUNK: usize = 128;
 pub struct Version {
     pub latest_claim_index: u64,
     pub desired_claim_id: Option<String>,
-    /// The newest local mark (message_marks.rs): a mark changes the view as a claim does.
+    /// Which kinds of local mark the message has, as a bitmask (message_marks.rs): a mark changes
+    /// the view as a claim does, and unlike a rowid the mask cannot repeat a trimmed mark's key.
     pub latest_mark: i64,
 }
 
@@ -16,7 +17,8 @@ pub struct Version {
 const QUERY: &str = "SELECT requested.key,
     (SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=requested.value),
     (SELECT claim_id FROM desired WHERE subject=requested.value),
-    (SELECT COALESCE(MAX(rowid), 0) FROM local_message_marks WHERE message=requested.value)
+    (SELECT COALESCE(SUM(CASE kind WHEN 'message.delivered' THEN 1 WHEN 'message.read' THEN 2
+        WHEN 'message.closed' THEN 4 ELSE 0 END), 0) FROM local_message_marks WHERE message=requested.value)
     FROM json_each(?1) AS requested ORDER BY requested.key";
 
 pub fn read(connection: &Connection, subjects: &[&str]) -> Result<Vec<Version>> {
