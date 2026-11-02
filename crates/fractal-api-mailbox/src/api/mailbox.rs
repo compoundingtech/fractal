@@ -2386,7 +2386,7 @@ mod tests {
             let source = "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; command \"true\"; }";
             let intent = crate::graph::parse_intent(source, "node").unwrap();
             state.store.apply_internal(&intent, "declare-eval-worker").unwrap();
-            assert_eq!(state.store.refresh_marks_switch().unwrap(), (true, Vec::new()));
+            assert_eq!(state.store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
         }
         crate::store::mailbox_tests::ready(&state.store, "session-1");
         let send = |id: &str| {

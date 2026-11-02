@@ -208,7 +208,7 @@ fn trimming_keeps_every_state_and_bounds_the_marks() {
     let before = projections(&marks);
     let statuses = |store: &Store| messages().into_iter().map(|(subject, _, _)| store.message(&subject).unwrap().unwrap().status).collect::<Vec<_>>();
     let status_before = statuses(&marks);
-    marks.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h6fc07a0220dd owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_message_marks SET recorded_at_unix_ms=1; UPDATE local_message_staged SET recorded_at_unix_ms=1").unwrap();
+    marks.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h497d211aacc4 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_message_marks SET recorded_at_unix_ms=1; UPDATE local_message_staged SET recorded_at_unix_ms=1").unwrap();
     let trimmed = message_marks::trim(&marks, now_ms(), 3).unwrap();
     // A read supersedes a delivery; a close supersedes neither, since unread and idle mail count
     // a read apart from a close. Any later mark supersedes a staging.

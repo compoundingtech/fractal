@@ -25,7 +25,7 @@ fn writer_seek(table: &str, column: &str) -> String {
 /// Whether `member`'s newest own `daemon.started` at or after `start` advertises [`FEATURE`].
 fn advertises(connection: &Connection, member: &str, start: u64) -> Result<bool> {
     let advertised: Option<Option<bool>> = connection
-        .query_row(&canonical_sql(
+        .query_row(/* sqlite-large-value: allow-for-now lv-he99ecbc33cee owner=fractal_store::store::marks_switch TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT json_extract(claims.body,'$.fields.features.seat_freshness_reads')=1
              FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
@@ -36,8 +36,10 @@ fn advertises(connection: &Connection, member: &str, start: u64) -> Result<bool>
     Ok(advertised.flatten() == Some(true))
 }
 
-/// Why this member may not record marks yet, one reason per member or writer; none means it may.
-pub fn blockers(connection: &Connection, origin: &str) -> Result<Vec<String>> {
+/// Why this member may not record marks yet, one reason per member, peer or writer; none means it
+/// may. `peers` are the members this daemon is configured to exchange with: one whose start has
+/// not reached this member yet, as on a member's first sync, is not ready.
+pub fn blockers(connection: &Connection, origin: &str, peers: &[String]) -> Result<Vec<String>> {
     let membership = fleet_membership_tx(connection)?;
     let mut blockers = Vec::new();
     let mut members = BTreeSet::new();
@@ -57,8 +59,8 @@ pub fn blockers(connection: &Connection, origin: &str) -> Result<Vec<String>> {
     let mut writers = BTreeSet::new();
     for (table, column) in WRITER_TABLES {
         let mut previous = String::new();
-        let mut statement = connection.prepare(&writer_seek(table, column))?;
-        while let Some(writer) = statement.query_row([&previous], |row| row.get::<_, String>(0)).optional()? {
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h4368bbfe977e owner=fractal_store::store::marks_switch TODO=trace-statement-and-value-representation */ &writer_seek(table, column))?;
+        while let Some(writer) = statement.query_row(/* sqlite-large-value: allow-for-now lv-he3fa6b5c879c owner=fractal_store::store::marks_switch TODO=trace-statement-and-value-representation */ [&previous], |row| row.get::<_, String>(0)).optional()? {
             if writer != origin && !members.contains(&writer) && !fenced.contains(&writer)
                 && !(membership.anchor().is_some() && membership.is_keyed_writer(&writer)) {
                 writers.insert(writer.clone());
@@ -66,9 +68,10 @@ pub fn blockers(connection: &Connection, origin: &str) -> Result<Vec<String>> {
             previous = writer;
         }
     }
+    writers.extend(peers.iter().filter(|peer| **peer != origin && !members.contains(*peer)).cloned());
     for writer in writers {
         if !advertises(connection, &writer, 0)? {
-            blockers.push(format!("{writer}: writes to this member outside its fleet membership and has not advertised {FEATURE}=1"));
+            blockers.push(format!("{writer}: exchanges with this member outside its fleet membership and has not advertised {FEATURE}=1"));
         }
     }
     Ok(blockers)
@@ -90,17 +93,17 @@ impl Store {
         marks_switched_tx(&self.readers.get())
     }
 
-    /// Decide the barrier again and record it when it changed. Answers whether marks are on and,
-    /// when they are not, why.
-    pub fn refresh_marks_switch(&self) -> Result<(bool, Vec<String>)> {
-        let blockers = blockers(&self.readers.get(), &self.origin)?;
+    /// Decide the barrier again, with the daemon's configured `peers`, and record it when it
+    /// changed. Answers whether marks are on and, when they are not, why.
+    pub fn refresh_marks_switch(&self, peers: &[String]) -> Result<(bool, Vec<String>)> {
+        let blockers = blockers(&self.readers.get(), &self.origin, peers)?;
         let switched = blockers.is_empty();
         if self.marks_switched()? != switched {
             let value = if switched { "1" } else { "0" };
             self.connection
                 .batched(|transaction| {
                     transaction.execute(
-                        "INSERT INTO meta(key, value) VALUES ('marks_switched', ?1)
+                        /* sqlite-large-value: allow-for-now lv-he3398ba708bb owner=fractal_store::store::marks_switch TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('marks_switched', ?1)
                          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                         [value],
                     )
@@ -130,11 +133,15 @@ mod tests {
     fn marks_switch_on_only_once_every_other_member_reads_them() {
         let alone = Store::open_memory("alder").unwrap();
         assert!(!alone.marks_switched().unwrap(), "off until decided");
-        assert_eq!(alone.refresh_marks_switch().unwrap(), (true, Vec::new()));
+        assert_eq!(alone.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
         assert!(alone.marks_switched().unwrap());
         let anchored = Store::open_memory("alder").unwrap();
         enable(&anchored);
-        assert!(anchored.refresh_marks_switch().unwrap().0);
+        assert!(anchored.refresh_marks_switch(&[]).unwrap().0);
+        // A configured peer this member has not heard start yet, as before a first sync.
+        let (switched, blockers) = Store::open_memory("alder").unwrap().refresh_marks_switch(&["birch".to_owned()]).unwrap();
+        assert!(!switched);
+        assert_eq!(blockers, ["birch: exchanges with this member outside its fleet membership and has not advertised seat_freshness_reads=1"]);
 
         let store = Store::open_memory("alder").unwrap();
         let anchor = enable(&store);
@@ -149,20 +156,20 @@ mod tests {
         sync(&store, &peer);
         started(&peer, false);
         sync(&peer, &store);
-        let (switched, blockers) = store.refresh_marks_switch().unwrap();
+        let (switched, blockers) = store.refresh_marks_switch(&[]).unwrap();
         assert!(!switched);
         assert_eq!(blockers, ["host/birch: has not advertised seat_freshness_reads=1"]);
         // Another origin cannot speak for the member.
         claim(&store, "daemon/birch", "daemon.started", None, json!({"status": "running", "features": {FEATURE: 1}}));
-        assert!(!store.refresh_marks_switch().unwrap().0);
+        assert!(!store.refresh_marks_switch(&[]).unwrap().0);
         started(&peer, true);
         sync(&peer, &store);
-        assert_eq!(store.refresh_marks_switch().unwrap(), (true, Vec::new()));
+        assert_eq!(store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
         assert!(store.marks_switched().unwrap());
         // The peer restarts on an older build: marks go off again.
         started(&peer, false);
         sync(&peer, &store);
-        assert!(!store.refresh_marks_switch().unwrap().0);
+        assert!(!store.refresh_marks_switch(&[]).unwrap().0);
         assert!(!store.marks_switched().unwrap());
     }
 }

@@ -27,7 +27,7 @@ pub const EVENTS_KEPT: i64 = 16_384;
 pub fn event_position(connection: &Connection) -> Result<u64> {
     Ok(connection
         .prepare_cached("SELECT COALESCE(MAX(id), 0) FROM local_message_mark_events")?
-        .query_row([], |row| row.get(0))?)
+        .query_row(/* sqlite-large-value: allow-for-now lv-h5a3089cd7513 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
 }
 
 /// The mark events after `after`, at most `limit`, as (id, message, consumer).
@@ -44,7 +44,7 @@ pub const SUPERSEDED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The table, before any projection backfill folds it in.
 pub fn create_table(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h5e219940ed04 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
+        /* sqlite-large-value: allow-for-now lv-hfe0fdba03f21 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_message_marks (
     message TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('message.delivered','message.read','message.closed')),
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS local_message_mark_events (
 /// The triggers, once every projection they maintain exists.
 pub fn create_triggers(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h101527c32d2e owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "
+        /* sqlite-large-value: allow-for-now lv-h074f8716f6c1 owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "
 -- The same projection rows a lifecycle claim of the mark's kind writes (see the claim triggers
 -- in store.rs, idle_mail.rs, unread_mail.rs, coordination.rs and client_messages.rs). A lifecycle
 -- claim carries a status field, so it always marks the client selector dirty; a mark does too.
@@ -173,7 +173,7 @@ pub fn record_tx(
     let receipt = super::messages_shard::lifecycle_receipt(origin, message, kind, Some(consumer), &fields);
     let inserted = if kind == STAGED {
         transaction.execute(
-            "INSERT OR IGNORE INTO local_message_staged(message, consumer, recorded_at_unix_ms, receipt)
+            /* sqlite-large-value: allow-for-now lv-h2d30ef9f972a owner=fractal_store::store::message_marks TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_message_staged(message, consumer, recorded_at_unix_ms, receipt)
              SELECT ?1, ?2, ?3, ?4 WHERE EXISTS(SELECT 1 FROM message_index WHERE subject=?1)",
             params![message, consumer, now_ms() as i64, receipt.id],
         )
@@ -204,7 +204,7 @@ pub fn record_tx(
 pub fn staged(connection: &Connection, message: &str) -> Result<Option<(String, u128)>> {
     Ok(connection
         .prepare_cached("SELECT consumer, recorded_at_unix_ms FROM local_message_staged WHERE message=?1 ORDER BY recorded_at_unix_ms LIMIT 1")?
-        .query_row([message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h34c24f65b594 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)))
         .optional()?)
 }
 
@@ -227,12 +227,12 @@ pub fn recorded(connection: &Connection, origin: &str, message: &str, kind: &str
     let consumer: Option<String> = if kind == STAGED {
         connection
             .prepare_cached("SELECT consumer FROM local_message_staged WHERE message=?1 ORDER BY recorded_at_unix_ms LIMIT 1")?
-            .query_row([message], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-he19a16a9018a owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))
             .optional()?
     } else if MARKS.contains(&kind) {
         connection
             .prepare_cached("SELECT consumer FROM local_message_marks WHERE message=?1 AND kind=?2 ORDER BY recorded_at_unix_ms LIMIT 1")?
-            .query_row([message, kind], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h01ddb4f0b68e owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message, kind], |row| row.get(0))
             .optional()?
     } else {
         None
@@ -253,7 +253,7 @@ pub fn latest(connection: &Connection, message: &str) -> Result<Option<(String, 
                  UNION ALL SELECT receipt, recorded_at_unix_ms FROM local_message_staged WHERE message=?1)
              ORDER BY recorded_at_unix_ms DESC, receipt DESC LIMIT 1",
         )?
-        .query_row([message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h7d8afd8a5d72 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)))
         .optional()?)
 }
 
@@ -274,10 +274,10 @@ pub fn local_consumer(connection: &Connection, origin: &str, message: &str, cons
     }
     let graph_message: bool = connection
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)")?
-        .query_row([message], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h25eeeac696a4 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
     let host: Option<Option<String>> = connection
         .prepare_cached("SELECT json_extract(member,'$.host') FROM desired WHERE subject=?1")?
-        .query_row([consumer], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h967901d802cf owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [consumer], |row| row.get(0))
         .optional()?;
     Ok(graph_message && host.flatten().as_deref() == Some(origin))
 }
@@ -293,7 +293,7 @@ pub fn status(connection: &Connection, message: &str) -> Result<Option<&'static 
     }
     let staged: bool = connection
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM local_message_staged WHERE message=?1)")?
-        .query_row([message], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h8f64d250e864 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
     Ok(staged.then_some("staged"))
 }
 
@@ -331,7 +331,7 @@ pub fn host_marks(
         let connection = store.readers.get();
         let held: bool = connection
             .prepare_cached("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)")?
-            .query_row(/* sqlite-large-value: allow-for-now lv-he19a16a9018a owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
+            .query_row(/* sqlite-large-value: allow-for-now lv-h3962b6920e6b owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
         if held {
             let marks = connection
                 .prepare_cached(
@@ -425,7 +425,7 @@ pub fn trim(store: &Store, now: u128, chunk: usize) -> Result<usize> {
         )?;
         // A staging stands for nothing once any later lifecycle of the message is recorded.
         let staged = connection.execute(
-            "DELETE FROM local_message_staged WHERE rowid IN (
+            /* sqlite-large-value: allow-for-now lv-hed71df032c6d owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_message_staged WHERE rowid IN (
                 SELECT staged.rowid FROM local_message_staged AS staged
                 WHERE NOT EXISTS(SELECT 1 FROM message_index WHERE subject=staged.message)
                    OR (staged.recorded_at_unix_ms < ?1 AND (
@@ -436,7 +436,7 @@ pub fn trim(store: &Store, now: u128, chunk: usize) -> Result<usize> {
             params![cutoff, chunk],
         )?;
         connection.execute(
-            "DELETE FROM local_message_mark_events WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM local_message_mark_events) - ?1",
+            /* sqlite-large-value: allow-for-now lv-h6faacb101bab owner=fractal_store::store::message_marks TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_message_mark_events WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM local_message_mark_events) - ?1",
             [EVENTS_KEPT],
         )?;
         drop(connection);

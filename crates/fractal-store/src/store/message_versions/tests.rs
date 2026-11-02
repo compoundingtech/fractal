@@ -24,7 +24,7 @@ fn fixture() -> Connection {
     smallclaims::sqlite::observe(&mut connection);
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h3505ec1ca327 owner=fractal_store::store::message_versions::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(store_index INTEGER PRIMARY KEY,subject TEXT,kind TEXT);
+            /* sqlite-large-value: allow-for-now lv-hd73001c86492 owner=fractal_store::store::message_versions::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(store_index INTEGER PRIMARY KEY,subject TEXT,kind TEXT);
          CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
          CREATE TABLE desired(subject TEXT PRIMARY KEY,claim_id TEXT NOT NULL);
          CREATE TABLE local_message_marks(message TEXT,kind TEXT,consumer TEXT,PRIMARY KEY(message,kind,consumer));

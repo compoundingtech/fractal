@@ -7876,6 +7876,22 @@ fn relayed_held_mail(
         .collect())
 }
 
+/// Whether this member records its seats' lifecycle as local marks (store/marks_switch.rs), and,
+/// while it does not, which members keep it writing claims. Either is healthy: the check informs.
+fn message_marks_check(state: &AppState) -> DoctorCheck {
+    let switched = state.store.marks_switched();
+    let blockers = crate::store::marks_switch::blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
+    let message = match (switched, blockers) {
+        (Ok(true), _) => "on: this member records its own seats' delivery, read and close as local marks".to_owned(),
+        (Ok(false), Ok(blockers)) if blockers.is_empty() => "off: every member is ready; marks turn on at the next check".to_owned(),
+        (Ok(false), Ok(blockers)) => format!("off: lifecycle claims until every member reads marks ({})", blockers.join("; ")),
+        (Err(error), _) | (_, Err(error)) => {
+            return DoctorCheck { name: "message-marks".into(), status: "warn".into(), message: format!("{error:#}") };
+        }
+    };
+    DoctorCheck { name: "message-marks".into(), status: "pass".into(), message }
+}
+
 /// Held silent mail is never lost: unread past a day, it is listed for its seat. A seat whose
 /// host keeps its receipts (`message_reads`) is listed by what that host answers: this member's
 /// held flags for it never clear.
@@ -9062,6 +9078,7 @@ fn doctor_report_within(
     checks.check("publication-evidence", || {
         Ok(vec![publication_evidence_check(&state.store)])
     });
+    checks.check("message-marks", || Ok(vec![message_marks_check(state)]));
     checks.check("held-mail", || {
         Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
     });
