@@ -118,6 +118,12 @@ public actor FractalClient {
         return try await get("v1/client/events", query: query)
     }
     private func submit(_ action: ActionRequest) async throws -> Envelope<ActionResult> { try await post("v1/client/actions", action) }
+    public func subjectNotesCreate(_ note: SubjectNoteCreate) async throws -> Envelope<SubjectNoteResult> {
+        try await post("v1/subject-notes", note)
+    }
+    public func subjectNotesUpdate(id: String, note: SubjectNoteUpdate) async throws -> Envelope<SubjectNoteResult> {
+        try await request("v1/subject-notes/\(Self.routedSessionID(id))", query: [], method: "PUT", body: try JSONEncoder().encode(note))
+    }
     public func listGlasses(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { try await list("glasses", cursor: cursor, limit: limit) }
     public func getGlass(id: String) async throws -> Envelope<Glass> { try await get("v1/client/glasses/\(Self.routedSessionID(id.split(separator: "/").last.map(String.init) ?? id))") }
     public func putGlass(id: String, body: GlassPut, idempotencyKey: String) async throws -> Envelope<Glass> { try await request("v1/client/glasses/\(Self.routedSessionID(id.split(separator: "/").last.map(String.init) ?? id))", query: [], method: "PUT", body: try JSONEncoder().encode(body), idempotencyKey: idempotencyKey) }
@@ -283,6 +289,8 @@ public actor FractalClient {
     public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/harness-questions", query: query) }
     public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> { try await get("v1/client/harness-questions/\(Self.routedSessionID(id))") }
     public func notesList() async throws -> Envelope<DirectiveNotes> { try await get("v1/client/notes") }
+    public func subjectNotesList(target: String? = nil) async throws -> Envelope<SubjectNotes> { try await get("v1/client/subject-notes", query: target.map { [.init(name: "target", value: $0)] } ?? []) }
+    public func subjectNotesMine(author: String) async throws -> Envelope<SubjectNotes> { try await get("v1/client/subject-notes", query: [.init(name: "author", value: author)]) }
     public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let kind { query.append(.init(name: "kind", value: kind)) }; if let version { query.append(.init(name: "version", value: String(version))) }; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/custom-subjects", query: query) }
     public func customSubjectsGet(id: String) async throws -> Envelope<Resource> { try await resource("custom-subjects", id: id) }
     public func privateNotesGet(uri: String) async throws -> Envelope<PrivateNotesSubject> { try await get("v1/client/private-notes/\(Self.pathSegment(uri))") }

@@ -5,7 +5,7 @@ import { API_VERSION } from './Models.generated.ts';
 import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
-    ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
+    ResourcesFilter, ResourcesPage, DirectiveNotes, SubjectNotes, SubjectNoteResult, SubjectNoteCreate, SubjectNoteUpdate, HarnessQuestion, SchedulesPage,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -650,6 +650,8 @@ export class FractalClient {
     listGlasses(options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get(`/v1/client/glasses${query(options)}`, undefined, requestOptions); }
     getGlass(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Glass>> { return this.get(`/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`, undefined, requestOptions); }
     putGlass(id: string, request: GlassPut, idempotencyKey: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Glass>> { return this.request('PUT', `/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`, request, idempotencyKey, undefined, requestOptions); }
+    subjectNotesCreate(note: SubjectNoteCreate, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectNoteResult>> { return this.request('POST', '/v1/subject-notes', note, undefined, undefined, requestOptions); }
+    subjectNotesUpdate(id: string, note: SubjectNoteUpdate, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectNoteResult>> { return this.request('PUT', `/v1/subject-notes/${encodeURIComponent(id)}`, note, undefined, undefined, requestOptions); }
     deleteGlass(id: string, request: GlassDelete, idempotencyKey: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Glass>> { return this.request('DELETE', `/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`, request, idempotencyKey, undefined, requestOptions); }
     /** Exact server-side filters; refuses older servers that ignore them. */
     async terminalsListFiltered(options: TerminalListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> {
@@ -665,6 +667,8 @@ export class FractalClient {
     async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
+    async subjectNotesList(target?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectNotes>> { return this.get('/v1/client/subject-notes' + query({ target }), undefined, requestOptions); }
+    async subjectNotesMine(author: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectNotes>> { return this.get('/v1/client/subject-notes' + query({ author }), undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async privateNotesGet(uri: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PrivateNotesSubject>> { return this.get(`/v1/client/private-notes/${encodeURIComponent(uri)}`, undefined, requestOptions); }

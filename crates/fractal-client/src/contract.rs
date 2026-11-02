@@ -67,6 +67,8 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("harness-questions.list", "/v1/client/harness-questions"),
     ("harness-questions.get", "/v1/client/harness-questions/{id}"),
     ("notes.list", "/v1/client/notes"),
+    ("subject-notes.list", "/v1/client/subject-notes"),
+    ("subject-notes.mine", "/v1/client/subject-notes"),
     ("custom-subjects.list", "/v1/client/custom-subjects"),
     ("custom-subjects.get", "/v1/client/custom-subjects/{id}"),
     ("private-notes.get", "/v1/client/private-notes/{uri}"),
