@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The exact-agent selector stream tests read collection frames through a helper that answers and skips the server's 8 s keepalive ping, so a test that runs past 8 s under load no longer parses the ping as a frame (#4737)",
+  "replay": {"status": "none", "detail": "Test-only change; no claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "No runtime, client, wire or harness change; only test helpers, the exact_agent_selector_stream fixture and a new control in crates/fractal-api-client-v0/src/api/client_v0.rs."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}

@@ -10937,6 +10937,53 @@ mission "differential" state="ready" {
         exact_agent_selector_stream_fixture(true).await;
     }
 
+    type CollectionTestSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// The next data frame on a collection socket. The server pings every
+    /// COLLECTION_PING_INTERVAL (8 s), and a test that runs that long under load gets a ping
+    /// between its frames: it is answered and skipped, never read as a frame.
+    async fn next_data_frame(socket: &mut CollectionTestSocket) -> Value {
+        data_frame_within(socket, Duration::from_secs(5)).await.expect("a data frame within 5 s")
+    }
+
+    /// The data frame that arrives within `wait`, if one does; a keepalive ping is not one.
+    async fn data_frame_within(socket: &mut CollectionTestSocket, wait: Duration) -> Option<Value> {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::time::timeout_at(deadline, socket.next()).await.ok()?.unwrap().unwrap() {
+                Message::Text(text) => return Some(serde_json::from_str(&text).unwrap()),
+                Message::Ping(_) | Message::Pong(_) => socket.flush().await.unwrap(),
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_test_frames_skip_the_servers_keepalive_ping() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket.send(Message::Ping(Vec::new().into())).await.unwrap();
+            socket.send(Message::Text(json!({"kind":"changes"}).to_string().into())).await.unwrap();
+            socket.send(Message::Ping(Vec::new().into())).await.unwrap();
+            // Hold the socket open until the client is done.
+            while socket.next().await.is_some() {}
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/")).await.unwrap();
+        assert_eq!(next_data_frame(&mut socket).await["kind"], "changes");
+        assert_eq!(data_frame_within(&mut socket, Duration::from_millis(200)).await, None);
+        drop(socket);
+        server.await.unwrap();
+    }
+
     async fn exact_agent_selector_stream_fixture(fleet_first: bool) {
         use futures_util::{SinkExt as _, StreamExt as _};
         use tokio_tungstenite::tungstenite::Message;
@@ -10989,8 +11036,7 @@ mission "differential" state="ready" {
         let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
         socket.send(Message::Text(json!({"kind":"subscribe","id":"details",
             "collection":"agents","agent":"agent/z","limit":1}).to_string().into())).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let snapshot: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let snapshot = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&snapshot);
         assert_eq!(snapshot["kind"], "snapshot");
         assert_eq!(snapshot["order"], json!(["agent/z"]));
@@ -11007,15 +11053,14 @@ mission "differential" state="ready" {
             json!({"state":"working","driver":"codex","incarnation_id":"one"}));
         signal_changed(&writer);
         tokio::time::timeout(Duration::from_secs(5), completions.recv()).await.unwrap().unwrap();
-        assert!(tokio::time::timeout(Duration::from_millis(200), socket.next()).await.is_err(),
+        assert!(data_frame_within(&mut socket, Duration::from_millis(200)).await.is_none(),
             "an unrelated agent change must not emit a frame");
         assert_eq!(writer.store.agent_resources_refolded_cards_for_test(), folded);
         assert_eq!(writer.store.agent_resources_builds_for_test(), builds);
         agent_selector_observe(&writer, "agent/z", "harness.observed",
             json!({"state":"working","driver":"codex","incarnation_id":"one"}));
         signal_changed(&writer);
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let changes: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let changes = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&changes);
         assert_eq!(changes["kind"], "changes");
         assert_eq!(changes["upserts"].as_array().unwrap().len(), 1);
@@ -11027,8 +11072,7 @@ mission "differential" state="ready" {
         agent_selector_observe(&writer, "agent/z", "runtime.observed",
             json!({"status":"stopped","runtime_id":"agent/z","incarnation_id":"one"}));
         signal_changed(&writer);
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let removed: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let removed = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&removed);
         assert_eq!(removed["kind"], "changes");
         assert_eq!(removed["removes"], json!(["agent/z"]));
@@ -11037,8 +11081,7 @@ mission "differential" state="ready" {
         agent_selector_observe(&writer, "agent/z", "runtime.observed",
             json!({"status":"running","runtime_id":"agent/z","incarnation_id":"two"}));
         signal_changed(&writer);
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let returned: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let returned = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&returned);
         assert_eq!(returned["kind"], "changes");
         assert_eq!(returned["upserts"][0]["id"], "agent/z");
