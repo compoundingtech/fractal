@@ -170,6 +170,17 @@ mod tests {
             let bytes = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
             (status, serde_json::from_slice(&bytes).unwrap())
         }
+        for actor in ["person/example", "agent/example/worker"] {
+            for text in [json!("Context reminder"), Value::Null] {
+                let subject = format!("note/{actor}/{}", uuid::Uuid::now_v7());
+                let (status, rejected) = call(&state, "POST", "/v1/claims", actor,
+                    json!({"subject":subject,"kind":"note.set","actor":actor,
+                        "fields":{"target":"agent/example/worker","text":text,"audience":"agent"}})).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+                assert_eq!(rejected["code"], "claim-write-forbidden");
+                assert_eq!(rejected["message"], "claim kind `note.set` requires a dedicated authorized operation");
+            }
+        }
         let (status, created) = call(&state, "POST", "/v1/subject-notes", "person/example",
             json!({"target":"agent/example/worker","text":"Context reminder"})).await;
         assert_eq!(status, StatusCode::OK, "{created}");

@@ -23,6 +23,10 @@ The directive/subject-note CLI split is implemented in source:
 `directive set|clear|show` is available through the shared `fractal`/`st`/`st3`
 CLI. Bare `note` and `note set|clear` print a one-line deprecation notice.
 
+DQ8 dedicated-only writes are implemented: generic claim admission refuses
+`note.set`; the note API retains local target/assignment checks, and peers
+trust the origin's check without changing replicated admission.
+
 The minimal session subject (DQ2) is registered. Notes use session targets,
 not a `session` field. Local note admission checks the parent runtime's exact
 running incarnation; current reads and digests stop including those notes on
@@ -197,14 +201,20 @@ Read-only research against fetched `origin/main` at
 | `person/example` | any target it can read | own notes |
 | `agent/<org>/<name>` | itself; sessions whose parent is itself; mission runs and step runs it is assigned to | own notes |
 
-The new `SubjectEncodedAuthor` write policy requires the claim actor to equal
+The `SubjectEncodedAuthor` write policy requires the claim actor to equal
 the author encoded in the note subject. This rule is stateless, analogous to
-`SameSubjectActor`, and is validated in `st3-schema` (`validate_actor`,
+`SameSubjectActor`, and is validated in `fractal-schema` (`validate_actor`,
 `validate_fields`) and again at replicated admission.
 
+Notes are written only through `st note add|archive` and
+`POST /v1/subject-notes` / `PUT /v1/subject-notes/{id}`. Generic claim
+admission (`POST /v1/claims`, `st claim`) refuses `note.set` with
+`claim-write-forbidden`, using the same dedicated-authorized-operation
+refusal as `AuthorizedParticipant` claims. `SubjectEncodedAuthor` remains
+the note's write policy; it does not grant generic claim write access.
 Target access and agent assignment restrictions require graph state and are
-enforced only at local API admission. Replicated admission does not enforce
-these restrictions; see `DQ8`.
+enforced only at local note API admission. Peers trust the origin's check;
+replicated admission does not enforce these restrictions (DQ8).
 Person- and agent-authored notes follow the same audience rule: new notes use
 `agent`; neither author type can create a private `self` note. Existing
 `self` notes are not hidden from agents. The schema retains the open enum
@@ -417,13 +427,15 @@ A note kind registration includes:
   references owned by that spec. No second subject-ref shape exists.
 - **DQ7 Text limit — resolved:** 1024 UTF-8 bytes, confirmed by q3 (DQ5),
   rather than the directive note's 4096.
-- **DQ8 Replicated target restrictions:** Must replicated admission enforce
-  agent target/assignment restrictions too? This requires
-  `AuthorizedParticipant` with ownership evidence; the draft enforces these
-  graph-state restrictions only at local API admission.
-  The generic claim API (`POST /v1/claims`, `st claim`) applies only
-  `SubjectEncodedAuthor`; target restrictions apply only through the note
-  API.
+- **DQ8 Replicated target restrictions — resolved (2026-11-02):** Johannes
+  chose dedicated-only (Axe Q2 request `ih018s`, answer `ip25da`). Notes
+  are written only through the note API (`st note add|archive`,
+  `POST`/`PUT /v1/subject-notes`). Generic claim admission
+  (`POST /v1/claims`, `st claim`) refuses `note.set`, using the same
+  dedicated-operation refusal as `AuthorizedParticipant` claims.
+  `SubjectEncodedAuthor` still enforces exact authorship. Target/assignment
+  checks stay at local note API admission; peers trust the origin's check,
+  and replicated admission is unchanged.
 - **DQ9 Agent privacy — moot under DQ3:** No private audience exists for
   either author type. Agents and persons create `agent` notes; all current
   notes are agent context regardless of their stored audience. The

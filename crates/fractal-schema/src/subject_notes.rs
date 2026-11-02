@@ -171,10 +171,24 @@ mod tests {
             assert!(registry().validate_subject(&id).is_err(), "{id}");
         }
         for actor in [None, Some("person/other"), Some("agent/org/worker")] {
-            assert!(registry().validate_public_claim(ID, KIND, &fields(), actor).is_err());
+            assert!(validate_actor(ID, KIND, actor).is_err());
         }
-        assert!(registry().validate_public_claim(ID, KIND, &fields(), Some("person/avery")).is_ok());
-        assert!(registry().validate_public_claim(&agent_id, KIND, &fields(), Some("agent/org/worker")).is_ok());
+        assert!(validate_actor(ID, KIND, Some("person/avery")).is_ok());
+        assert!(validate_actor(&agent_id, KIND, Some("agent/org/worker")).is_ok());
+    }
+
+    #[test]
+    fn subject_note_claims_require_dedicated_operations() {
+        for (subject, actor) in [(ID.to_owned(), "person/avery"),
+            (ID.replace("person/avery", "agent/org/worker"), "agent/org/worker")] {
+            for text in [json!("Context, not authority"), Value::Null] {
+                let mut values = fields();
+                values.insert("text".into(), text);
+                let error = registry().validate_public_claim(&subject, KIND, &values, Some(actor)).unwrap_err();
+                assert_eq!(error.code, "claim-write-forbidden");
+                assert_eq!(error.message, "claim kind `note.set` requires a dedicated authorized operation");
+            }
+        }
     }
 
     #[test]

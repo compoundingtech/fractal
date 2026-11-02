@@ -884,9 +884,7 @@ impl Registry {
         directive_notes::validate_actor(subject, kind, actor)?;
         subject_notes::validate_actor(subject, kind, actor)?;
         let allowed = spec.write_policy == WritePolicy::OrdinaryClient
-            || (spec.write_policy == WritePolicy::SameSubjectActor && actor == Some(subject))
-            || (spec.write_policy == WritePolicy::SubjectEncodedAuthor
-                && actor == Some(subject_notes::author(subject)?));
+            || (spec.write_policy == WritePolicy::SameSubjectActor && actor == Some(subject));
         if !allowed {
             return Err(error(
                 "claim-write-forbidden",
