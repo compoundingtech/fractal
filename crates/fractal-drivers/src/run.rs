@@ -25,11 +25,10 @@ pub(crate) fn resolve_task_cwd(
     }
 }
 
-/// The `PTY_ROOT` st2 uses for a pty op. An EXPORTED ambient `PTY_ROOT` WINS — a decoupled partition,
-/// e.g. an eval run's short `/tmp/stev-<runid>` that dodges the 104-byte unix-socket-path limit that a
-/// deep `<catalog>/pty` would blow — else what the catalog itself declares
-/// ([`crate::catalog::pty_root`]), else the native default `<catalog>/pty`. Applied uniformly to
-/// spawn and list/kill so st2 always manages sessions where it put them.
+/// Resolve `PTY_ROOT` for retained catalog materialization and validation. A nonempty exported
+/// ambient `PTY_ROOT` takes precedence over the catalog declaration and its `<catalog>/pty`
+/// default ([`crate::catalog::pty_root`]). A short ambient root also leaves more room for session
+/// identities within the portable Unix socket path limit.
 pub fn effective_pty_root(catalog_root: &Path) -> PathBuf {
     effective_pty_root_from(catalog_root, std::env::var_os("PTY_ROOT"))
 }
