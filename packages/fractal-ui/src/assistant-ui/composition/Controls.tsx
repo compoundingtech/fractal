@@ -5,7 +5,7 @@ import { surfaceVars as surface, textVars as text, borderVars as border, accentV
 import { Icon, type IconName } from './Icons'
 import { ThemePortal } from '../taste/ThemePortal'
 
-export function Button({ children, variant = 'ghost', size = 'sm', ...props }: ButtonProps & { variant?: 'ghost' | 'outline'; size?: 'sm' | 'md' | 'lg' }) {
+export function Button({ children, variant = 'ghost', size = 'sm', ...props }: React.ComponentPropsWithRef<typeof AriaButton> & { variant?: 'ghost' | 'outline'; size?: 'sm' | 'md' | 'lg' }) {
   return <AriaButton {...props} {...stylex.props(styles.button, styles[size], variant === 'outline' && styles.outline)}>{children}</AriaButton>
 }
 export function IconButton({ icon, label, ...props }: Omit<ButtonProps, 'children'> & { icon: IconName; label: string }) {
