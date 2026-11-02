@@ -83,7 +83,7 @@ CLI pairing selects `caller-bound-allow`: reads within the sealed scopes, consen
 Use stdio when the MCP client launches a local process:
 
 ```sh
-fractal-chatgpt --transport stdio \
+st-chatgpt --transport stdio \
   --socket /PATH/TO/st3-client.sock \
   --credential-file /PATH/TO/mcp-private/credential
 ```
@@ -112,7 +112,7 @@ A generic MCP client configuration looks like this; adapt the outer configuratio
 HTTP is the default transport. The default listen address is `127.0.0.1:8787`:
 
 ```sh
-fractal-chatgpt --transport http --listen 127.0.0.1:8787 \
+st-chatgpt --transport http --listen 127.0.0.1:8787 \
   --socket /PATH/TO/st3-client.sock \
   --credential-file /PATH/TO/mcp-private/credential
 ```
