@@ -23,7 +23,7 @@ pub(super) fn pair(state: &AppState, device: &str, person: &str, scopes: &[&str]
 pub(super) fn request(device: &str, kind: &str) -> client_commands::DeviceCommandRequest {
     serde_json::from_value(json!({
         "api_version":CLIENT_API_VERSION,"device":device,"kind":kind,
-        "args":if kind == "phone.message.read" { json!({"attention_id":"attention/example"}) }
+        "args":if kind == "phone.message.read" { json!({"message_id":"message/example"}) }
             else if kind == "phone.navigate" { json!({"screen":"Agents"}) }
             else { json!({}) }
     })).unwrap()
