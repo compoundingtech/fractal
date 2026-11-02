@@ -9,6 +9,7 @@ export const SIDEBAR_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000001" a
 
 export type ActionCommon = {
   api_version: "st3.client.v0" | "fractal.client.v0";
+  device_command?: string;
   fence: Fence;
   id: Id;
   idempotency_key: string;
@@ -1620,6 +1621,11 @@ export type DeviceCommand = {
   command_kind?: "phone.message.read";
 });
 
+export type DeviceCommandAdmissionDetails = {
+  device_command: string;
+  reason: "expired" | "not-pending" | "mismatch" | "foreign";
+};
+
 export type DeviceCommandOutcome = "completed" | "not-foreground" | "expired" | "refused" | "failed";
 
 export type DeviceCommandRequest = ({
@@ -2796,7 +2802,7 @@ export type PersonUpdate = {
 export type PhoneInspectArgs = Record<string, never>;
 
 export type PhoneMessageReadArgs = {
-  attention_id: string;
+  message_id: string;
 };
 
 export type PhoneNavigateArgs = ({
@@ -4201,29 +4207,29 @@ export type WorkState =
 ;
 
 export type ActionRequest =
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.create'; parameters: AgentCreateParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.queue-move'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'agent.create'; parameters: AgentCreateParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'agent.queue-move'; parameters: {
   agent_id: Id;
   anchor_run_id?: Id;
   mission_run_id: Id;
   placement: "top" | "bottom" | "before" | "after";
   reason?: string;
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.resume'; parameters: AgentResumeParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.retire'; parameters: AgentRetireParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.start'; parameters: AgentStartParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.stop'; parameters: AgentStopParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.suspend'; parameters: AgentSuspendParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.edit'; parameters: ArrangementEditParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.membership.edit'; parameters: ArrangementMembershipEditParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.resolve'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'agent.resume'; parameters: AgentResumeParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'agent.retire'; parameters: AgentRetireParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'agent.start'; parameters: AgentStartParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'agent.stop'; parameters: AgentStopParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'agent.suspend'; parameters: AgentSuspendParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'arrangement.edit'; parameters: ArrangementEditParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'arrangement.membership.edit'; parameters: ArrangementMembershipEditParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'attention.resolve'; parameters: {
   attention_id: Id;
   outcome: string;
   reason?: string;
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'custom.reply'; parameters: CustomReplyParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'harness.answer'; parameters: HarnessAnswerParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.approve'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'custom.reply'; parameters: CustomReplyParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'harness.answer'; parameters: HarnessAnswerParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'lane.approve'; parameters: {
   anchor_id?: Id;
   detail?: string;
   entry_id: Id;
@@ -4234,7 +4240,7 @@ export type ActionRequest =
   reason?: string;
   state?: "waiting" | "held" | "ready" | "running";
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.join'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'lane.join'; parameters: {
   anchor_id?: Id;
   detail?: string;
   entry_id: Id;
@@ -4245,7 +4251,7 @@ export type ActionRequest =
   reason?: string;
   state?: "waiting" | "held" | "ready" | "running";
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.leave'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'lane.leave'; parameters: {
   anchor_id?: Id;
   detail?: string;
   entry_id: Id;
@@ -4256,7 +4262,7 @@ export type ActionRequest =
   reason?: string;
   state?: "waiting" | "held" | "ready" | "running";
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.mark'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'lane.mark'; parameters: {
   anchor_id?: Id;
   detail?: string;
   entry_id: Id;
@@ -4267,7 +4273,7 @@ export type ActionRequest =
   reason?: string;
   state?: "waiting" | "held" | "ready" | "running";
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.move'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'lane.move'; parameters: {
   anchor_id?: Id;
   detail?: string;
   entry_id: Id;
@@ -4278,12 +4284,12 @@ export type ActionRequest =
   reason?: string;
   state?: "waiting" | "held" | "ready" | "running";
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'launch.approve'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'launch.approve'; parameters: {
   launch_id: Id;
   variant_id: Id;
 }; fence: Fence & Required<Pick<Fence, 'preview_token'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'launch.cancel'; parameters: TargetParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'launch.create'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'launch.cancel'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'launch.create'; parameters: {
   effort?: string;
   model?: string;
   provider?: "codex" | "claude" | "pi" | "omp" | "opencode";
@@ -4299,17 +4305,17 @@ export type ActionRequest =
 });
   title: string;
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'launch.preview'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'launch.preview'; parameters: {
   launch_id: Id;
   variant_id: Id;
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'launch.revise'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'launch.revise'; parameters: {
   feedback: string;
   launch_id: Id;
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'message.close'; parameters: TargetParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'message.read'; parameters: TargetParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'message.send'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'message.close'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'message.read'; device_command?: string; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'message.send'; parameters: {
   attachments?: Array<AttachmentInput>;
   content: string;
   in_reply_to?: Id;
@@ -4320,66 +4326,66 @@ export type ActionRequest =
   title?: string;
   to: Id;
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'mission.approve-revision'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'preview_token' | 'mission_generation'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'mission.cancel'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'mission.cancel-revision'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'mission.revise'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'mission.approve-revision'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'preview_token' | 'mission_generation'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'mission.cancel'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'mission.cancel-revision'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'mission.revise'; parameters: {
   launch_id: Id;
   mission_run_id: Id;
 }; fence: Fence & Required<Pick<Fence, 'mission_generation'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'mission.start'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'mission.start'; parameters: {
   inputs: {
   [key: string]: string;
 };
   mission_id: Id;
   workspace: string;
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'pairing.revoke'; parameters: TargetParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'private-notes.write'; parameters: PrivateNotesWriteParameters; fence: Fence & Required<Pick<Fence, 'private_notes'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'prompt.respond'; parameters: PromptRespondParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.approve'; parameters: TargetParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.reject'; parameters: TargetParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.request-changes'; parameters: TargetParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'runtime.context-clear'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'runtime.reset'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'runtime.restart'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'runtime.signal'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'pairing.revoke'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'private-notes.write'; parameters: PrivateNotesWriteParameters; fence: Fence & Required<Pick<Fence, 'private_notes'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'prompt.respond'; parameters: PromptRespondParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'review.approve'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'review.reject'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'review.request-changes'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'runtime.context-clear'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'runtime.reset'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'runtime.restart'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'runtime.signal'; parameters: {
   signal: "interrupt" | "terminate" | "kill";
   target_id: Id;
 }; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'runtime.stop'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'session.import'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'subject_revisions'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'terminal.attach'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'terminal.create'; parameters: TerminalCreateParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'terminal.detach'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'terminal.end'; parameters: TargetParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'terminal.input'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'runtime.stop'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'session.import'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'subject_revisions'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'terminal.attach'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'terminal.create'; parameters: TerminalCreateParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'terminal.detach'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'terminal.end'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'terminal.input'; parameters: {
   mode: "line" | "raw" | "key";
   terminal_id: Id;
   value: string;
 }; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'terminal_sequence'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'terminal.resize'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'terminal.resize'; parameters: {
   columns: number;
   rows: number;
   terminal_id: Id;
 }; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'terminal_sequence'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.ask'; parameters: PersonAskParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.cancel-ask'; parameters: PersonStepParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.claim'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.complete'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.done'; parameters: PersonStepParameters; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.fail'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.progress'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.publish-mission'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.ask'; parameters: PersonAskParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.cancel-ask'; parameters: PersonStepParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.claim'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.complete'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.done'; parameters: PersonStepParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.fail'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.progress'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.publish-mission'; parameters: {
   mission: {
 
 };
   name: string;
   target_id: Id;
 }; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch' | 'runtime_incarnation'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.release'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.renew'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.retry'; parameters: {
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.release'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.renew'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & { type: 'work.retry'; parameters: {
   reason: string;
   target_id: Id;
 }; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> });

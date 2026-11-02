@@ -1564,7 +1564,8 @@ fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant])
                 fence = format!("Fence & Required<Pick<Fence, {}>>", keys.join(" | "));
             }
         }
-        variants.push(format!("  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & {{ type: '{action}'; parameters: {parameter}; fence: {fence} }})"));
+        let command = if action == "message.read" { "device_command?: string; " } else { "" };
+        variants.push(format!("  (Omit<ActionCommon, 'type' | 'parameters' | 'fence' | 'device_command'> & {{ type: '{action}'; {command}parameters: {parameter}; fence: {fence} }})"));
     }
     writeln!(
         out,

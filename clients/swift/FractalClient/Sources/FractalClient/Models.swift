@@ -701,10 +701,10 @@ public enum PhoneNavigateArgs: Codable, Sendable, Equatable {
     }
 }
 public enum PhoneCommand: Codable, Sendable, Equatable {
-    case inspect, navigate(PhoneNavigateArgs), messageRead(attentionID: String)
+    case inspect, navigate(PhoneNavigateArgs), messageRead(messageID: String)
     private enum Keys: String, CodingKey { case kind, commandKind = "command_kind", args }
     private struct EmptyArgs: Codable {}
-    private struct MessageReadArgs: Codable { let attentionID: String; enum CodingKeys: String, CodingKey { case attentionID = "attention_id" } }
+    private struct MessageReadArgs: Codable { let messageID: String; enum CodingKeys: String, CodingKey { case messageID = "message_id" } }
     public init(from decoder: Decoder) throws { try self.init(from: decoder, resource: false) }
     fileprivate init(from decoder: Decoder, resource: Bool) throws {
         let box = try decoder.container(keyedBy: Keys.self)
@@ -712,7 +712,7 @@ public enum PhoneCommand: Codable, Sendable, Equatable {
         switch try box.decode(String.self, forKey: key) {
         case "phone.inspect": _ = try box.decode(EmptyArgs.self, forKey: .args); self = .inspect
         case "phone.navigate": self = .navigate(try box.decode(PhoneNavigateArgs.self, forKey: .args))
-        case "phone.message.read": self = .messageRead(attentionID: try box.decode(MessageReadArgs.self, forKey: .args).attentionID)
+        case "phone.message.read": self = .messageRead(messageID: try box.decode(MessageReadArgs.self, forKey: .args).messageID)
         default: throw DecodingError.dataCorruptedError(forKey: key, in: box, debugDescription: "Unknown phone command")
         }
     }
@@ -723,7 +723,7 @@ public enum PhoneCommand: Codable, Sendable, Equatable {
         switch self {
         case .inspect: try box.encode("phone.inspect", forKey: key); try box.encode(EmptyArgs(), forKey: .args)
         case .navigate(let args): try box.encode("phone.navigate", forKey: key); try box.encode(args, forKey: .args)
-        case .messageRead(let attentionID): try box.encode("phone.message.read", forKey: key); try box.encode(MessageReadArgs(attentionID: attentionID), forKey: .args)
+        case .messageRead(let messageID): try box.encode("phone.message.read", forKey: key); try box.encode(MessageReadArgs(messageID: messageID), forKey: .args)
         }
     }
 }
@@ -1138,6 +1138,7 @@ public struct Fence: Codable, Sendable {
 }
 public struct ActionRequest: Codable, Sendable {
     public let apiVersion: String; public let id: String; public let type: ActionType; public let idempotencyKey: String; public let fence: Fence; public let parameters: [String: JSONValue]
+    public var deviceCommand: String? = nil
     private init(id: String, type: ActionType, idempotencyKey: String, fence: Fence, parameters: [String: JSONValue]) { self.apiVersion = fractalClientAPIVersion; self.id = id; self.type = type; self.idempotencyKey = idempotencyKey; self.fence = fence; self.parameters = parameters }
     private init<Parameters: Encodable>(id: String, type: ActionType, idempotencyKey: String, fence: Fence, typedParameters: Parameters) throws {
         let encoded = try JSONEncoder().encode(typedParameters)
@@ -1203,7 +1204,7 @@ public struct ActionRequest: Codable, Sendable {
     public static func workRelease(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .workRelease, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workRenew(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .workRenew, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workRetry(id: String, idempotencyKey: String, fence: Fence, parameters: WorkRetryParameters) throws -> Self { try .init(id: id, type: .workRetry, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
-    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", id, type, idempotencyKey = "idempotency_key", fence, parameters }
+    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", id, type, idempotencyKey = "idempotency_key", fence, parameters, deviceCommand = "device_command" }
 }
 
 public struct PersonAskParameters: Codable, Sendable { public var personID, title, reason: String; public var stepID, newRun: String?; public var request: StructuredRequest?; public var deadlineMS: UInt64?; public var defaultAnswer: String?; public init(personID: String, title: String, reason: String, stepID: String? = nil, newRun: String? = nil, request: StructuredRequest? = nil, deadlineMS: UInt64? = nil, defaultAnswer: String? = nil) { self.personID = personID; self.title = title; self.reason = reason; self.stepID = stepID; self.newRun = newRun; self.request = request; self.deadlineMS = deadlineMS; self.defaultAnswer = defaultAnswer }; enum CodingKeys: String, CodingKey { case personID = "person_id", title, reason, stepID = "step_id", newRun = "new_run", request, deadlineMS = "deadline_ms", defaultAnswer = "default_answer" } }

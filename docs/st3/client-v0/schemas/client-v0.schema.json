@@ -225,7 +225,7 @@
     "PushRegistrationStatus": {"description": "Safe registration summary; never carries the token. `environment` is present exactly when `registered` is true.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["registered"], "properties": {"registered": {"const": false}}}, {"type": "object", "additionalProperties": false, "required": ["registered", "environment"], "properties": {"registered": {"const": true}, "environment": {"$ref": "#/$defs/PushEnvironment"}}}]},
     "PushRegistrationResponse": {"type": "object", "additionalProperties": false, "required": ["api_version", "request_id", "value"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "request_id": {"$ref": "#/$defs/RequestId"}, "value": {"$ref": "#/$defs/PushRegistrationStatus"}}},
     "PhoneInspectArgs": {"type": "object", "additionalProperties": false, "properties": {}},
-    "PhoneMessageReadArgs": {"type": "object", "additionalProperties": false, "required": ["attention_id"], "properties": {"attention_id": {"type": "string", "pattern": "^attention/.+", "maxLength": 4096}}},
+    "PhoneMessageReadArgs": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string", "pattern": "^message/.+", "maxLength": 4096}}},
     "PhoneRouteString": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000-\\u001f\\u007f]+$"},
     "PhoneNavigateArgs": {
       "description": "Restricted phone navigation routes; parameters are specific to the selected screen.",
@@ -3072,6 +3072,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["api_version", "id", "type", "idempotency_key", "fence", "parameters"],
+      "allOf": [{"if": {"required": ["device_command"], "properties": {"device_command": true, "type": true}}, "then": {"properties": {"type": {"const": "message.read"}}}}],
       "properties": {
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "id": { "$ref": "#/$defs/Id" },
@@ -3140,6 +3141,7 @@
         },
         "idempotency_key": { "x-st-brand": "IdempotencyKey", "type": "string", "minLength": 16, "maxLength": 256 },
         "fence": { "$ref": "#/$defs/Fence" },
+        "device_command": {"type": "string", "pattern": "^device-command/.+", "description": "Optional daemon-authorized phone.message.read command; only valid on message.read."},
         "parameters": { "type": "object" }
       }
     },
@@ -4156,6 +4158,7 @@
         "fence_conflicts": { "type": "integer", "minimum": 0 }
       }
     },
+    "DeviceCommandAdmissionDetails": {"type": "object", "required": ["device_command", "reason"], "properties": {"device_command": {"type": "string"}, "reason": {"enum": ["expired", "not-pending", "mismatch", "foreign"]}}},
     "ErrorEnvelope": {
       "type": "object",
       "additionalProperties": false,

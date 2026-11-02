@@ -71,6 +71,7 @@ async fn device_push_summary_is_secret_free_and_pairing_revoke_deletes_the_local
     assert!(!serialized.contains("org.example.push"));
     let snapshot = new_client_snapshot(&state);
     let action = ActionRequest {
+        device_command: None,
         api_version: CLIENT_API_VERSION.into(),
         id: "action/push-revoke".into(),
         action_type: "pairing.revoke".into(),

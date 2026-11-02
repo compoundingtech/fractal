@@ -80,7 +80,7 @@ pub fn validate_args(kind: &str, args: &Value) -> Result<(), ApiError> {
     scope(kind)?;
     let valid = match kind {
         "phone.inspect" => fields(args, &[], &[]),
-        "phone.message.read" => fields(args, &["attention_id"], &[]) && bounded_string(&args["attention_id"]) && args["attention_id"].as_str().is_some_and(|s| s.starts_with("attention/") && s.len() > "attention/".len()),
+        "phone.message.read" => fields(args, &["message_id"], &[]) && bounded_string(&args["message_id"]) && args["message_id"].as_str().is_some_and(|s| s.starts_with("message/") && s.len() > "message/".len()),
         "phone.navigate" if fields(args, &["screen"], &["params"]) => {
             let empty = json!({});
             let params = args.get("params").unwrap_or(&empty);
@@ -201,6 +201,54 @@ pub fn report(state: &AppState, session: &ClientSession, request: DeviceResultRe
     changed(&state.node);
     Ok(resource)
 }
+
+/// Serialize command admission and the real lifecycle write against expiry and result reporting.
+pub fn with_message_read<T>(
+    state: &AppState, session: &ClientSession, id: &str, target: &str,
+    write: impl FnOnce() -> Result<T, ApiError>,
+    result: impl FnOnce(&T) -> Value,
+) -> Result<T, ApiError> {
+    let session = revalidate_session(state, session)?;
+    let denied = |reason| ApiError {
+        status: StatusCode::FORBIDDEN, code: "forbidden".into(),
+        message: "device command does not authorize this message.read".into(),
+        details: Box::new(serde_json::Map::from_iter([("reason".into(), json!(reason)), ("device_command".into(), json!(id))])),
+    };
+    if !paired(&session) { return Err(denied("foreign")); }
+    let mut rows = ROWS.lock().map_err(|_| storage_error())?;
+    let row = rows.get_mut(&(state.node.clone(), id.to_owned())).ok_or_else(|| denied("mismatch"))?;
+    if !visible(row, &session) { return Err(denied("foreign")); }
+    if row.terminal() {
+        return Err(denied(if matches!(row.resource["state"].as_str(), Some("expired" | "not-foreground")) { "expired" } else { "not-pending" }));
+    }
+    if client_now_ms() >= row.expires {
+        row.expire(client_now_ms(), super::client_presence::has_open_stream(&state.node, &session.actor));
+        return Err(denied("expired"));
+    }
+    if row.resource["command_kind"] != "phone.message.read" { return Err(denied("mismatch")); }
+    if row.resource["args"]["message_id"] != target { return Err(denied("mismatch")); }
+    let message = state.store.message(target).map_err(ApiError::internal)?
+        .ok_or_else(|| denied("mismatch"))?;
+    if message.to != row.person && message.from != row.person { return Err(denied("foreign")); }
+    // Projection/DB reads can wait; recheck the daemon deadline immediately before admission.
+    if client_now_ms() >= row.expires { return Err(denied("expired")); }
+    let written = write();
+    let now = client_now_ms();
+    match &written {
+        Ok(value) => {
+            row.resource["state"] = json!("completed");
+            row.resource["result"] = result(value);
+        }
+        Err(error) => {
+            row.resource["state"] = json!("failed");
+            row.resource["error_code"] = json!(error.code);
+        }
+    }
+    row.terminal_at = Some(now);
+    row.stamp(now);
+    changed(&state.node);
+    written
+}
 /// A paired phone sees only its own exact grant; other issuers see only their own rows.
 /// Reading a phone's window marks live rows delivered, never redelivering expired work.
 pub fn collection_items(state: &AppState, session: &ClientSession) -> Result<Vec<Value>, ApiError> {
@@ -268,7 +316,9 @@ mod tests {
         assert!(validate_args("phone.inspect", &json!({})).is_ok());
         for args in [json!({"screen":"Unknown"}), json!({"screen":"Conversation","params":{}}), json!({"screen":"NowRoot","params":{"id":"x"}}), json!({"screen":"Document","params":{"reference":"doc/a","trail":[false]}})] { assert!(validate_args("phone.navigate", &args).is_err()); }
         assert!(validate_args("phone.inspect", &json!({"actor":"person/other"})).is_err());
-        assert!(validate_args("phone.message.read", &json!({"attention_id":"x".repeat(9000)})).is_err());
+        assert!(validate_args("phone.message.read", &json!({"message_id":"x".repeat(9000)})).is_err());
+        assert!(validate_args("phone.message.read", &json!({"message_id":"message/example"})).is_ok());
+        assert!(validate_args("phone.message.read", &json!({"attention_id":"attention/example"})).is_err());
     }
     #[test]
     fn terminal_retention_is_bounded() {

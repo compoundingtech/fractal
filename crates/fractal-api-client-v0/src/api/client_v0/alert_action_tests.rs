@@ -19,6 +19,7 @@ async fn delegated_prompt_actions_share_one_source_contract_and_cannot_choose_th
             serde_json::from_value(parameters.clone()).unwrap();
         assert_eq!(serde_json::to_value(typed).unwrap(), parameters);
         let request = ActionRequest {
+            device_command: None,
             api_version: CLIENT_API_VERSION.into(),
             id: format!("action/{client}-dismiss"),
             action_type: "prompt.respond".into(),
@@ -179,6 +180,7 @@ async fn allow_prompt(state: &AppState, seat: &str, episode: &str, key: &str) ->
     let session = ClientSession::for_tests_scoped("client/tui-answer-fixture", "person/avery", &["control.attention", "read.projections"]);
     let snapshot = new_client_snapshot(state);
     let request = ActionRequest {
+        device_command: None,
         api_version: CLIENT_API_VERSION.into(),
         id: format!("action/{key}"),
         action_type: "prompt.respond".into(),

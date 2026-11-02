@@ -3384,6 +3384,8 @@ pub struct ActionRequest {
     idempotency_key: String,
     fence: Fence,
     parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_command: Option<String>,
 }
 
 impl ActionRequest {
@@ -3405,6 +3407,7 @@ impl ActionRequest {
             idempotency_key: idempotency_key.into(),
             fence,
             parameters: serde_json::to_value(parameters)?,
+            device_command: None,
         })
     }
     pub fn agent_create(
@@ -5817,7 +5820,7 @@ pub struct PhoneInspectArgs {}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PhoneMessageReadArgs {
-    pub attention_id: String,
+    pub message_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
