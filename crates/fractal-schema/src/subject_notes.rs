@@ -13,7 +13,51 @@ pub const FEATURE: &str = "subject_notes";
 pub const FEATURE_VERSION: u64 = 1;
 /// Known audience labels; the wire vocabulary remains open to future labels.
 pub const AUDIENCES: &[&str] = &["self", "agent"];
-pub const TARGET_FAMILIES: &[&str] = &["agent", "mission", "mission-run", "step-run"];
+pub const TARGET_FAMILIES: &[&str] = &["agent", "session", "mission", "mission-run", "step-run"];
+
+/// Canonical note-target identity for an existing runtime incarnation.
+pub fn session_subject(parent: &str, incarnation: &str) -> Result<String, ValidationError> {
+    if !parent.starts_with("agent/") || incarnation.trim().is_empty() {
+        return Err(error("invalid-session-subject", "a session requires an agent parent and nonblank incarnation"));
+    }
+    crate::registry().validate_subject(parent)?;
+    let mut subject = format!("session/{parent}/");
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in incarnation.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            subject.push(char::from(byte));
+        } else {
+            subject.push('%');
+            subject.push(char::from(HEX[usize::from(byte >> 4)]));
+            subject.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+    }
+    if subject.len() > 512 {
+        return Err(error("invalid-session-subject", "session subject exceeds 512 bytes"));
+    }
+    Ok(subject)
+}
+
+/// Split parentage and decode the canonical final component exactly once.
+pub fn session_parts(subject: &str) -> Result<(&str, String), ValidationError> {
+    let invalid = || error("invalid-session-subject", "expected session/agent/ID/ENCODED_INCARNATION");
+    let (parent, component) = subject.strip_prefix("session/").and_then(|tail| tail.rsplit_once('/'))
+        .ok_or_else(invalid)?;
+    let mut decoded = Vec::with_capacity(component.len());
+    let mut bytes = component.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = bytes.next().and_then(|b| char::from(b).to_digit(16)).ok_or_else(invalid)?;
+            let low = bytes.next().and_then(|b| char::from(b).to_digit(16)).ok_or_else(invalid)?;
+            decoded.push(u8::try_from(high * 16 + low).map_err(|_| invalid())?);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    let incarnation = String::from_utf8(decoded).map_err(|_| invalid())?;
+    if session_subject(parent, &incarnation)? != subject { return Err(invalid()); }
+    Ok((parent, incarnation))
+}
 
 /// The immutable person or agent author encoded before the lowercase UUIDv7.
 pub fn author(subject: &str) -> Result<&str, ValidationError> {
@@ -53,7 +97,7 @@ pub fn validate_fields(fields: &BTreeMap<String, Value>) -> Result<(), Validatio
         .ok_or_else(|| error("invalid-subject-note", "target must be a subject reference"))?;
     let target_spec = crate::registry().validate_subject(target)?;
     if !TARGET_FAMILIES.contains(&target_spec.family.as_str()) {
-        return Err(error("invalid-subject-note", "target must be an agent, mission, mission-run or step-run subject"));
+        return Err(error("invalid-subject-note", "target must be an agent, session, mission, mission-run or step-run subject"));
     }
     match fields.get("text") {
         Some(Value::Null) => {}
@@ -62,10 +106,6 @@ pub fn validate_fields(fields: &BTreeMap<String, Value>) -> Result<(), Validatio
     }
     if !fields.get("audience").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty()) {
         return Err(error("invalid-subject-note", "audience must be a nonblank open-enum string"));
-    }
-    if let Some(session) = fields.get("session")
-        && (target_spec.family != "agent" || !session.as_str().is_some_and(|value| !value.trim().is_empty())) {
-        return Err(error("invalid-subject-note", "session must be a nonblank incarnation id on an agent target"));
     }
     if let Some(value) = fields.get("expires_at") {
         expiry(value.as_str().ok_or_else(|| error("invalid-subject-note", "expires_at must be a UTC timestamp string"))?)?;
@@ -87,6 +127,22 @@ mod tests {
             ("text".into(), json!("Context, not authority")),
             ("audience".into(), json!("self")),
         ])
+    }
+
+    #[test]
+    fn session_identity_is_canonical_and_decodes_once() {
+        let parent = "agent/example/worker";
+        for incarnation in ["1234:2026-10-14T15:57:40.016Z", "%2F/é", "AbC-._~"] {
+            let subject = session_subject(parent, incarnation).unwrap();
+            assert_eq!(session_parts(&subject).unwrap(), (parent, incarnation.to_owned()));
+            assert!(!registry().validate_subject(&subject).unwrap().client_writable);
+        }
+        assert_eq!(session_subject(parent, "%2F/é").unwrap(), "session/agent/example/worker/%252F%2F%C3%A9");
+        for subject in ["session/agent/example/worker/%2f", "session/agent/example/worker/%41",
+            "session/person/example/first", "session/agent/example/worker/%FF",
+            "session/agent/example/worker/%", "session/agent/example/worker/"] {
+            assert!(registry().validate_subject(subject).is_err(), "{subject}");
+        }
     }
 
     #[test]
@@ -152,12 +208,12 @@ mod tests {
 
     #[test]
     fn target_session_and_utc_expiry_constraints() {
-        for target in ["agent/org/worker", "mission/task", "mission-run/run", "step-run/gen/step"] {
+        for target in ["agent/org/worker", "session/agent/org/worker/incarnation%3A1", "mission/task", "mission-run/run", "step-run/gen/step"] {
             let mut values = fields();
             values.insert("target".into(), json!(target));
             assert!(registry().validate_claim(ID, KIND, &values).is_ok());
             values.insert("session".into(), json!("incarnation:2026-10-14T16:20:00Z"));
-            assert_eq!(registry().validate_claim(ID, KIND, &values).is_ok(), target.starts_with("agent/"));
+            assert!(registry().validate_claim(ID, KIND, &values).is_err());
         }
         for (field, value) in [("target", json!("person/avery")), ("target", json!("agent/")), ("session", json!(null)), ("session", json!(" ")), ("audience", json!(null)), ("audience", json!(" ")), ("expires_at", json!(null)), ("expires_at", json!("2099-01-01T00:00:00+01:00")), ("expires_at", json!("2099-01-01T00:00:00-00:00")), ("expires_at", json!("2099-02-30T00:00:00Z"))] {
             let mut values = fields();

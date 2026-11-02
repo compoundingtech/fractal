@@ -9,7 +9,6 @@ pub struct SubjectNote {
     pub author: String,
     pub text: String,
     pub audience: String,
-    pub session: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub expires_at: Option<String>,
@@ -22,7 +21,6 @@ CREATE TABLE IF NOT EXISTS subject_notes (
     target TEXT NOT NULL,
     author TEXT NOT NULL,
     audience TEXT NOT NULL,
-    session TEXT,
     claim_id TEXT NOT NULL,
     head_key BLOB NOT NULL
 );
@@ -167,12 +165,12 @@ fn project(tx: &Transaction<'_>, note: &str, id: &str) -> Result<()> {
     let body: Value = serde_json::from_str(&body)?;
     let fields = &body["fields"];
     let author = fractal_schema::subject_notes::author(note).map_err(anyhow::Error::new)?;
-    tx.execute("INSERT INTO subject_notes(note,target,author,audience,session,claim_id,head_key) VALUES(?1,?2,?3,?4,?5,?6,?7)
+    tx.execute("INSERT INTO subject_notes(note,target,author,audience,claim_id,head_key) VALUES(?1,?2,?3,?4,?5,?6)
         ON CONFLICT(note) DO UPDATE SET target=excluded.target,author=excluded.author,audience=excluded.audience,
-        session=excluded.session,claim_id=excluded.claim_id,head_key=excluded.head_key
+        claim_id=excluded.claim_id,head_key=excluded.head_key
         WHERE excluded.head_key>subject_notes.head_key",
         params![note, fields["target"].as_str().context("note target missing")?, author,
-            fields["audience"].as_str().context("note audience missing")?, fields["session"].as_str(), id, key])?;
+            fields["audience"].as_str().context("note audience missing")?, id, key])?;
     Ok(())
 }
 

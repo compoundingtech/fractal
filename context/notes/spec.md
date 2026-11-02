@@ -19,29 +19,33 @@ and reads and digests include every current note regardless of stored
 audience. Composer audience controls and audience-specific badges are
 removed; the schema's open audience enum stays.
 
-The directive/subject-note CLI split is not implemented yet. Rename coordination
-is settled: `fractal` and its `st`/`st3` aliases use the same clap CLI, so the
-new top-level command will be available through all three binary names.
+The directive/subject-note CLI split is implemented in source:
+`directive set|clear|show` is available through the shared `fractal`/`st`/`st3`
+CLI. Bare `note` and `note set|clear` print a one-line deprecation notice.
 
-Session subjects and the replacement of the note's `session` field by a
-session target (DQ2) are not implemented.
+The minimal session subject (DQ2) is registered. Notes use session targets,
+not a `session` field. Local note admission checks the parent runtime's exact
+running incarnation; current reads and digests stop including those notes on
+session end or replacement. `--on session/…` targets one directly, while
+`--on agent/… --session current` resolves the authoritative running incarnation
+without falling back to an agent-wide note.
 
 The web placement decision keeps both entry points: detail-view Notes with
 **Add note**, plus the selected-row `n` popover, using one composer. The
 selected-row quick-add wiring is not implemented.
 
-The main merge retains main's generated clients and lockfiles. Regeneration
-and implementation verification are deferred to gate-slot; no builds, tests,
-codegen or Storybook runs are part of this merge.
+Session/directive source changes and client schema/templates are implemented.
+Client regeneration, targeted tests and canonical clippy remain pending the
+permitted dev3 gate-slot window and completion of its SYS roll.
 Regenerate all nine `fractal-client-codegen` outputs:
 
 - `crates/fractal-client/src/{contract.rs,generated.rs,lib.rs}`
 - `clients/typescript/fractal-client/{Client,Models,Schema}.generated.ts`
 - `clients/swift/FractalClient/Sources/FractalClient/{Client.swift,Models.swift,Contract.generated.swift}`
 
-Regenerate `pnpm-lock.yaml` for the notes kit's `@fractal/client` dependency;
-refresh `Cargo.lock` if the generator/toolchain requires it. The codegen inputs
-and templates include notes; generated outputs do not yet include this PR.
+The client schema, templates and synthetic contract fixtures use session
+targets and omit the removed note `session` field. Regenerate outputs in a
+separate commit before verifying consumers; no local build or codegen was run.
 
 ## Scope
 
@@ -388,13 +392,13 @@ A note kind registration includes:
   remain deprecated aliases. The `st` → `fractal` rename uses one clap CLI
   with `st` and `st3` aliases, so the command lands once for all binary names.
   Coordination with `agent/compoundingtech/fractal-rename` is settled and is
-  not a blocker. This CLI split is not implemented yet.
+  not a blocker. The shared CLI implements this split.
 - **DQ2 Session as target — resolved (2026-11-01):** Johannes chose sessions
   as their own subject, not a `session` field on an agent note (Axe Q5
   request `c88zos`, answer `kpn312`, relayed by Manager in
   `message/6a5ae12d025284bc`). The minimal `session` family above reuses
   the owning agent's existing incarnation id and runtime currency; no
-  other session features are implied. This target design is not implemented.
+  other session features are implied. The source implements this target design.
 - **DQ3 Audience choice — resolved (2026-10-15):** No audience choice; every
   note is context for its target's resolved agents. Johannes initially
   selected "only me" but said notes need not be hidden from agents (q1,

@@ -383,21 +383,22 @@ test('subject notes reads encode target and author and writes preserve omitted v
             return response(init.method === 'GET' ? wire : archived);
         },
     });
-    assert.deepEqual(await client.subjectNotesList('agent/example/reviewer'), wire);
+    assert.deepEqual(await client.subjectNotesList(wire.value.notes[0].target), wire);
     assert.deepEqual(await client.subjectNotesMine('person/ada'), wire);
-    const created = await client.subjectNotesCreate({ target: 'mission/example', text: 'Inform, never assign.' });
+    const create = require('../../../docs/st3/client-v0/fixtures/subject-note-create.json');
+    const created = await client.subjectNotesCreate(create);
     assert.deepEqual(created, archived);
     assert.equal(created.value.id, wire.value.notes[0].id, 'even non-current creates return their stable note id');
-    assert.deepEqual(await client.subjectNotesUpdate(wire.value.notes[0].id, { text: null, session: null }), archived);
+    assert.deepEqual(await client.subjectNotesUpdate(wire.value.notes[0].id, { text: null, expires_at: null }), archived);
     const reads = calls.filter(([, init]) => init.method === 'GET');
-    assert.equal(reads[1][0], 'https://example.test/v1/client/subject-notes?target=agent%2Fexample%2Freviewer');
+    assert.equal(reads[1][0], 'https://example.test/v1/client/subject-notes?target=session%2Fagent%2Fexample%2Freviewer%2Fincarnation%252Fexample');
     assert.equal(reads[2][0], 'https://example.test/v1/client/subject-notes?author=person%2Fada');
     const writes = calls.filter(([, init]) => init.method !== 'GET');
     assert.equal(writes[0][0], 'https://example.test/v1/subject-notes');
-    assert.deepEqual(JSON.parse(writes[0][1].body), { target: 'mission/example', text: 'Inform, never assign.' });
+    assert.deepEqual(JSON.parse(writes[0][1].body), create);
     assert.equal(writes[1][0], 'https://example.test/v1/subject-notes/' + encodeURIComponent(wire.value.notes[0].id));
     assert.equal(writes[1][1].method, 'PUT');
-    assert.deepEqual(JSON.parse(writes[1][1].body), { text: null, session: null });
+    assert.deepEqual(JSON.parse(writes[1][1].body), { text: null, expires_at: null });
 });
 
 test('notes collection applies typed resources and archive removals without modifying agent rows', () => {

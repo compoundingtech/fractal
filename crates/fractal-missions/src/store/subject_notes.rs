@@ -9,7 +9,7 @@ pub trait SubjectNotesStore {
     fn subject_note_readable(&self, note: &SubjectNote, reader: &str) -> Result<bool>;
     fn subject_note(&self, id: &str, reader: &str) -> Result<Option<SubjectNote>, St3Error>;
     fn list_subject_notes(&self, target: Option<&str>, author: Option<&str>, reader: &str) -> Result<Vec<SubjectNote>, St3Error>;
-    fn set_subject_note(&self, id: &str, actor: &str, target: &str, text: Option<&str>, session: Option<&str>, expires_at: Option<&str>) -> Result<Option<SubjectNote>, St3Error>;
+    fn set_subject_note(&self, id: &str, actor: &str, target: &str, text: Option<&str>, expires_at: Option<&str>) -> Result<Option<SubjectNote>, St3Error>;
 }
 
 fn timestamp(milliseconds: u128) -> Result<String> {
@@ -38,10 +38,11 @@ fn current(store: &Store, id: &str, now: u128) -> Result<Option<SubjectNote>> {
         }
     }
     let target = fields["target"].as_str().context("note target missing")?;
-    let session = fields["session"].as_str();
-    if let Some(session) = session
-        && store.current_subject_note_incarnation(target)?.as_deref() != Some(session) {
-        return Ok(None);
+    if target.starts_with("session/") {
+        let (parent, incarnation) = fractal_schema::subject_notes::session_parts(target).map_err(anyhow::Error::new)?;
+        if store.current_subject_note_incarnation(parent)?.as_deref() != Some(&incarnation) {
+            return Ok(None);
+        }
     }
     let created: String = connection.query_row(
         &canonical_sql("SELECT accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='note.set'
@@ -51,7 +52,7 @@ fn current(store: &Store, id: &str, now: u128) -> Result<Option<SubjectNote>> {
         id: id.to_owned(), target: target.to_owned(),
         author: fractal_schema::subject_notes::author(id).map_err(anyhow::Error::new)?.to_owned(),
         text: text.to_owned(), audience: fields["audience"].as_str().context("note audience missing")?.to_owned(),
-        session: session.map(str::to_owned), created_at: timestamp(created.parse()?)?,
+        created_at: timestamp(created.parse()?)?,
         updated_at: timestamp(claim.accepted_at_unix_ms)?,
         expires_at: expires_at.map(str::to_owned), revision: claim.id,
     }))
@@ -76,6 +77,12 @@ impl SubjectNotesStore for Store {
     fn subject_note_agents(&self, target: &str) -> Result<BTreeSet<String>> {
         smallclaims::touched::note_read(|| target.to_owned());
         if target.starts_with("agent/") { return Ok(BTreeSet::from([target.to_owned()])); }
+        if target.starts_with("session/") {
+            let (parent, incarnation) = fractal_schema::subject_notes::session_parts(target).map_err(anyhow::Error::new)?;
+            return Ok(if self.current_subject_note_incarnation(parent)?.as_deref() == Some(&incarnation) {
+                BTreeSet::from([parent.to_owned()])
+            } else { BTreeSet::new() });
+        }
         let (predicate, key) = if let Some(id) = target.strip_prefix("mission/") {
             ("r.mission_id=?1", id)
         } else if let Some(id) = target.strip_prefix("mission-run/") {
@@ -144,15 +151,22 @@ impl SubjectNotesStore for Store {
     }
 
     fn set_subject_note(&self, id: &str, actor: &str, target: &str, text: Option<&str>,
-        session: Option<&str>, expires_at: Option<&str>) -> Result<Option<SubjectNote>, St3Error> {
-        if actor.starts_with("agent/") && actor != target
+        expires_at: Option<&str>) -> Result<Option<SubjectNote>, St3Error> {
+        let session_parent = if target.starts_with("session/") {
+            let (parent, incarnation) = fractal_schema::subject_notes::session_parts(target)
+                .map_err(|error| St3Error::new(error.code, error.message))?;
+            if text.is_some() && self.current_subject_note_incarnation(parent).map_err(internal)?.as_deref() != Some(&incarnation) {
+                return Err(St3Error::new("note-target-access", "session target has no matching current running incarnation"));
+            }
+            Some(parent)
+        } else { None };
+        if actor.starts_with("agent/") && actor != target && session_parent != Some(actor)
             && (!(target.starts_with("mission-run/") || target.starts_with("step-run/"))
                 || !self.subject_note_agents(target).map_err(internal)?.contains(actor)) {
-            return Err(St3Error::new("note-target-access", "agents may note only themselves or assigned mission/step runs"));
+            return Err(St3Error::new("note-target-access", "agents may note only themselves, their sessions or assigned mission/step runs"));
         }
         let mut fields = BTreeMap::from([
             ("target".into(), json!(target)), ("text".into(), json!(text)), ("audience".into(), json!("agent"))]);
-        if let Some(session) = session { fields.insert("session".into(), json!(session)); }
         if let Some(at) = expires_at { fields.insert("expires_at".into(), json!(at)); }
         self.append_claim(&ClaimInput {
             subject: id.into(), kind: KIND.into(), actor: Some(actor.into()), fields,

@@ -152,7 +152,7 @@ mod tests {
         SubjectNote {
             id: format!("note/person/example/{index:04}"), target: "agent/example.reader".into(),
             author: "person/example".into(), text: format!("text {index}"), audience: "agent".into(),
-            session: None, created_at: "2026-10-14T00:00:00Z".into(),
+            created_at: "2026-10-14T00:00:00Z".into(),
             updated_at: format!("2026-10-14T00:{index:02}:00Z"), expires_at: None,
             revision: format!("revision-{index}"),
         }
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn first_and_later_incarnations_receive_idempotent_non_waking_context() {
         let store = enabled_store();
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Shared"), None, None).unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Shared"), None).unwrap();
         assert!(emit_for_incarnation(&store, AGENT, "first").unwrap());
         assert!(!emit_for_incarnation(&store, AGENT, "first").unwrap());
         assert!(emit_for_incarnation(&store, AGENT, "second").unwrap());
@@ -234,21 +234,21 @@ mod tests {
             assert!(crate::silent::is_held(message));
             assert!(!message.tags.iter().any(|tag| tag.starts_with(crate::silent::SESSION_START_TAG_PREFIX)));
         }
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Updated"), None, None).unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Updated"), None).unwrap();
         assert!(emit_for_incarnation(&store, AGENT, "second").unwrap());
     }
 
     #[test]
     fn silent_release_refreshes_revision_and_drops_archived_context() {
         let store = enabled_store();
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Old"), None, None).unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Old"), None).unwrap();
         emit_for_incarnation(&store, AGENT, "first").unwrap();
         let mut messages = store.messages(Some(AGENT), true).unwrap();
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Current"), None, None).unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Current"), None).unwrap();
         crate::silent::refresh_notes(&store, &mut messages).unwrap();
         assert!(messages[0].content.contains("Current"));
         assert!(!messages[0].content.contains(": Old"));
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, None, None, None).unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, None, None).unwrap();
         crate::silent::refresh_notes(&store, &mut messages).unwrap();
         assert!(messages.is_empty());
     }
@@ -288,8 +288,8 @@ mod tests {
             }).unwrap();
         };
         runtime("running");
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("This session"),
-            Some("first"), None).unwrap();
+        let session = fractal_schema::subject_notes::session_subject(AGENT, "first").unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", &session, Some("This session"), None).unwrap();
         assert!(emit_for_incarnation(&store, AGENT, "first").unwrap());
         runtime("exited");
         assert!(current_notes(&store, AGENT).unwrap().is_empty());

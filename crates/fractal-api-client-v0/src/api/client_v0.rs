@@ -10222,24 +10222,24 @@ mod tests {
         let historical = "note/person/ada/019a0000-0000-7000-8000-000000000001";
         let shared = "note/person/ada/019a0000-0000-7000-8000-000000000002";
         let future = "note/agent/example/reader/019a0000-0000-7000-8000-000000000003";
-        for (id, author, audience, session) in [
-            (historical, "person/ada", "self", None),
-            (future, target, "future-level", Some("first")),
+        let session_target = fractal_schema::subject_notes::session_subject(target, "first").unwrap();
+        for (id, author, audience, note_target) in [
+            (historical, "person/ada", "self", target),
+            (future, target, "future-level", session_target.as_str()),
         ] {
-            let mut fields = std::collections::BTreeMap::from([
-                ("target".into(), json!(target)), ("text".into(), json!("Historical context")),
+            let fields = std::collections::BTreeMap::from([
+                ("target".into(), json!(note_target)), ("text".into(), json!("Historical context")),
                 ("audience".into(), json!(audience)),
             ]);
-            if let Some(session) = session { fields.insert("session".into(), json!(session)); }
             state.store.append_claim(&crate::model::ClaimInput {
                 subject: id.into(), kind: fractal_schema::subject_notes::KIND.into(), actor: Some(author.into()),
                 fields,
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
         }
-        state.store.set_subject_note(shared, "person/ada", target, Some("Session context"), Some("first"), None).unwrap();
+        state.store.set_subject_note(shared, "person/ada", &session_target, Some("Session context"), None).unwrap();
         state.store.set_subject_note("note/person/ada/019a0000-0000-7000-8000-000000000004",
-            "person/ada", target, Some("Expired reminder"), None, Some("2000-01-01T00:00:00Z")).unwrap();
+            "person/ada", target, Some("Expired reminder"), Some("2000-01-01T00:00:00Z")).unwrap();
         let request: CollectionSubscribe = serde_json::from_value(json!({"kind":"subscribe","id":"notes","collection":"notes","limit":200})).unwrap();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         for (reader, expected) in [("person/ada", 3), ("person/other", 3), (target, 3), ("agent/example/unrelated", 0)] {
@@ -10255,7 +10255,7 @@ mod tests {
                 }
             }
         }
-        state.store.set_subject_note(historical, "person/ada", target, None, None, None).unwrap();
+        state.store.set_subject_note(historical, "person/ada", target, None, None).unwrap();
         let mut owner = ClientSession::for_tests("person/ada", "person/ada", "unix");
         owner.scopes.insert("read.projections".into());
         let (_, rows, _, _) = collection_items(&state, &owner, &request, semaphore.clone().acquire_owned().await.unwrap()).await.unwrap();

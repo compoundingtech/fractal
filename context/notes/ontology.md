@@ -33,9 +33,9 @@ decision (DQ2). Alignment with `agent/dotfiles/annotations` remains.
 - **Person directive note**: The existing `person.directive-note-set` record:
   one current note per person, read by the agents that work for that person.
   It has no target and remains a separate record from subject notes, with its
-  own command, `directive set|clear|show` (see spec `DQ1`). The command split
-  is not implemented yet; bare `note` and `note set|clear` remain deprecated
-  aliases. `fractal` and its `st`/`st3` aliases share the same CLI command.
+  own command, `directive set|clear|show` (see spec `DQ1`). Bare `note` and
+  `note set|clear` remain deprecated aliases with a stderr notice.
+  `fractal` and its `st`/`st3` aliases share the same CLI command.
 - **Annotation**: Umbrella term, owned by `agent/dotfiles/annotations`, for
   structured metadata attached to artifacts. Its record is **Agent
   Provenance** (`agent-provenance`): who/why/where facts about agent-made

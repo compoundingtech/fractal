@@ -28,7 +28,6 @@
         "author": {"type": "string"},
         "text": {"type": "string", "minLength": 1, "maxLength": 1024, "description": "Nonblank; at most 1024 UTF-8 bytes."},
         "audience": {"$ref": "#/$defs/NoteAudience"},
-        "session": {"type": ["string", "null"]},
         "created_at": {"$ref": "#/$defs/Timestamp"},
         "updated_at": {"$ref": "#/$defs/Timestamp"},
         "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
@@ -41,7 +40,6 @@
       "type": "object", "additionalProperties": false, "required": ["target", "text"],
       "properties": {
         "target": {"type": "string"}, "text": {"type": "string", "minLength": 1, "maxLength": 1024},
-        "session": {"type": ["string", "null"]},
         "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
       }
     },
@@ -49,7 +47,6 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "text": {"type": ["string", "null"], "minLength": 1, "maxLength": 1024},
-        "session": {"type": ["string", "null"]},
         "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
       }
     },
@@ -59,7 +56,7 @@
         {"type": "object", "required": ["kind", "target", "author", "text", "audience", "created_at"], "properties": {
           "kind": {"const": "note"}, "target": {"type": "string"}, "author": {"type": "string"},
           "text": {"type": "string", "minLength": 1, "maxLength": 1024}, "audience": {"$ref": "#/$defs/NoteAudience"},
-          "session": {"type": ["string", "null"]}, "created_at": {"$ref": "#/$defs/Timestamp"},
+          "created_at": {"$ref": "#/$defs/Timestamp"},
           "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
         }}
       ]

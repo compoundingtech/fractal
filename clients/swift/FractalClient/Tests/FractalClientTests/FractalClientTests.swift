@@ -209,17 +209,16 @@ final class FractalClientTests: XCTestCase {
         XCTAssertTrue(empty.notes.isEmpty)
     }
 
-    func testSubjectNotesKeepIdentitySessionAndOpenAudience() throws {
+    func testSubjectNotesKeepIdentitySessionTargetAndOpenAudience() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
         let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/subject-notes.json"))
         let result = try JSONDecoder().decode(Envelope<SubjectNotes>.self, from: data)
         let note = try XCTUnwrap(result.value.notes.first)
         XCTAssertEqual(note.id, "note/person/ada/019a0000-0000-7000-8000-000000000001")
-        XCTAssertEqual(note.target, "agent/example/reviewer")
+        XCTAssertEqual(note.target, "session/agent/example/reviewer/incarnation%2Fexample")
         XCTAssertEqual(note.author, "person/ada")
         XCTAssertEqual(note.audience, .selfOnly)
-        XCTAssertEqual(note.session, "incarnation/example")
         XCTAssertEqual(note.createdAt, "2026-10-14T09:00:00Z")
         XCTAssertEqual(note.updatedAt, "2026-10-14T09:01:00Z")
         XCTAssertEqual(note.expiresAt, "2026-10-15T09:00:00Z")
@@ -236,11 +235,13 @@ final class FractalClientTests: XCTestCase {
     }
 
     func testSubjectNoteArchivePatchDistinguishesOmittedAndNullFields() throws {
-        let wire = Data(#"{"text":null,"session":null}"#.utf8)
+        let wire = Data(#"{"text":null,"expires_at":null}"#.utf8)
         let patch = try JSONDecoder().decode(SubjectNoteUpdate.self, from: wire)
         XCTAssertEqual(patch.text, .clear)
-        XCTAssertEqual(patch.session, .clear)
-        XCTAssertNil(patch.expiresAt)
+        XCTAssertEqual(patch.expiresAt, .clear)
+        let omitted = try JSONDecoder().decode(SubjectNoteUpdate.self, from: Data("{}".utf8))
+        XCTAssertNil(omitted.text)
+        XCTAssertNil(omitted.expiresAt)
         XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(patch)) as? NSDictionary,
             try JSONSerialization.jsonObject(with: wire) as? NSDictionary)
         let archive = try JSONDecoder().decode(SubjectNoteResult.self, from: Data(#"{"id":"note/person/ada/019a0000-0000-7000-8000-000000000001","note":null}"#.utf8))

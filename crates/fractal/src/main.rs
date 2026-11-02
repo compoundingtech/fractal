@@ -312,8 +312,10 @@ enum Command {
     Up(UpArgs),
     /// Understand what needs action now.
     Now(NowArgs),
-    /// Read current person notes; notes inform but never assign work or grant authority.
+    /// Manage subject notes; notes inform but never assign work or grant authority.
     Note(directive_note::NoteArgs),
+    /// Set, clear or show person directive notes.
+    Directive(directive_note::DirectiveArgs),
     /// Show token spend over a period, with the largest spenders first.
     Usage(UsageArgs),
     /// List every objective and budget with its target, current value and what is left, and
@@ -5855,6 +5857,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Now(args) => run_now(&endpoint, config.person.as_deref(), args, cli.json).await,
         Command::Note(args) => {
             directive_note::run(&endpoint, config.person.as_deref(), args, cli.json).await
+        }
+        Command::Directive(args) => {
+            directive_note::run_directive(&endpoint, config.person.as_deref(), args, cli.json).await
         }
         Command::Usage(args) => run_usage(&immediate, args, cli.json).await,
         Command::Slo(args) => run_slo(&immediate, args, cli.json).await,

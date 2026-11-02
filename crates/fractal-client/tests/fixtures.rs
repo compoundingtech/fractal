@@ -19,11 +19,9 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 #[test]
 fn subject_note_create_retains_scope_without_an_audience_choice() {
     let request: SubjectNoteCreate = decode("subject-note-create.json");
-    assert_eq!(request.target, "agent/example/reviewer");
-    assert_eq!(request.session.as_deref(), Some("incarnation/example"));
+    assert_eq!(request.target, "session/agent/example/reviewer/incarnation%2Fexample");
     assert_eq!(request.expires_at.as_deref(), Some("2026-10-15T09:00:00Z"));
     let defaults: SubjectNoteCreate = serde_json::from_value(serde_json::json!({"target":"mission/example","text":"Context"})).unwrap();
-    assert!(defaults.session.is_none());
     assert!(defaults.expires_at.is_none());
     assert_eq!(serde_json::to_value(defaults).unwrap(), serde_json::json!({"target":"mission/example","text":"Context"}));
 }
@@ -33,10 +31,9 @@ fn subject_notes_keep_identity_scope_and_open_audiences() {
     let wire: Envelope<SubjectNotes> = decode("subject-notes.json");
     let note = &wire.value.notes[0];
     assert_eq!(note.id, "note/person/ada/019a0000-0000-7000-8000-000000000001");
-    assert_eq!(note.target, "agent/example/reviewer");
+    assert_eq!(note.target, "session/agent/example/reviewer/incarnation%2Fexample");
     assert_eq!(note.author, "person/ada");
     assert_eq!(note.audience, NoteAudience::SelfOnly);
-    assert_eq!(note.session.as_deref(), Some("incarnation/example"));
     assert_eq!(note.created_at, "2026-10-14T09:00:00Z");
     assert_eq!(note.updated_at, "2026-10-14T09:01:00Z");
     assert_eq!(note.expires_at.as_deref(), Some("2026-10-15T09:00:00Z"));
@@ -53,11 +50,11 @@ fn subject_notes_keep_identity_scope_and_open_audiences() {
 
 #[test]
 fn subject_note_updates_preserve_omitted_fields_and_send_explicit_nulls() {
-    let patch: SubjectNoteUpdate = serde_json::from_value(serde_json::json!({"text":null,"session":null})).unwrap();
+    let patch: SubjectNoteUpdate = decode("subject-note-update.json");
     assert_eq!(patch.text, Some(None));
-    assert_eq!(patch.session, Some(None));
-    assert_eq!(patch.expires_at, None);
-    assert_eq!(serde_json::to_value(patch).unwrap(), serde_json::json!({"text":null,"session":null}));
+    assert_eq!(patch.expires_at, Some(None));
+    assert_eq!(serde_json::to_value(patch).unwrap(), serde_json::json!({"text":null,"expires_at":null}));
+    assert_eq!(serde_json::to_value(SubjectNoteUpdate::default()).unwrap(), serde_json::json!({}));
     let archived: Envelope<SubjectNoteResult> = decode("subject-note-archive.json");
     assert!(archived.value.note.is_none());
     assert_eq!(archived.value.id, "note/person/ada/019a0000-0000-7000-8000-000000000001");
