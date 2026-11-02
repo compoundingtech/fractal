@@ -11,9 +11,9 @@ use fractal_store::store::messages_shard::mailbox_reads;
 
 const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The dispatcher's position: the graph's claims, its local observations, and the messages
-/// shard, whose items and local lifecycle are not graph claims.
-/// Claims, local observations, the messages shard, and local mark events (message_marks.rs).
+/// The dispatcher's position: the graph's claims, its local observations, the messages shard,
+/// whose items and local lifecycle are not graph claims, and this member's mark events
+/// (message_marks.rs).
 pub type WakeCursor = (u64, u64, mailbox_reads::StreamPosition, u64);
 
 async fn dispatch(
