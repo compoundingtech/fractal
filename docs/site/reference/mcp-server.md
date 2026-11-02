@@ -8,7 +8,7 @@ order: 6
 
 The Fractal MCP server connects an MCP client to the daemon's paired-client gateway. It exposes a closed set of tools for alerts, missions, agents, conversations, and explicitly scoped writes. It does not expose daemon control or give an assistant person authority.
 
-The Rust package and executable are `fractal-chatgpt`. The Nix package also provides the temporary `st-chatgpt` executable alias for existing consumers. The supported assistant principal is `assistant/chatgpt`, including when a generic MCP client uses the adapter. Pairing requires the configured owning person's explicit consent to disclose assistant reads to OpenAI. Do not use a person credential for this server.
+The Rust package and canonical executable are `fractal-chatgpt`. The temporary `st-chatgpt` executable alias remains available for existing consumers. The supported assistant principal is `assistant/chatgpt`, including when a generic MCP client uses the adapter. Pairing requires the configured owning person's explicit consent to disclose assistant reads to OpenAI. Do not use a person credential for this server.
 
 The [external-assistant contract](https://github.com/compoundingtech/fractal/blob/main/docs/st3/external-assistants.md) defines the authority and wire behavior. Remote access is a restricted dogfood path, not an authenticated public service.
 
@@ -28,7 +28,7 @@ The binary is `target/release/fractal-chatgpt`. Alternatively, obtain it from th
 nix build github:compoundingtech/fractal#fractal-chatgpt
 ```
 
-That binary is `result/bin/fractal-chatgpt`. The temporary `#st-chatgpt` package alias selects the same derivation; both packages include `bin/fractal-chatgpt` and `bin/st-chatgpt`. Use a matching Fractal revision. The examples below assume the binary is on `PATH`.
+That binary is `result/bin/fractal-chatgpt`. The temporary `#st-chatgpt` package alias selects the same derivation and includes both executables. Use a matching Fractal revision. The examples below assume the binary is on `PATH`.
 
 ## Pair and prepare a grant
 
@@ -84,11 +84,11 @@ Use stdio when the MCP client launches a local process:
 
 ```sh
 fractal-chatgpt --transport stdio \
-  --socket /PATH/TO/fractal-client.sock \
+  --socket /PATH/TO/st3-client.sock \
   --credential-file /PATH/TO/mcp-private/credential
 ```
 
-Use the daemon's **paired-client** socket, whose filename must be `fractal-client.sock` or `st3-client.sock`, not its control socket (`fractal.sock` or `st3.sock`). Use whichever paired-client name your daemon provides; both are accepted. All paths in the examples are placeholders, not defaults.
+Use the daemon's **paired-client** socket, whose filename must be `st3-client.sock`, not its control socket. All paths in the examples are placeholders, not defaults.
 
 A generic MCP client configuration looks like this; adapt the outer configuration format to your client. Use absolute paths and keep the bearer out of the configuration:
 
@@ -99,7 +99,7 @@ A generic MCP client configuration looks like this; adapt the outer configuratio
       "command": "/PATH/TO/fractal-chatgpt",
       "args": [
         "--transport", "stdio",
-        "--socket", "/PATH/TO/fractal-client.sock",
+        "--socket", "/PATH/TO/st3-client.sock",
         "--credential-file", "/PATH/TO/mcp-private/credential"
       ]
     }
@@ -113,7 +113,7 @@ HTTP is the default transport. The default listen address is `127.0.0.1:8787`:
 
 ```sh
 fractal-chatgpt --transport http --listen 127.0.0.1:8787 \
-  --socket /PATH/TO/fractal-client.sock \
+  --socket /PATH/TO/st3-client.sock \
   --credential-file /PATH/TO/mcp-private/credential
 ```
 
@@ -182,7 +182,7 @@ The corresponding `st_*` tool names are hidden, deprecated aliases for cached cl
 | Missing-scope denial | Inspect the exact grant. Replace policy explicitly if the owner authorizes the scope; do not substitute a person credential. |
 | `response-budget-exceeded` | Request a smaller page or content range, or raise the requested byte budget within the policy maximum. A single oversized item may still fail. |
 | `page-cursor-expired` or stale content revision | Restart discovery and use newly returned cursors/read handles. Do not manufacture a cursor or reference. |
-| Socket rejected or unavailable | Use the current daemon's `fractal-client.sock` or `st3-client.sock`, run the adapter on that machine, and check local ownership/access. Control sockets (`fractal.sock` and `st3.sock`) are intentionally rejected. |
+| Socket rejected or unavailable | Use the current daemon's `st3-client.sock`, run the adapter on that machine, and check local ownership/access. A control socket is intentionally rejected. |
 | Tunnel connects but tools are unavailable | Check the loopback adapter and grant first, then the operator-owned tunnel's forwarding to `/mcp` and the client's MCP support. Do not expose a non-loopback listener to bypass the problem. |
 
 For authority, consent, proof-gated reads, write semantics, and remote-access requirements, read the [external-assistant engineering contract](https://github.com/compoundingtech/fractal/blob/main/docs/st3/external-assistants.md).
