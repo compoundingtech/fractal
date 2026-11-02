@@ -174,6 +174,7 @@ mod agents;
 pub mod client_reads;
 pub mod fleet;
 pub mod launches;
+pub mod message_reads;
 pub mod messages;
 pub mod operations;
 pub mod records;
@@ -852,6 +853,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         // crate::peer::SEAT_FRESHNESS_INTERNAL_PATH; the cost inventory reads route literals.
         .route("/v1/internal/seat-freshness", post(seat_freshness::seat_freshness))
+        // crate::peer::SEAT_FRESHNESS_READS_INTERNAL_PATH, written out for the same reason.
+        .route("/v1/internal/seat-freshness/reads", post(seat_freshness::seat_freshness_read))
         .route(
             "/v1/internal/replication/answers-check",
             post(replication::replication_answers_check),
@@ -4687,7 +4690,7 @@ fn client_message_resource(
         "title": message.title,
         "content": message.content,
         "state": message.status,
-        "delivery": message_delivery_for(store, &message, sent_at, now)?,
+        "delivery": message_delivery_for(store, &message, sent_at, now, None)?,
         "sent_at": client_timestamp(sent_at),
         "session_id": metadata["session_id"],
         "in_reply_to": message.in_reply_to,
@@ -4770,7 +4773,7 @@ fn client_message_resources_at(
             "title": message.title,
             "content": message.content,
             "state": message.status,
-            "delivery": message_delivery_for(store, &message, sent_at, now)?,
+            "delivery": message_delivery_for(store, &message, sent_at, now, None)?,
             "sent_at": client_timestamp(sent_at),
             "session_id": session_id,
             "in_reply_to": message.in_reply_to,
@@ -4850,18 +4853,44 @@ fn stream_item_recipient_elsewhere(store: &Store, message: &MessageView) -> anyh
 
 /// A stream item's status is this member's own lifecycle for it, so for a seat on this host it
 /// is labelled as graph mail is. For a seat on another host it is `unknown`: that host keeps
-/// the receipts, and claiming sent or delivered here would be a guess.
-fn message_delivery_for(store: &Store, message: &MessageView, sent_at: u128, now: u128) -> anyhow::Result<Value> {
-    if let Some(host) = stream_item_recipient_elsewhere(store, message)? {
-        return Ok(json!({
-            "state": "unknown", "phase": "unknown",
-            "reason": format!("the recipient's seat runs on {host}, which keeps this message's receipts"),
+/// the receipts, and claiming sent or delivered here would be a guess. When that host answers
+/// reads (`message_reads::relay_host`), `relayed` is what it said, if this member asked it: the
+/// message is as far as the further of this member's own state and the host's answer.
+fn message_delivery_for(
+    store: &Store, message: &MessageView, sent_at: u128, now: u128, relayed: Option<&message_reads::Relayed>,
+) -> anyhow::Result<Value> {
+    let unknown = |reason: String| {
+        json!({
+            "state": "unknown", "phase": "unknown", "reason": reason,
             "age_ms": now.saturating_sub(sent_at),
             "recipient_delivery": delivery_presence::known(&message.to).map(|path| path.to_value()),
-        }));
+        })
+    };
+    let mut status = message.status.clone();
+    if let Some(host) = message_reads::relay_host(store, message)? {
+        match relayed {
+            Some(message_reads::Relayed::Answered { status: Some(relayed), .. }) => {
+                if crate::store::message_marks::rank(relayed) > crate::store::message_marks::rank(&status) {
+                    status = (*relayed).to_owned();
+                }
+            }
+            Some(message_reads::Relayed::Answered { status: None, .. }) => {}
+            Some(message_reads::Relayed::Unknown { reason, .. }) => {
+                return Ok(unknown(reason.clone()));
+            }
+            None => {
+                return Ok(unknown(format!(
+                    "the recipient's seat runs on {host}, which keeps this message's receipts; `st conversations status` asks it"
+                )));
+            }
+        }
+    } else if let Some(host) = stream_item_recipient_elsewhere(store, message)? {
+        return Ok(unknown(format!(
+            "the recipient's seat runs on {host}, which keeps this message's receipts"
+        )));
     }
-    let mut delivery = message_delivery_value(store, &message.to, &message.status, sent_at, now)?;
-    if !matches!(message.status.as_str(), "sent" | "staged") { return Ok(delivery); }
+    let mut delivery = message_delivery_value(store, &message.to, &status, sent_at, now)?;
+    if !matches!(status.as_str(), "sent" | "staged") { return Ok(delivery); }
     let Some(runtime) = store.latest_claim(&message.to, Some("runtime.observed"))? else {
         return Ok(delivery);
     };
@@ -7759,8 +7788,82 @@ fn publication_evidence_check(store: &Store) -> DoctorCheck {
     }
 }
 
-/// Held silent mail is never lost: unread past a day, it is listed for its seat.
-fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
+/// `seats` (seat, count, oldest), with each seat whose host keeps its receipts counted from what
+/// that host answers about its held mail sent before `before`: read or closed mail goes, and mail
+/// the host did not answer for stays, as this member cannot say it was read.
+fn relayed_held_mail(
+    state: &AppState,
+    seats: Vec<(String, u64, u128)>,
+    before: u128,
+    runtime: Option<&tokio::runtime::Handle>,
+) -> anyhow::Result<Vec<(String, u64, u128)>> {
+    let hosts = message_reads::relay_hosts(&state.store)?;
+    if hosts.is_empty() {
+        return Ok(seats);
+    }
+    let host_of = hosts
+        .iter()
+        .flat_map(|(host, on)| on.iter().map(move |seat| (seat.clone(), host.clone())))
+        .collect::<BTreeMap<_, _>>();
+    let mut asks = BTreeMap::<String, Vec<String>>::new();
+    let mut sent = BTreeMap::<String, (String, u128)>::new();
+    for (seat, _, _) in seats
+        .iter()
+        .filter(|(seat, _, _)| host_of.contains_key(seat))
+    {
+        let held = state
+            .store
+            .readers
+            .get()
+            .prepare_cached(
+                "SELECT held.subject, held.sent_ms FROM coordination_sends held
+                 JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
+                 WHERE held.held=1 AND held.sent_ms < ?1 AND json_extract(sent.body,'$.fields.to')=?2
+                 LIMIT ?3",
+            )?
+            .query_map(
+                rusqlite::params![i64::try_from(before).unwrap_or(i64::MAX), seat, message_reads::MAX_MESSAGES_PER_HOST as i64],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (subject, at) in held {
+            asks.entry(host_of[seat].clone())
+                .or_default()
+                .push(subject.clone());
+            sent.insert(subject, (seat.clone(), at));
+        }
+    }
+    let relayed = message_reads::read_blocking(runtime, state, asks, message_reads::CHECK_DEADLINE);
+    let mut counted = BTreeMap::<String, (u64, u128)>::new();
+    for (subject, (seat, at)) in sent {
+        if relayed
+            .get(&subject)
+            .is_some_and(|answer| matches!(answer.status(), Some("read" | "closed")))
+        {
+            continue;
+        }
+        let entry = counted.entry(seat).or_insert((0, at));
+        entry.0 += 1;
+        entry.1 = entry.1.min(at);
+    }
+    Ok(seats
+        .into_iter()
+        .filter_map(|(seat, count, oldest)| {
+            if !host_of.contains_key(&seat) {
+                return Some((seat, count, oldest));
+            }
+            counted
+                .remove(&seat)
+                .map(|(count, oldest)| (seat, count, oldest))
+        })
+        .collect())
+}
+
+/// Held silent mail is never lost: unread past a day, it is listed for its seat. A seat whose
+/// host keeps its receipts (`message_reads`) is listed by what that host answers: this member's
+/// held flags for it never clear.
+fn held_mail_check(state: &AppState, now: u128, runtime: Option<&tokio::runtime::Handle>) -> DoctorCheck {
+    let store = &state.store;
     match store.coordination_backfill_status() {
         Ok((cursor, ceiling, false, progress))
             if now.saturating_sub(u128::from(progress)) > 15 * 60 * 1000 =>
@@ -7782,7 +7885,10 @@ fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
         }
         _ => {}
     }
-    match store.held_mail_before(now.saturating_sub(crate::silent::HELD_TOO_LONG_MS)) {
+    let held = store
+        .held_mail_before(now.saturating_sub(crate::silent::HELD_TOO_LONG_MS))
+        .and_then(|seats| relayed_held_mail(state, seats, now.saturating_sub(crate::silent::HELD_TOO_LONG_MS), runtime));
+    match held {
         Ok(seats) if seats.is_empty() => DoctorCheck {
             name: "held-mail".into(),
             status: "pass".into(),
@@ -7818,30 +7924,49 @@ fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
     }
 }
 
+/// Current-seat mail older than ten seconds that its recipient has not read: how many, how many
+/// of those its native transport accepted, and, by host, how many a host that keeps its seats'
+/// receipts did not answer for (`relayed`, what those hosts said).
 fn unread_current_seat_counts(
     store: &Store,
     recipients: &BTreeSet<&str>,
     messages: &[MessageView],
     now: u128,
-) -> anyhow::Result<(usize, usize)> {
+    relayed: &BTreeMap<String, message_reads::Relayed>,
+) -> anyhow::Result<(usize, usize, BTreeMap<String, usize>)> {
     let mut pending = 0;
     let mut accepted = 0;
-    for message in messages.iter().filter(|message| {
-        recipients.contains(message.to.as_str())
-            && !matches!(message.status.as_str(), "read" | "closed")
-            // Held mail is not late: it waits for the seat's next turn.
-            && !crate::silent::waits_for_turn(message)
-    }) {
-        let owners = store.desired_subjects_named(std::slice::from_ref(&message.to))?;
-        if let Some(host) = owners
-            .first()
-            .and_then(|owner| owner.member.as_ref())
-            .map(|member| member.host.as_str())
-            && host != store.origin()
-            && !store.replication_peer_up(host)?.0
-        {
-            continue;
-        }
+    let mut unknown = BTreeMap::<String, usize>::new();
+    for message in unread_current_seat_mail(recipients, messages) {
+        let status = match relayed.get(&message.subject) {
+            Some(message_reads::Relayed::Unknown { host, .. }) => {
+                *unknown.entry(host.clone()).or_default() += 1;
+                continue;
+            }
+            Some(answer) => match answer.status() {
+                Some("read" | "closed") => continue,
+                Some(status)
+                    if crate::store::message_marks::rank(status)
+                        > crate::store::message_marks::rank(&message.status) =>
+                {
+                    status
+                }
+                _ => message.status.as_str(),
+            },
+            None => {
+                let owners = store.desired_subjects_named(std::slice::from_ref(&message.to))?;
+                if let Some(host) = owners
+                    .first()
+                    .and_then(|owner| owner.member.as_ref())
+                    .map(|member| member.host.as_str())
+                    && host != store.origin()
+                    && !store.replication_peer_up(host)?.0
+                {
+                    continue;
+                }
+                message.status.as_str()
+            }
+        };
         let claims = store.claims_for(&message.subject, Some("message.sent"))?;
         let sent_at = claims
             .first()
@@ -7849,11 +7974,25 @@ fn unread_current_seat_counts(
             .unwrap_or_default();
         if now.saturating_sub(sent_at) > 10_000 {
             pending += 1;
-            accepted += usize::from(message.status == "delivered");
+            accepted += usize::from(status == "delivered");
         }
     }
-    Ok((pending, accepted))
+    Ok((pending, accepted, unknown))
 }
+
+/// Current-seat mail its recipient has not read, held mail aside: it waits for the seat's turn.
+fn unread_current_seat_mail<'a>(
+    recipients: &'a BTreeSet<&str>,
+    messages: &'a [MessageView],
+) -> impl Iterator<Item = &'a MessageView> + 'a {
+    messages.iter().filter(|message| {
+        recipients.contains(message.to.as_str())
+            && !matches!(message.status.as_str(), "read" | "closed")
+            // Held mail is not late: it waits for the seat's next turn.
+            && !crate::silent::waits_for_turn(message)
+    })
+}
+
 fn terminal_exec_gates_check(store: &Store) -> anyhow::Result<DoctorCheck> {
     fn has_exit_code_gate(mission: &crate::model::MissionSpec) -> bool {
         let has_gate = |gates: &[crate::model::GateSpec]| {
@@ -8105,6 +8244,8 @@ fn doctor_report_within(
     clock: &DoctorClock,
     drift: Option<&anyhow::Result<Vec<String>>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
+    // Checks run on threads outside the runtime; a check that asks another member goes through it.
+    let runtime = tokio::runtime::Handle::try_current().ok();
     let mut checks = DoctorChecks::default();
     let admission = state.seat_admission.snapshot(admission_now());
     checks.push(DoctorCheck {
@@ -8839,15 +8980,27 @@ fn doctor_report_within(
                         )
                     })
                     .collect::<Vec<_>>();
-                let (pending, accepted) = unread_current_seat_counts(
+                // Mail to a seat whose host keeps its receipts is read from that host.
+                let asks = message_reads::asks_for(&state.store, unread_current_seat_mail(&current_recipients, &messages))
+                    .map_err(ApiError::internal)?;
+                let relayed = message_reads::read_blocking(runtime.as_ref(), state, asks, message_reads::CHECK_DEADLINE);
+                let (pending, accepted, unknown) = unread_current_seat_counts(
                     &state.store,
                     &current_recipients,
                     &messages,
                     client_now_ms(),
+                    &relayed,
                 )
                 .map_err(ApiError::internal)?;
                 if pending > 0 {
                     blocked.push(format!("{pending} current-seat messages older than 10s lack a recipient graph read receipt ({accepted} accepted native handoffs); this does not prove that a legacy channel failed to consume them. Inspect `st conversations status MESSAGE`"));
+                }
+                if !unknown.is_empty() {
+                    blocked.push(format!(
+                        "unknown whether {} current-seat messages were read: their recipients' hosts keep the receipts and did not answer ({})",
+                        unknown.values().sum::<usize>(),
+                        unknown.iter().map(|(host, count)| format!("{host}: {count}")).collect::<Vec<_>>().join(", ")
+                    ));
                 }
                 checks.push(DoctorCheck {
                     name: "message-delivery".into(),
@@ -8869,11 +9022,21 @@ fn doctor_report_within(
     });
     checks.check("mail-backlog", || {
         let mut checks = Vec::new();
-        match mail_backlog::report(&state.store, client_now_ms()) {
-            Ok(backlog) => checks.push(DoctorCheck {
+        match mail_backlog::report_with_unknown(state, client_now_ms(), runtime.as_ref()) {
+            Ok((backlog, unknown)) => checks.push(DoctorCheck {
                 name: "mail-backlog".into(),
-                status: if backlog.count == 0 { "pass" } else { "warn" }.into(),
-                message: format!("{} unread messages older than 1h; close them with `{}`", backlog.count, backlog.cleanup_command),
+                status: if backlog.count == 0 && unknown.is_empty() { "pass" } else { "warn" }.into(),
+                message: if unknown.is_empty() {
+                    format!("{} unread messages older than 1h; close them with `{}`", backlog.count, backlog.cleanup_command)
+                } else {
+                    format!(
+                        "{} unread messages older than 1h; close them with `{}`; unknown for {} more: their recipients' hosts keep the receipts and did not answer ({})",
+                        backlog.count,
+                        backlog.cleanup_command,
+                        unknown.values().sum::<usize>(),
+                        unknown.iter().map(|(host, count)| format!("{host}: {count}")).collect::<Vec<_>>().join(", ")
+                    )
+                },
             }),
             Err(error) => checks.push(DoctorCheck { name: "mail-backlog".into(), status: "warn".into(), message: error.to_string() }),
         }
@@ -8883,7 +9046,7 @@ fn doctor_report_within(
         Ok(vec![publication_evidence_check(&state.store)])
     });
     checks.check("held-mail", || {
-        Ok(vec![held_mail_check(&state.store, client_now_ms())])
+        Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
     });
     checks.check("delivery-probes", || {
         let mut checks = Vec::new();

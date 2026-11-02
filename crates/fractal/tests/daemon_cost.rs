@@ -371,6 +371,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/internal/seat-freshness",
         "records a peer's seat freshness push in memory: one declarations read, no write",
     ),
+    (
+        "POST /v1/internal/seat-freshness/reads",
+        "answers a peer's read about this node's seats: one declarations read and at most 512 messages' marks, no write",
+    ),
     // Planning sessions and evals start harnesses.
     ("POST /v1/launches", "starts a planning harness"),
     ("POST /v1/launches/{id}/submit", "planning session"),

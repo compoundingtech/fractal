@@ -1423,7 +1423,7 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
             "queued behind FIFO head message/claude-preparation-head: body unavailable; later mail cannot overtake it");
     }
     for (message, sent_at) in &messages {
-        let delivery = message_delivery_for(&store, message, *sent_at, *sent_at).unwrap();
+        let delivery = message_delivery_for(&store, message, *sent_at, *sent_at, None).unwrap();
         assert_eq!(delivery["state"], "waiting");
         assert_eq!(delivery["phase"], "sent");
         assert_eq!(delivery["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
@@ -1431,7 +1431,7 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
         assert!(!delivery["reason"].as_str().unwrap().contains("private-detail"));
         let mut accepted = message.clone();
         accepted.status = "delivered".into();
-        assert!(!message_delivery_for(&store, &accepted, *sent_at, *sent_at).unwrap()["reason"]
+        assert!(!message_delivery_for(&store, &accepted, *sent_at, *sent_at, None).unwrap()["reason"]
             .as_str().unwrap().contains("FIFO"));
     }
     // Match an operator's actor-scoped list: a person filter selects that person's
@@ -1449,13 +1449,13 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
     }
     // A different message's clear cannot release the head or its queued successors.
     diagnostic(&messages[2].0, "first", "ready", "preparation succeeded; FIFO blocker cleared");
-    assert!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)
+    assert!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1, None)
         .unwrap()["reason"].as_str().unwrap().contains("preparation is unavailable"));
     // Recovery clears each message. Late previous-incarnation reports cannot undo it.
     for (message, sent_at) in &messages {
         diagnostic(message, "first", "ready", "preparation succeeded; FIFO blocker cleared");
         diagnostic(message, "old", "waiting", "stale incarnation failure");
-        let delivery = message_delivery_for(&store, message, *sent_at, *sent_at).unwrap();
+        let delivery = message_delivery_for(&store, message, *sent_at, *sent_at, None).unwrap();
         assert_eq!(delivery["state"], "pending");
         assert!(!delivery["reason"].as_str().unwrap().contains("failure"));
     }
@@ -1464,9 +1464,9 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
     }), Vec::new());
     diagnostic(&messages[0].0, "second", "waiting", "current attachment preparation failed");
     diagnostic(&messages[0].0, "first", "ready", "old incarnation clear");
-    assert_eq!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)
+    assert_eq!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1, None)
         .unwrap()["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
-    let stale = message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1 + 90_001).unwrap();
+    let stale = message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1 + 90_001, None).unwrap();
     assert_eq!(stale["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
     assert_eq!(messages.iter().map(|(message, _)| store.message(&message.subject).unwrap().unwrap().content)
         .collect::<Vec<_>>(), ["head", "later", "last"]);
@@ -1500,7 +1500,7 @@ fn a_stream_items_delivery_is_unknown_while_its_seat_runs_on_another_host() {
     };
     let delivery = |subject: &str, sent_at: u128| {
         let view = store.message(subject).unwrap().unwrap();
-        message_delivery_for(&store, &view, sent_at, sent_at).unwrap()
+        message_delivery_for(&store, &view, sent_at, sent_at, None).unwrap()
     };
     let (near, far) = ("message/00000000000000d1", "message/00000000000000d2");
     let near_sent = shard.append_claim(&message(near, "agent/example/near")).unwrap().accepted_at_unix_ms;
@@ -1989,13 +1989,20 @@ fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     let current = BTreeSet::from(["agent/example/current"]);
     let messages = store.operational_messages(None, false).unwrap();
     assert_eq!(
-        unread_current_seat_counts(&store, &current, &messages, client_now_ms()).unwrap(),
-        (0, 0)
+        unread_current_seat_counts(
+            &store,
+            &current,
+            &messages,
+            client_now_ms(),
+            &BTreeMap::new()
+        )
+        .unwrap(),
+        (0, 0, BTreeMap::new())
     );
     assert_eq!(
-        unread_current_seat_counts(&store, &current, &messages, client_now_ms() + 20_000)
+        unread_current_seat_counts(&store, &current, &messages, client_now_ms() + 20_000, &BTreeMap::new())
             .unwrap(),
-        (1, 0)
+        (1, 0, BTreeMap::new())
     );
     assert_eq!(
         store.messages(None, false).unwrap().len(),

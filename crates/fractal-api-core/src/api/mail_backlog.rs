@@ -6,12 +6,13 @@ pub const THRESHOLD_MS: u64 = 3_600_000;
 pub const CLEANUP_COMMAND: &str = "st conversations cleanup --all --older-than 1h";
 
 fn overdue(
-    store: &Store,
+    state: &AppState,
     now: u128,
     threshold: u64,
     to: Option<&str>,
     resume_archives: bool,
 ) -> anyhow::Result<Vec<MessageView>> {
+    let store = &state.store;
     let mut result = Vec::new();
     // Include retained mail for retired seats: those are precisely the messages a current
     // agents projection would hide. Inspection never changes their lifecycle.
@@ -48,6 +49,23 @@ fn overdue(
             result.push(message);
         }
     }
+    // A seat whose host keeps its receipts is overdue only when that host answers it has not
+    // read the message; an unknown is never acted on.
+    let asks = message_reads::asks_for(store, result.iter())?;
+    if !asks.is_empty() {
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        let relayed = message_reads::read_blocking(
+            runtime.as_ref(),
+            state,
+            asks,
+            message_reads::CHECK_DEADLINE,
+        );
+        result.retain(|message| match relayed.get(&message.subject) {
+            None => true,
+            Some(message_reads::Relayed::Unknown { .. }) => false,
+            Some(answer) => !matches!(answer.status(), Some("read" | "closed")),
+        });
+    }
     Ok(result)
 }
 
@@ -66,25 +84,109 @@ fn unfinished_archive(store: &Store, message: &MessageView) -> anyhow::Result<bo
                 .is_some())
 }
 
-pub fn report(store: &Store, now: u128) -> anyhow::Result<fractal_client::MailBacklog> {
+/// The most unread messages past the threshold one backlog read asks other hosts about.
+const RELAYED_BACKLOG: usize = message_reads::MAX_HOSTS * message_reads::MAX_MESSAGES_PER_HOST;
+
+pub fn report(state: &AppState, now: u128) -> anyhow::Result<fractal_client::MailBacklog> {
+    Ok(report_with_unknown(
+        state,
+        now,
+        tokio::runtime::Handle::try_current().ok().as_ref(),
+    )?
+    .0)
+}
+
+/// The backlog, and by host how many unread messages a host that keeps its seats' receipts did
+/// not answer for. Those, and those it answered were read, are not counted: this member holds
+/// no receipt for them, and an unknown is never counted as unread.
+pub fn report_with_unknown(
+    state: &AppState,
+    now: u128,
+    runtime: Option<&tokio::runtime::Handle>,
+) -> anyhow::Result<(fractal_client::MailBacklog, BTreeMap<String, usize>)> {
+    let store = &state.store;
     // Historical held flags are incomplete during bounded bootstrap. Suppress the cleanup
     // banner until its exclusion count is authoritative; cleanup itself always checks tags.
     if !store.coordination_backfill_status()?.2 {
-        return Ok(fractal_client::MailBacklog {
-            count: 0,
+        return Ok((
+            fractal_client::MailBacklog {
+                count: 0,
+                threshold_ms: THRESHOLD_MS,
+                cleanup_command: CLEANUP_COMMAND.into(),
+            },
+            BTreeMap::new(),
+        ));
+    }
+    let before = now.saturating_sub(u128::from(THRESHOLD_MS));
+    // The count folds the unread queue first, so the relayed read below sees the same mail.
+    let unread = store
+        .unread_mail_count_before(before)?
+        .saturating_sub(store.held_mail_count_before(before)?);
+    let (settled, unknown) = relayed_backlog(state, before, runtime)?;
+    Ok((
+        fractal_client::MailBacklog {
+            count: unread.saturating_sub(settled + unknown.values().sum::<usize>() as u64),
             threshold_ms: THRESHOLD_MS,
             cleanup_command: CLEANUP_COMMAND.into(),
-        });
+        },
+        unknown,
+    ))
+}
+
+/// Unread mail sent before `before` to a seat whose host keeps its receipts (`message_reads`),
+/// held mail aside: how many its host answered were read or closed, and by host how many it
+/// did not answer for. Nothing is asked while no host keeps its seats' receipts.
+fn relayed_backlog(
+    state: &AppState,
+    before: u128,
+    runtime: Option<&tokio::runtime::Handle>,
+) -> anyhow::Result<(u64, BTreeMap<String, usize>)> {
+    let hosts = message_reads::relay_hosts(&state.store)?;
+    if hosts.is_empty() {
+        return Ok((0, BTreeMap::new()));
     }
-    Ok(fractal_client::MailBacklog {
-        count: store
-            .unread_mail_count_before(now.saturating_sub(u128::from(THRESHOLD_MS)))?
-            .saturating_sub(
-                store.held_mail_count_before(now.saturating_sub(u128::from(THRESHOLD_MS)))?,
-            ),
-        threshold_ms: THRESHOLD_MS,
-        cleanup_command: CLEANUP_COMMAND.into(),
-    })
+    let host_of = hosts
+        .iter()
+        .flat_map(|(host, seats)| seats.iter().map(move |seat| (seat.clone(), host.clone())))
+        .collect::<BTreeMap<_, _>>();
+    let unread = state
+        .store
+        .readers
+        .get()
+        .prepare_cached(
+            "SELECT unread.subject, json_extract(sent.body,'$.fields.to') FROM unread_mail unread
+             JOIN claims sent ON sent.subject=unread.subject AND sent.kind='message.sent'
+             WHERE unread.sent_time < ?1
+               AND json_extract(sent.body,'$.fields.to') IN (SELECT value FROM json_each(?2))
+               AND NOT EXISTS(SELECT 1 FROM coordination_sends held WHERE held.subject=unread.subject AND held.held=1)
+             LIMIT ?3",
+        )?
+        .query_map(
+            rusqlite::params![
+                i64::try_from(before).unwrap_or(i64::MAX),
+                serde_json::to_string(&host_of.keys().collect::<Vec<_>>())?,
+                RELAYED_BACKLOG as i64,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut asks = BTreeMap::<String, Vec<String>>::new();
+    for (subject, to) in unread {
+        if let Some(host) = host_of.get(&to) {
+            asks.entry(host.clone()).or_default().push(subject);
+        }
+    }
+    let mut settled = 0;
+    let mut unknown = BTreeMap::<String, usize>::new();
+    for relayed in message_reads::read_blocking(runtime, state, asks, message_reads::CHECK_DEADLINE)
+        .into_values()
+    {
+        match relayed {
+            message_reads::Relayed::Unknown { host, .. } => *unknown.entry(host).or_default() += 1,
+            answer => settled += u64::from(matches!(answer.status(), Some("read" | "closed"))),
+        }
+    }
+    Ok((settled, unknown))
 }
 
 pub async fn get(
@@ -92,7 +194,7 @@ pub async fn get(
     Extension(session): Extension<client_v0::ClientSession>,
 ) -> Result<Json<fractal_client::MailBacklog>, ApiError> {
     client_v0::require_scope(&session, "read.projections")?;
-    blocking_store(move || report(&state.store, client_now_ms()))
+    blocking_store(move || report(&state, client_now_ms()))
         .await
         .map(Json)
 }
@@ -119,11 +221,12 @@ pub async fn cleanup(
         )));
     }
     let dry_run = request.dry_run;
+    let reader = state.clone();
     let store = state.store.clone();
     let result = blocking_api(move || {
         let to = request.to.as_deref().map(normalize_message_party);
         let messages = overdue(
-            &store,
+            &reader,
             client_now_ms(),
             request.older_than_ms,
             to.as_deref(),
@@ -206,7 +309,7 @@ mod tests {
             ).unwrap();
             assert_eq!(state.store.coordination_backfill_status().unwrap().2, complete);
             assert_eq!(
-                serde_json::to_value(report(&state.store, now).unwrap()).unwrap(),
+                serde_json::to_value(report(&state, now).unwrap()).unwrap(),
                 json!({
                     "count": 0,
                     "threshold_ms": 3_600_000,
@@ -243,7 +346,7 @@ mod tests {
                 idempotency_key: None,
             })
             .unwrap();
-        assert_eq!(report(&state.store, now).unwrap().count, 0);
+        assert_eq!(report(&state, now).unwrap().count, 0);
         let Json(result) = cleanup(
             State(state.clone()),
             Json(CleanupRequest {
@@ -351,7 +454,7 @@ mod tests {
             }
         }
         state.store.set_write_clock_at(now).unwrap();
-        assert_eq!(report(&state.store, now).unwrap().count, 4);
+        assert_eq!(report(&state, now).unwrap().count, 4);
         let Json(doctor) = doctor_report(&state).unwrap();
         let warning = doctor
             .checks
@@ -371,7 +474,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(preview["count"], 5);
-        assert_eq!(report(&state.store, now).unwrap().count, 4);
+        assert_eq!(report(&state, now).unwrap().count, 4);
         let Json(selected) = cleanup(
             State(state.clone()),
             Json(request(false, Some("agent/example/retired".into()))),
@@ -387,7 +490,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repeat["count"], 0);
-        assert_eq!(report(&state.store, now).unwrap().count, 0);
+        assert_eq!(report(&state, now).unwrap().count, 0);
         let Json(doctor) = doctor_report(&state).unwrap();
         assert_eq!(
             doctor

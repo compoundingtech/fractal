@@ -66,7 +66,7 @@ endpoints describe routes, not grants or live reachability. This endpoint remain
 a read-only membership projection and does not start or renew leave grace.
 
 On Linux worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
-`/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
+`/v1/internal/seat-freshness/reads`, `/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
 Unix connector's kernel-observed process generation with the replication worker.
 Services use the supervisor-observed worker; foreground operation uses the explicitly
 enrolled process. An unrelated unbound process is not a worker.
@@ -383,6 +383,21 @@ mail hold read the latest of the replicated report, the local log, and that time
 A member that doesn't advertise the feature is never pushed to, and it keeps reading replicated
 re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the
 route records nothing. Its peers read the replicated report, as before.
+
+Reads on the same relay, `POST /v1/peer/seat-freshness/reads`, go the other way: a member asks a
+seat's host how far its seats got with some messages, and the host answers. A consumer's
+delivery, read and close of a message stay on its host and never replicate (`local_message_marks`
+for graph mail, `stream_lifecycle` for a stream item), so this is how another member learns them.
+- A read is one tagged operation, `{"op":"message_marks","messages":[…]}`, naming up to 512
+  messages. A later operation joins the same route.
+- A member asks only a host whose own newest `daemon.started` advertises
+  `features.seat_freshness_reads = 1`. That's a key of its own: released members push seat
+  freshness only to `seat_freshness = 1`.
+- The host answers each message in order: whether it holds it, and the marks of the seats its
+  declarations place on it. The asker drops any mark for a seat it doesn't place on that host.
+- Nothing is pushed or kept. A host that doesn't answer within the asker's deadline reads as
+  unknown, never as sent.
+- A bound harness is refused on the daemon's `/v1/internal/seat-freshness/reads`, as on the push.
 
 Writers emit only three-field child IDs. At the link boundary, readers still accept
 two-field native-parent/task links because open or bookmarked links can outlive the
