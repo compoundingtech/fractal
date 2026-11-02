@@ -65,18 +65,36 @@ a transport temporarily remains available for leave completion. Published
 endpoints describe routes, not grants or live reachability. This endpoint remains
 a read-only membership projection and does not start or renew leave grace.
 
-On Linux the daemon observes worker-only routes (`/v1/internal/replication/*`,
-`/v1/internal/seat-freshness`, `/v1/internal/seat-snapshot` and
-`/v1/internal/client-read/forward`) against the Unix connector's process
-generation. Services use the supervisor-observed worker; foreground operation
-uses the explicitly enrolled process. This preparatory observation logs
-would-refuse requests without changing route admission. On macOS no socket-bound
-process-generation witness is available: these routes retain existing admission
-and emit `unverified-platform`, not an authentication success. The unbound local
-caller authority gap remains open on macOS. `LOCAL_PEERPID` and `LOCAL_PEERTOKEN`
-resolve through a live numeric PID; after PID reuse they can attribute a surviving
-socket to the wrong worker. Operator fleet routes retain their existing local
-authority boundary.
+On Linux worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
+`/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
+Unix connector's kernel-observed process generation with the replication worker.
+Services use the supervisor-observed worker; foreground operation uses the explicitly
+enrolled process. An unrelated unbound process is not a worker.
+
+The optional top-level daemon TOML key `worker_ingress_generation_check` accepts
+exactly `"observe"` or `"enforce"`; omission means `"observe"`. Unknown values fail
+configuration parsing at startup. Changing the mode requires restarting the daemon.
+In observe mode, unavailable or nonmatching evidence logs
+`fractal: worker authority observation would refuse ROUTE` and admits the request.
+Observe does not close the unbound local caller authority gap.
+In enforce mode, authentication precedes body decoding and unavailable or nonmatching
+process/supervisor evidence fails closed. Re-observation admits a restarted supervised
+worker and revokes its predecessor, including inherited connections.
+
+Deploy with observe first. Before enabling enforce on a member, retain at least
+24 hours of journal evidence covering replication and the other worker-only route
+classes, including worker restarts. Review unexpected would-refuse entries before
+changing that member's configuration; roll enforcement out one member at a time.
+
+On macOS these routes retain existing admission and emit `unverified-platform`,
+not an authentication success. The unbound local caller authority gap remains
+open: `LOCAL_PEERPID` and `LOCAL_PEERTOKEN` resolve through a live numeric PID;
+after PID reuse they can attribute a surviving socket to the wrong worker.
+
+This Linux boundary does not protect against same-UID service-manager takeover or
+ptrace of the trusted worker. User-service ownership and process debugging
+remain host trust assumptions; process pinning is not a separate-user sandbox.
+Operator fleet routes retain their existing local authority boundary.
 
 
 Adapters that retain a departing member's transport must instead make their
@@ -295,7 +313,7 @@ exceptions. Status reports a graph digest over the complete projection registry,
 plus one digest for every table. The original six-table hash remains a compatibility field on
 the peer protocol; it cannot prove that every shared outcome agrees.
 
-Shared reducers use `store/canonical.rs`. `canonical_sql` expands `CANONICAL_ASC(ALIAS)` and
+Shared reducers use `crates/smallclaims/src/store/canonical.rs`. `canonical_sql` expands `CANONICAL_ASC(ALIAS)` and
 `CANONICAL_DESC(ALIAS)` in a query; `CANONICAL_ORDER` and its descending counterpart format the
 same order for existing claim queries. In-memory comparisons use `claim_key` or
 `key_from_record`, and claim-to-claim predicates use `after_sql`. Legacy batch position is its
@@ -371,6 +389,27 @@ two-field native-parent/task links because open or bookmarked links can outlive 
 gateway version that generated them. The reader derives the root routing session from
 the native parent (recursively for descendants), then uses the current internal shape.
 This does not add a legacy writer or relax transcript ownership and path validation.
+
+## The messages shard
+
+Each daemon also opens a second store beside its database, the messages shard
+(`shards/messages/claims.sqlite3`), and replicates it on the same listener and worker. An
+exchange names it with `shard_id = "messages"`; the default store's exchanges omit the field.
+
+- **Who is dialed.** A member dials a peer for the shard only when that peer's newest
+  `daemon.started` in its current incarnation carries `features.messages_stream=1`. A member
+  on an older release is never dialed for it, and its graph sync is unchanged. A peer that
+  answers for another store, or refuses the exchange with `shard-mismatch`, parks that route
+  until the peer set changes.
+- **Authority.** The shard holds no fleet claims. It takes its fleet id and membership from
+  the graph. Its envelopes sign `st3-shard-envelope-v1` over the shard ID, so a signature made
+  for the graph never counts in the shard or the other way round. A keyed member's shard
+  envelope needs a signature in that domain by a key of one of its non-removed incarnations; a
+  writer without membership is judged as the graph judges it.
+- **Contents.** One immutable `message.sent` per message, written by an agent or the daemon.
+  A person's device-signed message and an external assistant's message stay graph claims.
+- **No checkpoint.** Nothing in the shard is superseded, so it is never sealed or trimmed and
+  has no checkpoint or answers routes.
 
 ## Rolling upgrades and waiting claims
 
@@ -454,14 +493,10 @@ and graph/table convergence after upgrading the older registry.
 
 ## Projection digest coverage and cost
 
-`store/projection_digest.rs::TABLES` lists 24 shared tables:
-
-`operations`, `blobs`, `documents`, `desired`, `arrangements`, `arrangement_registers`,
-`message_index`, `resource_observations`, `glass_heads`, `person_directive_notes`,
-`custom_registrations`, `custom_sources`, `custom_dependencies`, `mission_revisions`,
-`mission_definitions`, `mission_runs`, `mission_run_deadlines`, `mission_run_after`,
-`run_generations`, `step_runs`, `revision_proposals`, `planning_sessions`,
-`planning_candidates`, `planning_previews`.
+[`PROJECTION_DIGEST_TABLES` in `crates/fractal-store/src/store.rs`](../../crates/fractal-store/src/store.rs)
+is the production registry of shared tables and their excluded columns. Use that registry,
+rather than the test-only `store/projection_digest.rs::TABLES` alias, for the current inventory.
+`st replication status` prints a `table-digest` entry for each covered table.
 
 Every column joins the digest by default. Only document, message and mission-revision
 arrival indexes, `arrangements.changed_index`, and the effective step lease expiry/change
@@ -482,8 +517,7 @@ old claim row while another rejected it before admission; both exclude it from c
 and operation projections. The original wire bytes remain committed by authenticated envelope
 inventory, and the repair and replacement remain shared claim sources. A local
 `projection_digest_repaired_claims` cache retains the exclusion after receipt cleanup; repair
-record updates and cached source digests commit or roll back together. Registry version 5
-backfills existing repairs once, and operation rules version 2 rebuilds older operation rows.
+record updates and cached source digests commit or roll back together.
 
 Operations are logical rows over the hot operation table and operation facts retained in
 checkpoint tombstones. Trimming a claim changes its storage representation, preserving its
@@ -501,7 +535,7 @@ rollback and commit therefore change rows and cached digest state together. SHA-
 table name, column schema, count and sum; a sorted map of those table digests commits the graph.
 Shared columns are encoded in sorted name order, including the logical operation row. A fresh
 schema and an additive migration can place the same column at different physical positions;
-that layout does not change the digest. Registry version 6 rebuilds older physical-order caches.
+that layout does not change the digest.
 These are diagnostic digests; authenticated envelopes and signatures remain the replication
 integrity boundary. Work scales with changed row bytes, plus the fixed-size accumulator.
 Reading all table digests reads one small cache, independent of retained history size. Operations
@@ -536,7 +570,7 @@ This projection is independent of the claim/resource vocabulary and replication 
 ## Add any machine
 
 Install Fractal on the new machine and configure the person who operates it, as described in the
-[README](../getting-started.md#daemon-details). On an existing listening member, invite the new name:
+[installation guide](../site/getting-started/install.md#set-up-your-machine). On an existing listening member, invite the new name:
 
 ```sh
 st fleet invite beacon
@@ -1443,15 +1477,16 @@ with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only i
 sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
 drop as a capture of the whole store. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
-and the trimmed log: today `observer.observed` and `harness.observed`. Everything else is kept, as a protected claim is.
+and the trimmed log: today `observer.observed`, `harness.observed` and `resource.observed`. Everything
+else is kept, as a protected claim is.
 An envelope that holds a kept claim stays whole, with its payload and signatures, so peers can still
 fetch and verify it; a dropped claim inside it loses only this member's own copies (its claim row,
 raw record, signature and verdict rows; its stored position stays, as every position does), its ID goes into the retired ledger, and
 admitting the envelope again restores neither the claim nor its record. Shared checkpoints keep
-envelopes atomic. One audited
-rule stays out because a reader reads the history it drops, which no projection digest covers:
-`resource.observed`'s keeps only the newest observation of a GitHub pull request, and a watch walks
-those observations back to find when the pull request left the merge queue. `harness.observed`
+envelopes atomic. `resource.observed` keeps what its readers walk back through (rules version
+23), such as a pull request's observations back to the newest one outside "open and out of the
+merge queue", which the idle nudge walks to find when it left the queue; the test compares that
+walk, the folded state and the projection between the full and the trimmed log. `harness.observed`
 joined once its rule kept the credential report where a seat's needs-login run begins (rules
 version 24, see #4237). Two checks stand in for the
 proof. A plan that would drop the newest claim of any subject and kind is refused before anything

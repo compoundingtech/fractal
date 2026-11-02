@@ -18,6 +18,7 @@ use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
         notify: Arc::new(Notify::new()),
@@ -417,7 +418,7 @@ fn person_admission_exception_is_local_reversible_and_never_spawns_the_producer(
     std::fs::write(&producer, format!("#!/bin/sh\nprintf called > '{}'\nexit 1\n", marker.display())).unwrap();
     std::fs::set_permissions(&producer, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |action: &str, agent: bool| {
-        let mut command = std::process::Command::new(test_bin!("fractal"));
+        let mut command = std::process::Command::new(test_bin!("fractal-unstamped"));
         command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
             .arg("--json").args(["admission", action, "omp", "--binary"])
             .arg(&producer).arg("--state-dir").arg(root.path().join("state"));
@@ -474,6 +475,8 @@ async fn agent_lane_cli_prints_the_slice_the_runtime_gives_the_seat() {
     let json = value(&run_cli(&socket, &["agents", "lane", "agent/garden/builder"]).await);
     assert_eq!(json["slice"], slice.as_str(), "{json}");
     assert_eq!(json["agent"], "agent/garden/builder");
+    // And the lane's sccache server, which st-test gives a check it puts in the lane.
+    assert!(json.get("sccache_server_uds").is_some(), "{json}");
     let missing = run_cli_human(&socket, &["agents", "lane", "garden/nobody"]).await;
     assert!(!missing.status.success(), "{missing:?}");
     server.abort();

@@ -7,14 +7,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch;
 pub use fractal_store::store::mailbox_wakes::*;
 pub use fractal_store::store::mailbox_wakes::{Dependency, Registry, Subscription, Wakes};
+use fractal_store::store::messages_shard::mailbox_reads;
 
 const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The dispatcher's position: the graph's claims, its local observations, and the messages
+/// shard, whose items and local lifecycle are not graph claims.
+pub type WakeCursor = (u64, u64, mailbox_reads::StreamPosition);
 
 async fn dispatch(
     store: std::sync::Weak<Store>,
     wakes: Arc<Wakes>,
     mut events: watch::Receiver<u64>,
-    mut cursor: Option<(u64, u64)>,
+    mut cursor: Option<WakeCursor>,
 ) {
     let mut retrying = cursor.is_none();
     let mut retry = tokio::time::interval_at(tokio::time::Instant::now() + RETRY, RETRY);
@@ -95,11 +100,11 @@ pub trait MailboxWakesStore {
         ) -> Subscription;
     /// Local telemetry uses the existing doctor check shape; never claims or replicated state.
     fn mailbox_wake_health(&self) -> DoctorCheck;
-    fn mailbox_wake_cursor(&self) -> Result<(u64, u64)>;
+    fn mailbox_wake_cursor(&self) -> Result<WakeCursor>;
     fn mailbox_wake_batch(
             &self,
-            cursor: (u64, u64),
-        ) -> Result<((u64, u64), HashSet<Dependency>, bool)>;
+            cursor: WakeCursor,
+        ) -> Result<(WakeCursor, HashSet<Dependency>, bool)>;
 }
 
 impl MailboxWakesStore for Store {
@@ -156,20 +161,21 @@ impl MailboxWakesStore for Store {
         }
     }
 
-    fn mailbox_wake_cursor(&self) -> Result<(u64, u64)> {
+    fn mailbox_wake_cursor(&self) -> Result<WakeCursor> {
         let connection = self.readers.get();
-        Ok(connection
+        let (index, local) = connection
             .prepare_cached(
                 "SELECT COALESCE((SELECT MAX(store_index) FROM claims),0),
                     COALESCE((SELECT MAX(id) FROM local_observations),0)",
             )?
-            .query_row(/* sqlite-large-value: allow-for-now lv-hb895da732cc2 owner=fractal_delivery::store::mailbox_wakes TODO=trace-statement-and-value-representation */ [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-hb895da732cc2 owner=fractal_delivery::store::mailbox_wakes TODO=trace-statement-and-value-representation */ [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok((index, local, mailbox_reads::position(self)?))
     }
 
     fn mailbox_wake_batch(
             &self,
-            cursor: (u64, u64),
-        ) -> Result<((u64, u64), HashSet<Dependency>, bool)> {
+            cursor: WakeCursor,
+        ) -> Result<(WakeCursor, HashSet<Dependency>, bool)> {
         let connection = self.readers.get();
         let mut dependencies = HashSet::new();
         let mut next = cursor;
@@ -215,7 +221,16 @@ impl MailboxWakesStore for Store {
             next.1 = id;
             dependencies.insert(Dependency::Subject(subject));
         }
-        Ok((next, dependencies, graph_full || local_full))
+        // A stream item's arrival or local receipt wakes its recipient and its subject.
+        let (stream, changed, stream_full) = mailbox_reads::wake_batch(self, cursor.2, 1024)?;
+        next.2 = stream;
+        for (subject, recipient) in changed {
+            if !recipient.is_empty() {
+                dependencies.insert(Dependency::Recipient(normalize_message_party(&recipient)));
+            }
+            dependencies.insert(Dependency::Subject(subject));
+        }
+        Ok((next, dependencies, graph_full || local_full || stream_full))
     }
 }
 

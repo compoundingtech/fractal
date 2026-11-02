@@ -34,8 +34,10 @@ class CiLocal(unittest.TestCase):
         (self.bin / 'cargo').chmod(0o755)
         (self.work / 'scripts/ci-install-built-hooks').write_text(RECORD)
         # nix and the compat-binary script stand in for CI's test-build preparation (they record that they ran).
+        # A path nix has valid is what CI_LOCAL_TEST_NIX_VALID names (none unless a test says so).
         (self.bin / 'nix').write_text('#!/usr/bin/env bash\necho "nix $*" >> "$CI_LOCAL_TEST_LOG.prep"\n'
-                                      'case "$1" in eval) printf x86_64-linux ;; build) echo /nix/store/components ;; esac\n')
+                                      'case "$1 ${3:-}" in "eval "*.outPath) printf /nix/store/components ;; eval*) printf x86_64-linux ;;\n'
+                                      '  "path-info "*) [ "$2" = "${CI_LOCAL_TEST_NIX_VALID:-}" ] ;; build*) echo /nix/store/components ;; esac\n')
         (self.bin / 'nix').chmod(0o755)
         (self.work / 'scripts/messaging-compat-binary').write_text('echo compat >> "$CI_LOCAL_TEST_LOG.prep"; echo /compat/fractal\n')
         self.home = root / 'account home'
@@ -107,6 +109,23 @@ class CiLocal(unittest.TestCase):
         self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
         self.assertEqual(calls[-1]['env']['BUILD_ADMISSION_LOG'], '/elsewhere/build-admission.log')  # beside the state it names
 
+    def test_a_compile_in_the_lane_straight_after_a_check_there_succeeds(self):
+        # sccache's client starts the server its socket names when none answers there, and the server keeps the client's TMPDIR for
+        # every compile after. The stage stands in for such a compile: it starts the lane's server unless one runs, recording its TMPDIR.
+        socket = Path(self.tmp.name) / 'sccache-lane-x.sock'
+        compile_ = RECORD + 'if [ -n "${SCCACHE_SERVER_UDS:-}" ] && [ ! -e "$SCCACHE_SERVER_UDS" ]; then echo "$TMPDIR" > "$SCCACHE_SERVER_UDS"; fi\n'
+        done, calls = self.run_local('tests', ci_linux=compile_, SCCACHE_SERVER_UDS=str(socket), SCCACHE_DIR='/lane/cache')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertNotIn('SCCACHE_SERVER_UDS', call['env'])
+            self.assertNotIn('SCCACHE_DIR', call['env'])
+        # The seat's next compile in the lane: a server the run started would compile in a TMPDIR the run has removed
+        # ("Failed to create temp dir"); with none, the seat's compile starts the lane's server in its own.
+        self.assertFalse(socket.exists() and not Path(socket.read_text().strip()).is_dir(),
+                         'the lane\'s server was started inside the run and its TMPDIR is gone')
+        self.assertFalse(socket.exists(), 'no server was started inside the run')
+
     def test_the_stages_build_without_debug_info_as_ci_does(self):
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_PROFILE_TEST_DEBUG='1')
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -136,10 +155,10 @@ class CiLocal(unittest.TestCase):
             self.assertNotIn('RUSTC_WRAPPER', env)
             self.assertNotIn('CARGO_BUILD_RUSTC_WRAPPER', env)
             for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
-                         'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST3_OTELITE_BIN'):
+                         'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST2_OTELITE_BIN', 'ST3_OTELITE_BIN'):
                 self.assertNotIn(name, env)
             # The dev shell's collector for the OTLP export tests stays, as in CI; the same name pointing anywhere else does not.
-            self.assertEqual((env.get('ST2_OTELITE_BIN'), env.get('FRACTAL_OTELITE_BIN')), ('/nix/store/x-otelite/bin/otelite',) * 2)
+            self.assertEqual(env.get('FRACTAL_OTELITE_BIN'), '/nix/store/x-otelite/bin/otelite')
             # Kept: the dependency cache, the build admission's runtime directory, and the saved dev shell environment.
             # CARGO_REAL is the dev shell's cargo: not the shim first on PATH, not the cargo in the account's home.
             self.assertEqual((env['CARGO_HOME'], env['RUSTUP_HOME'], env['CARGO_REAL'], env['XDG_RUNTIME_DIR']),
@@ -184,6 +203,26 @@ class CiLocal(unittest.TestCase):
         self.assertGreaterEqual(int(seconds), 2)
         run, = logs.glob('run-*')
         self.assertIn('compiling', (run / 'tests.log').read_text())
+
+    def test_a_stage_s_wait_at_the_admission_gate_after_its_slot_is_queue_time_too(self):
+        events = Path(self.tmp.name) / 'queue-events'
+        # The cargo shim holds its slot, then waits at the admission gate, which prints no end: the build's own output ends the wait.
+        queue = ('#!/usr/bin/env bash\necho "cargo: waiting in order for a host build slot (all 6 busy)"\nsleep 1.1\n'
+                 'echo "cargo: got build slot 0 and a heavy slot"\n'
+                 'echo "build-admission: cargo:build waits to start: 2 build(s) ahead (2 ahead, waited 0 s)" >&2\nsleep 2.1\n'
+                 'echo "   Compiling fractal v0.1.0"\nsleep 1.1\necho done\n')
+        done, _ = self.run_local('tests', ci_linux=queue, CI_LOCAL_QUEUE_LOG=str(events))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        row, = [line for line in done.stdout.splitlines() if line.startswith('ci-local:   tests')]
+        waits, seconds = re.search(r'queue: (\d+) waits, (\d+)s', row).groups()
+        self.assertEqual(waits, '2')
+        self.assertGreaterEqual(int(seconds), 3)
+        self.assertLess(int(seconds), int(re.search(r'(\d+)s +exit', row).group(1)))  # the compile after it ran
+        self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] tests: waiting for build admission', done.stdout)), 1)
+        lines = [line.split(' ') for line in events.read_text().splitlines()]
+        self.assertEqual([(kind, stage) for kind, _, stage in lines], [('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests')])
+        at = [int(when) for _, when, _ in lines]
+        self.assertGreaterEqual(at[3] - at[2], 2)
 
     def test_each_wait_for_a_build_slot_is_written_as_it_starts_and_ends_to_the_queue_log(self):
         events = Path(self.tmp.name) / 'queue-events'
@@ -493,23 +532,17 @@ class CiLocal(unittest.TestCase):
         if shutil.which('nice'):
             self.assertEqual(int(Path(f"{self.log}.nice").read_text()), min(os.nice(0) + 10, 19))
 
-    def test_keyed_defaults_and_explicit_values_pass_through_ci_local(self):
-        # linux-clippy's local run no longer has an entry of its own: scripts/st-test runs `ci-local clippy` unkeyed and
-        # scripts/ci-clippy-result checks the policy after the stage (docs/keyed-clippy.md, PR 2).
-        for entry, stage, variable in (('ci-fleet-compat-keyed', 'fleet-compat', 'CI_KEYED_FLEET_COMPAT_POLICY'),):
-            shutil.copy(ROOT / 'scripts' / entry, self.work / 'scripts' / entry)
-            for explicit in (None, '', '.st/evidence-skip-policy.json', '/custom/policy.json'):
-                with self.subTest(entry=entry, explicit=explicit):
-                    extra = {} if explicit is None else {variable: explicit}
-                    done, calls = self.run_local(entry=entry, CLIPPY_BASE_SHA='f' * 40, **extra)
-                    self.assertEqual(done.returncode, 0, done.stderr)
-                    self.assertEqual(calls[-1]['env'][variable], 'auto:.st/evidence-skip-policy.json' if explicit is None else explicit)
-                    self.assertEqual(calls[-1]['argv'], [stage])
-                    self.log.unlink()
-            done, calls = self.run_local(stage, CLIPPY_BASE_SHA='f' * 40)
-            self.assertEqual(done.returncode, 0, done.stderr)
-            self.assertNotIn(variable, calls[-1]['env'], 'ordinary linux-gate stages stay unkeyed')
-            self.log.unlink()
+    def test_ordinary_clippy_and_fleet_compat_stages_stay_unkeyed(self):
+        # Neither keyed check has a local entry of its own any more: scripts/st-test runs `ci-local clippy` / `ci-local fleet-compat` unkeyed
+        # and scripts/ci-clippy-result / ci-fleet-compat-result check the policy after the stage (docs/keyed-clippy.md). Only CI's keyed
+        # jobs name the policy.
+        for stage in ('clippy', 'fleet-compat'):
+            with self.subTest(stage=stage):
+                done, calls = self.run_local(stage, CLIPPY_BASE_SHA='f' * 40)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                for variable in ('CI_KEYED_CLIPPY_POLICY', 'CI_KEYED_FLEET_COMPAT_POLICY'):
+                    self.assertNotIn(variable, calls[-1]['env'], 'ordinary linux-gate stages stay unkeyed')
+                self.log.unlink()
 
     def test_keyed_consumer_selects_missing_only_without_running_compiles(self):
         source = (ROOT / 'scripts/ci-linux').read_text()
@@ -595,6 +628,45 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertFalse(prep.exists(), 'no tests stage: nothing is prepared')
         self.assertNotIn('ST2_GITHUB_PR_COMPONENT', calls[-1]['env'])
+
+    def test_built_provider_components_are_used_without_a_build_and_its_heavy_admission(self):
+        done, calls = self.run_local('tests', CLIPPY_BASE_SHA='f' * 40, CI_LOCAL_TEST_NIX_VALID='/nix/store/components')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(calls[-1]['env']['ST2_VISTA_COMPONENT'], '/nix/store/components/share/st2/providers/st2_vista_component.component.wasm')
+        prep = Path(f'{self.log}.prep').read_text().splitlines()
+        self.assertIn('nix eval --raw .#checks.x86_64-linux.provider-components.outPath', prep)
+        self.assertIn('nix path-info /nix/store/components', prep)
+        self.assertFalse([line for line in prep if line.startswith('nix build')], prep)
+        # A path nix does not have valid (another tree's components, or one collected) is built as before, through the heavy build.
+        Path(f'{self.log}.prep').unlink()
+        done, calls = self.run_local('tests', CLIPPY_BASE_SHA='f' * 40, CI_LOCAL_TEST_NIX_VALID='/nix/store/other')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('nix build .#checks.x86_64-linux.provider-components --no-link --print-out-paths', Path(f'{self.log}.prep').read_text())
+        self.assertEqual(calls[-1]['env']['ST2_VISTA_COMPONENT'], '/nix/store/components/share/st2/providers/st2_vista_component.component.wasm')
+
+    def test_the_setup_s_build_admission_waits_are_its_queue_and_written_to_the_queue_log(self):
+        events = Path(self.tmp.name) / 'queue-events'
+        # The hooks build waits for a slot, then at the admission gate, which prints no end: the build's own output ends it.
+        (self.bin / 'cargo').write_text('#!/usr/bin/env bash\n'
+                                        'if [ "$1" = build ]; then echo "cargo: waiting in order for a host build slot (all 6 busy)" >&2; sleep 1.1\n'
+                                        '  echo "cargo: got build slot 2 and a heavy slot" >&2\n'
+                                        '  echo "build-admission: cargo:build waits to start: 2 build(s) ahead (2 ahead, waited 0 s)" >&2; sleep 1.1\n'
+                                        '  echo "build-admission: cargo:build waits to start: ramp (0 ahead, waited 60 s)" >&2; sleep 1.1\n'
+                                        '  echo "    Finished dev profile" >&2; sleep 1.1; fi\n' + RECORD.split('\n', 1)[1])
+        done, _ = self.run_local('mail-redelivery-canaries', CI_LOCAL_QUEUE_LOG=str(events))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        row, = [line for line in done.stdout.splitlines() if line.startswith('ci-local:   setup')]
+        waits, seconds = re.search(r'queue: (\d+) waits, (\d+)s$', row).groups()
+        self.assertEqual(waits, '2')
+        # The two waits, not the second after Finished: that ran.
+        self.assertGreaterEqual(int(seconds), 3)
+        self.assertLessEqual(int(seconds), int(re.search(r'(\d+)s +queue', row).group(1)) - 1)
+        self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] setup: waiting for build admission', done.stdout)), 1)
+        self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] setup: admitted', done.stdout)), 1)
+        lines = [line.split(' ') for line in events.read_text().splitlines()]
+        self.assertEqual([(kind, stage) for kind, _, stage in lines], [('wait', 'setup'), ('slot', 'setup'), ('wait', 'setup'), ('slot', 'setup')])
+        at = [int(when) for _, when, _ in lines]
+        self.assertGreaterEqual(at[3] - at[2], 2)  # the admission wait lasted its two seconds
 
     def test_a_failed_hook_install_runs_no_stage(self):
         (self.work / 'scripts/ci-install-built-hooks').write_text('exit 9\n')

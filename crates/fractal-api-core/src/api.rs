@@ -238,6 +238,8 @@ pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
     pub store: Arc<Store>,
+    /// Process-local seat admission observations, never replicated as graph claims.
+    pub seat_admission: Arc<fractal_runtime::seat_admission_status::Status>,
     pub private_notes: Arc<crate::private_notes::Authority>,
     pub notify: Arc<Notify>,
     pub event_notify: watch::Sender<u64>,
@@ -382,9 +384,19 @@ pub fn signal_changed(state: &AppState) {
     signal_visible_change(state);
 }
 
-/// The reconciler reads a message only when it is a work wake, tagged `st3-work:`.
+/// The reconciler reads a message only when it carries a work-wake tag.
 pub fn is_work_wake(tags: &[String]) -> bool {
-    tags.iter().any(|tag| tag.starts_with("st3-work:"))
+    crate::silent::message_tag_values(tags.iter().map(String::as_str), "work:")
+        .next()
+        .is_some()
+}
+
+#[test]
+fn work_wake_prefixes() {
+    for prefix in ["st3-", "fractal-"] {
+        assert!(is_work_wake(&[format!("{prefix}work:step-run/r/s@1@1@x")]));
+    }
+    assert!(!is_work_wake(&["fractal-work-handoff:r/s".into()]));
 }
 
 /// A message write wakes the reconciler only for a work wake, since the reconciler reads no other
@@ -557,6 +569,29 @@ pub fn router(state: AppState) -> Router {
 /// routes listed here. `router` without them is the route table this crate alone answers.
 pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
 
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestMessageMark {
+    message: String,
+    kind: String,
+    consumer: String,
+}
+
+/// Test support: record a consumer's local mark of a graph message, as 4b-2's consumers will.
+#[cfg(feature = "test-support")]
+async fn test_record_message_mark(
+    State(state): State<AppState>,
+    Json(mark): Json<TestMessageMark>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    let store = state.store.clone();
+    let (receipt, _) = blocking_action(move || {
+        crate::store::message_marks::record(&store, &mark.message, &mark.kind, &mark.consumer)
+    })
+    .await?;
+    signal_visible_change(&state);
+    Ok(Json(receipt))
+}
+
 /// [`router`] with the route families of the crates above.
 pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
@@ -675,6 +710,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
+        .route("/v1/agents/rename-id/proof/export", post(agents::export_agent_rename_proof))
+        .route("/v1/missions/rename-id/proof/export", post(agents::export_mission_rename_proof))
+        .route("/v1/fleet/anchor", get(fleet::fleet_anchor))
         .route("/v1/agents/restart", post(agents::restart_agent))
         .route("/v1/agents/rollout", post(agents::rollout_agent))
         .route("/v1/agents/start", post(agents::start_mission_seat))
@@ -783,6 +821,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
         .route("/v1/signatures/resume", post(replication::signature_resume))
+        .route("/v1/faults/dismiss", post(records::dismiss_fault))
         .route(
             "/v1/internal/replication/export",
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
@@ -856,6 +895,26 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(fleet::fleet_publish_endpoints),
         )
         .route("/v1/internal/replication-wake", post(replication::replication_wake))
+        .route(
+            "/v1/internal/replication/shard/{shard}/peers",
+            get(replication::shard_replication_peers),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/export",
+            post(replication::shard_replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/receive",
+            post(replication::shard_replication_receive).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/peer-failure",
+            post(replication::shard_replication_peer_failure),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/wake",
+            post(replication::shard_replication_wake),
+        )
         .route(
             crate::peer::CLIENT_READ_FORWARD_PATH,
             post(forward_client_read).layer(DefaultBodyLimit::max(16_384)),
@@ -949,6 +1008,17 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/hosts/{host}/agent-workspace",
             get(host_agent_workspace),
         );
+    // Tests reach the messages shard before anything in the product writes to it.
+    #[cfg(feature = "test-support")]
+    let app = app
+        .route(
+            "/v1/internal/test/messages-shard",
+            get(replication::test_shard_items).post(replication::test_shard_append),
+        )
+        // The worker-only peers route refuses a test caller; this reads the same answer.
+        .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
+        // Nothing records a message mark until consumers switch (4b-2); tests record one here.
+        .route("/v1/internal/test/message-marks", post(test_record_message_mark));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
@@ -3152,11 +3222,13 @@ pub fn client_agent_cards_selected(
         add_agent_todos(store, &mut cards, index)?;
         Ok(cards)
     };
-    if chunk {
-        store.cached_agent_resources_chunk(index, history, selected, build)
-    } else {
-        store.cached_agent_resources_for(index, history, Some(selected), build)
-    }
+    pinned_unless_enclosed(store, || {
+        if chunk {
+            store.cached_agent_resources_chunk(index, history, selected, build)
+        } else {
+            store.cached_agent_resources_for(index, history, Some(selected), build)
+        }
+    })
 }
 
 fn client_agent_cards_from_cached(
@@ -3534,14 +3606,16 @@ fn client_agent_resources_selected(
     snapshot_index: u64,
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
-        changed.map(|(subjects, _)| subjects), snapshot_index, history,
-    ))?;
-    client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+    pinned_unless_enclosed(store, || {
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
+            changed.map(|(subjects, _)| subjects), snapshot_index, history,
+        ))?;
+        client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+    })
 }
 
-/// Every agent card at `snapshot_index` of a quiet store, folded as the roster folds them but
-/// outside a read snapshot: on a store just opened, nothing is kept yet, as at a daemon start.
+/// Every agent card at `snapshot_index` of a quiet store, with no enclosing read snapshot
+/// and no retained cards, as at a daemon start. The selected fold pins its own snapshot.
 /// For load measurements; it returns how many cards it folded.
 #[doc(hidden)]
 pub fn cold_agent_roster_rebuild(store: &Store, snapshot_index: u64) -> anyhow::Result<usize> {
@@ -4768,7 +4842,32 @@ fn message_delivery_value(store: &Store, to: &str, status: &str, sent_at: u128, 
     }))
 }
 
+/// The host a stream item's recipient seat runs on, when that is not this one. Its receipts are
+/// that member's local lifecycle, in its own shard, so this member cannot see how far it got.
+fn stream_item_recipient_elsewhere(store: &Store, message: &MessageView) -> anyhow::Result<Option<String>> {
+    if !crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
+        return Ok(None);
+    }
+    let owners = store.desired_subjects_named(std::slice::from_ref(&message.to))?;
+    Ok(owners
+        .first()
+        .and_then(|owner| owner.member.as_ref())
+        .map(|member| member.host.clone())
+        .filter(|host| host != store.origin()))
+}
+
+/// A stream item's status is this member's own lifecycle for it, so for a seat on this host it
+/// is labelled as graph mail is. For a seat on another host it is `unknown`: that host keeps
+/// the receipts, and claiming sent or delivered here would be a guess.
 fn message_delivery_for(store: &Store, message: &MessageView, sent_at: u128, now: u128) -> anyhow::Result<Value> {
+    if let Some(host) = stream_item_recipient_elsewhere(store, message)? {
+        return Ok(json!({
+            "state": "unknown", "phase": "unknown",
+            "reason": format!("the recipient's seat runs on {host}, which keeps this message's receipts"),
+            "age_ms": now.saturating_sub(sent_at),
+            "recipient_delivery": delivery_presence::known(&message.to).map(|path| path.to_value()),
+        }));
+    }
     let mut delivery = message_delivery_value(store, &message.to, &message.status, sent_at, now)?;
     if !matches!(message.status.as_str(), "sent" | "staged") { return Ok(delivery); }
     let Some(runtime) = store.latest_claim(&message.to, Some("runtime.observed"))? else {
@@ -7122,6 +7221,7 @@ pub async fn guard_bound_request(
         "/v1/rules/",
         "/v1/repair",
         "/v1/signatures/",
+        "/v1/faults/",
         "/v1/checkpoint/",
     ]
     .iter()
@@ -7168,8 +7268,25 @@ pub async fn serve_tcp(address: &str, app: Router) -> anyhow::Result<()> {
 }
 
 
+pub fn admission_now() -> u64 {
+    (client_now_ms() / 1_000).min(u128::from(u64::MAX)) as u64
+}
+
+/// Attach process-local admission facts only at a current API response boundary.
+pub fn overlay_seat_admission(state: &AppState, items: &mut [Value], history: bool) {
+    if history { return; }
+    let now = admission_now();
+    for item in items {
+        let admission = item["id"].as_str()
+            .and_then(|subject| state.seat_admission.subject(subject, now));
+        if let Some(admission) = admission {
+            item["seat_admission"] = admission;
+        }
+    }
+}
+
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({
+    let mut health = json!({
         "status": "ready",
         "node": state.node,
         "version": env!("CARGO_PKG_VERSION"),
@@ -7177,8 +7294,16 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":1},
-    })))
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
+    });
+    // How far this member's messages stream has come. Absent when it holds no shard, so a
+    // client that waits on both indexes knows there is only the graph to wait on.
+    if let Some(index) = crate::store::messages_shard::stream_reads::stream_index(&state.store)
+        .map_err(ApiError::internal)?
+    {
+        health["messages_store_index"] = json!(index);
+    }
+    Ok(Json(health))
 }
 
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {
@@ -7438,7 +7563,7 @@ fn stale_attention_check(items: &[crate::model::AttentionItemView], now: u128) -
         name: "attention-age".into(),
         status: "warn".into(),
         message: format!(
-            "{} alerts and faults have been open for more than a day; `st alerts ls --as PERSON` shows how to close a person's alert, and a fault closes at its source: {}",
+            "{} alerts and faults have been open for more than a day; `st alerts ls --as PERSON` shows how to close a person's alert, and a fault closes at its source, or with `st missions dismiss-fault` once its run has ended: {}",
             stale.len(),
             listed.join("; ")
         ),
@@ -7788,89 +7913,323 @@ fn terminal_exec_gates_check(store: &Store) -> anyhow::Result<DoctorCheck> {
     })
 }
 
-pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
-    let drift = state.store.operation_projection_drift();
-    doctor_report_with_operation_drift(state, &drift)
+/// All of doctor's store checks together, inside the client's 120 s request limit with room
+/// for the checks outside the store.
+pub(crate) const DOCTOR_TOTAL: Duration = Duration::from_secs(60);
+/// One check's share of it. A check past its deadline reports `timeout`, and the rest still run.
+pub(crate) const DOCTOR_CHECK: Duration = Duration::from_secs(15);
+
+/// Deadlines for doctor's checks. Each check reads under a child of doctor's budget, so the
+/// store's read interrupt ends a slow check without ending the report. The deadline stops store
+/// reads and lock waits only: a check's filesystem and runtime observations run to their end,
+/// and the check is then reported as timed out.
+pub(crate) struct DoctorClock {
+    total: smallclaims::read_budget::ReadBudget,
+    check: Duration,
 }
 
+impl DoctorClock {
+    pub(crate) fn new(total: Duration, check: Duration) -> Self {
+        let total = match smallclaims::read_budget::current() {
+            Some(request) => request.child(total),
+            None => smallclaims::read_budget::ReadBudget::new("/v1/doctor", total),
+        };
+        Self { total, check }
+    }
+
+    /// Run one check under its own deadline. A check whose deadline passed reports `timeout`
+    /// with its elapsed time, whatever it returned; an error fails this check alone.
+    pub(crate) fn checks(
+        &self,
+        name: &str,
+        work: impl FnOnce() -> Result<Vec<DoctorCheck>, ApiError>,
+    ) -> Vec<DoctorCheck> {
+        if self.total.expired() {
+            return vec![DoctorCheck {
+                name: name.into(),
+                status: "timeout".into(),
+                message: "not run: doctor's checks used all their time".into(),
+            }];
+        }
+        let budget = self.total.child(self.check);
+        let started = Instant::now();
+        let result = smallclaims::read_budget::with(Some(budget.clone()), work);
+        if budget.expired() {
+            return vec![doctor_timeout(name, started.elapsed())];
+        }
+        result.unwrap_or_else(|error| {
+            vec![DoctorCheck {
+                name: name.into(),
+                status: "fail".into(),
+                message: error.message,
+            }]
+        })
+    }
+}
+
+pub(crate) fn doctor_timeout(name: &str, elapsed: Duration) -> DoctorCheck {
+    DoctorCheck {
+        name: name.into(),
+        status: "timeout".into(),
+        message: format!("did not finish in {:.1} s; the other checks still ran", elapsed.as_secs_f64()),
+    }
+}
+
+/// How many of doctor's checks read at once: a third of the read admission limit, at most 4, so
+/// a doctor run never takes the readers a busy daemon's requests need.
+pub(crate) fn doctor_workers(read_limit: usize) -> usize {
+    (read_limit / 3).clamp(1, 4)
+}
+
+type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
+
+/// Doctor's checks in report order. Store checks run together on up to `doctor_workers`
+/// threads, each under its own deadline from the clock, so a slow check costs its own time and
+/// not the time of the checks after it. A worker past the first reads on a reader it is
+/// admitted for, and when the pool admits none the checks run on the caller's thread. A check
+/// therefore must not need the Tokio runtime or the caller's thread-locals beyond its read budget.
+#[derive(Default)]
+pub(crate) struct DoctorChecks<'a> {
+    slots: Vec<DoctorSlot<'a>>,
+}
+
+enum DoctorSlot<'a> {
+    Done(Vec<DoctorCheck>),
+    Due(&'static str, DoctorWork<'a>),
+    Alone(&'static str, DoctorWork<'a>),
+}
+
+impl<'a> DoctorChecks<'a> {
+    /// A check whose answer needs no store read.
+    pub(crate) fn push(&mut self, check: DoctorCheck) {
+        self.slots.push(DoctorSlot::Done(vec![check]));
+    }
+
+    /// A store check, run under its own deadline.
+    pub(crate) fn check(
+        &mut self,
+        name: &'static str,
+        work: impl FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a,
+    ) {
+        self.slots.push(DoctorSlot::Due(name, Box::new(work)));
+    }
+
+    /// A store check that can take the writer, such as one that seeds the sealed replication
+    /// snapshot: it runs by itself on the caller's thread once the others are done, so no other
+    /// check reads beside its write.
+    pub(crate) fn check_alone(
+        &mut self,
+        name: &'static str,
+        work: impl FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a,
+    ) {
+        self.slots.push(DoctorSlot::Alone(name, Box::new(work)));
+    }
+
+    pub(crate) fn run(
+        self,
+        clock: &DoctorClock,
+        readers: &smallclaims::sqlite::ReadPool,
+        workers: usize,
+    ) -> Vec<DoctorCheck> {
+        let mut done = Vec::with_capacity(self.slots.len());
+        let mut due = std::collections::VecDeque::new();
+        let mut alone = Vec::new();
+        for (position, slot) in self.slots.into_iter().enumerate() {
+            match slot {
+                DoctorSlot::Done(checks) => done.push(Some(checks)),
+                DoctorSlot::Due(name, work) => {
+                    done.push(None);
+                    due.push_back((position, name, work));
+                }
+                DoctorSlot::Alone(name, work) => {
+                    done.push(None);
+                    alone.push((position, name, work));
+                }
+            }
+        }
+        let extra = workers.saturating_sub(1).min(due.len().saturating_sub(1));
+        let due = std::sync::Mutex::new(due);
+        let done = std::sync::Mutex::new(done);
+        let drain = &|| loop {
+            let Some((position, name, work)) =
+                due.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop_front()
+            else {
+                return;
+            };
+            let checks = clock.checks(name, work);
+            done.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[position] = Some(checks);
+        };
+        std::thread::scope(|scope| {
+            for _ in 0..extra {
+                let Some(permit) = readers.try_admit_read() else { break };
+                let total = clock.total.clone();
+                scope.spawn(move || {
+                    smallclaims::read_budget::with(Some(total), || {
+                        // A refused loan leaves this worker's checks to the others.
+                        let _ = readers.request_read_with_permit(permit, drain);
+                    })
+                });
+            }
+            drain();
+        });
+        let mut done = done.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (position, name, work) in alone {
+            done[position] = Some(clock.checks(name, work));
+        }
+        done
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect()
+    }
+}
+
+/// A timed-out check could not say the daemon is healthy, so it fails the report as a failed
+/// check does.
+pub(crate) fn doctor_status(checks: &[DoctorCheck]) -> &'static str {
+    if checks.iter().any(|check| check.status == "fail" || check.status == "timeout") {
+        "fail"
+    } else if checks.iter().any(|check| check.status == "warn") {
+        "warn"
+    } else {
+        "pass"
+    }
+}
+
+pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
+    doctor_report_within(state, &DoctorClock::new(DOCTOR_TOTAL, DOCTOR_CHECK), None)
+}
+
+/// The report with an operation drift the caller already scanned for.
 fn doctor_report_with_operation_drift(
     state: &AppState,
     drift: &anyhow::Result<Vec<String>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
-    let mut checks = Vec::new();
-    let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
-        .map_err(ApiError::internal)?
-        .is_some_and(|claim| claim.body.pointer("/fields/features/harness_access_auto").and_then(Value::as_u64) == Some(1));
-    let access_mode = if auto { "auto" } else { "bypass" };
+    doctor_report_within(state, &DoctorClock::new(DOCTOR_TOTAL, DOCTOR_CHECK), Some(drift))
+}
+
+fn doctor_report_within(
+    state: &AppState,
+    clock: &DoctorClock,
+    drift: Option<&anyhow::Result<Vec<String>>>,
+) -> Result<Json<DoctorReport>, ApiError> {
+    let mut checks = DoctorChecks::default();
+    let admission = state.seat_admission.snapshot(admission_now());
     checks.push(DoctorCheck {
-        name: "harness-access-mode".into(), status: "pass".into(),
-        message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
+        name: "seat-admission".into(),
+        status: "pass".into(),
+        message: format!("mode={}; reason={}; pendingCount={}; oldestPendingAgeSecs={}",
+            admission["mode"].as_str().unwrap_or("unknown"),
+            admission["reason"].as_str().unwrap_or("unknown"),
+            admission["pendingCount"], admission["oldestPendingAgeSecs"]),
+    });
+    checks.check("harness-access-mode", || {
+        let mut checks = Vec::new();
+        let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
+            .map_err(ApiError::internal)?
+            .is_some_and(|claim| claim.body.pointer("/fields/features/harness_access_auto").and_then(Value::as_u64) == Some(1));
+        let access_mode = if auto { "auto" } else { "bypass" };
+        checks.push(DoctorCheck {
+            name: "harness-access-mode".into(), status: "pass".into(),
+            message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
+        });
+        Ok(checks)
     });
 
-    match state.store.index() {
-        Ok(index) => checks.push(DoctorCheck {
-            name: "claim-store".into(),
-            status: "pass".into(),
-            message: format!("the claim store is readable at index {index}"),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "claim-store".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
-    for fault in state.store.signature_state_faults().map_err(ApiError::internal)? {
-        checks.push(DoctorCheck {
-            name: fault.code.clone(),
-            status: if fault.code == "signature-state-corrupt" { "fail" } else { "warn" }.into(),
-            message: format!("{}: {}", fault.subject, fault.detail),
-        });
-    }
-    match state.store.claim_verdict_counts() {
-        Ok(counts) => checks.push(claim_signatures_check(&counts)),
-        Err(error) => checks.push(DoctorCheck {
-            name: "claim-signatures".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
-    match drift {
-        Ok(drift) if drift.is_empty() => checks.push(DoctorCheck {
-            name: "operation-projection".into(),
-            status: "pass".into(),
-            message: "the operation projection matches the claim log".into(),
-        }),
-        Ok(drift) => checks.push(DoctorCheck {
-            name: "operation-projection".into(),
-            status: "fail".into(),
-            message: format!("operation projection drift: {}", drift.join(", ")),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "operation-projection".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
-    checks.push(operations::operational_repair_check(
-        operations::owner_operational_repair_plan(state),
-    )?);
-    checks.push(
-        terminal_exec_gates_check(&state.store).unwrap_or_else(|error| DoctorCheck {
-            name: "terminal-exec-gates".into(),
-            status: "warn".into(),
-            message: format!("could not inspect terminal exec gates: {error}"),
-        }),
-    );
-    checks.push(
-        state
-            .store
-            .account_limits_check(client_now_ms(), 3_600_000)
-            .unwrap_or_else(|error| DoctorCheck {
-                name: "account-limits".into(),
-                status: "warn".into(),
-                message: format!("could not inspect weekly account readings: {error}"),
+    checks.check("claim-store", || {
+        let mut checks = Vec::new();
+        match state.store.index() {
+            Ok(index) => checks.push(DoctorCheck {
+                name: "claim-store".into(),
+                status: "pass".into(),
+                message: format!("the claim store is readable at index {index}"),
             }),
-    );
+            Err(error) => checks.push(DoctorCheck {
+                name: "claim-store".into(),
+                status: "fail".into(),
+                message: error.to_string(),
+            }),
+        }
+        Ok(checks)
+    });
+    checks.check("claim-signatures", || {
+        let mut checks = Vec::new();
+        for fault in state.store.signature_state_faults().map_err(ApiError::internal)? {
+            checks.push(DoctorCheck {
+                name: fault.code.clone(),
+                status: if fault.code == "signature-state-corrupt" { "fail" } else { "warn" }.into(),
+                message: format!("{}: {}", fault.subject, fault.detail),
+            });
+        }
+        match state.store.claim_verdict_counts() {
+            Ok(counts) => checks.push(claim_signatures_check(&counts)),
+            Err(error) => checks.push(DoctorCheck {
+                name: "claim-signatures".into(),
+                status: "fail".into(),
+                message: error.to_string(),
+            }),
+        }
+        Ok(checks)
+    });
+    checks.check("operation-projection", || {
+        let mut checks = Vec::new();
+        let scanned;
+        let drift = match drift {
+            Some(drift) => drift,
+            None => {
+                scanned = state.store.operation_projection_drift();
+                &scanned
+            }
+        };
+        match drift {
+            Ok(drift) if drift.is_empty() => checks.push(DoctorCheck {
+                name: "operation-projection".into(),
+                status: "pass".into(),
+                message: "the operation projection matches the claim log".into(),
+            }),
+            Ok(drift) => checks.push(DoctorCheck {
+                name: "operation-projection".into(),
+                status: "fail".into(),
+                message: format!("operation projection drift: {}", drift.join(", ")),
+            }),
+            Err(error) => checks.push(DoctorCheck {
+                name: "operation-projection".into(),
+                status: "fail".into(),
+                message: error.to_string(),
+            }),
+        }
+        Ok(checks)
+    });
+    checks.check("operational-repair", || {
+        Ok(vec![operations::operational_repair_check(
+            operations::owner_operational_repair_plan(state),
+        )?])
+    });
+    checks.check("terminal-exec-gates", || {
+        let mut checks = Vec::new();
+        checks.push(
+            terminal_exec_gates_check(&state.store).unwrap_or_else(|error| DoctorCheck {
+                name: "terminal-exec-gates".into(),
+                status: "warn".into(),
+                message: format!("could not inspect terminal exec gates: {error}"),
+            }),
+        );
+        Ok(checks)
+    });
+    checks.check("account-limits", || {
+        let mut checks = Vec::new();
+        checks.push(
+            state
+                .store
+                .account_limits_check(client_now_ms(), 3_600_000)
+                .unwrap_or_else(|error| DoctorCheck {
+                    name: "account-limits".into(),
+                    status: "warn".into(),
+                    message: format!("could not inspect weekly account readings: {error}"),
+                }),
+        );
+        Ok(checks)
+    });
     match tempfile::Builder::new()
         .prefix(".st3-doctor-")
         .tempfile_in(&state.state_dir)
@@ -7905,685 +8264,722 @@ fn doctor_report_with_operation_drift(
             ),
         },
     });
-    let desired = state.store.desired_subjects().map_err(ApiError::internal)?;
-    for subject in &desired {
-        if subject.kind != "stop"
-            && !subject
-                .member
-                .as_ref()
-                .is_some_and(|member| member.host == state.store.origin())
-        {
-            continue;
-        }
-        if let Some(fault) = state
-            .store
-            .member_reconcile_fault(&subject.subject, None)
-            .map_err(ApiError::internal)?
-        {
-            checks.push(DoctorCheck {
-                name: format!("member-reconcile/{}", subject.subject),
-                status: "fail".into(),
-                message: fault,
-            });
-        }
-    }
-    let terminal_required = desired.iter().any(|subject| {
-        subject
-            .member
-            .as_ref()
-            .is_some_and(|member| member.terminal)
+    checks.check("graph-references", || {
+        Ok(vec![graph_references_check(
+            &state
+                .store
+                .unresolved_graph_references()
+                .map_err(ApiError::bad)?,
+        )])
     });
-    let pty_snapshot = daemon_pty(state).and_then(|runtime| runtime.snapshot());
-    match &pty_snapshot {
-        Ok(items) => checks.push(DoctorCheck {
-            name: "pty-runtime".into(),
-            status: "pass".into(),
-            message: format!("the PTY runtime returned {} sessions", items.len()),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "pty-runtime".into(),
-            status: if terminal_required { "fail" } else { "warn" }.into(),
-            message: error.to_string(),
-        }),
-    }
-    let isolation = fractal_runtime::isolation_mode();
-    checks.push(DoctorCheck {
-        name: "process-isolation".into(),
-        status: if isolation == fractal_runtime::Isolation::DegradedDetached {
-            "warn"
-        } else {
-            "pass"
-        }
-        .into(),
-        message: match isolation {
-            fractal_runtime::Isolation::Scope => "Linux tasks use transient systemd user scopes".into(),
-            fractal_runtime::Isolation::Detached => {
-                "tasks use detached process groups on this platform".into()
+    checks.check("member-runtimes", || {
+        let mut checks = Vec::new();
+        let desired = state.store.desired_subjects().map_err(ApiError::internal)?;
+        for subject in &desired {
+            if subject.kind != "stop"
+                && !subject
+                    .member
+                    .as_ref()
+                    .is_some_and(|member| member.host == state.store.origin())
+            {
+                continue;
             }
-            fractal_runtime::Isolation::DegradedDetached => {
-                "systemd user scopes are unavailable; a daemon restart can stop tasks".into()
+            if let Some(fault) = state
+                .store
+                .member_reconcile_fault(&subject.subject, None)
+                .map_err(ApiError::internal)?
+            {
+                checks.push(DoctorCheck {
+                    name: format!("member-reconcile/{}", subject.subject),
+                    status: "fail".into(),
+                    message: fault,
+                });
             }
-        },
-    });
-    let mut owners = BTreeMap::<String, Vec<String>>::new();
-    for subject in &desired {
-        if let Some(member) = &subject.member {
-            owners
-                .entry(member.runtime_id.clone())
-                .or_default()
-                .push(subject.subject.clone());
         }
-    }
-    let duplicates = owners
-        .into_iter()
-        .filter(|(_, subjects)| subjects.len() > 1)
-        .map(|(runtime, subjects)| format!("{runtime}: {}", subjects.join(", ")))
-        .collect::<Vec<_>>();
-    let mut ownership_problems = duplicates
-        .iter()
-        .map(|item| format!("duplicate runtime owners: {item}"))
-        .collect::<Vec<_>>();
-    let local_live_ptys = pty_snapshot
-        .as_ref()
-        .map(|items| {
-            items
-                .iter()
-                .filter(|item| item.status == "running")
-                .map(|item| item.name.clone())
-                .collect::<std::collections::BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let exec_runtime =
-        fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
-    for subject in &desired {
-        let Some(member) = subject
-            .member
-            .as_ref()
-            .filter(|member| member.host != state.node)
-        else {
-            continue;
-        };
-        let local_live = if member.terminal {
-            local_live_ptys.contains(&member.runtime_id)
-        } else {
-            matches!(
-                exec_runtime.observe(&member.runtime_id),
-                Ok(Some(fractal_runtime::ExecObservation::Running(_)))
-            )
-        };
-        if local_live {
-            ownership_problems.push(format!("local runtime {} for {} is placed on host/{} instead of host/{}; restore the same state directory's stable node identity before moving or restarting the seat", member.runtime_id, subject.subject, member.host, state.node));
-        }
-    }
-    checks.push(DoctorCheck {
-        name: "runtime-ownership".into(),
-        status: if ownership_problems.is_empty() {
-            "pass"
-        } else {
-            "fail"
-        }
-        .into(),
-        message: if ownership_problems.is_empty() {
-            "each desired member has a unique runtime ID and live local runtimes match their placement".into()
-        } else {
-            ownership_problems.join("; ")
-        },
-    });
-    checks.push(claude_hooks_check(state, &desired)?);
-    checks.push(claude_usage_check(state, &desired)?);
-    checks.push(graph_references_check(
-        &state
-            .store
-            .unresolved_graph_references()
-            .map_err(ApiError::bad)?,
-    ));
-    let terminal_owned = state
-        .store
-        .terminal_owned_runtime_subjects()
-        .map_err(ApiError::internal)?;
-    let mut desired_runtime_ids = desired
-        .iter()
-        .filter(|subject| !terminal_owned.contains(&subject.subject))
-        .filter(|subject| subject.member.as_ref().is_some_and(|member| member.host == state.node))
-        .filter_map(|subject| {
+        let terminal_required = desired.iter().any(|subject| {
             subject
                 .member
                 .as_ref()
-                .map(|member| member.runtime_id.clone())
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    for subject in &desired {
-        if terminal_owned.contains(&subject.subject)
-            || !subject.member.as_ref().is_some_and(|member| member.host == state.node) {
-            continue;
+                .is_some_and(|member| member.terminal)
+        });
+        let pty_snapshot = daemon_pty(state).and_then(|runtime| runtime.snapshot());
+        match &pty_snapshot {
+            Ok(items) => checks.push(DoctorCheck {
+                name: "pty-runtime".into(),
+                status: "pass".into(),
+                message: format!("the PTY runtime returned {} sessions", items.len()),
+            }),
+            Err(error) => checks.push(DoctorCheck {
+                name: "pty-runtime".into(),
+                status: if terminal_required { "fail" } else { "warn" }.into(),
+                message: error.to_string(),
+            }),
         }
-        if let Some(runtime_id) = state
-            .store
-            .latest_actual_value(&subject.subject)
-            .map_err(ApiError::internal)?
-            .as_ref()
-            .map(|actual| actual.get("fields").unwrap_or(actual))
-            .and_then(|fields| fields.get("runtime_id"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        {
-            desired_runtime_ids.insert(runtime_id);
-        }
-    }
-    let mut unowned = pty_snapshot
-        .as_ref()
-        .map(|items| {
-            items
-                .iter()
-                .filter(|item| {
-                    item.status == "running" && !desired_runtime_ids.contains(&item.name)
-                })
-                .map(|item| format!("PTY {}", item.name))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let exec_directory = state.state_dir.join("exec");
-    let exec_runtime =
-        fractal_runtime::ExecRuntime::new(exec_directory.clone(), state.state_dir.join("logs"));
-    if let Ok(entries) = fs::read_dir(&exec_directory) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let Some(runtime_id) = name.strip_suffix(".json") else {
-                continue;
-            };
-            if desired_runtime_ids.contains(runtime_id) {
-                continue;
-            }
-            match exec_runtime.observe(runtime_id) {
-                Ok(Some(fractal_runtime::ExecObservation::Running(_))) => {
-                    unowned.push(format!("exec {runtime_id}"));
-                }
-                Ok(Some(fractal_runtime::ExecObservation::Indeterminate(reason))) => {
-                    unowned.push(format!("exec {runtime_id} ({reason})"));
-                }
-                Ok(Some(fractal_runtime::ExecObservation::Exited(_)) | None) => {}
-                Err(error) => unowned.push(format!("exec {runtime_id} ({error})")),
-            }
-        }
-    }
-    checks.push(DoctorCheck {
-        name: "runtime-drift".into(),
-        status: if unowned.is_empty() { "pass" } else { "warn" }.into(),
-        message: if unowned.is_empty() {
-            "the runtime has no unowned live sessions or indeterminate records".into()
-        } else {
-            format!("unowned runtime state: {}", unowned.join(", "))
-        },
-    });
-    let mut driver_gaps = Vec::new();
-    for desired_subject in desired.iter().filter(|desired| {
-        !terminal_owned.contains(&desired.subject)
-            && desired
-                .member
-                .as_ref()
-                .and_then(|member| member.driver.as_ref())
-                .is_some()
-    }) {
-        let selected = state
-            .store
-            .status(Some(&desired_subject.subject))
-            .map_err(ApiError::internal)?
-            .subjects
-            .into_iter()
-            .next();
-        let Some(subject) = selected else {
-            continue;
-        };
-        if !subject
-            .harness
-            .as_ref()
-            .is_some_and(crate::model::CurrentHarnessView::is_ready)
-            || subject.gap.is_some()
-        {
-            driver_gaps.push(format!(
-                "{}: {}",
-                subject.subject,
-                subject
-                    .harness
-                    .as_ref()
-                    .and_then(|harness| harness.reason.as_deref())
-                    .or(subject.gap.as_deref())
-                    .unwrap_or("the current harness incarnation is not ready")
-            ));
-        }
-    }
-    checks.push(DoctorCheck {
-        name: "driver-readiness".into(),
-        status: if driver_gaps.is_empty() {
-            "pass"
-        } else {
-            "warn"
-        }
-        .into(),
-        message: if driver_gaps.is_empty() {
-            "all desired native drivers have a ready current harness incarnation".into()
-        } else {
-            driver_gaps.join("; ")
-        },
-    });
-    match state.store.replication_status_sealed(
-        state.fleet_id.is_some(),
-        state.fleet_id.as_deref(),
-        &replication_peer_names(state),
-    ) {
-        Ok(replication) if !replication.configured => checks.push(DoctorCheck {
-            name: "replication".into(),
-            status: "pass".into(),
-            message: if state.state_dir.join("left-fleet.json").is_file() {
-                "this node is intentionally local-only after leaving its fleet".into()
-            } else {
-                "no fleet is configured; use st fleet create or st fleet join to connect this node"
-                    .into()
-            },
-        }),
-        Ok(replication) => {
-            let unavailable = replication
-                .peers
-                .iter()
-                .filter(|peer| {
-                    !matches!(
-                        peer.status.as_str(),
-                        "up" | "last-seen" | "unknown" | "refused"
-                    )
-                })
-                .map(|peer| format!("{}={}", peer.peer, peer.status))
-                .collect::<Vec<_>>();
-            // A member that listens is meant to answer, so its absence warns. A dial-out
-            // member, or a config peer outside membership, can be away for hours, as a sleeping
-            // laptop is; its absence is reported without a warning.
-            let now = client_now_ms();
-            let listening = state
-                .store
-                .fleet_view_sealed()
-                .map(|view| {
-                    view.members
-                        .into_iter()
-                        .filter(|member| member.state == "current" && member.mode == "listening")
-                        .map(|member| member.name)
-                        .collect::<BTreeSet<_>>()
-                })
-                .unwrap_or_default();
-            let (absent, away): (Vec<_>, Vec<_>) = replication
-                .peers
-                .iter()
-                .filter(|peer| peer.status == "last-seen")
-                .partition(|peer| listening.contains(&peer.peer));
-            let describe = |peers: Vec<&crate::model::ReplicationPeerStatus>| {
-                peers
-                    .into_iter()
-                    .map(|peer| {
-                        format!(
-                            "{} {}{}{}",
-                            peer.peer,
-                            peer.last_success_at_unix_ms
-                                .map(|at| format!(
-                                    "has not exchanged for {}",
-                                    elapsed_words(now.saturating_sub(at))
-                                ))
-                                .unwrap_or_else(|| "has never exchanged with this node".into()),
-                            peer.sync
-                                .as_ref()
-                                .map(|sync| sync.local_only_envelopes
-                                    + sync.added_since_measured_envelopes)
-                                .filter(|unsent| *unsent != 0)
-                                .map(|unsent| format!(
-                                    "; this node has not sent it {unsent} envelopes"
-                                ))
-                                .unwrap_or_default(),
-                            peer.last_error
-                                .as_deref()
-                                .map(|error| format!(" (last attempt: {error})"))
-                                .unwrap_or_default()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let absent = describe(absent);
-            let away = describe(away);
-            let unresolved = replication.invalid_records;
-            let diverged = replication
-                .peers
-                .iter()
-                .filter(|peer| peer.sync.as_ref().is_some_and(|sync| sync.diverged))
-                .map(|peer| peer.peer.as_str())
-                .collect::<Vec<_>>();
-            let differing_tables = replication
-                .peers
-                .iter()
-                .flat_map(|peer| {
-                    peer.differing_tables
-                        .iter()
-                        .map(|table| format!("{}/{table}", peer.peer))
-                })
-                .collect::<Vec<_>>();
-            if !differing_tables.is_empty() {
-                checks.push(DoctorCheck {
-                    name: "shared-projections".into(),
-                    status: "fail".into(),
-                    message: format!(
-                        "shared tables differ at equal inventory: {}",
-                        differing_tables.join(", ")
-                    ),
-                });
-            }
-            let first_sync_failed = replication
-                .first_sync
-                .as_ref()
-                .filter(|first| first.state == "failed");
-            // A verified first sync is history. Whether this node is caught up now takes an
-            // exchange since this daemon started, and one that found nothing left to fetch.
-            let catching_up = replication
-                .peers
-                .iter()
-                .filter_map(|peer| {
-                    let sync = peer.sync.as_ref().filter(|sync| sync.catching_up)?;
-                    Some(format!(
-                        "{} has {} envelopes this node lacks",
-                        peer.peer, sync.peer_only_envelopes
-                    ))
-                })
-                .collect::<Vec<_>>();
-            // A peer whose grants refuse this node never exchanges with it directly.
-            let unmeasured = replication.timings.exchanges == 0
-                && replication
-                    .peers
-                    .iter()
-                    .any(|peer| peer.status != "refused");
-            // A removed node is never told by status alone: its peers merely stop answering.
-            let removed = crate::fleet::file::RemovalNotice::load(&state.state_dir);
-            let status = if removed.is_some()
-                || replication.unhealthy_projections != 0
-                || !diverged.is_empty()
-                || first_sync_failed.is_some()
-            {
-                "fail"
-            } else if !unavailable.is_empty()
-                || !absent.is_empty()
-                || unresolved != 0
-                || !catching_up.is_empty()
-                || unmeasured
-            {
+        let isolation = fractal_runtime::isolation_mode();
+        checks.push(DoctorCheck {
+            name: "process-isolation".into(),
+            status: if isolation == fractal_runtime::Isolation::DegradedDetached {
                 "warn"
             } else {
                 "pass"
+            }
+            .into(),
+            message: match isolation {
+                fractal_runtime::Isolation::Scope => "Linux tasks use transient systemd user scopes".into(),
+                fractal_runtime::Isolation::Detached => {
+                    "tasks use detached process groups on this platform".into()
+                }
+                fractal_runtime::Isolation::DegradedDetached => {
+                    "systemd user scopes are unavailable; a daemon restart can stop tasks".into()
+                }
+            },
+        });
+        let mut owners = BTreeMap::<String, Vec<String>>::new();
+        for subject in &desired {
+            if let Some(member) = &subject.member {
+                owners
+                    .entry(member.runtime_id.clone())
+                    .or_default()
+                    .push(subject.subject.clone());
+            }
+        }
+        let duplicates = owners
+            .into_iter()
+            .filter(|(_, subjects)| subjects.len() > 1)
+            .map(|(runtime, subjects)| format!("{runtime}: {}", subjects.join(", ")))
+            .collect::<Vec<_>>();
+        let mut ownership_problems = duplicates
+            .iter()
+            .map(|item| format!("duplicate runtime owners: {item}"))
+            .collect::<Vec<_>>();
+        let local_live_ptys = pty_snapshot
+            .as_ref()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item.status == "running")
+                    .map(|item| item.name.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let exec_runtime =
+            fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
+        for subject in &desired {
+            let Some(member) = subject
+                .member
+                .as_ref()
+                .filter(|member| member.host != state.node)
+            else {
+                continue;
             };
-            checks.push(DoctorCheck {
+            let local_live = if member.terminal {
+                local_live_ptys.contains(&member.runtime_id)
+            } else {
+                matches!(
+                    exec_runtime.observe(&member.runtime_id),
+                    Ok(Some(fractal_runtime::ExecObservation::Running(_)))
+                )
+            };
+            if local_live {
+                ownership_problems.push(format!("local runtime {} for {} is placed on host/{} instead of host/{}; restore the same state directory's stable node identity before moving or restarting the seat", member.runtime_id, subject.subject, member.host, state.node));
+            }
+        }
+        checks.push(DoctorCheck {
+            name: "runtime-ownership".into(),
+            status: if ownership_problems.is_empty() {
+                "pass"
+            } else {
+                "fail"
+            }
+            .into(),
+            message: if ownership_problems.is_empty() {
+                "each desired member has a unique runtime ID and live local runtimes match their placement".into()
+            } else {
+                ownership_problems.join("; ")
+            },
+        });
+        checks.push(claude_hooks_check(state, &desired)?);
+        checks.push(claude_usage_check(state, &desired)?);
+        let terminal_owned = state
+            .store
+            .terminal_owned_runtime_subjects()
+            .map_err(ApiError::internal)?;
+        let mut desired_runtime_ids = desired
+            .iter()
+            .filter(|subject| !terminal_owned.contains(&subject.subject))
+            .filter(|subject| subject.member.as_ref().is_some_and(|member| member.host == state.node))
+            .filter_map(|subject| {
+                subject
+                    .member
+                    .as_ref()
+                    .map(|member| member.runtime_id.clone())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        for subject in &desired {
+            if terminal_owned.contains(&subject.subject)
+                || !subject.member.as_ref().is_some_and(|member| member.host == state.node) {
+                continue;
+            }
+            if let Some(runtime_id) = state
+                .store
+                .latest_actual_value(&subject.subject)
+                .map_err(ApiError::internal)?
+                .as_ref()
+                .map(|actual| actual.get("fields").unwrap_or(actual))
+                .and_then(|fields| fields.get("runtime_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                desired_runtime_ids.insert(runtime_id);
+            }
+        }
+        let mut unowned = pty_snapshot
+            .as_ref()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| {
+                        item.status == "running" && !desired_runtime_ids.contains(&item.name)
+                    })
+                    .map(|item| format!("PTY {}", item.name))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let exec_directory = state.state_dir.join("exec");
+        let exec_runtime =
+            fractal_runtime::ExecRuntime::new(exec_directory.clone(), state.state_dir.join("logs"));
+        if let Ok(entries) = fs::read_dir(&exec_directory) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let Some(runtime_id) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                if desired_runtime_ids.contains(runtime_id) {
+                    continue;
+                }
+                match exec_runtime.observe(runtime_id) {
+                    Ok(Some(fractal_runtime::ExecObservation::Running(_))) => {
+                        unowned.push(format!("exec {runtime_id}"));
+                    }
+                    Ok(Some(fractal_runtime::ExecObservation::Indeterminate(reason))) => {
+                        unowned.push(format!("exec {runtime_id} ({reason})"));
+                    }
+                    Ok(Some(fractal_runtime::ExecObservation::Exited(_)) | None) => {}
+                    Err(error) => unowned.push(format!("exec {runtime_id} ({error})")),
+                }
+            }
+        }
+        checks.push(DoctorCheck {
+            name: "runtime-drift".into(),
+            status: if unowned.is_empty() { "pass" } else { "warn" }.into(),
+            message: if unowned.is_empty() {
+                "the runtime has no unowned live sessions or indeterminate records".into()
+            } else {
+                format!("unowned runtime state: {}", unowned.join(", "))
+            },
+        });
+        let mut driver_gaps = Vec::new();
+        for desired_subject in desired.iter().filter(|desired| {
+            !terminal_owned.contains(&desired.subject)
+                && desired
+                    .member
+                    .as_ref()
+                    .and_then(|member| member.driver.as_ref())
+                    .is_some()
+        }) {
+            let selected = state
+                .store
+                .status(Some(&desired_subject.subject))
+                .map_err(ApiError::internal)?
+                .subjects
+                .into_iter()
+                .next();
+            let Some(subject) = selected else {
+                continue;
+            };
+            if !subject
+                .harness
+                .as_ref()
+                .is_some_and(crate::model::CurrentHarnessView::is_ready)
+                || subject.gap.is_some()
+            {
+                driver_gaps.push(format!(
+                    "{}: {}",
+                    subject.subject,
+                    subject
+                        .harness
+                        .as_ref()
+                        .and_then(|harness| harness.reason.as_deref())
+                        .or(subject.gap.as_deref())
+                        .unwrap_or("the current harness incarnation is not ready")
+                ));
+            }
+        }
+        checks.push(DoctorCheck {
+            name: "driver-readiness".into(),
+            status: if driver_gaps.is_empty() {
+                "pass"
+            } else {
+                "warn"
+            }
+            .into(),
+            message: if driver_gaps.is_empty() {
+                "all desired native drivers have a ready current harness incarnation".into()
+            } else {
+                driver_gaps.join("; ")
+            },
+        });
+        Ok(checks)
+    });
+    checks.check_alone("replication", || {
+        let mut checks = Vec::new();
+        match state.store.replication_status_sealed(
+            state.fleet_id.is_some(),
+            state.fleet_id.as_deref(),
+            &replication_peer_names(state),
+        ) {
+            Ok(replication) if !replication.configured => checks.push(DoctorCheck {
                 name: "replication".into(),
-                status: status.into(),
-                message: format!(
-                    "{}{}{}{}{}{} envelopes; {} unresolved records; {} claims waiting for a newer build; {} unhealthy projections{}; peers {}",
-                    removed
-                        .map(|notice| format!(
-                            "{}; ",
-                            notice.describe(replication.fleet_id.as_deref())
-                        ))
-                        .unwrap_or_default(),
-                    if !catching_up.is_empty() {
-                        format!("catching up: {}; ", catching_up.join(", "))
-                    } else if unmeasured {
-                        "no exchange with a peer since this daemon started, so whether this \
-                         node is caught up is not known yet; "
-                            .to_owned()
-                    } else {
-                        String::new()
-                    },
-                    absent
-                        .iter()
-                        .chain(&away)
-                        .map(|peer| format!("{peer}; "))
-                        .collect::<String>(),
-                    first_sync_failed
-                        .map(|first| format!(
-                            "the first sync with {} failed on an earlier build: {}; it ends at \
-                             the next exchange where both hold the same claims; ",
-                            first.peer.as_deref().unwrap_or("a peer"),
-                            first.message.as_deref().unwrap_or("no reason recorded")
-                        ))
-                        .unwrap_or_default(),
-                    if diverged.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            "graph diverged from {}: the same envelopes project a different \
-                             graph, which exchanges cannot fix (st replication status); ",
-                            diverged.join(", ")
+                status: "pass".into(),
+                message: if state.state_dir.join("left-fleet.json").is_file() {
+                    "this node is intentionally local-only after leaving its fleet".into()
+                } else {
+                    "no fleet is configured; use st fleet create or st fleet join to connect this node"
+                        .into()
+                },
+            }),
+            Ok(replication) => {
+                let unavailable = replication
+                    .peers
+                    .iter()
+                    .filter(|peer| {
+                        !matches!(
+                            peer.status.as_str(),
+                            "up" | "last-seen" | "unknown" | "refused"
                         )
-                    },
-                    replication.received_envelopes,
-                    unresolved,
-                    replication.waiting_claims,
-                    replication.unhealthy_projections,
-                    replication
-                        .unhealthy
-                        .first()
-                        .map(|projection| format!(
-                            " ({}: {})",
-                            projection.aggregate,
-                            projection
-                                .error_message
-                                .as_deref()
-                                .unwrap_or("no reason recorded")
-                        ))
-                        .unwrap_or_default(),
-                    replication
-                        .peers
-                        .iter()
+                    })
+                    .map(|peer| format!("{}={}", peer.peer, peer.status))
+                    .collect::<Vec<_>>();
+                // A member that listens is meant to answer, so its absence warns. A dial-out
+                // member, or a config peer outside membership, can be away for hours, as a sleeping
+                // laptop is; its absence is reported without a warning.
+                let now = client_now_ms();
+                let listening = state
+                    .store
+                    .fleet_view_sealed()
+                    .map(|view| {
+                        view.members
+                            .into_iter()
+                            .filter(|member| member.state == "current" && member.mode == "listening")
+                            .map(|member| member.name)
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let (absent, away): (Vec<_>, Vec<_>) = replication
+                    .peers
+                    .iter()
+                    .filter(|peer| peer.status == "last-seen")
+                    .partition(|peer| listening.contains(&peer.peer));
+                let describe = |peers: Vec<&crate::model::ReplicationPeerStatus>| {
+                    peers
+                        .into_iter()
                         .map(|peer| {
-                            match &peer.refusal_reason {
-                                Some(reason) => format!("{}: {reason}", peer.peer),
-                                None => format!("{}={}", peer.peer, peer.status),
-                            }
+                            format!(
+                                "{} {}{}{}",
+                                peer.peer,
+                                peer.last_success_at_unix_ms
+                                    .map(|at| format!(
+                                        "has not exchanged for {}",
+                                        elapsed_words(now.saturating_sub(at))
+                                    ))
+                                    .unwrap_or_else(|| "has never exchanged with this node".into()),
+                                peer.sync
+                                    .as_ref()
+                                    .map(|sync| sync.local_only_envelopes
+                                        + sync.added_since_measured_envelopes)
+                                    .filter(|unsent| *unsent != 0)
+                                    .map(|unsent| format!(
+                                        "; this node has not sent it {unsent} envelopes"
+                                    ))
+                                    .unwrap_or_default(),
+                                peer.last_error
+                                    .as_deref()
+                                    .map(|error| format!(" (last attempt: {error})"))
+                                    .unwrap_or_default()
+                            )
                         })
                         .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            });
+                };
+                let absent = describe(absent);
+                let away = describe(away);
+                let unresolved = replication.invalid_records;
+                let diverged = replication
+                    .peers
+                    .iter()
+                    .filter(|peer| peer.sync.as_ref().is_some_and(|sync| sync.diverged))
+                    .map(|peer| peer.peer.as_str())
+                    .collect::<Vec<_>>();
+                let differing_tables = replication
+                    .peers
+                    .iter()
+                    .flat_map(|peer| {
+                        peer.differing_tables
+                            .iter()
+                            .map(|table| format!("{}/{table}", peer.peer))
+                    })
+                    .collect::<Vec<_>>();
+                if !differing_tables.is_empty() {
+                    checks.push(DoctorCheck {
+                        name: "shared-projections".into(),
+                        status: "fail".into(),
+                        message: format!(
+                            "shared tables differ at equal inventory: {}",
+                            differing_tables.join(", ")
+                        ),
+                    });
+                }
+                let first_sync_failed = replication
+                    .first_sync
+                    .as_ref()
+                    .filter(|first| first.state == "failed");
+                // A verified first sync is history. Whether this node is caught up now takes an
+                // exchange since this daemon started, and one that found nothing left to fetch.
+                let catching_up = replication
+                    .peers
+                    .iter()
+                    .filter_map(|peer| {
+                        let sync = peer.sync.as_ref().filter(|sync| sync.catching_up)?;
+                        Some(format!(
+                            "{} has {} envelopes this node lacks",
+                            peer.peer, sync.peer_only_envelopes
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                // A peer whose grants refuse this node never exchanges with it directly.
+                let unmeasured = replication.timings.exchanges == 0
+                    && replication
+                        .peers
+                        .iter()
+                        .any(|peer| peer.status != "refused");
+                // A removed node is never told by status alone: its peers merely stop answering.
+                let removed = crate::fleet::file::RemovalNotice::load(&state.state_dir);
+                let status = if removed.is_some()
+                    || replication.unhealthy_projections != 0
+                    || !diverged.is_empty()
+                    || first_sync_failed.is_some()
+                {
+                    "fail"
+                } else if !unavailable.is_empty()
+                    || !absent.is_empty()
+                    || unresolved != 0
+                    || !catching_up.is_empty()
+                    || unmeasured
+                {
+                    "warn"
+                } else {
+                    "pass"
+                };
+                checks.push(DoctorCheck {
+                    name: "replication".into(),
+                    status: status.into(),
+                    message: format!(
+                        "{}{}{}{}{}{} envelopes; {} unresolved records; {} claims waiting for a newer build; {} unhealthy projections{}; peers {}",
+                        removed
+                            .map(|notice| format!(
+                                "{}; ",
+                                notice.describe(replication.fleet_id.as_deref())
+                            ))
+                            .unwrap_or_default(),
+                        if !catching_up.is_empty() {
+                            format!("catching up: {}; ", catching_up.join(", "))
+                        } else if unmeasured {
+                            "no exchange with a peer since this daemon started, so whether this \
+                             node is caught up is not known yet; "
+                                .to_owned()
+                        } else {
+                            String::new()
+                        },
+                        absent
+                            .iter()
+                            .chain(&away)
+                            .map(|peer| format!("{peer}; "))
+                            .collect::<String>(),
+                        first_sync_failed
+                            .map(|first| format!(
+                                "the first sync with {} failed on an earlier build: {}; it ends at \
+                                 the next exchange where both hold the same claims; ",
+                                first.peer.as_deref().unwrap_or("a peer"),
+                                first.message.as_deref().unwrap_or("no reason recorded")
+                            ))
+                            .unwrap_or_default(),
+                        if diverged.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "graph diverged from {}: the same envelopes project a different \
+                                 graph, which exchanges cannot fix (st replication status); ",
+                                diverged.join(", ")
+                            )
+                        },
+                        replication.received_envelopes,
+                        unresolved,
+                        replication.waiting_claims,
+                        replication.unhealthy_projections,
+                        replication
+                            .unhealthy
+                            .first()
+                            .map(|projection| format!(
+                                " ({}: {})",
+                                projection.aggregate,
+                                projection
+                                    .error_message
+                                    .as_deref()
+                                    .unwrap_or("no reason recorded")
+                            ))
+                            .unwrap_or_default(),
+                        replication
+                            .peers
+                            .iter()
+                            .map(|peer| {
+                                match &peer.refusal_reason {
+                                    Some(reason) => format!("{}: {reason}", peer.peer),
+                                    None => format!("{}={}", peer.peer, peer.status),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                });
+            }
+            Err(error) => checks.push(DoctorCheck {
+                name: "replication".into(),
+                status: "fail".into(),
+                message: error.to_string(),
+            }),
         }
-        Err(error) => checks.push(DoctorCheck {
-            name: "replication".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
-    checks.push(first_readiness_scheduler_check(&state.store, &state.node));
+        Ok(checks)
+    });
+    checks.check("first-readiness", || {
+        Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
+    });
     if state.fleet_id.is_some() {
         checks.push(crate::replication_worker_build::check(
             &state.state_dir,
             fractal_drivers::version::build_commit(),
         ));
     }
-    match state.store.idempotency_conflicts(5) {
-        Ok((0, _)) => checks.push(DoctorCheck {
-            name: "idempotency-keys".into(),
-            status: "pass".into(),
-            message: "no idempotency key was used for two different requests".into(),
-        }),
-        Ok((count, conflicts)) => checks.push(DoctorCheck {
-            name: "idempotency-keys".into(),
-            status: "warn".into(),
-            message: format!(
-                "{count} idempotency {} used for different requests on different members, as \
-                 members apart during a partition can: each such claim stands, and a retry with \
-                 the key is refused as idempotency-conflict. {}",
-                if count == 1 { "key was" } else { "keys were" },
-                conflicts
-                    .iter()
-                    .map(|claims| claims
+    checks.check("idempotency-keys", || {
+        let mut checks = Vec::new();
+        match state.store.idempotency_conflicts(5) {
+            Ok((0, _)) => checks.push(DoctorCheck {
+                name: "idempotency-keys".into(),
+                status: "pass".into(),
+                message: "no idempotency key was used for two different requests".into(),
+            }),
+            Ok((count, conflicts)) => checks.push(DoctorCheck {
+                name: "idempotency-keys".into(),
+                status: "warn".into(),
+                message: format!(
+                    "{count} idempotency {} used for different requests on different members, as \
+                     members apart during a partition can: each such claim stands, and a retry with \
+                     the key is refused as idempotency-conflict. {}",
+                    if count == 1 { "key was" } else { "keys were" },
+                    conflicts
                         .iter()
-                        .map(|(subject, writer)| format!("{subject} by {writer}"))
+                        .map(|claims| claims
+                            .iter()
+                            .map(|(subject, writer)| format!("{subject} by {writer}"))
+                            .collect::<Vec<_>>()
+                            .join(" and "))
                         .collect::<Vec<_>>()
-                        .join(" and "))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "idempotency-keys".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
+                        .join("; ")
+                ),
+            }),
+            Err(error) => checks.push(DoctorCheck {
+                name: "idempotency-keys".into(),
+                status: "fail".into(),
+                message: error.to_string(),
+            }),
+        }
+        Ok(checks)
+    });
     let (recording, message) = crate::recorder::health(&state.state_dir);
     checks.push(DoctorCheck {
         name: "command-recorder".into(),
         status: if recording { "pass" } else { "warn" }.into(),
         message,
     });
-    match (
-        client_agent_resources(
-            &state.store,
-            false,
-            "",
-            state.store.index().map_err(ApiError::internal)?,
-        ),
-        state.store.operational_messages(None, false),
-    ) {
-        (Ok(agents), Ok(messages)) => {
-            let current_recipients = agents
-                .iter()
-                .filter_map(|agent| agent["id"].as_str())
-                .collect::<BTreeSet<_>>();
-            let mut blocked = agents
-                .iter()
-                .filter(|agent| {
-                    matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
-                        || agent.pointer("/delivery/reason").and_then(Value::as_str)
-                            .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
-                                || reason.starts_with("ownership proof unavailable"))
-                })
-                .map(|agent| {
-                    format!(
-                        "{}: {}",
-                        agent["id"].as_str().unwrap_or("agent"),
-                        agent
-                            .pointer("/delivery/reason")
-                            .and_then(Value::as_str)
-                            .unwrap_or("delivery is stale")
-                    )
-                })
-                .collect::<Vec<_>>();
-            let (pending, accepted) = unread_current_seat_counts(
+    checks.check("message-delivery", || {
+        let mut checks = Vec::new();
+        match (
+            client_agent_resources(
                 &state.store,
-                &current_recipients,
-                &messages,
-                client_now_ms(),
-            )
-            .map_err(ApiError::internal)?;
-            if pending > 0 {
-                blocked.push(format!("{pending} current-seat messages older than 10s lack a recipient graph read receipt ({accepted} accepted native handoffs); this does not prove that a legacy channel failed to consume them. Inspect `st conversations status MESSAGE`"));
-            }
-            checks.push(DoctorCheck {
-                name: "message-delivery".into(),
-                status: if blocked.is_empty() { "pass" } else { "warn" }.into(),
-                message: if blocked.is_empty() {
-                    "no stalled local delivery paths or overdue agent messages were observed".into()
-                } else {
-                    blocked.join("; ")
-                },
-            });
-        }
-        (Err(error), _) | (_, Err(error)) => checks.push(DoctorCheck {
-            name: "message-delivery".into(),
-            status: "warn".into(),
-            message: error.to_string(),
-        }),
-    }
-    match mail_backlog::report(&state.store, client_now_ms()) {
-        Ok(backlog) => checks.push(DoctorCheck {
-            name: "mail-backlog".into(),
-            status: if backlog.count == 0 { "pass" } else { "warn" }.into(),
-            message: format!("{} unread messages older than 1h; close them with `{}`", backlog.count, backlog.cleanup_command),
-        }),
-        Err(error) => checks.push(DoctorCheck { name: "mail-backlog".into(), status: "warn".into(), message: error.to_string() }),
-    }
-    checks.push(publication_evidence_check(&state.store));
-    checks.push(held_mail_check(&state.store, client_now_ms()));
-    match delivery_probes::check(
-        &state.store,
-        client_now_ms(),
-        &replication_peer_names(state),
-    ) {
-        Ok(Some(check)) => checks.push(check),
-        Ok(None) => {}
-        Err(error) => checks.push(DoctorCheck {
-            name: "delivery-probes".into(),
-            status: "warn".into(),
-            message: error.to_string(),
-        }),
-    }
-    // Once a node pins a fleet anchor, membership decides admission. Report what waits for a
-    // signature, what is fenced, and what was admitted before this node knew better.
-    match state.store.fleet_anchor() {
-        Ok(None) => {}
-        Ok(Some(_)) => match (
-            state
-                .store
-                .replication_status_sealed(true, state.fleet_id.as_deref(), &[]),
-            state.store.fleet_admission_residue(),
+                false,
+                "",
+                state.store.index().map_err(ApiError::internal)?,
+            ),
+            state.store.operational_messages(None, false),
         ) {
-            (Ok(holds), Ok(residue)) => {
-                let mut notes = vec![format!(
-                    "{} envelopes wait for their writer's signature; {} are fenced",
-                    holds.unsigned_envelopes, holds.fenced_envelopes
-                )];
-                notes.extend(residue.iter().map(|item| {
-                    format!(
-                        "{} envelopes from {} were {}",
-                        item.envelopes,
-                        item.writer,
-                        item.reason.replace('-', " ")
-                    )
-                }));
+            (Ok(agents), Ok(messages)) => {
+                let current_recipients = agents
+                    .iter()
+                    .filter_map(|agent| agent["id"].as_str())
+                    .collect::<BTreeSet<_>>();
+                let mut blocked = agents
+                    .iter()
+                    .filter(|agent| {
+                        matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
+                            || agent.pointer("/delivery/reason").and_then(Value::as_str)
+                                .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
+                                    || reason.starts_with("ownership proof unavailable"))
+                    })
+                    .map(|agent| {
+                        format!(
+                            "{}: {}",
+                            agent["id"].as_str().unwrap_or("agent"),
+                            agent
+                                .pointer("/delivery/reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("delivery is stale")
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let (pending, accepted) = unread_current_seat_counts(
+                    &state.store,
+                    &current_recipients,
+                    &messages,
+                    client_now_ms(),
+                )
+                .map_err(ApiError::internal)?;
+                if pending > 0 {
+                    blocked.push(format!("{pending} current-seat messages older than 10s lack a recipient graph read receipt ({accepted} accepted native handoffs); this does not prove that a legacy channel failed to consume them. Inspect `st conversations status MESSAGE`"));
+                }
                 checks.push(DoctorCheck {
-                    name: "fleet-admission".into(),
-                    status: if residue.is_empty() && holds.unsigned_envelopes == 0 {
-                        "pass"
+                    name: "message-delivery".into(),
+                    status: if blocked.is_empty() { "pass" } else { "warn" }.into(),
+                    message: if blocked.is_empty() {
+                        "no stalled local delivery paths or overdue agent messages were observed".into()
                     } else {
-                        "warn"
-                    }
-                    .into(),
-                    message: notes.join("; "),
+                        blocked.join("; ")
+                    },
                 });
             }
             (Err(error), _) | (_, Err(error)) => checks.push(DoctorCheck {
+                name: "message-delivery".into(),
+                status: "warn".into(),
+                message: error.to_string(),
+            }),
+        }
+        Ok(checks)
+    });
+    checks.check("mail-backlog", || {
+        let mut checks = Vec::new();
+        match mail_backlog::report(&state.store, client_now_ms()) {
+            Ok(backlog) => checks.push(DoctorCheck {
+                name: "mail-backlog".into(),
+                status: if backlog.count == 0 { "pass" } else { "warn" }.into(),
+                message: format!("{} unread messages older than 1h; close them with `{}`", backlog.count, backlog.cleanup_command),
+            }),
+            Err(error) => checks.push(DoctorCheck { name: "mail-backlog".into(), status: "warn".into(), message: error.to_string() }),
+        }
+        Ok(checks)
+    });
+    checks.check("publication-evidence", || {
+        Ok(vec![publication_evidence_check(&state.store)])
+    });
+    checks.check("held-mail", || {
+        Ok(vec![held_mail_check(&state.store, client_now_ms())])
+    });
+    checks.check("delivery-probes", || {
+        let mut checks = Vec::new();
+        match delivery_probes::check(
+            &state.store,
+            client_now_ms(),
+            &replication_peer_names(state),
+        ) {
+            Ok(Some(check)) => checks.push(check),
+            Ok(None) => {}
+            Err(error) => checks.push(DoctorCheck {
+                name: "delivery-probes".into(),
+                status: "warn".into(),
+                message: error.to_string(),
+            }),
+        }
+        Ok(checks)
+    });
+    checks.check("fleet-admission", || {
+        let mut checks = Vec::new();
+        // Once a node pins a fleet anchor, membership decides admission. Report what waits for a
+        // signature, what is fenced, and what was admitted before this node knew better.
+        match state.store.fleet_anchor() {
+            Ok(None) => {}
+            Ok(Some(_)) => match (
+                state
+                    .store
+                    .replication_status_sealed(true, state.fleet_id.as_deref(), &[]),
+                state.store.fleet_admission_residue(),
+            ) {
+                (Ok(holds), Ok(residue)) => {
+                    let mut notes = vec![format!(
+                        "{} envelopes wait for their writer's signature; {} are fenced",
+                        holds.unsigned_envelopes, holds.fenced_envelopes
+                    )];
+                    notes.extend(residue.iter().map(|item| {
+                        format!(
+                            "{} envelopes from {} were {}",
+                            item.envelopes,
+                            item.writer,
+                            item.reason.replace('-', " ")
+                        )
+                    }));
+                    checks.push(DoctorCheck {
+                        name: "fleet-admission".into(),
+                        status: if residue.is_empty() && holds.unsigned_envelopes == 0 {
+                            "pass"
+                        } else {
+                            "warn"
+                        }
+                        .into(),
+                        message: notes.join("; "),
+                    });
+                }
+                (Err(error), _) | (_, Err(error)) => checks.push(DoctorCheck {
+                    name: "fleet-admission".into(),
+                    status: "fail".into(),
+                    message: error.to_string(),
+                }),
+            },
+            Err(error) => checks.push(DoctorCheck {
                 name: "fleet-admission".into(),
                 status: "fail".into(),
                 message: error.to_string(),
             }),
-        },
-        Err(error) => checks.push(DoctorCheck {
-            name: "fleet-admission".into(),
-            status: "fail".into(),
-            message: error.to_string(),
-        }),
-    }
-    let attention_now = client_now_ms();
-    let attention = doctor_attention_items(&state.store, attention_now).map_err(ApiError::internal)?;
-    checks.push(
-        mission_eligibility_doctor::check(&state.store, &attention, attention_now)
-            .map_err(ApiError::internal)?,
-    );
-    checks.push(stale_attention_check(&attention, attention_now));
-    let report_status = if checks.iter().any(|check| check.status == "fail") {
-        "fail"
-    } else if checks.iter().any(|check| check.status == "warn") {
-        "warn"
-    } else {
-        "pass"
-    };
+        }
+        Ok(checks)
+    });
+    checks.check("attention", || {
+        let mut checks = Vec::new();
+        let attention_now = client_now_ms();
+        let attention = doctor_attention_items(&state.store, attention_now).map_err(ApiError::internal)?;
+        checks.push(
+            mission_eligibility_doctor::check(&state.store, &attention, attention_now)
+                .map_err(ApiError::internal)?,
+        );
+        checks.push(stale_attention_check(&attention, attention_now));
+        Ok(checks)
+    });
+    let checks = checks.run(clock, &state.store.readers, doctor_workers(smallclaims::sqlite::max_read_workers()));
+    let report_status = doctor_status(&checks);
+    let mut performance = crate::performance::snapshot();
+    performance["seatAdmission"] = admission;
     Ok(Json(DoctorReport {
         machine_version: Some(fractal_drivers::version::machine_version()),
         status: report_status.into(),
         checks,
-        performance: crate::performance::snapshot(),
+        performance,
     }))
 }
 
@@ -8767,6 +9163,7 @@ async fn refuse_while_leaving(
     // leaving, because transport observations stop. Everything else that writes waits,
     // including invite redemption and endpoint announcements.
     let allowed = path.starts_with("/v1/internal/fleet/leave/")
+        || path.starts_with("/v1/internal/replication/shard/")
         || matches!(
             path,
             "/v1/health"
@@ -10160,6 +10557,11 @@ fn message_subject(value: &str) -> String {
 pub struct EventQuery {
     #[serde(default, alias = "after_index")]
     after: u64,
+    /// The messages stream's position the client has read through. A client that sends it also
+    /// gets the stream's message events after it, in `stream_items`; one that does not gets the
+    /// graph's events alone, as before.
+    #[serde(default)]
+    messages_after: Option<u64>,
     subject: Option<String>,
     owner_run: Option<String>,
     wait: Option<bool>,
@@ -10173,6 +10575,16 @@ struct EventPage {
     next_after: Option<u64>,
     has_more: bool,
     frontier: u64,
+    /// The messages stream's message events after `messages_after`, when the client asked and
+    /// this member holds a shard. Their `store_index` is the stream's own index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_items: Option<Vec<EventRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_next_after: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_has_more: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_frontier: Option<u64>,
 }
 
 async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPage, ApiError> {
@@ -10187,6 +10599,7 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
     let after = query.after;
     let subject = query.subject.clone();
     let owner = query.owner_run.clone();
+    let messages_after = query.messages_after;
     blocking_store(move || {
         // A commit is visible here before its writer publishes the store index that client
         // snapshots read at. A cursor past that index would let a client read a resource older
@@ -10210,11 +10623,30 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
             }
             let (items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
+            // Stream items have no run owner, so an owner-filtered page has none of them.
+            let stream = match messages_after {
+                Some(messages_after) if owner.is_none() => {
+                    crate::store::messages_shard::stream_reads::stream_events_page(&store, messages_after, limit)?
+                }
+                _ => None,
+            };
+            let stream_items = stream.as_ref().map(|stream| {
+                stream
+                    .items
+                    .iter()
+                    .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
+                    .cloned()
+                    .collect()
+            });
             Ok(Ok(EventPage {
                 items,
                 next_after,
                 has_more,
                 frontier,
+                stream_items,
+                messages_next_after: stream.as_ref().and_then(|stream| stream.next_after),
+                messages_has_more: stream.as_ref().map(|stream| stream.has_more),
+                messages_frontier: stream.as_ref().map(|stream| stream.frontier),
             }))
         })
     })
@@ -10231,8 +10663,12 @@ async fn events_page(
         + Duration::from_millis(query.timeout_ms.unwrap_or(30_000).clamp(10, 30_000));
     loop {
         let page = read_event_page(&state, &query).await?;
-        if page.next_after.is_some() || query.wait != Some(true) {
-            if query.wait == Some(true) && page.items.is_empty() {
+        // A stream event is news for a waiter that asked for them, as a graph event is.
+        if page.next_after.is_some() || page.messages_next_after.is_some() || query.wait != Some(true) {
+            if query.wait == Some(true)
+                && page.items.is_empty()
+                && page.stream_items.as_ref().is_none_or(Vec::is_empty)
+            {
                 // A filtered page can advance through nonmatching rows during migration.
                 // Keep its exact continuation, but pace wait-mode clients instead of inviting
                 // an immediate empty-page repoll. The caller's timeout still bounds the wait.

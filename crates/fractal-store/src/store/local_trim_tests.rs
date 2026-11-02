@@ -5,13 +5,18 @@ use super::*;
 use crate::store::checkpoint_agreement_tests_shared_attention_tests::{context, kinds, step};
 use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
 const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
 
 /// A member with both seats declared, so the seat readers have something to answer.
 fn member(trims_locally: bool) -> Store {
-    let store = Store::open_memory("node").unwrap();
+    declared(Store::open_memory("node").unwrap(), trims_locally)
+}
+
+/// `store` with both seats declared.
+fn declared(store: Store, trims_locally: bool) -> Store {
     store.bind_fleet(TEST_FLEET).unwrap();
     let source = "version 2\nagent \"amber\" { command \"true\" }\nagent \"birch\" { command \"true\" }\n";
     let intent = crate::graph::parse_test_intent(source, "node").unwrap();
@@ -37,9 +42,10 @@ fn local_member(_name: &str) -> Store {
 #[derive(Clone, Debug)]
 enum Write {
     Observer { observer: u8, status: u8, cursor: Option<u8> },
-    Resource { resource: u8, state: u8 },
+    /// A pull request's observation, in one of the shapes of `resource_fields`.
+    Resource { resource: u8, shape: u8 },
     /// One poll, as an observer seals it: its observation and a resource it saw, in one batch.
-    Poll { observer: u8, status: u8, resource: u8, state: u8 },
+    Poll { observer: u8, status: u8, resource: u8, shape: u8 },
     Harness { seat: u8, incarnation: u8, state: u8, restamp: bool, provider_auth: Option<bool> },
 }
 
@@ -47,9 +53,9 @@ fn write() -> impl Strategy<Value = Write> {
     prop_oneof![
         (0..3u8, 0..3u8, proptest::option::of(0..4u8))
             .prop_map(|(observer, status, cursor)| Write::Observer { observer, status, cursor }),
-        (0..3u8, 0..3u8).prop_map(|(resource, state)| Write::Resource { resource, state }),
-        (0..3u8, 0..3u8, 0..3u8, 0..3u8)
-            .prop_map(|(observer, status, resource, state)| Write::Poll { observer, status, resource, state }),
+        (0..3u8, shape()).prop_map(|(resource, shape)| Write::Resource { resource, shape }),
+        (0..3u8, 0..3u8, 0..3u8, shape())
+            .prop_map(|(observer, status, resource, shape)| Write::Poll { observer, status, resource, shape }),
         (0..2u8, 0..2u8, 0..6u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
             |(seat, incarnation, state, restamp, provider_auth)| Write::Harness {
                 seat,
@@ -62,11 +68,38 @@ fn write() -> impl Strategy<Value = Write> {
     ]
 }
 
+/// A shape of `resource_fields`, rarely the flat one, which keeps its resource's whole history.
+fn shape() -> impl Strategy<Value = u8> {
+    prop_oneof![9 => 0..6u8, 1 => Just(6u8)]
+}
+
+/// The pull request `resource` an observer watches.
+fn pull_request(resource: u8) -> String {
+    format!("resource/github/acme/garden/pull-request/{resource}")
+}
+
+/// An observation of a pull request as `observer` writes it, by shape: open outside the merge
+/// queue, queued, merged, closed, a receipt, open with its opener named, or in flat facts.
+fn resource_fields(shape: u8, observer: &str) -> serde_json::Map<String, Value> {
+    let open = json!({"state": "open", "merge_queue": null});
+    let mut fields = json!({"kind": "vcs.pull-request", "observer": observer});
+    let more = match shape {
+        0 => json!({"facts": open}),
+        1 => json!({"facts": {"state": "open", "merge_queue": {"state": "QUEUED", "position": 1}}}),
+        2 => json!({"facts": {"state": "closed", "merged": true, "merge_queue": null}}),
+        3 => json!({"facts": {"state": "closed", "merged": false, "merge_queue": null}}),
+        4 => json!({"facts": open, "attribution_only": true}),
+        5 => json!({"facts": {"state": "open", "merge_queue": null, "opened_by": "agent/node.amber"}}),
+        _ => json!({"state": "open"}),
+    };
+    fields.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+    fields.as_object().unwrap().clone()
+}
+
 fn apply(store: &Store, write: &Write, n: usize) {
-    if let Write::Poll { observer, status, resource, state } = write {
+    if let Write::Poll { observer, status, resource, shape } = write {
         let observer = format!("observer/watch-{observer}");
         let status = ["ok", "changed", "failed"][usize::from(*status)];
-        let state = ["open", "merged", "closed"][usize::from(*state)];
         let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
         let observed = append_claim_tx(
@@ -83,14 +116,10 @@ fn apply(store: &Store, write: &Write, n: usize) {
         append_claim_tx(
             &transaction,
             &store.origin,
-            &format!("resource/pr/{resource}"),
+            &pull_request(*resource),
             "resource.observed",
             None,
-            &json!({"fields": {
-                "kind": "vcs.pull-request",
-                "state": state,
-                "observer": observer,
-            }}),
+            &json!({"fields": resource_fields(*shape, &observer)}),
             &[],
             Some(&observed.batch_id),
         )
@@ -110,13 +139,9 @@ fn apply(store: &Store, write: &Write, n: usize) {
             (format!("observer/watch-{observer}"), "observer.observed", fields)
         }
         // As an observer writes it: no actor, and its observer named.
-        Write::Resource { resource, state } => {
-            let fields = BTreeMap::from([
-                ("kind".into(), json!("vcs.pull-request")),
-                ("state".into(), json!(["open", "merged", "closed"][usize::from(*state)])),
-                ("observer".into(), json!("observer/watch-0")),
-            ]);
-            (format!("resource/pr/{resource}"), "resource.observed", fields)
+        Write::Resource { resource, shape } => {
+            let fields = resource_fields(*shape, "observer/watch-0").into_iter().collect();
+            (pull_request(*resource), "resource.observed", fields)
         }
         Write::Harness { seat, incarnation, state, restamp, provider_auth } => {
             let seat = SEATS[usize::from(*seat)];
@@ -164,33 +189,49 @@ fn apply(store: &Store, write: &Write, n: usize) {
         .unwrap();
 }
 
-/// Every answer the readers of these kinds give: the whole graph, each observer's and resource's
-/// newest observation (what resources and reconcile read), each resource's observations newest
-/// first (what a GitHub watch walks back to find when a pull request left the merge queue), each
-/// seat's current harness, status history, newest turn or end, and newest `working` (when its last
-/// turn began, and whether it worked after a given time).
+/// Every answer the readers of these kinds give: the whole graph (with the resource
+/// projection), each observer's and resource's newest observation (what resources and reconcile
+/// read), each pull request's folded state (`latest_actual`, as JSON), when it left the merge queue as the
+/// idle nudge's check walks its observations back to find out, and each seat's current harness,
+/// status history, newest turn or end, and newest `working` (when its last turn began, and whether
+/// it worked after a given time). The check's answer from the start of time decides its answer
+/// from any later time: the exit, if it is later.
 fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     let connection = store.readers.get();
     let mut seats = Vec::new();
     for observer in 0..3 {
         let newest = store.latest_claim(&format!("observer/watch-{observer}"), Some("observer.observed")).unwrap();
         seats.push(format!("observer/watch-{observer}: {:?}", newest.map(|claim| claim.body)));
-        let newest = store.latest_claim(&format!("resource/pr/{observer}"), Some("resource.observed")).unwrap();
-        seats.push(format!("resource/pr/{observer}: {:?}", newest.map(|claim| claim.body)));
-        let walked = connection
+        let subject = pull_request(observer);
+        let newest = store.latest_claim(&subject, Some("resource.observed")).unwrap();
+        seats.push(format!("{subject}: {:?}", newest.map(|claim| claim.body)));
+        // The fold inserts keys in the order it first meets them, which the trimmed log can change.
+        let folded = latest_actual(&connection, &subject).unwrap().map(|value| smallclaims::hash::canonical_json_value(&value));
+        seats.push(format!("{subject} folds to {folded:?}"));
+        // As `idle_holds` reads a thread's observations.
+        let rows = connection
             .prepare(
-                "SELECT accepted_at_unix_ms, json_extract(body, '$.fields.state') FROM claims
-                 WHERE subject=?1 AND kind='resource.observed'
-                 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, store_index DESC",
+                "SELECT json_extract(body, '$.fields.facts'), accepted_at_unix_ms,
+                 CASE WHEN json_extract(body, '$.fields.attribution_only') IN (1,'true') THEN 1 ELSE 0 END
+                 FROM claims WHERE subject=?1 AND kind='resource.observed'
+                 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, store_index DESC LIMIT ?2",
             )
             .unwrap()
-            .query_map([format!("resource/pr/{observer}")], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            .query_map(rusqlite::params![subject, fractal_github_base::github_watch::THREAD_SCAN], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?))
             })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        seats.push(format!("resource/pr/{observer} walked back: {walked:?}"));
+        let exit = fractal_github_base::github_watch::merge_queue_exit(
+            rows.into_iter().map(|(facts, at, receipt)| -> serde_json::Result<_> {
+                let facts = facts.map(|facts| serde_json::from_str::<Value>(&facts)).transpose()?.unwrap_or(Value::Null);
+                Ok((facts, at.parse::<u128>().unwrap_or_default(), receipt))
+            }),
+            0,
+        )
+        .unwrap();
+        seats.push(format!("{subject} left the merge queue: {exit:?}"));
     }
     for seat in SEATS {
         let harness = store.current_harness(seat).unwrap();
@@ -227,14 +268,15 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     for n in 0..40 {
         apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: Some(1) }, n);
     }
+    // Queued, merged and open outside the queue in turn, and queued last.
     for n in 40..50 {
-        apply(&store, &Write::Resource { resource: 0, state: (n % 3) as u8 }, n);
+        apply(&store, &Write::Resource { resource: 0, shape: (n % 3) as u8 }, n);
     }
     let before = answers(&store, context.now_unix_ms);
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
     assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
     assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
-    assert_eq!(claims_of(&store, "resource.observed"), 10, "resource observations stay whole");
+    assert_eq!(claims_of(&store, "resource.observed"), 1, "a pull request seen queued last walks back no further");
     let retired: i64 = store
         .readers
         .get()
@@ -246,6 +288,283 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().filter(|entry| {
         entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("capture-")
     }).count(), 0);
+}
+
+/// A local cut that deletes in many chunks leaves the roster's generation alone until its run
+/// stops, so a fold under way publishes. Forgetting the views after every chunk restarted the
+/// roster's fold before it could publish, all through a run.
+#[test]
+fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let all = observer_ids(&store);
+    // A capped day stops at TrimDeferred, and the next day's run reaches the final mark.
+    store.trim_locally_at_most(15);
+    for (day, outcome) in [(0, "deferred"), (1, "trimmed")] {
+        let context = context(scratch.path(), day);
+        let before = answers(&store, context.now_unix_ms);
+        let deleted = all.difference(&observer_ids(&store)).count();
+        let generation = store.fractal.presented_agents.generation();
+        let sequence = claims_sequence(&store);
+        let actions = kinds(&step(&store, &context));
+        assert_eq!(actions.first(), Some(&outcome), "day {day}: {actions:?}");
+        let chunks = all.difference(&observer_ids(&store)).count() - deleted;
+        let forgets = store.fractal.presented_agents.generation() - generation;
+        assert!(chunks > 4, "day {day}: the run deletes in many chunks ({chunks})");
+        // Once when a cut's tombstones are recorded and once when its run stops: the second
+        // day finishes the first cut, then records the next one and stops at the cap.
+        assert!(forgets <= 3, "day {day}: {forgets} forgets for {chunks} chunks");
+        // A stopped run still forgets what the views hold of the claims it deleted, and the
+        // final mark still expires every cursor taken before it.
+        assert!(forgets >= 1, "day {day}: the run's stop forgets the views");
+        assert_eq!(claims_sequence(&store) > sequence, outcome == "trimmed", "day {day}: cursors expire at the final mark");
+        assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}: the readers answer the same");
+    }
+}
+
+/// The agents roster publishes while a local cut deletes in many chunks: a fold begun after
+/// one chunk publishes after the next. Forgetting the views after every chunk failed it with
+/// "the agents source reset while materializing its publication", all through the run.
+#[test]
+fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
+    use super::agents_publication::{AgentsStatusWatermark, PresentedAgents};
+    use super::published_list::Publication;
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let fractal = Arc::clone(&store.fractal);
+    fractal.presented_agents.start();
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let hook_published = Arc::clone(&published);
+    let mut building = None;
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        // A fold begun after one chunk ends after the next, as a fold of seconds does.
+        if let Some(build) = building.take() {
+            let row = serde_json::json!({ "id": format!("agent/example-{chunk}") });
+            let done = fractal.presented_agents.publish_identified(build, |identity| Publication {
+                cut: 1,
+                published_at_unix_ms: 1,
+                valid_until_unix_ms: None,
+                rows: PresentedAgents::new(
+                    uuid::Uuid::nil(), identity, AgentsStatusWatermark { store_index: 1, local_frontier: 1 }, 1,
+                    vec![row], vec![format!("agent/example-{chunk}")],
+                ),
+            });
+            hook_published.lock().unwrap().push(done.is_some());
+        }
+        building = fractal.presented_agents.begin_materialization();
+    }));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let published = published.lock().unwrap();
+    assert!(published.len() > 4, "the cut deletes in many chunks ({})", published.len());
+    assert!(published.iter().all(|done| *done), "the agents source reset while materializing its publication: {published:?}");
+}
+
+/// A local cut's run lets the views refold once the interval is due, keeping the roster's
+/// generation; within the interval it leaves them serving.
+#[test]
+fn a_local_cut_refolds_the_views_within_its_run_once_the_interval_is_due() {
+    for (interval, refolds) in [(std::time::Duration::ZERO, true), (smallclaims::store::checkpoint_trim::TRIM_VIEW_REFOLD_INTERVAL, false)] {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = local_member("alder");
+        store.set_trim_pause(std::time::Duration::ZERO);
+        store.set_trim_chunk_envelopes(1);
+        store.set_trim_view_refold_interval(interval);
+        for n in 0..30 {
+            apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+        }
+        let fractal = Arc::clone(&store.fractal);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hook_seen = Arc::clone(&seen);
+        let mut generation = None;
+        *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+            let now = fractal.presented_agents.generation();
+            let refolded = fractal.glass_list.refold.swap(false, std::sync::atomic::Ordering::AcqRel);
+            hook_seen.lock().unwrap().push((refolded, *generation.get_or_insert(now) == now));
+        }));
+        assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+        store.trim_chunk_hook.lock().unwrap().take();
+        let seen = seen.lock().unwrap();
+        assert!(seen.len() > 4, "{interval:?}: the cut deletes in many chunks ({})", seen.len());
+        assert_eq!(seen.iter().any(|(refolded, _)| *refolded), refolds, "{interval:?}: {seen:?}");
+        assert!(seen.iter().all(|(_, kept)| *kept), "{interval:?}: a refold keeps the roster's generation: {seen:?}");
+    }
+}
+
+/// The frames in a store's WAL, which the next write appends after until a restart starts it
+/// over: `mxFrame` of the WAL-index header, read from the shared-memory file so that looking
+/// checkpoints nothing.
+fn wal_frames(store: &Store) -> i32 {
+    let mut shm = store.path.clone().into_os_string();
+    shm.push("-shm");
+    let header = std::fs::read(shm).unwrap_or_default();
+    header.get(16..20).map_or(0, |frames| i32::from_ne_bytes(frames.try_into().unwrap()))
+}
+
+/// A file-backed member trimming locally, with its trim unpaced and one envelope a chunk, and a
+/// cut's worth of observations to drop.
+fn file_member(scratch: &std::path::Path) -> Arc<Store> {
+    let store = declared(Store::open(&scratch.join("claims.sqlite3"), "node").unwrap(), true);
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..300 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    Arc::new(store)
+}
+
+/// Read transactions of 60 ms on two readers half a read apart, so one is always open and was
+/// begun before the trim's latest commit, as a busy daemon's are; and the daemon's idle recycle
+/// every 20 ms. Stop with `stop`.
+fn busy_daemon(store: &Arc<Store>, stop: &Arc<AtomicBool>) -> Vec<std::thread::JoinHandle<()>> {
+    let mut threads = Vec::new();
+    for offset in [0, 30] {
+        let (store, stop) = (Arc::clone(store), Arc::clone(stop));
+        threads.push(std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(offset));
+            let reader = store.readers.get();
+            while !stop.load(Ordering::Acquire) {
+                let read = reader.unchecked_transaction().unwrap();
+                read.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get::<_, i64>(0)).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                read.commit().unwrap();
+            }
+        }));
+    }
+    let (store, stop) = (Arc::clone(store), Arc::clone(stop));
+    threads.push(std::thread::spawn(move || {
+        let checkpoint = rusqlite::Connection::open(&store.path).unwrap();
+        while !stop.load(Ordering::Acquire) {
+            store.checkpoint_idle_wal_report(&checkpoint).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }));
+    threads
+}
+
+/// A trim writes nearly all the time and a busy daemon always has a reader on an older snapshot,
+/// so the idle recycle never finds the WAL copied: on a large member the WAL grew 650 MB a minute
+/// until the trim was stopped. Past its bound the trim stops deleting and restarts the WAL, so the
+/// WAL stays near the bound for the whole cut however much the cut deletes.
+#[test]
+fn a_paced_local_trim_keeps_the_wal_under_its_bound_with_readers_always_open() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = file_member(scratch.path());
+    let bound = 1_000;
+    store.set_trim_wal(smallclaims::store::checkpoint_trim::TrimWal {
+        frames: bound,
+        check: std::time::Duration::ZERO,
+        ..smallclaims::store::checkpoint_trim::TRIM_WAL
+    });
+    let logged = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&logged);
+    *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
+    let stop = Arc::new(AtomicBool::new(false));
+    let daemon = busy_daemon(&store, &stop);
+    let sampled = Arc::new(Mutex::new((0, 0, 0)));
+    let samples = Arc::clone(&sampled);
+    let hook_store = Arc::clone(&store);
+    let mut last = wal_frames(&store);
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+        let frames = wal_frames(&hook_store);
+        let mut samples = samples.lock().unwrap();
+        // The largest WAL, the most one chunk added, and every frame the trim wrote.
+        samples.0 = samples.0.max(frames);
+        samples.1 = samples.1.max(frames - last);
+        samples.2 += (frames - last).max(0);
+        last = frames;
+    }));
+    let actions = kinds(&step(&store, &context(scratch.path(), 0)));
+    store.trim_chunk_hook.lock().unwrap().take();
+    stop.store(true, Ordering::Release);
+    daemon.into_iter().for_each(|thread| thread.join().unwrap());
+    assert_eq!(actions.first(), Some(&"trimmed"), "{actions:?}");
+    assert!(observer_ids(&store).len() < 10, "the cut dropped the observations");
+    let (largest, chunk, written) = *sampled.lock().unwrap();
+    assert!(written > 10 * bound, "the trim writes far past the bound ({written} frames)");
+    // Past the bound by what one chunk and the run between two looks write, never by the cut.
+    assert!(largest < bound + bound / 4, "the WAL reached {largest} frames, bound {bound}, chunk {chunk}");
+    // Each restart says so on the daemon's stderr.
+    let restarts = logged.lock().unwrap().iter().filter(|line| line.starts_with("st3: a trim restarted the WAL {")).count();
+    assert!(restarts * bound as usize >= written as usize / 2, "{restarts} restart lines for {written} frames");
+}
+
+/// A trim whose WAL will not restart, because a reader holds a snapshot past the trim's wait,
+/// stops where it is, deletes nothing more, and goes on at the next step once the reader is gone.
+#[test]
+fn a_trim_that_cannot_restart_the_wal_stops_until_the_next_step_and_resumes() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = file_member(scratch.path());
+    let bound = 200;
+    store.set_trim_wal(smallclaims::store::checkpoint_trim::TrimWal {
+        frames: bound,
+        busy: std::time::Duration::from_millis(20),
+        wait: std::time::Duration::from_millis(300),
+        check: std::time::Duration::ZERO,
+    });
+    let all = observer_ids(&store);
+    // From the third chunk, one reader holds its snapshot for longer than the trim waits.
+    let (begun, release) = (Arc::new(std::sync::Barrier::new(2)), Arc::new(AtomicBool::new(false)));
+    let holder = Arc::new(Mutex::new(None));
+    let (hook_store, hook_begun, hook_release, hook_holder) =
+        (Arc::clone(&store), Arc::clone(&begun), Arc::clone(&release), Arc::clone(&holder));
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        if chunk == 3 {
+            let (store, begun, release) = (Arc::clone(&hook_store), Arc::clone(&hook_begun), Arc::clone(&hook_release));
+            *hook_holder.lock().unwrap() = Some(std::thread::spawn(move || {
+                let reader = store.readers.get();
+                let read = reader.unchecked_transaction().unwrap();
+                read.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get::<_, i64>(0)).unwrap();
+                begun.wait();
+                while !release.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                read.commit().unwrap();
+            }));
+            hook_begun.wait();
+        }
+    }));
+    let logged = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&logged);
+    *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
+    let actions = kinds(&step(&store, &context(scratch.path(), 0)));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let stopped_at = wal_frames(&store);
+    assert!(
+        logged.lock().unwrap().iter().any(|line| line.starts_with("st3: a trim could not restart the WAL and stops until the next step {")),
+        "the stop is logged: {:?}", logged.lock().unwrap()
+    );
+    let left = observer_ids(&store);
+    release.store(true, Ordering::Release);
+    holder.lock().unwrap().take().unwrap().join().unwrap();
+    assert_eq!(actions.first(), Some(&"deferred"), "{actions:?}");
+    assert!(cut_states(&store).iter().any(|state| state == "trimming"), "{:?}", cut_states(&store));
+    assert!(left.len() < all.len() && left.len() > 10, "the run stopped part way ({} of {} left)", left.len(), all.len());
+    assert!(stopped_at < 2 * bound, "the trim deleted past the bound ({stopped_at} frames)");
+    // The reader gone, the next step restarts the WAL and finishes the cut.
+    store.set_trim_wal(smallclaims::store::checkpoint_trim::TRIM_WAL);
+    let actions = kinds(&step(&store, &context(scratch.path(), 0)));
+    assert_eq!(actions.first(), Some(&"trimmed"), "{actions:?}");
+    assert!(observer_ids(&store).len() < 10, "the cut dropped the observations");
+}
+
+/// The claims sequence a page cursor carries, which the final mark of a trim moves on.
+fn claims_sequence(store: &Store) -> i64 {
+    store
+        .readers
+        .get()
+        .query_row("SELECT seq FROM sqlite_sequence WHERE name='claims'", [], |row| row.get(0))
+        .unwrap()
 }
 
 /// How many claims this member retired, and whether every one of `deleted` is among them.
@@ -446,7 +765,9 @@ fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
     let scratch = tempfile::tempdir().unwrap();
     let store = local_member("alder");
     store.trim_locally_at_most(10);
-    for n in 0..30 {
+    // Superseded observer observations and each day's superseded resource observation: three
+    // days of at most ten.
+    for n in 0..27 {
         apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
     }
     let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
@@ -462,8 +783,9 @@ fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
         let (prepared, rebuilt) = prepared_and_rebuilt(&store, &format!("resource/pr/{day}"));
         assert_eq!(prepared, rebuilt, "day {day}");
         assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}");
+        let state = if day < 2 { "trimming" } else { "trimmed" };
+        assert_eq!(cut_states(&store).last().map(String::as_str), Some(state), "day {day}");
     }
-    assert_eq!(cut_states(&store).last().map(String::as_str), Some("trimmed"));
 }
 
 /// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its
@@ -484,7 +806,7 @@ fn a_member_that_trims_locally_drops_superseded_claims_from_envelopes_it_keeps()
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
     for n in 0..20 {
-        apply(&store, &Write::Poll { observer: 0, status: (n % 3) as u8, resource: 0, state: (n % 3) as u8 }, n);
+        apply(&store, &Write::Poll { observer: 0, status: (n % 3) as u8, resource: 0, shape: 0 }, n);
     }
     store.seal_local_batches().unwrap();
     let envelopes = || -> i64 {
@@ -495,7 +817,7 @@ fn a_member_that_trims_locally_drops_superseded_claims_from_envelopes_it_keeps()
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
     assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
     assert_eq!(claims_of(&store, "observer.observed"), 1, "the newest observation stays");
-    assert_eq!(claims_of(&store, "resource.observed"), 20, "resource observations stay whole");
+    assert_eq!(claims_of(&store, "resource.observed"), 20, "a pull request open outside the queue keeps what a check reads");
     // Each poll's envelope stays whole, for its resource observation and for peers; only this
     // member's own copies of the superseded observations go, and each goes into the ledger.
     assert_eq!(envelopes(), sealed);
@@ -528,7 +850,7 @@ fn a_fresh_member_joining_from_one_that_split_envelopes_admits_them_whole_and_ag
     let context = context(scratch.path(), 0);
     let alder = local_member("alder");
     for n in 0..20 {
-        apply(&alder, &Write::Poll { observer: 0, status: (n % 3) as u8, resource: 0, state: (n % 3) as u8 }, n);
+        apply(&alder, &Write::Poll { observer: 0, status: (n % 3) as u8, resource: 0, shape: 0 }, n);
     }
     alder.seal_local_batches().unwrap();
     assert_eq!(kinds(&step(&alder, &context)), ["trimmed"]);
@@ -784,24 +1106,29 @@ proptest! {
     }
 }
 
-/// A GitHub watch finds when a pull request left the merge queue by walking the request's
-/// observations back to the watch's last wake, which can be before the cut. The audited
-/// `resource.observed` rule keeps only the newest, so local trim leaves the kind whole until a
-/// rule keeps that history.
+/// The idle nudge finds when a pull request left the merge queue by walking its observations
+/// back to the one that saw it queued, which can be before the cut. Local trim keeps those and
+/// drops the open observations before them; a resource in flat facts keeps every observation.
 #[test]
-fn local_trim_leaves_resource_observations_whole() {
+fn local_trim_keeps_a_pull_requests_observations_back_to_the_merge_queue() {
     let scratch = tempfile::tempdir().unwrap();
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
-    for (n, state) in [0, 0, 2, 0].into_iter().enumerate() {
-        apply(&store, &Write::Resource { resource: 0, state }, n);
+    let writes = [(0, 0), (0, 0), (0, 1), (0, 0), (0, 0), (1, 6), (1, 0), (1, 0)];
+    for (n, (resource, shape)) in writes.into_iter().enumerate() {
+        apply(&store, &Write::Resource { resource, shape }, n);
     }
-    for n in 4..20 {
+    for n in writes.len()..20 {
         apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
     }
     let before = answers(&store, context.now_unix_ms);
+    assert!(before.1.iter().any(|answer| answer.contains("pull-request/0 left the merge queue: Some(Some(")), "{before:?}");
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
-    assert_eq!(claims_of(&store, "resource.observed"), 4);
+    let count = |resource: u8| -> i64 {
+        store.readers.get().query_row("SELECT COUNT(*) FROM claims WHERE subject=?1", [pull_request(resource)], |row| row.get(0)).unwrap()
+    };
+    assert_eq!(count(0), 3, "the queued observation and those after it stay");
+    assert_eq!(count(1), 3, "a resource in flat facts keeps every observation");
     assert_eq!(claims_of(&store, "observer.observed"), 1);
     assert_eq!(answers(&store, context.now_unix_ms), before);
 }
@@ -1155,6 +1482,20 @@ fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> 
         .map(|envelope| format!("{}/{}/{}", envelope.writer, envelope.sequence, envelope.envelope_hash))
         .collect();
     (claims, envelopes, staged.guard_answers(kinds).unwrap())
+}
+
+#[test]
+fn a_local_cut_s_scoped_capture_stages_every_kind_its_rules_read() {
+    let capture = smallclaims::store::local_trim_capture_kinds();
+    for kind in smallclaims::store::LOCAL_TRIM_KINDS {
+        let missing = checkpoint_rules::kinds_read_for(kind)
+            .into_iter()
+            .filter(|read| !capture.contains(read))
+            .collect::<Vec<_>>();
+        assert!(missing.is_empty(), "judging {kind} reads {missing:?}, which a local cut does not stage");
+    }
+    // The status-history rule reads a seat's runtime resets and diagnostics.
+    assert!(checkpoint_rules::kinds_read_for("harness.observed").contains("runtime.observed"));
 }
 
 /// A seat whose harness transitions are all old, with a provider prompt raised and restored

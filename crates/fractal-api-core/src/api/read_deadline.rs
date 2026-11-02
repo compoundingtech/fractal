@@ -189,6 +189,7 @@ fn forwarded_deadline(operation: &crate::peer::ClientReadOperation) -> Option<Du
         | ClientReadOperation::Blob { .. }
         | ClientReadOperation::HarnessInventory { .. }
         | ClientReadOperation::GithubPlugin { .. }
+        | ClientReadOperation::GithubPluginRead { .. }
         | ClientReadOperation::Messages { .. } => Some(ORDINARY),
     }
 }
@@ -1460,7 +1461,7 @@ use super::*;
                     async move {
                         let work = super::super::events_page(State(state.clone()), Query(
                             super::super::EventQuery {
-                                after: 0, subject: None, owner_run: None, wait: Some(true),
+                                after: 0, messages_after: None, subject: None, owner_run: None, wait: Some(true),
                                 timeout_ms: Some(30_000), limit: Some(10),
                             },
                         ));

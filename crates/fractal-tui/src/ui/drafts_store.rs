@@ -39,6 +39,9 @@ fn now() -> u64 {
 }
 
 fn read(path: &Path) -> File {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let path = fractal_client::product_dirs::tui_read_path(path);
+    // LIVE-MIGRATION END
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())

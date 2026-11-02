@@ -33,6 +33,11 @@ pub mod declarations;
 pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
+mod rename_proof;
+#[cfg(test)]
+mod rename_proof_tests;
+#[cfg(test)]
+mod observation_trim_tests;
 pub mod directive_notes;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
@@ -47,6 +52,7 @@ pub mod schedule_active_run_tests;
 #[cfg(test)]
 pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
+pub mod mission_capacity;
 pub mod glasses;
 pub mod mailbox_wakes;
 pub mod mailbox_changes;
@@ -100,6 +106,7 @@ pub mod mission_provenance;
 pub mod agent_queue_values;
 pub mod backup_format;
 pub mod message_bodies;
+pub mod messages_shard;
 pub mod projectors;
 #[cfg(test)]
 pub mod projectors_tests;
@@ -196,6 +203,7 @@ pub mod roster_admission;
 pub mod adhoc_work;
 pub mod attention_history;
 pub mod attention_snapshot;
+pub mod fault_cache;
 pub use attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
     plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
@@ -235,6 +243,9 @@ pub use declared_waits::{WORK_WAIT_ENDED_KIND, WaitTarget, WaitWake, describe_wa
 pub mod quiet_claims;
 pub use quiet_claims::{STALLED_GRACE_MS, STEP_QUIET_CONDITION, STEP_STALLED_CONDITION, quiet_episode};
 pub mod idle_mail;
+pub mod message_marks;
+#[cfg(test)]
+mod message_marks_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -2180,6 +2191,16 @@ impl LocalSeats {
     }
 }
 
+/// What one local-observation trim pass deleted, and the longest it held the store's writer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ObservationTrim {
+    pub deleted: usize,
+    pub longest_writer_hold: std::time::Duration,
+}
+
+/// Rows past retention one reader read of the trim examines.
+const TRIM_SCAN_PAGE: i64 = 5_000;
+
 pub struct Store {
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
@@ -2215,6 +2236,7 @@ pub const ACTUAL_CACHE_LIMIT: usize = 4096;
 pub struct MessageCacheEntry {
     latest_claim_index: u64,
     desired_claim_id: Option<String>,
+    latest_mark: i64,
     view: MessageView,
 }
 
@@ -2252,7 +2274,8 @@ pub fn stale_pull_request_request_tx(
     discovery: &str,
 ) -> Result<Option<String>> {
     smallclaims::touched::note_read(|| resource.to_owned());
-    let Some(requested) = claim_by_id_tx(connection, discovery)?.filter(|claim| {
+    // A compact item state, as a poller in compact mode pins, reads as its observation.
+    let Some(requested) = claim_by_id_tx(connection, discovery)?.map(|mut claim| { claim.body = fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body); claim }).filter(|claim| {
         claim.subject == resource
             && claim.body.pointer("/fields/kind").and_then(Value::as_str)
                 == Some("vcs.pull-request")
@@ -3077,6 +3100,7 @@ impl Store {
                         serde_json::from_str(&response).map_err(internal)?,local_receipt,idempotency_key);
                 }
                 schedule_standby::validate_publication(transaction, &self.origin, intent)?;
+                mission_capacity::validate_publication(transaction, &self.origin, intent)?;
                 crate::provenance::validate_publication(transaction, intent)?;
                 message_subscriptions::validate(transaction, intent, current_index_tx(transaction).map_err(internal)?)?;
                 let owned_plan = owned.map(|options| owned_sets::plan_tx(transaction, intent, options)).transpose()?;
@@ -3123,6 +3147,7 @@ impl Store {
                     }
                 }
                 validate_documents(transaction, &intent.document_refs)?;
+                attention_snapshot::refuse_second_fault_agent(transaction, intent)?;
                 for desired in intent
                     .subjects
                     .values()
@@ -4259,40 +4284,87 @@ impl Store {
         max_per_subject_kind: usize,
         chunk: usize,
     ) -> Result<usize> {
+        Ok(self.trim_local_observations_pass(older_than_unix_ms, max_per_subject_kind, chunk)?.deleted)
+    }
+
+    /// One trim pass, and the longest the store's writer was held for it.
+    pub fn trim_local_observations_pass(
+        &self,
+        older_than_unix_ms: u128,
+        max_per_subject_kind: usize,
+        chunk: usize,
+    ) -> Result<ObservationTrim> {
         self.flush_overdue_usage_rollups(now_ms())?;
         let chunk = chunk.max(1).min(i64::MAX as usize) as i64;
         let max_per_subject_kind = max_per_subject_kind.max(1).min(i64::MAX as usize) as i64;
+        let mut longest_writer_hold = std::time::Duration::ZERO;
         let mut deleted = 0;
         // A reading a usage slot still waits to replicate is never trimmed (below).
         // The newest observation of a subject and kind always stays. Rows past retention go
         // through the time index, and a row is "not the newest" when a later id exists for its
-        // subject and kind, one seek in `local_observations_subject_kind_index`. This used to
-        // rank every row of the table with a window function inside the writer's hold, every
-        // chunk of every pass, even when nothing was due.
+        // subject and kind, one seek in `local_observations_subject_kind_index`.
+        //
+        // The search runs on a reader, a page of the time index at a time, and the writer only
+        // deletes the ids it found, re-checking each. Searching inside the DELETE walked every
+        // row past retention that must stay, on every chunk of every pass, inside the writer's
+        // hold: 20 s on a 57 GB member right after a restart, while every seat reconnected (#4610).
+        // `local_latest_slots` has no index on `pending_local_id`, so its check is a list built
+        // once per statement, never a correlated scan per row (60 s over 26,000 rows on that member).
+        let mut after: (i64, i64) = (i64::MIN, i64::MIN);
         loop {
-            let connection = self.connection.write_background();
-            let removed = connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h315fe07938f4 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
-                    SELECT id FROM local_observations AS old
-                    WHERE observed_at_unix_ms < ?1
-                      AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
-                      AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
-                      AND NOT EXISTS (SELECT 1 FROM local_latest_slots WHERE pending_local_id=old.id)
-                      AND EXISTS (SELECT 1 FROM local_observations AS newer
-                                  WHERE newer.subject=old.subject AND newer.kind=old.kind
-                                    AND newer.id>old.id)
-                    ORDER BY observed_at_unix_ms
-                    LIMIT ?2
-                 )",
-                params![
-                    older_than_unix_ms.min(i64::MAX as u128) as i64,
-                    chunk
-                ],
-            )?;
-            drop(connection);
-            deleted += removed;
-            if (removed as i64) < chunk {
-                break;
+            let (due, scanned, last) = {
+                let connection = self.readers.get();
+                let mut statement = connection.prepare_cached(
+                    "SELECT id, observed_at_unix_ms,
+                            kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
+                            AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
+                            AND old.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
+                            AND EXISTS (SELECT 1 FROM local_observations AS newer
+                                        WHERE newer.subject=old.subject AND newer.kind=old.kind
+                                          AND newer.id>old.id)
+                     FROM local_observations AS old
+                     WHERE observed_at_unix_ms < ?1 AND (observed_at_unix_ms, id) > (?2, ?3)
+                     ORDER BY observed_at_unix_ms, id
+                     LIMIT ?4",
+                )?;
+                let rows = statement
+                    .query_map(
+                        params![older_than_unix_ms.min(i64::MAX as u128) as i64, after.0, after.1, TRIM_SCAN_PAGE],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?)),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let last = rows.last().map(|(id, at, _)| (*at, *id));
+                let due: Vec<i64> = rows.iter().filter(|(_, _, due)| *due).map(|(id, _, _)| *id).collect();
+                (due, rows.len() as i64, last)
+            };
+            #[cfg(test)]
+            if let Some(change) = observation_trim_tests::AFTER_SEARCH.with(|change| change.borrow_mut().take()) {
+                change(self);
+            }
+            for ids in due.chunks(chunk as usize) {
+                let connection = self.connection.write_background();
+                let started = std::time::Instant::now();
+                // Every condition again, under the writer: a row may have become a pending slot or
+                // start evidence since the search.
+                let removed = connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-h0b1b867066d2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations
+                     WHERE id IN (SELECT value FROM json_each(?1))
+                       AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
+                       AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
+                       AND local_observations.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
+                       AND EXISTS (SELECT 1 FROM local_observations AS newer
+                                   WHERE newer.subject=local_observations.subject
+                                     AND newer.kind=local_observations.kind
+                                     AND newer.id>local_observations.id)",
+                    [serde_json::to_string(ids)?],
+                )?;
+                drop(connection);
+                longest_writer_hold = longest_writer_hold.max(started.elapsed());
+                deleted += removed;
+            }
+            match last {
+                Some(last) if scanned == TRIM_SCAN_PAGE => after = last,
+                _ => break,
             }
         }
         // The cap: only a subject and kind with more rows than the cap has any. Find them on a
@@ -4312,6 +4384,7 @@ impl Store {
         for (subject, kind) in over_cap {
             loop {
                 let connection = self.connection.write_background();
+                let started = std::time::Instant::now();
                 // The newest id past the cap: rank `cap + 1` from the newest.
                 let boundary: Option<i64> = connection
                     .query_row(
@@ -4322,27 +4395,30 @@ impl Store {
                     )
                     .optional()?;
                 let Some(boundary) = boundary else {
+                    drop(connection);
+                    longest_writer_hold = longest_writer_hold.max(started.elapsed());
                     break;
                 };
                 let removed = connection.execute(
-                    /* sqlite-large-value: allow-for-now lv-ha3460e7a5f9d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                    /* sqlite-large-value: allow-for-now lv-haf85b2aa5c24 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                         SELECT id FROM local_observations
                         WHERE subject=?1 AND kind=?2 AND id<=?3
                           AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                           AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
-                          AND NOT EXISTS (SELECT 1 FROM local_latest_slots WHERE pending_local_id=local_observations.id)
+                          AND local_observations.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
                         ORDER BY id LIMIT ?4
                      )",
                     params![subject, kind, boundary, chunk],
                 )?;
                 drop(connection);
+                longest_writer_hold = longest_writer_hold.max(started.elapsed());
                 deleted += removed;
                 if (removed as i64) < chunk {
                     break;
                 }
             }
         }
-        Ok(deleted)
+        Ok(ObservationTrim { deleted, longest_writer_hold })
     }
 
     pub fn idempotent_claim(&self, key: &str) -> Result<Option<ClaimRecord>> {
@@ -5092,6 +5168,7 @@ impl Store {
                     .collect::<Vec<_>>()
             });
             let mut merged = StatusResponse {
+                seat_admission: None,
                 store_index,
                 subjects: Vec::new(),
                 pending_actions: Vec::new(),
@@ -5219,6 +5296,7 @@ impl Store {
             subjects.push(status);
         }
         Ok(StatusResponse {
+            seat_admission: None,
             store_index,
             subjects,
             pending_actions,
@@ -5498,18 +5576,22 @@ impl Store {
         at_index: Option<u64>,
     ) -> Result<Option<String>> {
         let connection = self.readers.get();
-        let body: Option<String> = connection
+        let at_index = at_index.unwrap_or(i64::MAX as u64);
+        let decision: Option<(String, u64)> = connection
             .query_row(
-                "SELECT body FROM claims WHERE subject=?1 AND kind='runtime.reconcile-decision'
+                "SELECT body, store_index FROM claims WHERE subject=?1 AND kind='runtime.reconcile-decision'
              AND store_index<=?2 AND json_extract(body, '$.fields.key')='member-reconcile'
              ORDER BY store_index DESC LIMIT 1",
-                params![subject, at_index.unwrap_or(i64::MAX as u64)],
-                |row| row.get(0),
+                params![subject, at_index],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some(body) = body else {
+        let Some((body, index)) = decision else {
             return Ok(None);
         };
+        if stopped_after(&connection, subject, index, at_index)? {
+            return Ok(None);
+        }
         let body: Value = serde_json::from_str(&body)?;
         let fields = body.get("fields").unwrap_or(&body);
         Ok(
@@ -5526,18 +5608,25 @@ impl Store {
     /// The host that recorded `subject`'s current member fault, when it has one.
     pub fn member_reconcile_fault_origin(&self, subject: &str) -> Result<Option<String>> {
         let connection = self.readers.get();
-        Ok(connection
+        let Some((origin, decision, index)) = connection
             .query_row(
-                "SELECT origin, json_extract(body, '$.fields.decision') FROM claims
+                "SELECT origin, json_extract(body, '$.fields.decision'), store_index FROM claims
                  WHERE subject=?1 AND kind='runtime.reconcile-decision'
                    AND json_extract(body, '$.fields.key')='member-reconcile'
                  ORDER BY store_index DESC LIMIT 1",
                 params![subject],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, u64>(2)?)),
             )
             .optional()?
-            .filter(|(_, decision)| decision.as_deref() == Some("member-fault"))
-            .map(|(origin, _)| origin))
+        else {
+            return Ok(None);
+        };
+        if decision.as_deref() != Some("member-fault")
+            || stopped_after(&connection, subject, index, i64::MAX as u64)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(origin))
     }
 
     /// The member fault of each of `subjects` that has one at `at_index`, as
@@ -5555,16 +5644,24 @@ impl Store {
                     (SELECT body FROM claims WHERE subject=subjects.value
                        AND kind='runtime.reconcile-decision' AND store_index<=?2
                        AND json_extract(body, '$.fields.key')='member-reconcile'
+                     ORDER BY store_index DESC LIMIT 1),
+                    (SELECT store_index FROM claims WHERE subject=subjects.value
+                       AND kind='runtime.reconcile-decision' AND store_index<=?2
+                       AND json_extract(body, '$.fields.key')='member-reconcile'
                      ORDER BY store_index DESC LIMIT 1)
              FROM json_each(?1) subjects",
         )?;
         let mut decisions = Vec::new();
         for chunk in subjects.chunks(256) {
             for row in statement.query_map(params![serde_json::to_string(chunk)?, at_index], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<u64>>(2)?))
             })? {
-                let (subject, body) = row?;
-                decisions.extend(body.map(|body| (subject, body)));
+                let (subject, body, index) = row?;
+                if let (Some(body), Some(index)) = (body, index)
+                    && !stopped_after(&connection, &subject, index, at_index)?
+                {
+                    decisions.push((subject, body));
+                }
             }
         }
         let mut faults = BTreeMap::new();
@@ -5839,19 +5936,25 @@ impl Store {
     /// fault is a person's: the owning agent retries, revises or cancels, and asks a person
     /// only for what only a person can give.
     pub fn fault_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
+        // One read cut for every family, so a run, step, declaration or failure that many
+        // faults share is read once.
+        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of)))
+    }
+
+    fn fault_snapshot_in_cut(&self, as_of: u128) -> Result<Vec<FaultView>> {
         let mut items = self.subscription_fault_items(as_of)?;
-        let (operational, failures) = self.operational_attention_items_with_failures(None, as_of)?;
+        items.extend(self.operational_fault_families(None, as_of)?);
+        // Failure episodes come from the fault cache, read again only where something changed.
+        let (operational, gates) = self.cached_failure_faults(as_of)?;
         items.extend(operational);
-        items.extend(
-            self.broken_gate_items_from_failures(None, as_of, failures)?
-                .into_iter()
-                .filter(|item| !item.person.starts_with("person/")),
-        );
+        items.extend(gates);
         items.extend(self.checkpoint_attention_items(None, as_of)?);
         items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
+        let dismissed = self.dismissed_faults()?;
         self.current_attention(items, as_of)?
             .into_iter()
+            .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
             .map(|item| {
                 Ok(FaultView {
                     owner: self.fault_owner(&item, fallback.as_deref())?,
@@ -5859,6 +5962,125 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Each dismissed fault, by subject and episode. A new episode at the same source is a new
+    /// fault, so a dismissal never hides a later failure. Only a dismissal by a person, or by an
+    /// agent whose declaration carried `handles-faults` when it was written, counts: one that
+    /// another member accepted from any other actor hides nothing here.
+    pub fn dismissed_faults(&self) -> Result<HashSet<(String, String)>> {
+        let connection = self.readers.get();
+        let mut query = connection.prepare(
+            "SELECT dismissal.subject, json_extract(dismissal.body, '$.fields.episode')
+             FROM claims AS dismissal INDEXED BY claims_kind_index
+             WHERE dismissal.kind='fault.dismissed'
+               AND (substr(dismissal.actor, 1, 7)='person/' OR (
+                 SELECT json_extract(declaration.body, '$.kind')='agent' AND EXISTS (
+                     SELECT 1 FROM json_each(declaration.body, '$.desired.children')
+                     WHERE json_extract(value, '$.name')='handles-faults'
+                   )
+                 FROM claims AS declaration INDEXED BY claims_subject_kind_accepted_index
+                 WHERE declaration.subject=dismissal.actor AND declaration.kind='intent.desired'
+                   AND (length(declaration.accepted_at_unix_ms), declaration.accepted_at_unix_ms)
+                     <= (length(dismissal.accepted_at_unix_ms), dismissal.accepted_at_unix_ms)
+                 ORDER BY length(declaration.accepted_at_unix_ms) DESC,
+                   declaration.accepted_at_unix_ms DESC, declaration.store_index DESC
+                 LIMIT 1
+               ) = 1)",
+        )?;
+        Ok(query
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?
+            .filter_map(|row| match row {
+                Ok((subject, Some(episode))) => Some(Ok((subject, episode))),
+                Ok((_, None)) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Dismiss a current fault whose run has ended. Nothing at such a source can close it: a
+    /// failed child run's outcome belongs to its parent step, and an ended run is not retried,
+    /// revised or cancelled. A person may, and so may the fleet's fault agent, which owns faults
+    /// no one else does; no other agent. A fault whose run is still open closes at its source.
+    pub fn dismiss_fault_as(
+        &self,
+        request: &crate::model::FaultDismissRequest,
+    ) -> Result<crate::model::FaultDismissal, St3Error> {
+        let actor = smallclaims::store::normalize_actor(&request.actor, "person");
+        let fault_agent = self.fleet_fault_agent().map_err(internal)?;
+        if !(actor.starts_with("person/") || fault_agent.as_deref() == Some(actor.as_str())) {
+            return Err(St3Error::new(
+                "fault-dismiss-forbidden",
+                format!("`{actor}` cannot dismiss a fault; a person, or the fleet's fault agent, can"),
+            ));
+        }
+        if request.reason.trim().is_empty() {
+            return Err(St3Error::new("fault-dismiss-reason", "a fault dismissal needs a reason"));
+        }
+        let source = request.source.as_str();
+        let matching = self
+            .fault_snapshot(now_ms())
+            .map_err(internal)?
+            .into_iter()
+            .map(|fault| fault.item)
+            .filter(|item| item.subject == source || item.mission_run.as_deref() == Some(source))
+            .filter(|item| request.episode.as_deref().is_none_or(|episode| item.episode == episode))
+            .collect::<Vec<_>>();
+        let item = match matching.as_slice() {
+            [item] => item,
+            [] => {
+                return Err(St3Error::new(
+                    "missing-fault",
+                    format!("`{source}` has no current fault{}", request.episode.as_deref().map(|episode| format!(" with episode `{episode}`")).unwrap_or_default()),
+                ));
+            }
+            several => {
+                return Err(St3Error::new(
+                    "ambiguous-fault",
+                    format!(
+                        "`{source}` has {} current faults; name one with --episode: {}",
+                        several.len(),
+                        several.iter().map(|item| format!("{} ({})", item.episode, item.title)).collect::<Vec<_>>().join("; ")
+                    ),
+                ));
+            }
+        };
+        let run = item
+            .mission_run
+            .clone()
+            .or_else(|| item.subject.starts_with("mission-run/").then(|| item.subject.clone()));
+        let ended = match &run {
+            Some(run) => self
+                .mission_run(run)
+                .map_err(internal)?
+                .is_some_and(|view| is_terminal_run_state(&view.status)),
+            None => false,
+        };
+        if !ended {
+            return Err(St3Error::new(
+                "fault-source-open",
+                format!("the fault on `{}` belongs to a run that has not ended; it closes at its source", item.subject),
+            ));
+        }
+        self.append_claim(&ClaimInput {
+            subject: item.subject.clone(),
+            kind: "fault.dismissed".into(),
+            actor: Some(actor.clone()),
+            fields: BTreeMap::from([
+                ("episode".into(), Value::String(item.episode.clone())),
+                ("reason".into(), Value::String(request.reason.clone())),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("fault-dismissed:{}:{}", item.subject, item.episode)),
+        })?;
+        Ok(crate::model::FaultDismissal {
+            subject: item.subject.clone(),
+            episode: item.episode.clone(),
+            title: item.title.clone(),
+            actor,
+            reason: request.reason.clone(),
+        })
     }
 
     /// Clear a persisted signature fault and wake the stopped migration. A person may, and so
@@ -7841,13 +8063,23 @@ fn resolve_mission_run_inputs(
                 let claim_id = if let Some(claim_id) = requested_claim {
                     let exists = transaction
                         .query_row(
-                            "SELECT 1 FROM claims WHERE id=?1 AND subject=?2 AND kind='resource.observed'",
+                            "SELECT 1 FROM claims WHERE id=?1 AND subject=?2 AND kind IN ('resource.observed','vcs.item.state')",
                             params![claim_id, subject],
                             |_| Ok(()),
                         )
                         .optional()
                         .map_err(internal)?
                         .is_some();
+                    // A claim this member trimmed is never admitted again, so its pin cannot wait
+                    // for replication as an unarrived claim does.
+                    if !exists && smallclaims::store::retired::claim_refused(transaction, claim_id).map_err(internal)? {
+                        return Err(St3Error::new(
+                            "trimmed-resource-input-version",
+                            format!(
+                                "mission input `{name}`: {subject}@{claim_id} was trimmed on this member; pin a kept observation or the subject"
+                            ),
+                        ));
+                    }
                     if !exists {
                         return Err(St3Error::new(
                             "missing-resource-input-version",
@@ -7856,14 +8088,23 @@ fn resolve_mission_run_inputs(
                     }
                     claim_id.to_owned()
                 } else {
-                    transaction
+                    // The item's newest record: a compact state only when it is newer than the
+                    // newest snapshot, whose facts are fuller.
+                    let observed: Option<(String, String)> = transaction
                         .query_row(
-                            /* sqlite-large-value: allow-for-now lv-h35da657ee22f owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1"),
+                            /* sqlite-large-value: allow-for-now lv-h842f1ac38047 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1"),
                             [subject],
-                            |row| row.get(0),
+                            |row| Ok((row.get(0)?, row.get(1)?)),
                         )
                         .optional()
-                        .map_err(internal)?
+                        .map_err(internal)?;
+                    let state = crate::store::resources::newest_item_state(transaction, subject).map_err(internal)?;
+                    match (observed, state) {
+                        (Some((_, observed_at)), Some((id, _, state_at)))
+                            if state_at.parse::<u128>().unwrap_or_default() > observed_at.parse::<u128>().unwrap_or_default() => Some(id),
+                        (None, Some((id, _, _))) => Some(id),
+                        (observed, _) => observed.map(|(id, _)| id),
+                    }
                         .ok_or_else(|| {
                             St3Error::new(
                                 "missing-resource-input",
@@ -10468,6 +10709,13 @@ fn validate_message_transition(
         "message.closed" => "closed",
         _ => unreachable!("the SQL query selects message lifecycle kinds"),
     });
+    // A local mark (message_marks.rs) is this member's record of the same lifecycle: the
+    // message stands wherever the further along of the two puts it.
+    let current = match (current, message_marks::status(transaction, &input.subject).map_err(internal)?) {
+        (Some(claimed), Some(marked)) if message_marks::rank(marked) > message_marks::rank(claimed) => Some(marked),
+        (None, Some(marked)) => Some(marked),
+        (current, _) => current,
+    };
     let current = if current.is_some() {
         current
     } else {
@@ -10717,6 +10965,11 @@ pub fn append_claim_tx_with_assistant_answer(
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
     if kind == fractal_schema::directive_notes::KIND {
         directive_notes::validate_publication(transaction, origin).map_err(anyhow::Error::new)?;
+    }
+    if kind == "mission.published"
+        && let Some(mission) = fields.get("body").and_then(|body| serde_json::from_value::<MissionSpec>(body.clone()).ok())
+    {
+        mission_capacity::validate_mission(transaction, origin, &mission).map_err(anyhow::Error::new)?;
     }
     validate_claim_cardinality(
         transaction,
@@ -11027,7 +11280,18 @@ fn message_view_at_with_desired(
     through: Option<u64>,
     desired_row: impl FnOnce() -> Result<Option<DesiredRow>>,
 ) -> Result<MessageView> {
-    let actual = latest_actual_at(connection, subject, through)?.unwrap_or(Value::Null);
+    let mut actual = latest_actual_at(connection, subject, through)?.unwrap_or(Value::Null);
+    // A consumer's local mark (message_marks.rs) counts as its lifecycle claim would: the view
+    // reads whichever is further along. Marks are this member's current record, at any `through`.
+    if let Some(marked) = message_marks::status(connection, subject)? {
+        let claimed = actual.get("status").and_then(Value::as_str).unwrap_or("sent");
+        if message_marks::rank(marked) > message_marks::rank(claimed) {
+            if !actual.is_object() {
+                actual = json!({});
+            }
+            actual["status"] = json!(marked);
+        }
+    }
     // Deletion of the current projection retires the declaration. A retained
     // intent.desired claim is not permission to resurrect it in a fresh page.
     let desired = if through.is_some() && !connection.prepare_cached(
@@ -11037,6 +11301,18 @@ fn message_view_at_with_desired(
     } else {
         desired_row()?
     }.and_then(|row| serde_json::from_str::<Value>(&row.body).ok());
+    message_view_from(connection, subject, created_index, actual, desired)
+}
+
+/// A message's view from its folded fields and its declaration, if it has one. A stream
+/// item's fields come from the messages shard; references still resolve in the graph.
+pub(crate) fn message_view_from(
+    connection: &Connection,
+    subject: &str,
+    created_index: u64,
+    actual: Value,
+    desired: Option<Value>,
+) -> Result<MessageView> {
     let field = |name: &str| actual.get(name).and_then(Value::as_str).map(str::to_owned);
     let child = |name: &str| {
         desired
@@ -18650,7 +18926,7 @@ fn step_hashes(mission: &MissionSpec) -> BTreeMap<String, String> {
 }
 
 fn mission_header_hash(mission: &MissionSpec) -> Result<String, St3Error> {
-    let value = json!({
+    let mut value = json!({
         "id": mission.id,
         "state": mission.state,
         "inputs": mission.inputs,
@@ -18669,6 +18945,10 @@ fn mission_header_hash(mission: &MissionSpec) -> Result<String, St3Error> {
         "products": mission.products,
         "gates": mission.gates,
     });
+    // Only when declared, so an undeclared mission's header hashes as it did before the field.
+    if let Some(capacity) = mission.capacity {
+        value["capacity"] = json!(capacity);
+    }
     serde_json::to_vec(&value)
         .map(|bytes| hex::encode(Sha256::digest(bytes)))
         .map_err(internal)
@@ -19315,30 +19595,38 @@ pub fn enrich_step_wake_at(
         hex::encode(Sha256::digest(current_incarnation_id.as_bytes()))[..12].to_owned();
     let mut attempts = Vec::new();
     let wake_tag_prefix = format!(
-        "st3-work:{}@{}@{}@",
+        "{}@{}@{}@",
         view.subject, view.attempt, view.readiness_epoch
     );
     let bare_assignee = assignee
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha4b73baa9121 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h98fccb80a458 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.body, claims.accepted_at_unix_ms,
                 EXISTS(SELECT 1 FROM claims consumed
                        WHERE consumed.subject=claims.subject
                          AND consumed.kind IN ('message.read','message.closed')
-                         AND consumed.accepted_at_unix_ms<=?1),
+                         AND consumed.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks consumed
+                       WHERE consumed.message=claims.subject
+                         AND consumed.kind IN ('message.read','message.closed')
+                         AND consumed.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
                 EXISTS(SELECT 1 FROM claims delivered
                        WHERE delivered.subject=claims.subject
                          AND delivered.kind='message.delivered'
-                         AND delivered.accepted_at_unix_ms<=?1),
+                         AND delivered.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks delivered
+                       WHERE delivered.message=claims.subject
+                         AND delivered.kind='message.delivered'
+                         AND delivered.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
                 EXISTS(SELECT 1 FROM claims staged
                        WHERE staged.subject=claims.subject
                          AND staged.kind='message.staged'
                          AND staged.accepted_at_unix_ms<=?1)
          FROM claims INDEXED BY claims_message_to_index
          WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
-           AND instr(claims.body, ?2)>0
+           AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
            AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
          ORDER BY CANONICAL_ASC(claims)",
     ))?;
@@ -19367,8 +19655,11 @@ pub fn enrich_step_wake_at(
             .get("tags")
             .and_then(Value::as_array)
             .is_some_and(|tags| {
-                tags.iter()
-                    .any(|tag| tag.as_str() == Some("st3-wake-source:manual"))
+                crate::silent::message_tag_values(
+                    tags.iter().filter_map(Value::as_str),
+                    "wake-source:",
+                )
+                .any(|value| value == "manual")
             })
         {
             continue;
@@ -19378,7 +19669,8 @@ pub fn enrich_step_wake_at(
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(Value::as_str)
+            .filter_map(Value::as_str);
+        let matching_incarnation = crate::silent::message_tag_values(matching_incarnation, "work:")
             .find_map(|tag| {
                 work_wake_tag_incarnation(tag, &view.subject, view.attempt, view.readiness_epoch)
                     .map(str::to_owned)
@@ -19497,13 +19789,56 @@ pub fn enrich_step_wake_at(
     Ok(())
 }
 
+#[test]
+fn work_wake_multiple_tags_preserve_attempts_and_manual_exclusion() {
+    for (prefix, first, source, manual_prefix) in [
+        ("st3-", "st3-", "st3-", "st3-"),
+        ("fractal-", "fractal-", "fractal-", "fractal-"),
+        ("fractal-", "st3-", "st3-", "st3-"),
+        ("st3-", "st3-", "st3-", "fractal-"),
+    ] {
+        for manual in [false, true] {
+            let store = Store::open_memory("fixture").unwrap();
+            let mut tags = vec![
+                format!("{first}work:other@1@1@other"),
+                format!("{prefix}work:step-run/r/s@2@3@inc"),
+                format!("{source}wake-source:auto"),
+            ];
+            if manual {
+                tags.push(format!("{manual_prefix}wake-source:manual"));
+            }
+            let input = serde_json::from_value(json!({
+                "subject": "message/wake", "kind": "message.sent", "actor": "daemon/runtime",
+                "fields": {"from": "daemon/runtime", "to": "agent/worker", "content": "",
+                    "status": "sent", "tags": tags}, "evidence": [],
+                "expected_subject": null, "idempotency_key": null
+            }))
+            .unwrap();
+            store.append_claim(&input).unwrap();
+            let mut view: StepRunView = serde_json::from_value(json!({
+                "subject": "step-run/r/s", "run": "mission-run/r", "generation": "g", "step": "s",
+                "definition_hash": "", "status": "ready", "attempt": 2, "readiness_epoch": 3,
+                "assigned_to": "agent/worker", "agentless": false, "worker_reported": false,
+                "created_at_unix_ms": 0, "updated_at_unix_ms": 0
+            }))
+            .unwrap();
+            enrich_step_wake_at(&store.readers.get(), &mut view, u128::MAX).unwrap();
+            assert_eq!(
+                view.wake.unwrap().attempts,
+                u32::from(first == prefix && (!manual || source != manual_prefix)),
+                "{prefix} {first} {source} {manual_prefix} {manual}"
+            );
+        }
+    }
+}
+
 fn work_wake_tag_incarnation<'a>(
     tag: &'a str,
     step_subject: &str,
     attempt: u32,
     readiness_epoch: u32,
 ) -> Option<&'a str> {
-    let tag = tag.strip_prefix("st3-work:")?;
+    // Each value is decoded independently; fields from different tags are never merged.
     let mut parts = tag.rsplitn(4, '@');
     let incarnation = parts.next()?;
     (parts.next().and_then(|value| value.parse::<u32>().ok()) == Some(readiness_epoch)
@@ -22587,4 +22922,17 @@ fn fleet_hears_seats_tx(transaction: &Transaction<'_>) -> Result<bool, St3Error>
         .map_err(internal)?
         .as_deref()
         == Some("1"))
+}
+
+/// Whether the subject was stopped after the member reconcile decision at `decision_index`. A
+/// stop ends what an earlier fault was about, whichever host recorded it and whether or not that
+/// host answers, and declaring the seat again does not bring it back; a fault recorded after the
+/// stop stands.
+fn stopped_after(connection: &Connection, subject: &str, decision_index: u64, at_index: u64) -> Result<bool> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='intent.desired'
+               AND store_index>?2 AND store_index<=?3 AND json_extract(body, '$.kind')='stop')",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h0e4abbec7bce owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, decision_index, at_index], |row| row.get(0))?)
 }

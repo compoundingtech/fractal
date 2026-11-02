@@ -229,7 +229,11 @@ A writer hold over 1 s also logs one WARN line when it ends, "a write held the s
 over 1 s", so a stall can be attributed from the daemon's log after the hour has passed. It
 names the same holder (`holder`, `client`, `at`), with `kind`, `held_ms`, `writes`, `stages`
 (a staged lend's time by stage, or `-`) and `waited_ms`, how long that holder waited for the
-writer before its hold began.
+writer before its hold began. A trim chunk held over 1 s also logs "a trim chunk held the
+store's writer over 1 s", with what that hold did: `phase` (`record` for tombstones,
+`envelopes` or `claims` for deletes, `rebuild` for deferred derived state), the `envelopes` and
+`claims` it took, `body_bytes` of the claim bodies it deleted, and `held_ms` split into `step_ms`
+and `commit_ms`, the commit's own time (fsync and any WAL checkpoint it ran).
 
 Three more fields show what keeps the WAL from recycling:
 - `read_loans` lists every read loan now, grouped by the route label of the read budget it works
@@ -473,7 +477,16 @@ synthetic fixture measurements, not measurements of a deployed daemon or transpo
 
 Conversation collection followers (`follow_conversation`) and standalone conversation sockets
 (`conversation_stream_socket`) use the existing conversation page/change reader. Mailbox reads
-already name `task mailbox-snapshot` and `task mailbox-update`. Attention's collection clock
+already name `task mailbox-snapshot` and `task mailbox-update`. The rest of a mailbox stream's
+store work after the upgrade names what it checks: `task mailbox-fence` (the binding's fence, on
+each dirty pass and each report without a peer), `task mailbox-report` (admitting a report),
+`task mailbox-replay` (a replay proof), `task mailbox-primary` (a Claude primary's generation),
+`task mailbox-rollout`, `task mailbox-attachment`, `task mailbox-own-post` and `task mailbox-loss`.
+With task metrics on, the stream's writes stay under `mailbox.write`, as before. A label shows only
+where no operation is already running on that thread.
+The background maintenance loops that run after commits name theirs
+`maintenance.client_message_selectors`, `maintenance.completion_health`,
+`maintenance.response_expiry_deadline` and `maintenance.response_expiry_clock`. Attention's collection clock
 handles grace and expiry without a claim; HTTP Home/now reads retain their route labels.
 Terminal sockets (`terminal_stream_socket`) follow the shared latest-screen source and periodically
 recheck their live fence; the existing fence span is `terminal/live-fence`. These are source

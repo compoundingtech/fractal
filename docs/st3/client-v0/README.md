@@ -870,14 +870,14 @@ Swift has `usagePeriod(sinceMS:untilMS:)` and TypeScript `usagePeriod({ since_ms
 ### Objectives and budgets
 
 `GET /v1/client/slo` lists every objective and budget, the rows `st slo ls` prints. It requires
-`read.projections`. The value is `SloList { as_of_unix_ms, rows }`. An objective is a target with
+`read.projections`. The value is `SloList { as_of_unix_ms, otel_ui_url?, rows }`; `otel_ui_url` is where a person reads the exported observation history, present only when the daemon's `[observations.otlp]` sets `ui_url` (an http or https address; an older daemon rejects the key, so set it once every member runs this build), and a client shows it as a link beside the rows. An objective is a target with
 windows and an error budget (the daemon's latency, store, CPU and database targets and a paired
 phone's live-share target); a budget is an allowance that resets (each account's weekly and 5-hour
 limit, from the readings `usage.period` reports in `limits`). Every `SloRow` has `id`, `kind`
 (`objective` or `budget`), `about`, `target`, `current`, `window`, `remaining_percent` (what is
 left of the error budget or allowance; null when nothing was measured), `status` (`met`, `missed`,
 `no-data` or `stale`, the last meaning the newest reading is not recent) and `explain`, the row in
-plain words. A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`, and, when the local history
+plain words, and `tone` (`red`, `green`, `yellow` or `quiet`, a string: a client treats a word it does not know as `quiet`; red when an objective missed or a budget has 10% or less left, the one rule the terminal UI colors by; absent from an older daemon). A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`, and, when the local history
 has enough recent readings since its last reset, a forecast: `forecast_used_percent` (its projected use
 when it resets, at the rate of its recent past, at most 100), `forecast_basis_minutes` (how much history
 the rate was fitted to) and, only when the allowance would run out first, `runs_out_at_unix_ms`;
@@ -1181,7 +1181,15 @@ header's does, so a client pairs the two by identity; content from an older daem
 HTTP opens at the newest bounded chronological window; its page cursor walks backward (a keyset
 cursor for a native transcript, a frozen projection for a stored timeline). Conversation changes
 and WebSocket follow frames use the same chronology. The conversation cursor independently
-tracks graph-store position, local-observation position, and native-source high-water sequence.
+tracks graph-store position, local-observation position, messages-stream position, and
+native-source high-water sequence. A cursor without the stream position (from an earlier build)
+has read none of the stream. A stream item's message and content entries take sequences
+`g*4+2` and `g*4+3`, where `g` is the graph index it arrived at on this member, so they sort
+after the graph claim they arrived behind; a graph message keeps `index*4` and `index*4+1`.
+Items that arrived at the same `g` share those sequences, so each shows a distinct millisecond: its
+accepted time, or one past the item recorded before it at that `g`. A message and its content
+entry then sort next to each other, which a client that pairs a message with the content entry
+after it relies on.
 Its native mark is the source's newest native sequence, not just the latest display window's, so
 graph-only windows cannot rewind it: when the 200-entry window is truncated, the gateway reads
 the newest native entries by sequence beside it (at most one window more). A change omitted by
@@ -1416,7 +1424,14 @@ The server deadline envelope adds the clamped requested wait (10 ms through 30 s
 its ordinary 15-second read budget only when paged wait mode is enabled. Each bounded store
 query retains the ordinary query budget; waiting and pacing do not extend its SQL work budget.
 Trace follow
-uses this continuation and registers its wake before reading the frontier. The legacy
+uses this continuation and registers its wake before reading the frontier.
+A member that holds the messages stream reports how far it has come as `messages_store_index`
+in `GET /v1/health`; the field is absent without the stream. A page read that also sends
+`messages_after` gets the stream's message events after it in `stream_items`, with
+`messages_next_after`, `messages_has_more` and `messages_frontier`; their `store_index` is the
+stream's own. An owner-filtered page has no stream items, and a read without `messages_after`
+gets the graph's page unchanged. A stream item arriving wakes a waiting page read, so
+`st conversations wait` ends on a stream reply. The legacy
 `GET /v1/events` keeps its array shape, returns at most 200 rows, and reports continuation in
 `X-ST-Next-After`, `X-ST-Has-More`, and `X-ST-Frontier`; owner filters and subject filters
 during migration require the page endpoint. CLI condition, restart, and harness waits use pages.
@@ -1764,7 +1779,7 @@ The shared `checks.st3` suite includes the adapter's Rust tests.
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
 
 ```sh
-nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal --features fractal/test-support --bin st-chatgpt --bin fractal --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
+nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal -p fractal-cli --features fractal/test-support --bin st-chatgpt --bin fractal --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
 ```
 
 The script starts the repository API harness with its own persistent store, paired gateway,
@@ -2671,6 +2686,8 @@ A card with no previous value reports `"fault status unknown"` in that same fiel
 refresh retries those faults even if no claim changed. The refresher's card-faults read is
 bounded by 25 ms of query CPU time, with a one-second wall backstop for a stalled page read,
 so a scheduling pause on a loaded host does not reach its deadline.
+Direct roster and selected card folds, including pages and chunks, pin their own snapshot
+outside a request and use that same fault-read policy. Folds within a request retain its budget.
 
 ### Immutable current publications
 
@@ -3048,9 +3065,11 @@ signatures, with SVG/HTML/unrecognized bytes returned only as opaque octets.
 `message.send` accepts `kind: "silent" | "wake"`; omitted kind means wake. Silent mail stays unread until a real wake offers at most eight held messages, or it is read on demand. Replies default to wake independently of their parent; there is no question tag or per-seat wake policy. Person and system wake events always wake. Signed silent requests carry `st3-silent` in signed tags. Old daemons ignore the kind field and do not hold silent tags; inspect receipt tags in mixed-version fleets. See [silent messages](../silent-messages.md).
 
 Message resources and `GET /v1/messages/delivery/{subject}` expose the existing
-`delivery` projection: `state` (`pending`, `waiting`, or `read`), durable handoff `phase`,
-human-readable `reason`, `age_ms`, and `recipient_delivery`. Native transport acceptance
-(`phase: delivered`) is not recipient read. A `sent` or `staged` message whose recipient's
+`delivery` projection: `state` (`pending`, `waiting`, `read`, or `unknown`), durable handoff
+`phase`, human-readable `reason`, `age_ms`, and `recipient_delivery`. A message carried by the
+messages stream to a seat on another host has `state: unknown` and `phase: unknown`: its
+receipts stay on the recipient's host, so the sender's member cannot see them. Native
+transport acceptance (`phase: delivered`) is not recipient read. A `sent` or `staged` message whose recipient's
 current, fresh native harness observation is `blocked_on: human` has `state: waiting`
 and a `reason` explicitly saying it is held outside the native harness for a human answer
 or approval. The durable message remains queued, not delivered; no separate held wire

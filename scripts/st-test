@@ -68,7 +68,9 @@ or to the path in ST_TEST_RUNS (`off` records nothing); scripts/fractal-test-rep
 (docs/st3/gate-evidence.md). Recording never changes the result: a file that cannot be written is one line on stderr.
 
 Exit 0 when every selected check passed and was signed (with --out, exported but not verified); 1 when a check failed, timed out or
-could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered. A tree that edits
+could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument, or, for the whole suite, a branch whose merge with
+the base fails CI's upgrade-impact check: a missing release-notes/NAME.json, which --status shows as a warning); 3 from --status when
+the tree is not covered. A tree that edits
 a check's lane is signed like any other (the note carries the edited lane's digest). The run exits 4 when nothing failed but a check was not signed: only
 against a base whose evidence-wrap still refuses a lane edit (before 2026-10-26) is that check left "not signed" for CI, or rust-tests left a crate unsigned
 because one of its tests passed only on a retry (CI's own per-crate notes refuse such a crate too, so CI runs it; linux-gate still signs and records them
@@ -123,14 +125,15 @@ LOCAL = {
     # report (scripts/ci-clippy-result, as rust-tests records ci-rust-test-result); the stage itself runs once, in linux-gate's run when that
     # runs here, else alone (RUN_CLIPPY). Right after linux-gate, so it signs from that run's report.
     'linux-clippy': ['python3', 'scripts/ci-clippy-result'],
+    # The fleet-compat stage (the previous release's st3 against this tree's), keyed by what it reads, the same way: the recorded command
+    # reads the stage's report (scripts/ci-fleet-compat-result); the stage runs once, in linux-gate's run when that runs here, else alone
+    # (RUN_FLEET_COMPAT).
+    'linux-fleet-compat': ['python3', 'scripts/ci-fleet-compat-result'],
     # The web lane as ONE shard that covers every kit play and app test (scripts/ci-local-web); it runs only when a web input changed.
     'fractal-web': ['nix', 'develop', '.#web', '-c', 'bash', 'scripts/ci-local-web'],
     # One signature per workspace crate (docs/per-crate-test-signing.md): the recorded command is the small script that reads one crate's
     # result out of the run's JUnit report; the run itself is RUN_TESTS, for the crates that have no passing note for their key.
     'rust-tests': ['python3', 'scripts/ci-rust-test-result'],
-    # The fleet-compat stage alone (the previous release's st3 against this tree's), keyed by what it reads. Opt-in while linux-gate's own
-    # run still includes fleet-compat, so a default run never runs it twice: `--check linux-fleet-compat` signs it.
-    'linux-fleet-compat': ['nix', 'develop', '-c', 'bash', 'scripts/ci-fleet-compat-keyed'],
 }
 RUST_TESTS = 'rust-tests'
 RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]
@@ -139,9 +142,24 @@ RUN_TESTS = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']
 # The clippy stage alone, for a linux-clippy note when linux-gate does not run here (signed, a lane edit, not selected); its report goes to
 # CI_CLIPPY_REPORT, as linux-gate's run writes it when linux-clippy is selected too.
 LINUX_CLIPPY = 'linux-clippy'
-# Checks whose local notes carry their input key (source_inputs), so a tree with the same key reuses them, as CI's notes for them do.
-KEYED = frozenset({LINUX_CLIPPY})
 RUN_CLIPPY = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'clippy']
+# The fleet-compat stage alone, for a linux-fleet-compat note when linux-gate does not run here; its report goes to CI_FLEET_COMPAT_REPORT.
+LINUX_FLEET_COMPAT = 'linux-fleet-compat'
+RUN_FLEET_COMPAT = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'fleet-compat']
+# The checks signed from one of linux-gate's stages: {check: (the stage, the variable the stage writes its report to, the variable the
+# check's recorded command reads it from)}. stage_alone(check) is the stage's command when it runs alone.
+STAGE_SIGNED = {
+    LINUX_CLIPPY: ('clippy', 'CI_CLIPPY_REPORT', 'CLIPPY_REPORT'),
+    LINUX_FLEET_COMPAT: ('fleet-compat', 'CI_FLEET_COMPAT_REPORT', 'FLEET_COMPAT_REPORT'),
+}
+
+
+def stage_alone(check):
+    return {LINUX_CLIPPY: RUN_CLIPPY, LINUX_FLEET_COMPAT: RUN_FLEET_COMPAT}[check]
+
+
+# Checks whose local notes carry their input key (source_inputs), so a tree with the same key reuses them, as CI's notes for them do.
+KEYED = frozenset(STAGE_SIGNED)
 # nextest: 0 every test passed, 100 some test failed (the report is complete either way), 4 the selection matched no test.
 RUN_COMPLETED = frozenset({0, 4, 100})
 # The signer refuses an input longer than 500 characters (scripts/evidence-sign); a full run's filterset is longer than that.
@@ -153,10 +171,10 @@ BUILDS = frozenset({'linux-gate', 'linux-clippy', 'linux-fleet-compat', 'fractal
 # the same workspace build and selection), so the tests are not run twice. When the gate skips linux-gate's tests stage on the per-crate
 # notes, linux-gate's local command shrinks to clippy and fleet-compat and rust-tests runs the crates without a note itself
 # (docs/per-crate-test-signing.md, step 5).
-# linux-clippy runs by default too, signed from linux-gate's clippy stage. linux-gate keeps that stage while linux-clippy is in shadow: a
-# shadow note skips nothing, so a linux-gate run without it would sign no linux-gate note and CI would run clippy again (the shrink comes
-# after the flip, with rust-tests').
-OPT_IN = frozenset({'linux-fleet-compat'})
+# linux-clippy and linux-fleet-compat run by default too, signed from linux-gate's clippy and fleet-compat stages. linux-gate keeps those
+# stages while the checks are in shadow: a shadow note skips nothing, so a linux-gate run without them would sign no linux-gate note and CI
+# would run them again (the shrink comes after each flip, with rust-tests').
+OPT_IN = frozenset()
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate', 'linux-clippy'})  # rust-tests is not: a test's result does not depend on the base
 # What the fractal-web note records about the run, as CI's aggregate note does (scripts/ci-evidence-signing): one shard, every kit
@@ -280,6 +298,13 @@ def check_path():
     return ':'.join(kept)
 
 
+def report_environment(scratch, environment):
+    """Expose only the already-trusted running Python, not sibling tools from its installation, to report commands."""
+    bin_dir = Path(tempfile.mkdtemp(prefix='report-python-', dir=scratch))
+    (bin_dir / 'python3').symlink_to(Path(sys.executable).resolve())
+    return dict(environment, PATH=f'{bin_dir}{os.pathsep}{environment.get("PATH", os.defpath)}')
+
+
 def scrub_seat_environment():
     """A CI runner has none of the variables an agent seat carries (identity, mission, session, daemon endpoint, hook and messaging
     settings, and the pty session it runs in), and the checks must see what CI sees: tests that read them fail or behave differently
@@ -289,6 +314,8 @@ def scrub_seat_environment():
     FRACTAL_AGENT): a check that kept them could reach the live daemon as the seat. Every check starts in `nix develop`, whose shell
     sets the dev shell's FRACTAL_* settings (flake.nix) itself, and scripts/ci-local drops the rest for its stages. ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
     starts the check); the evidence switches stay. The kept list is the only exception mechanism for a future ST_* switch."""
+    if os.environ.get('CI_PERF_SLOT_RECEIPT_DIR'):
+        os.environ['CI_PERF_SLOT_DISPOSABLE_ROOTS'] = json.dumps([str(pool_base().resolve()), str(run_tmp_root().resolve())])
     for name in [name for name in os.environ
                  if name.startswith(SEAT_PREFIXES) and name not in KEPT_SEAT and not name.startswith('ST_EVIDENCE')]:
         del os.environ[name]
@@ -386,6 +413,47 @@ def gate_commit(base):
         result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
     GATE_TREE[key] = result
     return result
+
+
+IMPACT_CHECK = 'upgrade-impact'
+RELEASE_IMPACT = ('check-release-impact', 'release_notes.py')  # upgrade-impact's command and the module it imports, beside it
+
+
+def release_impact(base):
+    """Why the upgrade-impact check CI runs on a pull request (scripts/check-release-impact: the PR needs a fresh release-notes/NAME.json)
+    fails for this branch, '' when it passes, or None when it was not asked. It is asked of what CI asks it of: the merge of the head
+    with the base, the base as first parent, by that merge's own copy of the check. The whole-suite run asks it before any wait, so a missing note
+    stops the run in seconds here rather than ejecting the pull request from the merge queue (#4669, 2026-11-02). It is not asked when
+    there is nothing to ask: no branch commit of its own, no clean merge (CI cannot make one either), or no check in the merge (an older
+    base). Not for --seed, which names its tree. Only the whole-suite run stops on it; --status shows it as a warning."""
+    if TARGET:
+        return None
+    head = head_commit()
+    base_commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
+    if not base_commit or git('merge-base', '--is-ancestor', head, base_commit, check=False).returncode == 0:
+        return None
+    merged = git('merge-tree', '--write-tree', '--no-messages', base_commit, head, check=False)
+    if merged.returncode != 0:
+        return None
+    env = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid', 'GIT_COMMITTER_NAME': 'st-test',
+           'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
+    commit = text(git('commit-tree', merged.stdout.decode().split()[0], '-p', base_commit, '-p', head, '-m',
+                      f'merge of {head[:12]} into {base}', env=env))
+    with tempfile.TemporaryDirectory(prefix='st-test-impact-') as scratch:
+        for name in RELEASE_IMPACT:
+            shown = git('show', f'{commit}:scripts/{name}', check=False)
+            if shown.returncode != 0:
+                return None
+            (Path(scratch) / name).write_bytes(shown.stdout)
+        # -E -s, not -I: the check imports release_notes from its own directory, which -I leaves off sys.path.
+        done = subprocess.run([sys.executable, '-E', '-s', str(Path(scratch) / RELEASE_IMPACT[0]), '--repo', text(git('rev-parse', '--show-toplevel')),
+                               '--base', base_commit, '--source', commit], capture_output=True)
+    if done.returncode == 0:
+        return ''
+    said = done.stderr.decode(errors='replace').strip().splitlines() or [f'exit {done.returncode}']
+    return (f'the upgrade-impact check CI runs fails on the merge of this branch with {base} ({said[-1].replace(commit, "the merge")[:400]}), '
+            'and the merge queue would eject it. To fix: add release-notes/NAME.json (a name of its own; copy the fields of any note there '
+            'and say what this branch changes), commit it, and run again')
 
 
 CHECKS = ()  # the checks this run signs (main sets it): the gate decides per check whether main's protected changes are that check's
@@ -701,26 +769,37 @@ def shared_target(tree_target=None):
 
 
 def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
-    """The cap this process runs under, as one string, or None. Only the two caps made for builds count: builds.slice, and a
-    seat's lane, app-lanes-<seat>.slice directly in app-lanes.slice (docs/st3/seat-lanes.md). The process must be inside one, and
-    that slice or a cgroup below it, on the way to the process, must hold a memory.max and a cpu.max quota: read from the kernel's
-    files, never from a name alone or a variable. Limits above the cap (any other cgroup's) do not count."""
+    """The cap this process runs under, as one string, or None. Builds and seat lanes (docs/st3/seat-lanes.md) require
+    memory.max and cpu.max at or below their anchor. A gate-slot scope directly in app-capped.slice or its heavy child
+    requires only memory.max at the scope or within that approved slice chain: gate-slot does not normally set a CPU quota.
+    Read kernel files, never trust names or variables alone. Limits above the approved anchor do not count."""
     try:
         text = Path(cgroup_file).read_text()
     except OSError:
         return None
     path = next((line[3:] for line in text.splitlines() if line.startswith('0::')), '').strip('/')
     parts = path.split('/') if path else []
-    cap = next((depth for depth, part in enumerate(parts) if part == 'builds.slice' or (
-        depth > 0 and parts[depth - 1] == 'app-lanes.slice' and part.startswith('app-lanes-') and part.endswith('.slice'))), None)
-    if cap is None:
-        return None
 
     def limited(cgroup, file):  # whether CGROUP's FILE holds a limit; a missing or unreadable file (no controller) is none
         try:
             return cgroup.joinpath(file).read_text().split()[0] != 'max'
         except (OSError, IndexError):
             return False
+
+    gate = next((depth for depth, part in enumerate(parts) if depth > 1
+                 and re.fullmatch(r'gate-slot-(gate|heavy|eval)-[1-9][0-9]*(?:-[0-9]+)?\.scope', part)
+                 and (parts[depth - 2:depth] == ['app.slice', 'app-capped.slice']
+                      or parts[max(0, depth - 3):depth] == ['app.slice', 'app-capped.slice', 'app-capped-heavy.slice'])), None)
+    if gate is not None:
+        anchor = gate - (2 if parts[gate - 1] == 'app-capped-heavy.slice' else 1)
+        for depth in range(gate + 1, anchor, -1):
+            if limited(Path(root, *parts[:depth]), 'memory.max'):
+                return f'{parts[gate]}: memory by {parts[depth - 1]}'
+
+    cap = next((depth for depth, part in enumerate(parts) if part == 'builds.slice' or (
+        depth > 0 and parts[depth - 1] == 'app-lanes.slice' and part.startswith('app-lanes-') and part.endswith('.slice'))), None)
+    if cap is None:
+        return None
 
     memory = cpu = None
     for depth in range(cap + 1, len(parts) + 1):
@@ -790,16 +869,19 @@ def governed(argv, name):
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
     evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
 
-    A caller whose own cgroup is already under a memory and a CPU limit runs the check in place: a seat with a lane
-    (docs/st3/seat-lanes.md) builds inside its own lane, never in builds.slice beside it. The kernel's limits decide, never a slice
-    name or an environment variable a caller could set. The check then runs with BUILDS_SLICE_ACTIVE=1, which a build host's cargo
+    A caller already under a build cap runs the check in place: builds.slice and seat lanes require memory and CPU limits;
+    gate-slot scopes require a memory limit (`own_cap`). The kernel's limits decide, never a name or an environment variable
+    a caller could set. The check then runs with BUILDS_SLICE_ACTIVE=1, which a build host's cargo
     front door reads as "already in a build cap": without it, that front door moves each cargo command into builds.slice, out of
     the lane. A seat's harness has it from its lane, but a job the seat starts as a unit of its own in the lane does not inherit
     it (2026-10-30, on a build host: such a run's cargo and tests ran in builds.slice).
 
     A seat's caller outside every cap (ST_AGENT set: st-test started as a unit of the seat's own, outside its lane) runs
     the check in a scope in the seat's capped lane (`seat_lane`), with the lane's variables, rather than in builds.slice
-    beside it. Without a capped lane, it takes builds.slice as before and says why."""
+    beside it. Without a capped lane, it takes builds.slice as before and says why.
+
+    A check's compiles that go through an account's sccache wrapper still reach the host's server, in builds.slice: ci-local leaves a
+    lane's sccache socket, since a lane's server started inside a run kept the run's removed TMPDIR (2026-11-01)."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
     cap = own_cap()
@@ -1050,6 +1132,7 @@ def pool_base():
 TMP_NAMES = ('TMPDIR', 'TMP', 'TEMP')
 RUN_TMP_PREFIX = 'st-test.'
 KEPT = 'KEPT'  # in a run's TMPDIR that --keep kept: no later run removes it
+WEB_KEPT = 'ci-local-web-kept'  # in a kept run's TMPDIR: where scripts/ci-local-web left its scratch (CI_LOCAL_KEEP), one line each
 RUN_TMP_FRESH = 600  # seconds: a run TMPDIR younger than this is never swept, as its run may not have locked it yet
 
 
@@ -1121,6 +1204,9 @@ def run_tmpdir(keep=False):
         if keep:
             (path / KEPT).touch()
             print(f'fractal-test: kept this run\'s TMPDIR {path} (--keep): no later run removes it, so remove it when you are done', file=sys.stderr)
+            kept_web = (path / WEB_KEPT).read_text().split('\n') if (path / WEB_KEPT).exists() else []
+            for scratch in filter(None, kept_web):
+                print(f'fractal-test: kept fractal-web\'s scratch {scratch} too (its kit play receipts, browser traces and screenshots)', file=sys.stderr)
         else:
             remove_tree(path)
         os.close(fd)
@@ -1353,7 +1439,7 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
     if ticket is None:
         ticket = queue / f'{priority_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
     write_ticket(ticket)
-    waited, told, handing = False, set(), False
+    waited, handing = False, False
     began = time.monotonic() - (time.time_ns() - int(ticket.name.split('.')[1])) / 1e9  # since the ticket was taken, by this copy or the one before
     slot_waited, slot_seen, slot_told = 0.0, None, False
     free_since = {}  # tree number -> when this waiter first saw it free (not the head's, so only watched)
@@ -1382,35 +1468,31 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                     except BlockingIOError:
                         lock.close()
                         continue
-                    # A lease ends with the run that held it, not with every process it started (2026-10-28: a seat restart killed runs
-                    # whose children went on). A free tree that still has processes at work in it is busy: never two writers in one tree.
-                    users = tree_users(root / f'tree-{n}')
-                    if not users and slot_ready is None:
-                        return taken(n, lock)
-                    if not users:
-                        ready, why = slot_ready()
-                        now = time.monotonic()
-                        if slot_seen is not None:
-                            slot_waited += now - slot_seen
-                        if ready or slot_waited >= TREE_SLOT_WAIT_LIMIT:
-                            if not ready:
-                                print(f'fractal-test: taking tree-{n} after {round(slot_waited)}s without a free build slot ({why}; '
-                                      f'TREE_SLOT_WAIT_LIMIT): its build waits for one in the tree', file=sys.stderr, flush=True)
-                            elif slot_told:
-                                print(f'fractal-test: a build slot is free ({why}): taking tree-{n} after {round(slot_waited)}s', file=sys.stderr, flush=True)
-                            return taken(n, lock)
+                    try:
+                        clear_tree_orphans(root / f'tree-{n}')
+                    except BaseException:
                         lock.close()
-                        slot_seen, free_tree = now, True
-                        if not slot_told:
-                            slot_told = True
-                            print(f'fractal-test: tree-{n} is free, but a build started now would wait for a slot ({why}); waiting for one '
-                                  f'without holding a tree (at most {TREE_SLOT_WAIT_LIMIT}s)', file=sys.stderr, flush=True)
-                        break  # every free tree would wait for the same slot
+                        raise
+                    if slot_ready is None:
+                        return taken(n, lock)
+                    ready, why = slot_ready()
+                    now = time.monotonic()
+                    if slot_seen is not None:
+                        slot_waited += now - slot_seen
+                    if ready or slot_waited >= TREE_SLOT_WAIT_LIMIT:
+                        if not ready:
+                            print(f'fractal-test: taking tree-{n} after {round(slot_waited)}s without a free build slot ({why}; '
+                                  f'TREE_SLOT_WAIT_LIMIT): its build waits for one in the tree', file=sys.stderr, flush=True)
+                        elif slot_told:
+                            print(f'fractal-test: a build slot is free ({why}): taking tree-{n} after {round(slot_waited)}s', file=sys.stderr, flush=True)
+                        return taken(n, lock)
                     lock.close()
-                    if n not in told:
-                        told.add(n)
-                        print(f'fractal-test: pool tree tree-{n} is free, but processes {", ".join(map(str, users))} still work in it (left by '
-                              'a run that lost the tree); it is skipped until they end', file=sys.stderr)
+                    slot_seen, free_tree = now, True
+                    if not slot_told:
+                        slot_told = True
+                        print(f'fractal-test: tree-{n} is free, but a build started now would wait for a slot ({why}); waiting for one '
+                              f'without holding a tree (at most {TREE_SLOT_WAIT_LIMIT}s)', file=sys.stderr, flush=True)
+                    break  # every free tree would wait for the same slot
             elif trees:
                 # Not the head of this waiter's order. Normally it leaves free trees to the head. But another waiter may run an older or newer copy of this
                 # order and defer to this one while this one defers to it (an old copy's overdue rank-50 ticket and a new copy's rank-3 one), so nobody
@@ -1424,10 +1506,11 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                         lock.close()
                         free_since.pop(n, None)
                         continue
-                    if tree_users(root / f'tree-{n}'):
+                    try:
+                        clear_tree_orphans(root / f'tree-{n}')
+                    except BaseException:
                         lock.close()
-                        free_since.pop(n, None)
-                        continue
+                        raise
                     now = time.monotonic()
                     seen = free_since.setdefault(n, now)
                     if now - seen >= TREE_FREE_FALLBACK_SECONDS and (slot_ready is None or slot_ready()[0]):
@@ -1447,22 +1530,118 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                 ticket.unlink()
 
 
-def tree_users(directory):
-    """The live processes other than this one whose working directory is in the pool tree `directory`: work a run left there when it lost
-    the tree's lease (its children, a lane's build in a scope of its own). Read from /proc; where there is none, nothing can be seen."""
+def tree_users(directory, proc='/proc', execution_only=False):
+    """Same-uid tree users, excluding this process and its ancestors. Normalize path operands before testing the tree boundary."""
     base = os.path.realpath(directory)
+    ancestors, pid = set(), os.getpid()
+    while pid > 0 and pid not in ancestors:
+        ancestors.add(pid)
+        try:
+            status = Path(proc, str(pid), 'status').read_text()
+            pid = int(next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:')))
+        except (OSError, StopIteration, ValueError, IndexError):
+            break
     found = []
-    with contextlib.suppress(OSError):
-        for entry in os.scandir('/proc'):
-            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+    with contextlib.suppress(FileNotFoundError):
+        for entry in os.scandir(proc):
+            if not entry.name.isdigit() or int(entry.name) in ancestors:
                 continue
             try:
-                cwd = os.readlink(f'/proc/{entry.name}/cwd')
-            except OSError:
-                continue  # gone, or not ours to read
-            if cwd == base or cwd.startswith(base + os.sep):
+                if entry.stat().st_uid != os.getuid():
+                    continue
+            except FileNotFoundError:
+                continue
+            paths = []
+            for name in ('cwd', 'exe'):
+                with contextlib.suppress(OSError):
+                    paths.append(os.readlink(Path(entry.path, name)).removesuffix(' (deleted)'))
+            if not execution_only:
+                with contextlib.suppress(OSError):
+                    argv = Path(entry.path, 'cmdline').read_text(errors='surrogateescape').split('\0')
+                    paths.extend(arg.split('=', 1)[1] if arg.startswith('--') and '=' in arg else arg for arg in argv)
+            normalized = (os.path.realpath(path) for path in paths if os.path.isabs(path))
+            if any(path == base or path.startswith(base + os.sep) for path in normalized):
                 found.append(int(entry.name))
     return sorted(found)
+
+
+def sibling_sizing(pid, proc='/proc'):
+    """Whether `pid` is another st-test's du_gb: `du -sk [--] PATH` whose parent's argv runs an st-test. It names a pool tree only to
+    size it (evict_to_cap, the closing target line), for seconds, and refusing a tree for it failed a run that had waited an hour for
+    one (2026-11-02)."""
+    try:
+        argv = Path(proc, str(pid), 'cmdline').read_text(errors='surrogateescape').split('\0')
+        status = Path(proc, str(pid), 'status').read_text()
+        parent = int(next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:')))
+        parent_argv = Path(proc, str(parent), 'cmdline').read_text(errors='surrogateescape').split('\0')
+    except (OSError, StopIteration, ValueError, IndexError):
+        return False
+    argv = [arg for arg in argv if arg]
+    sizing = len(argv) in (3, 4) and os.path.basename(argv[0]) == 'du' and argv[1] == '-sk' and argv[2:-1] in ([], ['--'])
+    return sizing and any(os.path.basename(arg) == 'st-test' for arg in parent_argv[:2])
+
+
+ARGV_SETTLE = 30.0  # seconds an argv-only reference may take to go away before the tree is refused for it
+
+
+def clear_tree_orphans(directory, grace=2.0, proc='/proc', settle=ARGV_SETTLE):
+    """With the flock held, terminate only execution-backed orphans; argv-only references block reuse without authorizing a signal.
+    Another st-test sizing the tree (sibling_sizing) is no reference, and any other must still be there after `settle` seconds."""
+    def argv_only():
+        users = tree_users(directory, proc, execution_only=True)
+        return users, {pid for pid in set(tree_users(directory, proc)) - set(users) if not sibling_sizing(pid, proc)}
+
+    deadline = time.monotonic() + settle
+    users, references = argv_only()
+    while references and time.monotonic() < deadline:
+        time.sleep(0.5)
+        users, references = argv_only()
+    if references:
+        commands = {}
+        for pid in sorted(references):
+            commands[pid] = '(unavailable)'
+            with contextlib.suppress(OSError):
+                commands[pid] = Path(proc, str(pid), 'cmdline').read_text(errors='replace').replace('\0', ' ').strip()
+        raise Failure(f'pool tree {directory} has argv-only references {commands}; refusing to use it without signalling them')
+    if not users:
+        return
+    print(f'fractal-test: terminating {len(users)} orphan process(es) in pool tree {directory}', file=sys.stderr, flush=True)
+    handles = {}
+
+    def wait_live():
+        deadline = time.monotonic() + grace
+        while True:
+            exited = set(select.select(list(handles.values()), [], [], 0)[0])
+            live = {pid: fd for pid, fd in handles.items() if fd not in exited}
+            if not live or time.monotonic() >= deadline:
+                return live
+            time.sleep(0.05)
+
+    try:
+        for pid in users:
+            try:
+                fd = os.pidfd_open(pid)
+            except ProcessLookupError:
+                continue
+            handles[pid] = fd
+            # Recheck after pinning: a reused PID must still belong to this tree.
+            if pid not in tree_users(directory, proc, execution_only=True):
+                del handles[pid]
+                os.close(fd)
+                continue
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+        for fd in wait_live().values():
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+        remaining = sorted(set(wait_live()) | set(tree_users(directory, proc)))
+        if remaining:
+            raise Failure(f'pool tree {directory} still has orphan processes {remaining} after SIGKILL; refusing to use it')
+    except OSError as error:
+        raise Failure(f'cannot clear orphan processes in pool tree {directory}: {error}; refusing to use it') from error
+    finally:
+        for fd in handles.values():
+            os.close(fd)
 
 
 def clear_stale_index_lock(directory):
@@ -1646,11 +1825,41 @@ def base_input_values(verifier, directory, tree, check, base, repository, keyed=
     return found
 
 
+OWN_LEVELS_AT = {}  # base commit: (the gate's PROTECTED, its OWN_LEVELS), as the base has them
+
+
+def own_levels(directory, tree, base, lane_base):
+    """(levels, edits): when `tree` edits a file that decides skipping, the signer levels whose note alone covers our pull request in CI,
+    and those edits; else (None, []). The gate's own PROTECTED and OWN_LEVELS, from the base, so the two cannot drift: our pull request
+    that edits a protected file skips only on our hosts' note (ci-evidence-gate's own_pull_request), so a note another level signed for
+    the same inputs (CI's, on any other pull request) is not 'already signed' here either. Compared from `lane_base`, the branch point
+    (the base itself for a merge tree), as the gate compares the branch's own edits (choose_tree) or the merge with the base."""
+    if not lane_base:
+        return None, []
+    base_commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', cwd=directory, check=False))
+    if base_commit not in OWN_LEVELS_AT:
+        gate = load_base_gate(base_commit) if base_commit else None
+        OWN_LEVELS_AT[base_commit] = (tuple(getattr(gate, 'PROTECTED', ())), tuple(getattr(gate, 'OWN_LEVELS', ())))
+    protected, levels = OWN_LEVELS_AT[base_commit]
+    if not protected or not levels:
+        return None, []
+    diff = git('diff', '--no-renames', '--name-only', '-z', lane_base, tree, cwd=directory, check=False)
+    if diff.returncode != 0:
+        return levels, ['<comparison failed>']
+    edits = [path for path in diff.stdout.decode(errors='replace').split('\0') if path in protected]
+    return (levels, edits) if edits else (None, [])
+
+
 def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
-    """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None."""
+    """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None.
+    When the tree edits a protected file, only a note at the gate's own levels covers it (own_levels), and the verifier is asked for the
+    newest pass at those levels, as the gate asks it. Per crate, as in the gate, the verifier is not asked to prefer a level."""
     command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--keys-from', base]
+    levels, edits = own_levels(directory, tree, base, lane_base)
     if crate_key:
         command += ['--crate-key', crate_key]
+    elif levels and b'--prefer-levels' in Path(verifier).read_bytes():
+        command += ['--prefer-levels', ','.join(levels)]
     if repository:
         command += ['--policy-from', base, '--repository', repository]
         if lane_base and b'--lane-base' in Path(verifier).read_bytes():
@@ -1663,6 +1872,9 @@ def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=N
     except ValueError:
         return False, 'verifier gave no answer: ' + (done.stderr.strip().splitlines() or ['-'])[-1][:120], None
     if done.returncode == 0:
+        if levels and result.get('trust_level') not in levels:
+            return False, (f'only a {result.get("trust_level")} note covers it ({str(result.get("record", ""))[:12]}), and this tree edits '
+                           f'{", ".join(edits[:3])}: CI takes only a {"/".join(levels)} note for it'), None
         return True, f'covered by {result.get("kind")} {result.get("record", "")[:12]}', result.get('record')
     return False, result.get('reason') or 'not covered', None
 
@@ -2124,7 +2336,8 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         started = time.monotonic()
         command = wrap + ['--'] + RUST_TESTS_COMMAND
         print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
-        signed = subprocess.run(command, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
+        environment = report_environment(scratch, dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate))
+        signed = subprocess.run(command, cwd=directory, env=environment,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if signed.returncode != 0:
             detail = (f'{len(failing)} test(s) failed every try: {name_tests(failing)}' if failing else
@@ -2192,10 +2405,11 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
 
 
 # scripts/ci-local's closing stage table (one line per stage it ran: name, start, end, seconds, and for a stage its exit code and the build
-# queue it waited in), as `printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss'` prints it after the `ci-local:` prefix; setup has no exit.
+# queue it waited in), as `printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss'` prints it after the `ci-local:` prefix; setup has no exit,
+# and its queue (the setup's admission waits) since 2026-11-02.
 CI_LOCAL = 'scripts/ci-local'
 STAGE_LINE = re.compile(r'ci-local:\s+(\S+)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d+)s'
-                        r'(?:\s+exit\s+(\S+)(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?)?\s*')
+                        r'(?:\s+exit\s+(\S+))?(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?\s*')
 # How long a check's output is still copied after the check itself exited: a process it left behind may hold the pipe open.
 STREAM_GRACE = 5
 QUEUE_LIMIT = 14400  # default --queue-limit: the build-slot waits a check may spend, apart from its --time-limit
@@ -2594,12 +2808,23 @@ def run_main(argv, cleanup):
             if not args.check:
                 # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
                 rows += [(name, True, 'CI runs it', 'no local command') for name in policy_checks(args.base) if name not in LOCAL]
+                # CI runs it on every pull request, outside the skip policy: asked here as a run asks it. A missing note is a warning
+                # and leaves the exit code alone: the pre-push hook (scripts/evidence-prepush) refuses on exit 3, and seats hand work
+                # over by pushing work-in-progress branches. The whole-suite run refuses it (below).
+                impact = release_impact(args.base)
+                if impact is not None:
+                    rows.append((IMPACT_CHECK, True, 'warning: no note' if impact else 'checked', impact or 'the merge with the base has its release note'))
         for name, is_covered, label, why in rows:
             print(f'  {name:<24} {label:<22} {why}')
         return 0 if all(row[1] for row in rows) else 3
     status = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
     if status:
         raise Failure('the checkout has uncommitted changes to tracked files; commit them first, the note is for the committed tree')
+    # The whole suite, the run that signs a branch for its pull request, refuses a missing release note before any wait: CI fails the
+    # pull request on it, and the merge queue ejects it. A run of some checks only (--check) does not ask.
+    impact = release_impact(args.base) if set(default_checks) <= set(checks) else None
+    if impact:
+        raise Failure(impact)
     preflight(checks if not (args.push and not args.out and not TARGET) else all_checks, merges=bool(args.push) and not TARGET)  # before any wait
     limit = load_limit()
     if limit:
@@ -2670,8 +2895,9 @@ def run_main(argv, cleanup):
 
                 setup_seconds = round(time.monotonic() - (round_started if round_number else main_started))  # fetch and the clean tree (the members are fetched when a check first needs them)
                 gate_report = Path(scratch) / 'linux-gate-nextest-junit.xml'
-                gate_clippy = Path(scratch) / 'linux-gate-clippy'  # linux-gate's clippy stage report, for linux-clippy's note (scripts/ci-clippy-result)
-                ran = set()  # the checks whose command ran in this round (linux-gate's tells linux-clippy where its stage ran)
+                # linux-gate's clippy and fleet-compat stage reports, for linux-clippy's and linux-fleet-compat's notes (STAGE_SIGNED)
+                gate_stages = {check: Path(scratch) / f'linux-gate-{stage}' for check, (stage, *_) in STAGE_SIGNED.items()}
+                ran = set()  # the checks whose command ran in this round (linux-gate's tells linux-clippy and linux-fleet-compat where their stages ran)
                 stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
                 def run_one(name, output=None):
                     """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
@@ -2715,6 +2941,11 @@ def run_main(argv, cleanup):
                     environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                     if target and name in BUILDS:
                         environment['CARGO_TARGET_DIR'] = str(target)
+                    if args.keep and name == WEB:
+                        # scripts/ci-local-web removes its scratch (the kit play receipts, browser traces and screenshots) when it ends
+                        # unless CI_LOCAL_KEEP is set, and writes where it is to that file: the run's end names it (run_tmpdir). It stays
+                        # where it is, not in this TMPDIR, whose longer path would leave less room for the browsers' sockets.
+                        environment['CI_LOCAL_KEEP'] = str(Path(os.environ['TMPDIR']) / WEB_KEPT)
                     # The nix wrapper admits a `nix develop`/`nix shell` start as heavy unless told the shell compiles no Rust: a check that
                     # builds nothing starts as light (as the pre-sign worker starts .#web and .#genie), and one that builds never does.
                     if name in BUILDS:
@@ -2724,10 +2955,12 @@ def run_main(argv, cleanup):
                     if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
                         # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
                         environment['CI_TEST_JUNIT'] = str(gate_report)
-                    if name == 'linux-gate' and LINUX_CLIPPY in checks and 'clippy' in LOCAL[name]:
-                        # linux-clippy signs from this run's clippy stage (the same stage, its cargo messages and dep-info): ask it for its report.
-                        environment['CI_CLIPPY_REPORT'] = str(gate_clippy)
-                    if name in BUILDS and name != LINUX_CLIPPY:
+                    for check, (stage, report_variable, _) in STAGE_SIGNED.items():
+                        if name == 'linux-gate' and check in checks and stage in LOCAL[name]:
+                            # linux-clippy (linux-fleet-compat) signs from this run's clippy (fleet-compat) stage, the same stage, its cargo
+                            # messages and dep-info: ask it for its report.
+                            environment[report_variable] = str(gate_stages[check])
+                    if name in BUILDS and name not in STAGE_SIGNED:
                         # A test that cannot run on this host (no unprivileged user namespace, say) skips outside CI and writes its id here;
                         # the note records the list as env_skips, so the evidence says which tests did not run on this machine. rust-tests
                         # reads linux-gate's list for its per-crate records, so it is written even under a base wrapper without --input-file.
@@ -2757,22 +2990,23 @@ def run_main(argv, cleanup):
                     streams = output is None and CI_LOCAL in LOCAL[name]
                     limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
                     environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
-                    if name == LINUX_CLIPPY:
-                        # The clippy stage runs once: linux-gate's run in this round already ran it, else it runs here alone. Either way the note
+                    if name in STAGE_SIGNED:
+                        # The stage runs once: linux-gate's run in this round already ran it, else it runs here alone. Either way the note
                         # records the report reader (LOCAL) and which run made the report (run_command_sha256).
+                        (stage, report_variable, reader_variable), alone = STAGE_SIGNED[name], stage_alone(name)
                         if 'linux-gate' in ran:
-                            report, run_sha = gate_clippy, hashlib.sha256(json.dumps([LOCAL['linux-gate']]).encode()).hexdigest()
+                            report, run_sha = gate_stages[name], hashlib.sha256(json.dumps([LOCAL['linux-gate']]).encode()).hexdigest()
                             if not (report / 'passed').is_file():
-                                return (name, 'NOT SIGNED', 0, "linux-gate's clippy stage did not pass in this run"), True, False
+                                return (name, 'NOT SIGNED', 0, f"linux-gate's {stage} stage did not pass in this run"), True, False
                         else:
-                            report, run_sha = Path(scratch) / 'linux-clippy-report', hashlib.sha256(json.dumps([RUN_CLIPPY]).encode()).hexdigest()
-                            stage = dict(environment, CI_CLIPPY_REPORT=str(report))
-                            code = run_limited(governed(RUN_CLIPPY, name), limit, cwd=directory, env=stage, stdout=output,
-                                               stderr=subprocess.STDOUT if output else None)
+                            report, run_sha = Path(scratch) / f'{name}-report', hashlib.sha256(json.dumps([alone]).encode()).hexdigest()
+                            code = run_limited(governed(alone, name), limit, cwd=directory, env=dict(environment, **{report_variable: str(report)}),
+                                               stdout=output, stderr=subprocess.STDOUT if output else None)
                             if code != 0:
                                 return (name, 'timed out' if code == 124 else f'FAILED ({code})', round(time.monotonic() - started),
-                                        'the clippy stage failed: nothing signed' + queue_note(limit)), True, False
-                        environment['CLIPPY_REPORT'] = str(report)
+                                        f'the {stage} stage failed: nothing signed' + queue_note(limit)), True, False
+                        environment[reader_variable] = str(report)
+                        environment = report_environment(scratch, environment)
                         wrap += ['--input', f'run_command_sha256={run_sha}']
                     pre_start = None
                     if streams and takes_input_files(tools['evidence-wrap']):

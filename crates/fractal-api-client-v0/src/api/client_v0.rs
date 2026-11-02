@@ -82,6 +82,8 @@ mod stream_start_tests;
 mod conversation_delivery_tests;
 #[cfg(test)]
 mod conversation_participants_tests;
+#[cfg(test)]
+mod stream_timeline_tests;
 
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
@@ -1011,6 +1013,7 @@ async fn collection_items_with_windows(
                     // beside the others instead of behind them.
                     drop(admission.take());
                     overlay_agent_resources(&store, &mut items, &at)?;
+                    overlay_seat_admission(&state, &mut items, false);
                     if traced {
                         let path = match (status.is_some(), roster_path, folded.get()) {
                             (true, _, _) => "filtered_full",
@@ -1382,6 +1385,7 @@ async fn open_terminal_subscription(
 struct ResolvedConversation {
     snapshot: ClientSnapshot,
     local_position: u64,
+    stream_position: u64,
     managed: Option<super::ManagedSessionOwner>,
     routing_owner: Option<super::ManagedSessionOwner>,
 }
@@ -1390,6 +1394,7 @@ fn resolve_conversation(
     state: &AppState, target: &str,
 ) -> Result<(String, ResolvedConversation), ApiError> {
     let local_position = local_latest_position(state)?;
+    let stream_position = stream_latest_position(state)?;
     let snapshot = new_client_snapshot(state);
     let (session_id, managed) = if target.starts_with("agent/") {
         let owner = state.store.conversation_owner_at(target, snapshot.store_index)
@@ -1411,7 +1416,7 @@ fn resolve_conversation(
     } else {
         managed.clone()
     };
-    Ok((session_id, ResolvedConversation { snapshot, local_position, managed, routing_owner }))
+    Ok((session_id, ResolvedConversation { snapshot, local_position, stream_position, managed, routing_owner }))
 }
 
 /// Where a conversation is read: here, or on the host that owns its session.
@@ -1637,14 +1642,15 @@ fn conversation_open_local_marked(
         Some(resolved) => resolved,
         None => resolve_conversation(state, session_id)?.1,
     };
-    let ResolvedConversation { snapshot, local_position, managed, .. } = resolved;
+    let ResolvedConversation { snapshot, local_position, stream_position, managed, .. } = resolved;
     #[cfg(test)]
     AFTER_CONVERSATION_SNAPSHOT.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
     });
     let source = conversation_blocks::source(state, session_id, managed.as_ref());
     let mark = ConversationMark::from_resolved(
-        session_id, snapshot.store_index, local_position, managed.as_ref(), source.as_ref().ok(),
+        session_id, snapshot.store_index, local_position, stream_position, managed.as_ref(),
+        source.as_ref().ok(),
     );
     #[cfg(test)]
     BEFORE_CONVERSATION_PAGE.with(|pause| {
@@ -1670,6 +1676,7 @@ fn conversation_open_local_marked(
     let cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
         local_position,
+        stream_position,
         native_sequence: native_latest_sequence(&page).max(suppressed_sequence)
             .max(extent.native_latest()),
         source_generation,
@@ -3855,6 +3862,16 @@ fn operation_checks(
     Ok(Some(checks))
 }
 
+/// A doctor check's severity and state as an operation. A check that timed out, or carries a
+/// status this build does not know, could not say the daemon is healthy: it shows as degraded.
+fn operation_severity_and_state(status: &str) -> (&'static str, &'static str) {
+    match status {
+        "pass" | "info" => ("info", "healthy"),
+        "fail" => ("critical", "failed"),
+        _ => ("warning", "degraded"),
+    }
+}
+
 fn operation_resources(state: &AppState, at: &str) -> Result<Vec<Value>, ApiError> {
     let Some(checks) = operation_checks(state)? else {
         return Ok(vec![json!({
@@ -3880,8 +3897,8 @@ fn operation_resources(state: &AppState, at: &str) -> Result<Vec<Value>, ApiErro
                 "revision": format!("{}:{}", check.name, check.status),
                 "updated_at": at,
                 "component": match check.name.as_str() { "replication" => "transport", "runtime-drift" | "runtime-ownership" | "pty-runtime" | "driver-readiness" => "runtime", _ => "daemon" },
-                "severity": match check.status.as_str() { "fail" => "critical", "warn" => "warning", _ => "info" },
-                "state": match check.status.as_str() { "fail" => "failed", "warn" => "degraded", _ => "healthy" },
+                "severity": operation_severity_and_state(&check.status).0,
+                "state": operation_severity_and_state(&check.status).1,
                 "summary": check.message,
                 "targets": [],
                 "operational": { "layer": "current", "actionable": false, "reasons": ["diagnostic"] }
@@ -4518,19 +4535,22 @@ pub struct ConversationQuery {
 struct ConversationPosition {
     store_index: u64,
     local_position: u64,
+    /// How far into the messages stream the conversation was read, in shard indexes.
+    stream_position: u64,
     native_sequence: u64,
     source_generation: u64,
 }
 
 fn conversation_cursor(state: &AppState, session_id: &str, position: ConversationPosition) -> String {
     format!(
-        "conversation-cursor/{}/{}/{}.{}.{}.{}",
+        "conversation-cursor/{}/{}/{}.{}.{}.{}.{}",
         state.node,
         session_id.trim_start_matches("session/"),
         position.store_index,
         position.local_position,
         position.native_sequence,
-        position.source_generation
+        position.source_generation,
+        position.stream_position,
     )
 }
 
@@ -4548,12 +4568,17 @@ fn conversation_position(
         .strip_prefix(&prefix)
         .and_then(|part| {
             let mut parts = part.split('.');
-            let result = ConversationPosition {
+            let mut result = ConversationPosition {
                 store_index: parts.next()?.parse().ok()?,
                 local_position: parts.next()?.parse().ok()?,
                 native_sequence: parts.next()?.parse().ok()?,
                 source_generation: parts.next()?.parse().ok()?,
+                stream_position: 0,
             };
+            // A cursor from before the stream has no stream part: it has read none of the stream.
+            if let Some(stream) = parts.next() {
+                result.stream_position = stream.parse().ok()?;
+            }
             parts.next().is_none().then_some(result)
         })
         .ok_or_else(|| ApiError {
@@ -4801,6 +4826,8 @@ fn conversation_read_now_unbounded(
     session_id: &str,
     after: Option<&str>,
 ) -> Result<Value, ApiError> {
+    // Read before the page, so the next cursor never passes a stream item the page missed.
+    let stream_latest = stream_latest_position(state)?;
     let snapshot = new_client_snapshot(state);
     let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
         .map_err(ApiError::internal)?;
@@ -4826,6 +4853,7 @@ fn conversation_read_now_unbounded(
     if let Some(position) = position {
         if position.store_index > snapshot.store_index
             || position.local_position > local_latest
+            || position.stream_position > stream_latest
             || position.native_sequence > native_latest
         {
             return Err(conversation_replay_gap(
@@ -4850,7 +4878,7 @@ fn conversation_read_now_unbounded(
     let mut message_indexes = BTreeSet::new();
     let mut retention_changed = false;
     let mut scan_remaining = CONVERSATION_REPLAY_SCAN_LIMIT;
-    if let Some(ConversationPosition { store_index, local_position, .. }) = position {
+    if let Some(ConversationPosition { store_index, local_position, stream_position, .. }) = position {
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
@@ -4889,13 +4917,25 @@ fn conversation_read_now_unbounded(
             }
         }
         for claim in owner.as_deref().map(|owner| {
-            state.store.conversation_messages_at(owner, snapshot.store_index.checked_add(1), store_index)
+            state.store.conversation_messages_at(
+                owner, snapshot.store_index.checked_add(1), store_index,
+                Some(crate::store::messages_shard::stream_reads::StreamAfter::Position(stream_position)),
+            )
         }).transpose().map_err(ApiError::internal)?.unwrap_or_default() {
+            // A stream item admitted after this read's stream position is the next read's.
+            if claim.store_index.checked_sub(crate::store::messages_shard::STREAM_INDEX_BASE)
+                .is_some_and(|index| index > stream_latest)
+            {
+                continue;
+            }
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             if fields.get("session_id").and_then(Value::as_str)
                 .is_none_or(|message_session| message_session == session_id) {
                 changed_indexes.insert(claim.store_index);
-                message_indexes.insert(claim.store_index);
+                // The pair's sequences: a stream item's follow the graph index it arrived at.
+                message_indexes.insert(
+                    crate::store::messages_shard::stream_reads::timeline_base(&state.store, &claim).map_err(ApiError::internal)?,
+                );
                 // A stored timeline names a message by its claim; a native page by its digest.
                 changed_ids.extend(stored_timeline_claim_entry_ids(session_id, &claim));
                 let digest = hex::encode(Sha256::digest(claim.id.as_bytes()));
@@ -4972,11 +5012,8 @@ fn conversation_read_now_unbounded(
         .cloned()
         .collect::<Vec<_>>();
     let changed = |item: &&Value| item["id"].as_str().is_some_and(|id| changed_ids.contains(id));
-    let missing_message_pair = message_indexes.iter().any(|index| {
-        ![
-            index.saturating_mul(4),
-            index.saturating_mul(4).saturating_add(1),
-        ]
+    let missing_message_pair = message_indexes.iter().any(|base| {
+        ![*base, base.saturating_add(1)]
         .iter()
         .all(|sequence| {
             items
@@ -5009,6 +5046,7 @@ fn conversation_read_now_unbounded(
     let next_cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
         local_position: local_latest,
+        stream_position: stream_latest,
         native_sequence: native_latest,
         source_generation,
     });
@@ -5031,6 +5069,7 @@ struct ConversationMark {
     resolved_at: std::time::Instant,
     store_index: u64,
     local_position: u64,
+    stream_position: u64,
     transcript_seen: Option<(u64, std::time::SystemTime)>,
 }
 
@@ -5094,12 +5133,12 @@ impl ConversationMark {
         let source = conversation_blocks::source(state, session_id, resolved.managed.as_ref());
         Ok(Self::from_resolved(
             session_id, resolved.snapshot.store_index, resolved.local_position,
-            resolved.managed.as_ref(), source.as_ref().ok(),
+            resolved.stream_position, resolved.managed.as_ref(), source.as_ref().ok(),
         ))
     }
 
     fn from_resolved(
-        session_id: &str, store_index: u64, local_position: u64,
+        session_id: &str, store_index: u64, local_position: u64, stream_position: u64,
         managed: Option<&super::ManagedSessionOwner>,
         source: Option<&crate::external_sessions::ExternalSession>,
     ) -> Self {
@@ -5116,6 +5155,7 @@ impl ConversationMark {
             owner: managed.map(|(owner, _, _)| owner.clone()),
             store_index,
             local_position,
+            stream_position,
         }
     }
 
@@ -5128,6 +5168,7 @@ impl ConversationMark {
         super::read_deadline::query(&state.store, "/v1/client/conversations/{id}/changes", || {
             self.store_index = state.store.index().map_err(ApiError::internal)?;
             self.local_position = local_latest_position(state)?;
+            self.stream_position = stream_latest_position(state)?;
             Ok(())
         })?;
         self.transcript_seen = transcript_seen(self.transcript.as_deref());
@@ -5144,13 +5185,16 @@ impl ConversationMark {
     fn changed_unbounded(&mut self, state: &AppState) -> Result<bool, ApiError> {
         let index = state.store.index().map_err(ApiError::internal)?;
         let local = local_latest_position(state)?;
+        let stream = stream_latest_position(state)?;
         let mut changed = self.owner.as_deref().map(|owner| {
             state.store.conversation_changed_at(
                 owner, self.store_index, index, self.local_position, local,
+                (self.stream_position, stream),
             )
         }).transpose().map_err(ApiError::internal)?.unwrap_or(false);
         self.store_index = index;
         self.local_position = local;
+        self.stream_position = stream;
         let seen = transcript_seen(self.transcript.as_deref());
         if seen != self.transcript_seen {
             changed = true;
@@ -5162,6 +5206,12 @@ impl ConversationMark {
 
 fn local_latest_position(state: &AppState) -> Result<u64, ApiError> {
     state.store.conversation_local_position().map_err(ApiError::internal)
+}
+
+/// The newest stream item this member has admitted: a conversation's position in the messages
+/// stream, beside its graph and local positions.
+fn stream_latest_position(state: &AppState) -> Result<u64, ApiError> {
+    crate::store::messages_shard::stream_reads::conversation_position(&state.store).map_err(ApiError::internal)
 }
 
 async fn conversation_changes_local(
@@ -5197,12 +5247,13 @@ async fn conversation_changes_local_marked(
     let mut quiet = None;
     if let Some(cursor) = after
         && let Some(seen) = issued_transcript(cursor)
-        && let Ok(ConversationPosition { store_index, local_position, .. }) =
+        && let Ok(ConversationPosition { store_index, local_position, stream_position, .. }) =
             conversation_position(state, session_id, cursor)
     {
         let mut since = ConversationMark {
             store_index,
             local_position,
+            stream_position,
             transcript_seen: seen,
             ..mark.clone()
         };
@@ -5245,6 +5296,7 @@ async fn conversation_changes_local_marked(
                     let checked = ConversationPosition {
                         store_index: mark.store_index,
                         local_position: mark.local_position,
+                        stream_position: mark.stream_position,
                         ..conversation_position(state, session_id, cursor)?
                     };
                     let next = conversation_cursor(state, session_id, checked);
@@ -7639,6 +7691,16 @@ fn creation_string(value: &str, field: &str, max: usize) -> Result<(), ApiError>
     Ok(())
 }
 
+fn creation_tag<'a>(
+    tags: &'a BTreeMap<String, String>,
+    legacy: &str,
+    current: &str,
+) -> Option<&'a String> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    tags.get(legacy).or_else(|| tags.get(current))
+    // LIVE-MIGRATION END
+}
+
 fn existing_creation(
     state: &AppState,
     session: &ClientSession,
@@ -7650,9 +7712,18 @@ fn existing_creation(
     ));
     for desired in state.store.desired_subjects().map_err(ApiError::internal)? {
         if let Some(member) = &desired.member
-            && member.tags.get("st3.client.create-key") == Some(&key)
+            && creation_tag(
+                &member.tags,
+                "st3.client.create-key",
+                "fractal.client.create-key",
+            ) == Some(&key)
         {
-            if member.tags.get("st3.client.create-parameters") != Some(&digest) {
+            if creation_tag(
+                &member.tags,
+                "st3.client.create-parameters",
+                "fractal.client.create-parameters",
+            ) != Some(&digest)
+            {
                 return Err(ApiError {
                     status: StatusCode::CONFLICT,
                     code: "idempotency-conflict".into(),
@@ -7718,11 +7789,13 @@ async fn publish_creation(
         .into_iter()
         .find(|member| member.subject == subject)
     {
-        if existing
-            .member
-            .as_ref()
-            .and_then(|member| member.tags.get("st3.client.create-key"))
-            == Some(&key)
+        if existing.member.as_ref().and_then(|member| {
+            creation_tag(
+                &member.tags,
+                "st3.client.create-key",
+                "fractal.client.create-key",
+            )
+        }) == Some(&key)
             && existing.desired
                 == intent
                     .subjects
@@ -11776,6 +11849,7 @@ mission "differential" state="ready" {
             .map_or(3000, |ms| ms.parse().unwrap()));
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            seat_admission: Default::default(),
             store: Arc::new(Store::open(&database, "bench-host").unwrap()),
             ..test_state(root.path())
         };
@@ -13515,6 +13589,7 @@ mission "differential" state="ready" {
 
     pub fn test_state_named(root: &Path, node: &str) -> AppState {
         AppState {
+            seat_admission: Default::default(),
             owning_person: Some("person/operator".into()),
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),
@@ -13944,6 +14019,29 @@ subscription "watch/source" {
         victim.kill().await.unwrap();
         victim.wait().await.unwrap();
         server.abort();
+    }
+
+    #[test]
+    fn creation_tags_select_each_spelling_independently_without_value_fallback() {
+        for (legacy, current) in [
+            ("st3.client.create-key", "fractal.client.create-key"),
+            (
+                "st3.client.create-parameters",
+                "fractal.client.create-parameters",
+            ),
+        ] {
+            let read = |tags: &BTreeMap<_, _>| creation_tag(tags, legacy, current).cloned();
+            let mut tags = BTreeMap::new();
+            assert_eq!(read(&tags), None);
+            tags.insert(format!("{current}.unknown"), "ignored".into());
+            assert_eq!(read(&tags), None);
+            tags.insert(current.into(), "current".into());
+            assert_eq!(read(&tags).as_deref(), Some("current"));
+            tags.insert(legacy.into(), "legacy".into());
+            assert_eq!(read(&tags).as_deref(), Some("legacy"));
+            tags.insert(legacy.into(), String::new());
+            assert_eq!(read(&tags).as_deref(), Some(""));
+        }
     }
 
     #[tokio::test]
@@ -14856,6 +14954,12 @@ subscription "watch/source" {
                 .any(|item| item["revision"] == "claim-store:pass"),
             "{report:?}"
         );
+
+        // A check doctor gave up on at its deadline is never shown as healthy.
+        assert_eq!(operation_severity_and_state("timeout"), ("warning", "degraded"));
+        assert_eq!(operation_severity_and_state("fail"), ("critical", "failed"));
+        assert_eq!(operation_severity_and_state("pass"), ("info", "healthy"));
+        assert_eq!(operation_severity_and_state("a-later-status"), ("warning", "degraded"));
 
         // A started report is made on its own thread, and a second start keeps it.
         let other = tempfile::tempdir().unwrap();
@@ -18860,6 +18964,7 @@ mission "example/zero-run" state="ready" {
         let unknown = conversation_cursor(&owner, &session_id, ConversationPosition {
             store_index: 0,
             local_position: 0,
+            stream_position: 0,
             native_sequence: 0,
             source_generation: 0,
         });
@@ -20175,7 +20280,7 @@ mission "example/zero-run" state="ready" {
         let wrong_session = post_snapshot_native_sends(&state, &snapshot, "agent/cap", "session/other", None,
             &identity("message/post-snapshot-256"), &BTreeSet::new()).unwrap_err();
         assert_eq!(wrong_session.code, "cursor-gap");
-        let bounded = state.store.conversation_message_delta_at("agent/cap", None, snapshot.store_index, 2).unwrap();
+        let bounded = state.store.conversation_message_delta_at("agent/cap", None, snapshot.store_index, 2, None).unwrap();
         assert_eq!(bounded.len(), 2);
     }
 

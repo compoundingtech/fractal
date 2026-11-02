@@ -216,32 +216,15 @@ impl IdleHoldsStore for Store {
             return Ok((github_watch::open_outside_merge_queue(&current) && exited > after_unix_ms)
                 .then_some(exited));
         }
-        // Newest first: while the thread is out of the queue, the oldest such observation is when
-        // it left; the one before that must have it queued.
-        let mut left = None::<u128>;
-        let mut examined = 0;
-        for (facts, at, attribution_only, _) in history {
-            examined += 1;
-            if attribution_only {
-                continue;
-            }
-            let facts = facts
-                .map(|facts| serde_json::from_str::<Value>(&facts))
-                .transpose()?
-                .unwrap_or(Value::Null);
-            let at = at.parse::<u128>().unwrap_or_default();
-            if left.is_none() && !github_watch::open_outside_merge_queue(&facts) {
-                return Ok(None);
-            }
-            if github_watch::in_merge_queue(&facts) {
-                return Ok(left.filter(|left| *left > after_unix_ms));
-            }
-            if !github_watch::open_outside_merge_queue(&facts) || at <= after_unix_ms {
-                return Ok(None);
-            }
-            left = Some(at);
+        let examined = history.len();
+        let rows = history.into_iter().map(|(facts, at, attribution_only, _)| -> Result<_> {
+            let facts = facts.map(|facts| serde_json::from_str::<Value>(&facts)).transpose()?.unwrap_or(Value::Null);
+            Ok((facts, at.parse::<u128>().unwrap_or_default(), attribution_only))
+        });
+        if let Some(left) = github_watch::merge_queue_exit(rows, after_unix_ms)? {
+            return Ok(left);
         }
-        if examined == THREAD_SCAN {
+        if examined == THREAD_SCAN as usize {
             tracing::warn!(%item, limit=THREAD_SCAN, "idle nudge queue-exit history is unknown: bounded observation window exhausted");
         }
         Ok(None)

@@ -88,6 +88,15 @@ characterization `[34]` does not apply: with v7 seeds 2 and 34 do not trim a che
 other 15 fixed seeds do, measured with
 `cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.
 
+`claims-v13.json` is generated the same way from the declared-waits registry on top of v12's
+(`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v13.json`).
+It adds `work.wait-ended`, which closes a declared wait, and the `wait_on` field the work claim
+kinds carry; it also captures fields main added to `agent.retired` (`desired_revision`,
+`runtime_incarnation`) and `runtime.action.requested` (`ignore_fit`) after v12 was generated.
+Nothing in v12 is removed, and v1 to v12 stay frozen. The simulation selects v13 and records that
+filename in its audit summary. Every fixed seed converges and trims a checkpoint, so
+`NEVER_TRIMS` is empty. Characterization used the same command as v12.
+
 `claims-v8.json` captures the six durable version-1 deployment audit kinds added
 on top of v7. Regenerate it with
 `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v8.json`;
@@ -184,10 +193,14 @@ used
 `CONVERGENCE_START=1 CONVERGENCE_RUNS=300 CONVERGENCE_WORKERS=4 cargo nextest run -p fractal -E 'test(=convergence::fixed_sweep)' --run-ignored only`
 (1363 s); the 14 seeds of 1–300 that did not trim are not fixed seeds.
 
-`claims-v12.json` is generated the same way from the declared-waits registry on top of v11's
-(`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v12.json`).
-It adds `work.wait-ended`, which closes a declared wait, and the `wait_on` field the work claim
-kinds carry; nothing in v11 is removed. The simulation selects v12 and records that filename in its
-audit summary; v1 to v11 stay fixed. Every fixed seed converges; seeds 21, 34 and 241 converge
-without a trim, so `NEVER_TRIMS` is `[21, 34, 241]`. Claim generation shares the schedule's RNG, so a registry change on main can move this
-set. The characterization run used `cargo nextest run -p fractal -E 'test(convergence)'`.
+`claims-v12.json` captures the registry that adds `fault.dismissed` (a person's or the fleet
+fault agent's dismissal of a fault whose run has ended), and the current `daemon.diagnostic`
+fields. Versions 1 through 11 stay frozen. Generate v12 from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v12.json`;
+do not hand-edit or overwrite v11. The simulation selects v12 and records its filename in audit
+summaries.
+
+With v12 every fixed seed converges. The new kind shifts the draws, so seeds 2, 34 and 106 no
+longer reach a checkpoint trim; they are the exact never-trim set, and every other fixed seed
+trims. Characterization used
+`cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.

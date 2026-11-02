@@ -1875,6 +1875,43 @@
     "projection": "evals",
     "wakes_reconciler": true
   },
+  "fault.dismissed": {
+    "kind": "fault.dismissed",
+    "subjects": [
+      "agent",
+      "exec",
+      "pty",
+      "observer",
+      "subscription",
+      "schedule",
+      "daemon",
+      "machine",
+      "step-run",
+      "mission-run",
+      "loop-run",
+      "resource",
+      "checkpoint"
+    ],
+    "fields": {
+      "episode": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "reason": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "operational",
+    "wakes_reconciler": true
+  },
   "file.observed": {
     "kind": "file.observed",
     "subjects": [
@@ -9472,12 +9509,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -9597,12 +9628,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -9718,12 +9743,6 @@
       },
       "summary": {
         "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait_on": {
-        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -10233,12 +10252,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -10358,12 +10371,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -10479,12 +10486,6 @@
       },
       "summary": {
         "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait_on": {
-        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -10614,12 +10615,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -10638,43 +10633,6 @@
     "cardinality": "once-per-attempt",
     "projection": "work",
     "wakes_reconciler": true
-  },
-  "work.wait-ended": {
-    "kind": "work.wait-ended",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "attempt": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "message": {
-        "value_type": "subject-reference",
-        "required": false,
-        "immutable": false,
-        "reference": true
-      },
-      "reason": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
   },
   "workspace.observed": {
     "kind": "workspace.observed",

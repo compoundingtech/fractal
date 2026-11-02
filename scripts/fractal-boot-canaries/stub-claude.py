@@ -113,7 +113,10 @@ def turn(prompt, answer):
     hooks("Stop", {"stop_hook_active": False, "last_assistant_message": answer})
 
 
-server = mcp.get("mcpServers", {}).get("st3")
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+servers = mcp.get("mcpServers", {})
+server = servers["st3"] if "st3" in servers else servers.get("fractal")
+# LIVE-MIGRATION END
 # Fault injection belongs to this private workspace, never to a shared provider setting.
 channel_mode = Path.cwd() / "claude-channel-mode"
 mode = channel_mode.read_text().strip() if channel_mode.exists() else ""
