@@ -193,3 +193,32 @@ const terminalRefusal: ErrorEnvelope = {
     details: { scope: 'control.messages', applied: 'none', refusal: { variant: 'Retired', recipient: 'agent/example/worker' } },
 };
 void [genericRefusal, terminalRefusal];
+
+import type { DeviceCommand, DeviceCommandRequest, DeviceResult } from './Models.generated.ts';
+const inspectPhone: DeviceCommandRequest = { api_version: 'st3.client.v0', device: 'device/phone', kind: 'phone.inspect', args: {} };
+const navigatePhone: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.navigate', args: { screen: 'Conversation', params: { target: 'agent/worker', sessionId: 'session/chat' } } };
+const readPhoneMessage: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.message.read', args: { attention_id: 'attention/message' }, ttl_ms: 30000 };
+const reportPhoneResult: DeviceResult = { command_id: 'device-command/example', outcome: 'completed', result: { route: 'Conversation' } };
+const phoneWindow: CollectionCommand = { kind: 'subscribe', id: 'commands', collection: 'commands' };
+void cancellationClient.deviceCommand(inspectPhone, cancellationOptions);
+void cancellationClient.deviceCommand(navigatePhone, cancellationOptions);
+void cancellationClient.deviceCommand(readPhoneMessage, cancellationOptions);
+void cancellationClient.deviceCommandGet('device-command/example', { wait: true }, cancellationOptions);
+void cancellationClient.deviceResult(reportPhoneResult, cancellationOptions);
+declare const phoneCommand: DeviceCommand;
+const phoneResourceKind: 'device-command' = phoneCommand.kind;
+if (phoneCommand.command_kind === 'phone.message.read') {
+    const attentionID: string = phoneCommand.args.attention_id;
+    void attentionID;
+}
+// @ts-expect-error Message-read arguments are required for the selected command kind.
+const missingAttentionID: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.message.read', args: {} };
+// @ts-expect-error A Conversation route requires its target, not another route's id.
+const wrongRouteParams: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.navigate', args: { screen: 'Conversation', params: { id: 'agent/worker' } } };
+// @ts-expect-error Arbitrary phone screens are not a command surface.
+const unknownPhoneScreen: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.navigate', args: { screen: 'Settings' } };
+// @ts-expect-error A phone may report terminal outcomes only.
+const pendingPhoneResult: DeviceResult = { command_id: 'device-command/example', outcome: 'pending' };
+// @ts-expect-error Inspection accepts an empty argument object, not navigation arguments.
+const nonemptyInspect: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.inspect', args: { screen: 'NowRoot' } };
+void [phoneWindow, phoneResourceKind, missingAttentionID, wrongRouteParams, unknownPhoneScreen, pendingPhoneResult, nonemptyInspect];

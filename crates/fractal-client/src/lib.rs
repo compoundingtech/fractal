@@ -3549,6 +3549,21 @@ impl Client {
             .await
     }
 
+    /// Issue one expiring command. This is not a durable action or replay queue.
+    pub async fn device_command(
+        &self,
+        command: &DeviceCommandRequest,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.post("/v1/client/device-commands", command).await
+    }
+
+    pub async fn device_result(
+        &self,
+        result: &DeviceResult,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.post("/v1/client/device-results", result).await
+    }
+
     pub async fn pairing_begin(
         &self,
         request: &PairingBegin,
