@@ -3,7 +3,7 @@
 use super::*;
 
 pub const PAGE: usize = 64;
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h86f8162f8175 owner=fractal_store::store::publication_facts TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hca5f3097fccd owner=fractal_store::store::publication_facts TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_publication_claims (
     claim_id TEXT PRIMARY KEY,
     subject TEXT NOT NULL,
@@ -131,7 +131,7 @@ END;
 
 "#;
 
-const REPAIR_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfca44415d7f7 owner=fractal_store::store::publication_facts TODO=prepare-body-and-predecessor-values */ r#"
+const REPAIR_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hca5e425df438 owner=fractal_store::store::publication_facts TODO=prepare-body-and-predecessor-values */ r#"
 CREATE TRIGGER IF NOT EXISTS publication_repair_insert AFTER INSERT ON projection_digest_repaired_claims BEGIN
     DELETE FROM local_publication_claims WHERE claim_id=NEW.id;
     DELETE FROM local_publication_pending WHERE claim_id=NEW.id;
