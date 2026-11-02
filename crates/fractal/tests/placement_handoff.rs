@@ -420,6 +420,9 @@ struct Node {
 }
 impl Node {
     async fn new(name: &str) -> Self {
+        Self::with_peers(name, &[]).await
+    }
+    async fn with_peers(name: &str, peers: &[&str]) -> Self {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&root.path().join("graph.db"), name).unwrap());
         store.bind_fleet(FLEET).unwrap();
@@ -438,7 +441,7 @@ impl Node {
             pty_root: root.path().join("pty"),
             pty_binary: "pty".into(),
             fleet_id: Some(FLEET.into()),
-            configured_peers: vec![],
+            configured_peers: peers.iter().map(|peer| peer.to_string()).collect(),
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
@@ -618,6 +621,44 @@ async fn a_restarted_member_holding_a_moved_seat_waits_for_its_peer_then_lets_it
     cobalt.pass();
     cobalt.pass();
     assert_eq!(cobalt.running(), 1, "{}", cobalt.show().await);
+}
+
+#[tokio::test]
+async fn a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override() {
+    let mut amber = Node::with_peers("amber", &["cobalt"]).await;
+    amber.declare("amber", true, "initial");
+    amber
+        .store
+        .append_claim(&fractal_daemon::model::ClaimInput {
+            subject: "daemon/amber".into(),
+            kind: "daemon.started".into(),
+            actor: None,
+            fields: std::collections::BTreeMap::from([("status".into(), Value::String("running".into()))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some("amber-start".into()),
+        })
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    amber.restart(&["cobalt"]);
+    amber.pass();
+    amber.pass();
+    assert!(amber.runtime.starts.lock().unwrap().is_empty(), "cobalt is unreachable, so amber waits");
+
+    let refused = amber
+        .cli(&["fleet", "admit-without", "--peer", "stranger", "--reason", "rebuilding", "--as", "agent/example/operations"])
+        .await;
+    assert!(!refused.status.success(), "only this member's peers can be released");
+    let admitted = amber
+        .cli(&["fleet", "admit-without", "--peer", "cobalt", "--reason", "cobalt is being rebuilt", "--as", "agent/example/operations", "--json"])
+        .await;
+    assert!(admitted.status.success(), "{}", String::from_utf8_lossy(&admitted.stderr));
+    let claim: Value = serde_json::from_slice(&admitted.stdout).unwrap();
+    assert_eq!(claim["subject"], "host/amber");
+    assert_eq!(claim["actor"], "agent/example/operations");
+    assert_eq!(claim["body"]["fields"]["peers"], serde_json::json!(["cobalt"]));
+    amber.pass();
+    assert_eq!(amber.runtime.starts.lock().unwrap().len(), 1, "the override lets amber go on");
 }
 
 async fn move_running_seat(terminal: bool) {

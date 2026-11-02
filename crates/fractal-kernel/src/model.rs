@@ -22,7 +22,7 @@ pub const MAX_EVAL_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 pub const PERMISSION_DENIED_CODE: &str = "permission-denied";
 pub const PLACEMENT_SOURCE_OFFLINE_KIND: &str = "agent.placement.source-offline";
 /// Lets one member, for its current daemon start only, act on its seats' placement without
-/// waiting for the named peers it cannot reach (docs/st3/seat-placement.md, "After a start").
+/// waiting for the named peers it cannot reach (docs/st3/replication.md, "After a start").
 pub const MEMBER_ADMISSION_OVERRIDE_KIND: &str = "member.admission-override";
 /// The former owners and declarations which can acknowledge their latest departure.
 /// Walk causal predecessors, never receiver-local indexes or receipt timestamps.

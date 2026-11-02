@@ -3766,7 +3766,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 self.record_member(subject, &observation, false)?;
                             }
                             None if member.lifecycle == MemberLifecycle::AdoptOnly => {
-                                if self.member_admitted() {
+                                if self.member_admitted_for(&subject.subject)? {
                                     self.record_once(
                                         &subject.subject,
                                         "runtime.observed",
@@ -7470,7 +7470,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
         }
         // A member that has not caught up since it started may hold a placement that moved.
-        if !self.member_admitted() {
+        if !self.member_admitted_for(&subject.subject)? {
             return Ok(false);
         }
         if request.is_none() && self.store.runtime_start_for(&subject.subject)?.is_some() {
@@ -9199,7 +9199,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         observation: &RuntimeObservation,
     ) -> Result<()> {
-        if !self.member_admitted() { return Ok(()); }
+        if !self.member_admitted_for(&subject.subject)? { return Ok(()); }
         if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(()); }
         if subject.kind == "agent"
             && member.lifecycle == MemberLifecycle::Service
@@ -9947,7 +9947,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // An end is recorded only once the member knows the seat is still placed here; a
         // runtime that is alive is recorded wherever the seat is placed.
         if matches!(observation.status.as_str(), "exited" | "vanished" | "stopped" | "absent" | "failed")
-            && !self.member_admitted()
+            && !self.member_admitted_for(&subject.subject)?
         {
             return Ok(());
         }

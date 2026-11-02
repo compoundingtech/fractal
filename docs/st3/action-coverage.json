@@ -1192,6 +1192,14 @@
       "verification": "real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression"
     },
     {
+      "command": "st fleet admit-without",
+      "description": "Let this member start, restart and retire its seats without peers it cannot reach, for its current daemon start only",
+      "tests": [
+        "crates/fractal/tests/placement_handoff.rs::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override"
+      ],
+      "verification": "real CLI over private Unix socket; an unknown peer is refused, an agent actor's override names this member's start and releases its seats"
+    },
+    {
       "command": "st fleet anchor show",
       "description": "Print the fleet public trust anchor for offline proof verification",
       "tests": [

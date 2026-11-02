@@ -178,11 +178,21 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// Whether this pass found the member admitted. Each action that assumes a seat is placed
-    /// here asks this first.
-    pub(super) fn member_admitted(&self) -> bool {
+    /// Whether this member may act on `subject`'s placement: it is admitted, or the seat's
+    /// current declaration is one this member made since it started (a run it created, for
+    /// instance), which is its own current decision rather than one it may have held from before.
+    /// Each action that assumes a seat is placed here asks this first.
+    pub(super) fn member_admitted_for(&self, subject: &str) -> Result<bool> {
         smallclaims::touched::note_read(|| ADMISSION_KEY.to_owned());
-        self.member_admission.lock().unwrap_or_else(PoisonError::into_inner).admitted
+        if self.member_admission.lock().unwrap_or_else(PoisonError::into_inner).admitted {
+            return Ok(true);
+        }
+        let Some(token) = self.store.selected_desired_token(subject)? else {
+            return Ok(false);
+        };
+        Ok(self.store.claim_by_id(&token)?.is_some_and(|claim| {
+            claim.origin == self.host && claim.accepted_at_unix_ms >= self.started_at_unix_ms
+        }))
     }
 
     /// The peers this member still waits for, or `None` once it may act.
@@ -296,6 +306,8 @@ mod tests {
         let store = Arc::new(Store::open_memory("node").unwrap());
         started(&store, "start");
         seat(&store, root.path());
+        // The seat's declaration is held from before this start.
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let runtime = Arc::new(FakeRuntime::default());
         let reconciler = reconciler(&store, &runtime);
         reconciler.reconcile_once().unwrap();
@@ -345,6 +357,22 @@ mod tests {
         other.append_claim(&foreign).unwrap();
         let other = reconciler(&other, &runtime);
         assert_eq!(other.member_admission_waiting().unwrap(), Some(vec!["peer".to_owned()]));
+    }
+
+    #[tokio::test]
+    async fn a_waiting_member_starts_a_seat_it_declared_since_it_started() {
+        // A run this member creates, for instance a schedule's standby taking over an occurrence,
+        // declares its seats here after the start: that is this member's current decision.
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        started(&store, "start");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = reconciler(&store, &runtime);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        seat(&store, root.path());
+        reconciler.reconcile_once().unwrap();
+        assert!(reconciler.member_admission_waiting().unwrap().is_some());
+        assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

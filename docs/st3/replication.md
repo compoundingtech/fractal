@@ -1361,6 +1361,31 @@ repair "record/HASH" {
 
 A replacement must already be a valid admitted claim. The original record remains visible with state `repaired`.
 
+### After a start
+
+**What waits.** A member that starts again may hold desired state its peers have since replaced: a seat it ran may have moved to another host while it was away. Until it has caught up with a peer, the member takes no action that assumes a seat is placed on it:
+- it starts, restarts or retires no seat;
+- it records no seat's runtime as ended.
+
+**What still runs.** It adopts and records runtimes that are alive, which is true wherever a seat is placed.
+
+**Caught up.** The condition is the one schedules use after a cold start:
+- no deferred projection, catch-up or first sync;
+- for a member with peers, at least one peer measured since this start with nothing the member lacks;
+- no live peer that holds envelopes the member has not received.
+
+A single member, or a member without peers, is admitted at once.
+
+**Alerts and the override.** A member that has waited five minutes raises an operational alert naming its peers. If a peer cannot be reached, a person or an agent records an override on the waiting member itself:
+
+```sh
+st fleet admit-without --peer NAME --reason "why the member may go on" --as ACTOR
+```
+
+The override is a `member.admission-override` claim on `host/<member>`. It names the member's current `daemon.started` claim, the peers it releases and a required reason. Only the named member reads it, and only for that start: the next start waits again. A released peer that is back and measured since the start counts again.
+
+**Rollout.** An older member keeps the unknown kind retryable until it upgrades, as for any unknown kind. Nothing older reads it.
+
 ## Checkpoints
 
 A checkpoint deletes replicated claims that no longer change any answer. Checkpoint

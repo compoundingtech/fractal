@@ -876,6 +876,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st fleet admit-without": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st fleet anchor show": {
         "actor": "none",
         "accepts_person": false,
