@@ -1181,6 +1181,9 @@ impl Store {
             deleted_claims += claims.len();
             left = left.map(|left| left.saturating_sub(claims.len() as u64));
             chunks += 1;
+            if let Some(hook) = self.trim_chunk_hook.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+                hook(chunks);
+            }
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
             pause(self.trim_pause_duration(held));
         }

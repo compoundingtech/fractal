@@ -322,6 +322,49 @@ fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
     }
 }
 
+/// The agents roster publishes while a local cut deletes in many chunks: a fold begun after
+/// one chunk publishes after the next. Forgetting the views after every chunk failed it with
+/// "the agents source reset while materializing its publication", all through the run.
+#[test]
+fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
+    use super::agents_publication::{AgentsStatusWatermark, PresentedAgents};
+    use super::published_list::Publication;
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let fractal = Arc::clone(&store.fractal);
+    fractal.presented_agents.start();
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let hook_published = Arc::clone(&published);
+    let mut building = None;
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        // A fold begun after one chunk ends after the next, as a fold of seconds does.
+        if let Some(build) = building.take() {
+            let row = serde_json::json!({ "id": format!("agent/example-{chunk}") });
+            let done = fractal.presented_agents.publish_identified(build, |identity| Publication {
+                cut: 1,
+                published_at_unix_ms: 1,
+                valid_until_unix_ms: None,
+                rows: PresentedAgents::new(
+                    uuid::Uuid::nil(), identity, AgentsStatusWatermark { store_index: 1, local_frontier: 1 }, 1,
+                    vec![row], vec![format!("agent/example-{chunk}")],
+                ),
+            });
+            hook_published.lock().unwrap().push(done.is_some());
+        }
+        building = fractal.presented_agents.begin_materialization();
+    }));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let published = published.lock().unwrap();
+    assert!(published.len() > 4, "the cut deletes in many chunks ({})", published.len());
+    assert!(published.iter().all(|done| *done), "the agents source reset while materializing its publication: {published:?}");
+}
+
 /// The claims sequence a page cursor carries, which the final mark of a trim moves on.
 fn claims_sequence(store: &Store) -> i64 {
     store
