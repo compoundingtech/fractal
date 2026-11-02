@@ -198,23 +198,6 @@ pub(crate) fn publish_owner_binding_under_lock(
     Ok(())
 }
 
-pub(crate) fn clear_owner_binding(root: &Path, host: &str) {
-    let Ok(path) = crate::park::SupervisorScope::current(root, host)
-        .map(|scope| scope.stream_owner_binding_path())
-    else {
-        return;
-    };
-    let Ok(bytes) = fs::read(&path) else { return };
-    let Ok(binding) = serde_json::from_slice::<StreamOwnerBinding>(&bytes) else {
-        return;
-    };
-    if binding.supervisor_pid == std::process::id()
-        && crate::exec_backend::process_start_time_ticks(std::process::id() as i32).ok()
-            == Some(binding.supervisor_start_time_ticks)
-    {
-        let _ = fs::remove_file(path);
-    }
-}
 
 #[doc(hidden)]
 pub fn publish_owner_binding_for_test(root: &Path, host: &str) -> anyhow::Result<()> {

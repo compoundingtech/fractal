@@ -106,6 +106,9 @@ pub struct Config {
     /// What this node does when an account nears its weekly limit. Off unless enabled.
     #[serde(skip_serializing_if = "LimitsConfig::is_default")]
     pub limits: LimitsConfig,
+    /// Where the daemon's own diagnostics go. Written only when it differs from the default.
+    #[serde(skip_serializing_if = "LoggingConfig::is_default")]
+    pub logging: LoggingConfig,
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
@@ -247,6 +250,22 @@ impl TrimConfig {
         );
         anyhow::ensure!(self.daily_claims != Some(0), "trim.daily_claims is at least 1");
         Ok(())
+    }
+}
+
+/// `[logging]`: `stderr_warnings = true` writes every WARN and ERROR the daemon's code logs
+/// through `tracing` to its stderr, and so to the journal, when telemetry export is off. Without
+/// export the daemon installs no subscriber and those lines are lost. Off by default while its
+/// volume is measured.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LoggingConfig {
+    pub stderr_warnings: bool,
+}
+
+impl LoggingConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -643,6 +662,7 @@ impl Default for Config {
             checkpoint: CheckpointConfig::default(),
             trim: TrimConfig::default(),
             limits: LimitsConfig::default(),
+            logging: LoggingConfig::default(),
             reconcile: ReconcileConfig::default(),
             asks: AsksConfig::default(),
             codex_work_without_asking: None,
@@ -1666,6 +1686,18 @@ sekrets_profile = "nathan/daemon-gh"
         let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
         assert_eq!(config.trim.daily_claims, Some(5000));
         assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
+    }
+
+    #[test]
+    fn stderr_warnings_are_off_unless_chosen_and_absent_from_a_written_default_config() {
+        let config = Config::default();
+        assert!(!config.logging.stderr_warnings);
+        // An older build refuses unknown sections, so a default config never names it.
+        assert!(!toml::to_string(&config).unwrap().contains("[logging]"));
+        let config: Config = toml::from_str("[logging]\nstderr_warnings = true\n").unwrap();
+        assert!(config.logging.stderr_warnings);
+        assert!(toml::to_string(&config).unwrap().contains("[logging]"));
+        assert!(toml::from_str::<Config>("[logging]\nlevel = \"debug\"\n").is_err());
     }
 
     #[test]
