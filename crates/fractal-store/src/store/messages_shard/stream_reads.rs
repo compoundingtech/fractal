@@ -239,9 +239,10 @@ pub fn conversation_items(
     };
     let (position, arrival) = match after {
         StreamAfter::Position(position) => (position.max(floor), 0),
-        // Only items that arrived after `arrival` qualify, and the first of them bounds the read
-        // from below: arrivals rise with store order (`record_arrivals`), so the read starts at
-        // the first instead of the stream's start. Without one, nothing arrived since.
+        // Only items that arrived after `arrival` qualify, so the first of them bounds the read
+        // from below, whatever order arrivals were recorded in. Arrivals rise with store order
+        // (`record_arrivals`), so few items past the bound fail the arrival test. Without one,
+        // nothing arrived since.
         StreamAfter::Arrival(arrival) => {
             let first: Option<u64> = connection
                 .prepare_cached("SELECT MIN(store_index) FROM stream_arrivals WHERE graph_index>?1")?
