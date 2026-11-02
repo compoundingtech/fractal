@@ -45,10 +45,12 @@ fn empty_effect_authority_cost_does_not_grow_with_subject_history() {
         }
         inserted = history;
         store.owned_desired_guard(&captured).unwrap();
-        let before = smallclaims::sqlite::work::total();
+        // Count this thread's statements only: the guard runs on it, and the process-wide total
+        // also takes in other tests' SQL when they share the process.
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
         let (result, reads) = smallclaims::touched::record(|| store.owned_desired_guard(&captured));
+        let spent = work.finish();
         result.unwrap();
-        let spent = smallclaims::sqlite::work::total() - before;
         assert!(reads.contains("kind:owned-set.revised"));
         assert!(reads.contains(&captured.subject));
         assert_eq!(spent.statements, 1, "history={history} {spent:?}");
