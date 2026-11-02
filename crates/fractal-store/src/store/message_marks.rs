@@ -40,7 +40,8 @@ pub fn create_triggers(connection: &Connection) -> Result<()> {
     connection.execute_batch(
         "
 -- The same projection rows a lifecycle claim of the mark's kind writes (see the claim triggers
--- in store.rs, idle_mail.rs, unread_mail.rs, coordination.rs and client_messages.rs).
+-- in store.rs, idle_mail.rs, unread_mail.rs, coordination.rs and client_messages.rs). A lifecycle
+-- claim carries a status field, so it always marks the client selector dirty; a mark does too.
 CREATE TRIGGER IF NOT EXISTS local_message_marks_insert AFTER INSERT ON local_message_marks
 BEGIN
     UPDATE message_index SET closed=1
@@ -53,7 +54,7 @@ BEGIN
     SELECT NEW.message WHERE NEW.kind IN ('message.read','message.closed');
     UPDATE coordination_sends SET held=0 WHERE subject=NEW.message AND held!=0;
     INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
-    VALUES(NEW.message,-1,1,CASE WHEN NEW.kind='message.closed' THEN 1 ELSE 0 END)
+    VALUES(NEW.message,-1,1,1)
     ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|excluded.dirty_flags,created_index=created_index+1;
 END;
 -- Retention removes only marks something else covers, but a removed mark is folded out as a
@@ -97,8 +98,9 @@ pub fn record(
     }
     let fields = BTreeMap::from([("status".to_owned(), json!(kind.trim_start_matches("message.")))]);
     let receipt = super::messages_shard::lifecycle_receipt(&store.origin, message, kind, Some(consumer), &fields);
-    let connection = store.connection.write();
-    let inserted = connection
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().map_err(internal)?;
+    let inserted = transaction
         .execute(
             "INSERT OR IGNORE INTO local_message_marks(message, kind, consumer, recorded_at_unix_ms, receipt)
              SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS(SELECT 1 FROM message_index WHERE subject=?1)",
@@ -106,13 +108,18 @@ pub fn record(
         )
         .map_err(internal)?;
     if inserted == 0 {
-        let known: bool = connection
+        let known: bool = transaction
             .query_row("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)", [message], |row| row.get(0))
             .map_err(internal)?;
         if !known {
             return Err(St3Error::new("missing-message", format!("`{message}` is not a message this member holds")));
         }
+    } else {
+        // The client selectors fold their dirty headers at the end of a write, as a claim's
+        // commit does: a closed mark closes the message's current header.
+        super::client_messages::finalize_commit(&transaction).map_err(internal)?;
     }
+    transaction.commit().map_err(internal)?;
     Ok((receipt, inserted > 0))
 }
 
@@ -159,18 +166,12 @@ pub fn rank(status: &str) -> u8 {
     }
 }
 
-/// [`rank`] in SQL, for a column holding a lifecycle kind. Kinds do not sort by name.
-fn rank_sql(column: &str) -> String {
-    format!(
-        "CASE {column} WHEN 'message.staged' THEN 1 WHEN 'message.delivered' THEN 2
-         WHEN 'message.read' THEN 3 WHEN 'message.closed' THEN 4 ELSE 0 END"
-    )
-}
-
 /// Remove the marks that cannot change any state, so the table stays bounded by the messages it
 /// holds: every mark of a message this member no longer holds, and, once older than
-/// [`SUPERSEDED_RETENTION_MS`], a mark that a further-along mark or a lifecycle claim of the same
-/// or a later kind supersedes. Answers how many went.
+/// [`SUPERSEDED_RETENTION_MS`], a mark something else stands in for in every projection: a
+/// delivery once a read mark or a delivered or read claim records it, and a read or a close once
+/// a claim of its kind does. A close does not stand in for a read (unread mail and idle mail count
+/// them apart), so a closed message keeps at most its read and its close. Answers how many went.
 pub fn trim(store: &Store, now: u128, chunk: usize) -> Result<usize> {
     let cutoff = now.saturating_sub(u128::from(SUPERSEDED_RETENTION_MS)).min(i64::MAX as u128) as i64;
     let chunk = chunk.max(1) as i64;
@@ -178,20 +179,19 @@ pub fn trim(store: &Store, now: u128, chunk: usize) -> Result<usize> {
     loop {
         let connection = store.connection.write_background();
         let deleted = connection.execute(
-            &format!("DELETE FROM local_message_marks WHERE rowid IN (
+            "DELETE FROM local_message_marks WHERE rowid IN (
                 SELECT mark.rowid FROM local_message_marks AS mark
                 WHERE NOT EXISTS(SELECT 1 FROM message_index WHERE subject=mark.message)
                    OR (mark.recorded_at_unix_ms < ?1 AND (
-                        EXISTS(SELECT 1 FROM local_message_marks AS later
-                               WHERE later.message=mark.message AND {later} > {mark})
-                        OR EXISTS(SELECT 1 FROM claims WHERE claims.subject=mark.message
-                               AND claims.kind IN ('message.delivered','message.read','message.closed')
-                               AND {claim} >= {mark})))
+                        (mark.kind='message.delivered' AND (
+                            EXISTS(SELECT 1 FROM local_message_marks AS later
+                                   WHERE later.message=mark.message AND later.kind='message.read')
+                            OR EXISTS(SELECT 1 FROM claims WHERE claims.subject=mark.message
+                                   AND claims.kind IN ('message.delivered','message.read'))))
+                        OR (mark.kind IN ('message.read','message.closed')
+                            AND EXISTS(SELECT 1 FROM claims WHERE claims.subject=mark.message
+                                   AND claims.kind=mark.kind))))
                 LIMIT ?2)",
-                later = rank_sql("later.kind"),
-                mark = rank_sql("mark.kind"),
-                claim = rank_sql("claims.kind"),
-            ),
             params![cutoff, chunk],
         )?;
         drop(connection);

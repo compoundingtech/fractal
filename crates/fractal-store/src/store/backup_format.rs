@@ -17,6 +17,11 @@ pub const VERSION_WITH_BODIES: u32 = 2;
 /// The version of an archive that also carries the permanent ledgers (`super::backup_ledgers`).
 /// An archive with no ledger rows keeps an earlier version, as one without bodies does.
 pub const VERSION_WITH_LEDGERS: u32 = 3;
+/// The version of an archive that also carries local message marks (`super::message_marks`):
+/// delivery and read state no claim records. Without them a restore would redeliver every message
+/// a mark covers, so a build that predates marks refuses it. An archive with no marks keeps an
+/// earlier version.
+pub const VERSION_WITH_MARKS: u32 = 4;
 pub const PAGE: usize = 512;
 // One envelope can contain document bytes; reject unbounded lines before allocating them.
 pub const MAX_RECORD_BYTES: u64 = 128 * 1024 * 1024;

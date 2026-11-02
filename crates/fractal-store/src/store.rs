@@ -239,6 +239,8 @@ pub mod work_summaries_ivm;
 pub mod subagents;
 pub mod idle_mail;
 pub mod message_marks;
+#[cfg(test)]
+mod message_marks_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};

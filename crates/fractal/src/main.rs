@@ -20685,6 +20685,21 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         {
             stderr_message("st3", format_args!("usage response trim failed: {error:#}"));
         }
+        // Message marks a further-along record supersedes, and those of messages gone (message_marks.rs).
+        let marks_store = store.clone();
+        let marks = match marks_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("message_marks.trim", || {
+            fractal_daemon::store::message_marks::trim(&marks_store, now_ms(), LOCAL_OBSERVATION_TRIM_CHUNK)
+        })).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => {
+                stderr_message("st3", format_args!("message mark trim failed: {error:#}"));
+                0
+            }
+            Err(error) => {
+                stderr_message("st3", format_args!("message mark trim stopped: {error}"));
+                0
+            }
+        };
         let trim = match trimmed {
             Ok(Ok(trim)) => Some(trim),
             Ok(Err(error)) => {
@@ -20718,7 +20733,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         // One line a pass, so a slow one shows without a blocked checkpoint to name it.
         if let Some(trim) = trim {
             stderr_message("st3", format_args!(
-                "local observation trim: deleted {} rows, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
+                "local observation trim: deleted {} rows and {marks} message marks, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
                 trim.deleted,
                 trim.longest_writer_hold.as_millis(),
                 pass_started.elapsed().as_millis(),

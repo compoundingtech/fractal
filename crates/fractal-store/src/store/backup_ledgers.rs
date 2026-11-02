@@ -130,7 +130,25 @@ const LEDGERS: &[Ledger] = &[
         union: /* sqlite-large-value: allow-for-now lv-h6d886ced104e owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO repaired_claim_replacements(claim_id, \
                 replacement_claim_id, record_ref) VALUES ({0}, {1}, {2})",
     },
+    Ledger {
+        table: "local_message_marks",
+        columns: &[
+            ("message", Text),
+            ("kind", Text),
+            ("consumer", Text),
+            ("recorded_at_unix_ms", Integer),
+            ("receipt", Text),
+        ],
+        key: 3,
+        implied: None,
+        // A consumer's mark of a kind is recorded once; its triggers fold it into the projections.
+        union: "INSERT OR IGNORE INTO local_message_marks(message, kind, consumer, recorded_at_unix_ms, receipt) \
+                VALUES ({0}, {1}, {2}, {3}, {4})",
+    },
 ];
+
+/// The ledgers only an archive of [`super::backup_format::VERSION_WITH_MARKS`] carries.
+pub const MARK_LEDGERS: &[&str] = &["local_message_marks"];
 
 /// One page of one ledger's rows, each row in the ledger's column order. An identity is its
 /// 64 lowercase hex digits when stored as 32 bytes, and its original text otherwise.

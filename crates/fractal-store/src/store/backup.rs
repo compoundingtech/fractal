@@ -146,7 +146,9 @@ impl Store {
                 // projection frontier covers its log can promise the same graph on restore.
                 self.check_backup_projection()?;
                 let mut header = self.backup_header()?;
-                if !header.ledgers.is_empty() {
+                if super::backup_ledgers::MARK_LEDGERS.iter().any(|table| header.ledgers.contains_key(*table)) {
+                    header.version = super::backup_format::VERSION_WITH_MARKS;
+                } else if !header.ledgers.is_empty() {
                     header.version = super::backup_format::VERSION_WITH_LEDGERS;
                 } else if !owned.is_empty() {
                     header.version = super::backup_format::VERSION_WITH_BODIES;
