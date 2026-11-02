@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Dialog, DialogTrigger, MenuTrigger, Popover, VisuallyHidden } from 'react-aria-components'
 import { Icon } from '../composition/Icons'
-import { DeferredSurfaceBoundary } from '../composition/DeferredSurfaceBoundary.tsx'
+import { deferredLoader, DeferredSurfaceBoundary } from '../composition/DeferredSurfaceBoundary.tsx'
 import { ThemePortal } from '../taste/ThemePortal'
 import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import type { SidebarActions, SidebarAgentRow as Row } from './model'
@@ -10,11 +10,11 @@ import type { SidebarClock } from './SidebarTime'
 import { useTouchLayout } from './useTouchLayout'
 
 // Only overlay contents cross this boundary; their real triggers never suspend or remount.
-const AgentRowMenu = React.lazy(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentRowMenu })))
-const AgentReportedDetails = React.lazy(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentReportedDetails })))
-const HoverCardContents = React.lazy(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentHoverCard })))
+const loadAgentRowMenu = deferredLoader(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentRowMenu })))
+const loadAgentReportedDetails = deferredLoader(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentReportedDetails })))
+const loadHoverCard = deferredLoader(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentHoverCard })))
 export function AgentHoverCard(props: { readonly row: Row; readonly reportedStatusOnly?: boolean } & SidebarClock) {
-  return <DeferredSurfaceBoundary fallback={<span role="alert">This agent hover card could not load.</span>}><React.Suspense fallback={null}><HoverCardContents {...props} /></React.Suspense></DeferredSurfaceBoundary>
+  return <DeferredSurfaceBoundary load={loadHoverCard} surfaceProps={props} fallback={<span role="alert">This agent hover card could not load.</span>} />
 }
 
 export interface AgentRowActionsProps extends SidebarClock {
@@ -46,11 +46,11 @@ export const AgentRowActions = (props: AgentRowActionsProps) => {
         if (active === button?.ownerDocument.body || active === props.anchorRef.current || active === props.anchorRef.current?.closest('[role="row"]')) button?.focus()
       })
     }}>{props.wrapDetailsTrigger === undefined ? trigger : props.wrapDetailsTrigger(trigger)}
-      {detailsOpen && <DeferredSurfaceBoundary fallback={<Popover triggerRef={props.menuTriggerRef} placement="bottom end" {...stylex.props(styles.failureSurface)}><Dialog aria-label={`Reported details for ${props.row.title}`}><p role="alert">These agent details could not load.</p><Button onPress={() => setDetailsOpen(false)}>Close</Button></Dialog></Popover>}><React.Suspense fallback={null}><AgentReportedDetails {...props} /></React.Suspense></DeferredSurfaceBoundary>}
+      {detailsOpen && <DeferredSurfaceBoundary load={loadAgentReportedDetails} surfaceProps={props} fallback={<Popover triggerRef={props.menuTriggerRef} placement="bottom end" {...stylex.props(styles.failureSurface)}><Dialog aria-label={`Reported details for ${props.row.title}`}><p role="alert">These agent details could not load.</p><Button onPress={() => setDetailsOpen(false)}>Close</Button></Dialog></Popover>} />}
     </DialogTrigger>
     <MenuTrigger isOpen={menuOpen} onOpenChange={open => { setMenuOpen(open); props.onMenuOpenChange?.(open) }}>
       <Button ref={props.menuTriggerRef} data-agent-menu="true" aria-label={`Actions for ${props.row.title}`} className={state => stylex.props(props.menuButtonStyle(state), touch && styles.menuNarrow).className ?? ''}><Icon name="chevron-right" /></Button>
-      {menuOpen && <DeferredSurfaceBoundary fallback={<Popover placement="bottom end" {...stylex.props(styles.failureSurface)}><Dialog aria-label={`Actions for ${props.row.title}`}><p role="alert">These agent actions could not load.</p><Button onPress={() => { setMenuOpen(false); props.onMenuOpenChange?.(false) }}>Close</Button></Dialog></Popover>}><React.Suspense fallback={null}><AgentRowMenu {...props} onDetailsPress={() => { props.onDetailsPress?.(); setDetailsOpen(true) }} /></React.Suspense></DeferredSurfaceBoundary>}
+      {menuOpen && <DeferredSurfaceBoundary load={loadAgentRowMenu} surfaceProps={{ ...props, onDetailsPress: () => { props.onDetailsPress?.(); setDetailsOpen(true) } }} fallback={<Popover placement="bottom end" {...stylex.props(styles.failureSurface)}><Dialog aria-label={`Actions for ${props.row.title}`}><p role="alert">These agent actions could not load.</p><Button onPress={() => { setMenuOpen(false); props.onMenuOpenChange?.(false) }}>Close</Button></Dialog></Popover>} />}
     </MenuTrigger>
   </ThemePortal>
 }

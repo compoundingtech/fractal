@@ -89,6 +89,19 @@ it.each(['resolved', 'rejected'] as const)('keeps the roster and action trigger 
     await React.act(async () => root.render(<><span data-testid="workspace">Workspace</span><AgentHoverCard row={row} now={0} /></>))
     expect(canvas.getByTestId('workspace').textContent).toBe('Workspace')
     expect((await canvas.findByRole('alert')).textContent).toBe('This agent hover card could not load.')
+    // Vitest caches failed module evaluation too; replace that transport failure, not the mounted loader.
+    vi.resetModules()
+    vi.doMock('../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx', async importOriginal => importOriginal<typeof RowModule>())
+    await React.act(async () => root.render(<span data-testid="workspace">Workspace</span>))
+    await React.act(async () => root.render(<><span data-testid="workspace">Workspace</span><AgentHoverCard row={row} now={0} /></>))
+    expect(await canvas.findByTestId('agent-hover-card')).toBeTruthy()
+    expect(canvas.queryByRole('alert')).toBeNull()
+    await React.act(async () => root.render(<SidebarTree aria-label="Agents" items={[{ id: row.ref, textValue: row.title, depth: 0, children: [] }]} expandedKeys={new Set()} onExpandedChange={() => {}} onAction={selected} renderRow={() => <MilestoneAgentRow row={row} now={0} />} />))
+    await React.act(async () => canvas.getByRole('button', { name: 'Actions for Builder' }).click())
+    expect(await within(document.body).findByRole('menu', { name: 'Actions for Builder' })).toBeTruthy()
+    await React.act(async () => within(document.body).getByRole('menuitem', { name: 'Reported agent details' }).click())
+    expect(await within(document.body).findByRole('dialog', { name: 'Reported details for Builder' })).toBeTruthy()
+    expect(within(document.body).queryByRole('alert')).toBeNull()
     return
   }
   await React.act(async () => { release(); await import('../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx') })

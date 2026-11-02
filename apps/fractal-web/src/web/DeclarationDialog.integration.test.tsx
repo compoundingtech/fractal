@@ -92,6 +92,13 @@ describe('declaration dialog', () => {
       expect(within(host).getByRole('button', { name: 'Workspace remains available' })).toBe(workspace)
       workspace.focus()
       expect(document.activeElement).toBe(workspace)
+      // Restore transport availability without replacing the mounted dialog or its loader.
+      vi.resetModules()
+      vi.doUnmock('../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx')
+      await act(async () => root.render(<><button type="button">Workspace remains available</button><DeferredDeclarationDialog subject="schedule/nightly" isOpen onOpenChange={onOpenChange} /></>))
+      expect(await within(host).findByText('Only agents and missions have a declaration to show.')).toBeTruthy()
+      expect(within(host).queryByRole('alert')).toBeNull()
+      expect(host.contains(workspace)).toBe(true)
     } finally {
       vi.doUnmock('../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx')
     }
