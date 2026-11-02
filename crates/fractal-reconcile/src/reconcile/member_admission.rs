@@ -105,7 +105,14 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Decide, once per pass, whether this member may act on its seats' placement, and tell an
     /// operator when it has waited too long.
     pub(super) fn observe_member_admission(&self) -> Result<()> {
-        let waiting = self.member_admission_waiting()?;
+        // Once admitted, a member stays admitted for this start: a released peer that comes back
+        // does not pause seats the member already acts on.
+        let latched = self.member_admission.lock().unwrap_or_else(PoisonError::into_inner).admitted;
+        let waiting = if latched || !self.waits_for_peers_after_start {
+            None
+        } else {
+            self.member_admission_waiting()?
+        };
         let admitted = waiting.is_none();
         self.incremental.observe_value(ADMISSION_KEY, admitted.to_string());
         let wall = now_ms();
@@ -183,6 +190,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// instance), which is its own current decision rather than one it may have held from before.
     /// Each action that assumes a seat is placed here asks this first.
     pub(super) fn member_admitted_for(&self, subject: &str) -> Result<bool> {
+        if !self.waits_for_peers_after_start {
+            return Ok(true);
+        }
         smallclaims::touched::note_read(|| ADMISSION_KEY.to_owned());
         if self.member_admission.lock().unwrap_or_else(PoisonError::into_inner).admitted {
             return Ok(true);
@@ -294,6 +304,7 @@ mod tests {
     fn reconciler(store: &Arc<Store>, runtime: &Arc<FakeRuntime>) -> Reconciler<FakeRuntime> {
         Reconciler::new(store.clone(), runtime.clone(), store.origin.clone(), Arc::new(Notify::new()))
             .with_schedule_peers(vec!["peer".into()])
+            .with_wait_for_peers_after_start(true)
     }
 
     fn alert(store: &Store) -> Option<String> {
@@ -306,10 +317,9 @@ mod tests {
         let store = Arc::new(Store::open_memory("node").unwrap());
         started(&store, "start");
         seat(&store, root.path());
-        // The seat's declaration is held from before this start.
-        std::thread::sleep(std::time::Duration::from_millis(2));
         let runtime = Arc::new(FakeRuntime::default());
-        let reconciler = reconciler(&store, &runtime);
+        // The seat's declaration is held from before this start.
+        let reconciler = reconciler(&store, &runtime).with_started_at_for_test(now_ms() + 1);
         reconciler.reconcile_once().unwrap();
         reconciler.reconcile_once().unwrap();
         assert!(runtime.started_members.lock().unwrap().is_empty(), "nothing starts before a peer is caught up with");
@@ -367,12 +377,27 @@ mod tests {
         let store = Arc::new(Store::open_memory("node").unwrap());
         started(&store, "start");
         let runtime = Arc::new(FakeRuntime::default());
-        let reconciler = reconciler(&store, &runtime);
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        let reconciler = reconciler(&store, &runtime).with_started_at_for_test(now_ms().saturating_sub(1));
         seat(&store, root.path());
         reconciler.reconcile_once().unwrap();
         assert!(reconciler.member_admission_waiting().unwrap().is_some());
         assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn without_the_setting_a_member_acts_at_once_as_before() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        started(&store, "start");
+        seat(&store, root.path());
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
+            .with_schedule_peers(vec!["peer".into()])
+            .with_started_at_for_test(now_ms() + 1);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.started_members.lock().unwrap().len(), 1, "an unmeasured peer holds nothing back");
+        assert!(store.claims_for("daemon/node", Some("daemon.diagnostic")).unwrap().iter()
+            .all(|claim| claim.body["fields"]["code"] != "member-admission-waiting"));
     }
 
     #[tokio::test]

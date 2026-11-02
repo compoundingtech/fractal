@@ -529,7 +529,8 @@ agent "example/mover" {{
     fn pass(&self) {
         self.reconciler.reconcile_once().unwrap();
     }
-    /// The daemon starts again, with `peers` configured. Its runtimes keep what they hold.
+    /// The daemon starts again, after everything it holds, with `peers` configured. Its runtimes
+    /// keep what they hold.
     fn restart(&mut self, peers: &[&str]) {
         self.reconciler = Reconciler::new(
             self.store.clone(),
@@ -537,7 +538,9 @@ agent "example/mover" {{
             self.name.clone(),
             Arc::new(Notify::new()),
         )
-        .with_schedule_peers(peers.iter().map(|peer| peer.to_string()).collect());
+        .with_schedule_peers(peers.iter().map(|peer| peer.to_string()).collect())
+        .with_wait_for_peers_after_start(true)
+        .with_started_at_for_test(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() + 1);
     }
     /// This member's own records of the seat's runtime with `status`.
     fn recorded(&self, status: &str) -> usize {
@@ -639,7 +642,6 @@ async fn a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_overri
             idempotency_key: Some("amber-start".into()),
         })
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2));
     amber.restart(&["cobalt"]);
     amber.pass();
     amber.pass();

@@ -1363,7 +1363,9 @@ A replacement must already be a valid admitted claim. The original record remain
 
 ### After a start
 
-**What waits.** A member that starts again may hold desired state its peers have since replaced: a seat it ran may have moved to another host while it was away. Until it has caught up with a peer, the member takes no action that assumes a seat is placed on it:
+This is off unless the member's `config.toml` has `wait_for_peers_after_start = true`. Without it, a member acts on its seats at once after a start, as it always has.
+
+**What waits.** A member that starts again may hold desired state its peers have since replaced: a seat it ran may have moved to another host while it was away. With the setting on, until it has caught up with a peer, the member takes no action that assumes a seat is placed on it:
 - it starts, restarts or retires no seat;
 - it records no seat's runtime as ended.
 

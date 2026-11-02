@@ -119,6 +119,12 @@ pub struct Config {
     /// without the line still loads in older builds and one with it needs the line deleted first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_work_without_asking: Option<bool>,
+    /// `true` makes this member wait after each start, before it starts, restarts, retires or
+    /// records the end of any seat, until it has caught up with a peer (docs/st3/replication.md,
+    /// "After a start"). Absent or `false` acts at once, as before. A build that does not know
+    /// the key rejects a config that has it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_for_peers_after_start: Option<bool>,
     /// `STATE/fleet/fleet.toml`, merged by `apply_fleet_file` after command-line overrides.
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
@@ -646,6 +652,7 @@ impl Default for Config {
             reconcile: ReconcileConfig::default(),
             asks: AsksConfig::default(),
             codex_work_without_asking: None,
+            wait_for_peers_after_start: None,
             fleet: None,
         }
     }
@@ -678,6 +685,10 @@ impl Config {
 
     pub fn lanes_enforced(&self) -> bool {
         self.lanes == Some(Lanes::On)
+    }
+
+    pub fn waits_for_peers_after_start(&self) -> bool {
+        self.wait_for_peers_after_start == Some(true)
     }
 
     /// Service installation writes a new config once, never upgrading a legacy missing mode.
