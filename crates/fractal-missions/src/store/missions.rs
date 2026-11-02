@@ -7990,28 +7990,43 @@ impl MissionsStore for Store {
         };
         smallclaims::touched::note_read(|| actor.to_owned());
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc471d2fc8f29 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT body FROM claims
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9d5729a6ee29 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT origin, body FROM claims
              WHERE subject=?1 AND kind='runtime.observed'
              ORDER BY CANONICAL_DESC(claims)",
         ))?;
-        let bodies = statement.query_map([actor], |row| row.get::<_, String>(0))?;
-        for body in bodies {
-            let body: Value = serde_json::from_str(&body?)?;
+        let rows = statement.query_map([actor], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        // An end that names no incarnation, by the hosts that recorded one, newer than any
+        // running record read so far. It ends the claim's incarnation only when that
+        // incarnation ran on the same host: a host that still holds a seat which has since
+        // moved records its own old runtime ending, not the one on the seat's new host.
+        let mut unnamed_ends = BTreeSet::new();
+        for row in rows {
+            let (origin, body) = row?;
+            let body: Value = serde_json::from_str(&body)?;
             let fields = body.get("fields").unwrap_or(&body);
+            let observed = fields.get("incarnation_id").and_then(Value::as_str);
             match fields.get("status").and_then(Value::as_str) {
                 Some("running") => {
-                    if let Some(current) = fields.get("incarnation_id").and_then(Value::as_str) {
-                        return Ok(current != incarnation);
+                    if let Some(current) = observed {
+                        return Ok(current != incarnation || unnamed_ends.contains(&origin));
                     }
                 }
-                Some("exited" | "vanished" | "stopped" | "absent" | "failed") => {
-                    return Ok(true);
-                }
+                Some("exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
+                    Some(ended) if ended == incarnation => return Ok(true),
+                    // Another incarnation's end says nothing about this one.
+                    Some(_) => {}
+                    None => {
+                        unnamed_ends.insert(origin);
+                    }
+                },
                 _ => {}
             }
         }
-        Ok(false)
+        // With no record of where the incarnation ran, any end counts.
+        Ok(!unnamed_ends.is_empty())
     }
 
     fn settle_runs_for_canonical_replay(&self) -> Result<Vec<String>> {
