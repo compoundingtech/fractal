@@ -483,7 +483,8 @@ impl WriterConnection {
         observer: Option<Arc<dyn WriterObserver>>,
         policy: Option<writer_budget::OwnedHandlerPolicy>,
     ) -> Result<Self> {
-        Self::new_inner_admitted(connection, committed_index, observer, policy, None)
+        Self::new_inner_admitted(connection, committed_index, observer, policy, None,
+            #[cfg(any(test, feature = "test-support"))] None)
     }
 
     pub(crate) fn new_admitted(
@@ -492,7 +493,18 @@ impl WriterConnection {
         observer: Option<Arc<dyn WriterObserver>>,
         admitted: Arc<crate::store::AdmittedStore>,
     ) -> Result<Self> {
-        Self::new_inner_admitted(connection, committed_index, observer, None, Some(admitted))
+        Self::new_inner_admitted(connection, committed_index, observer, None, Some(admitted),
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new_temporary(
+        connection: Connection,
+        committed_index: Arc<AtomicU64>,
+        observer: Option<Arc<dyn WriterObserver>>,
+        directory: Option<Arc<tempfile::TempDir>>,
+    ) -> Result<Self> {
+        Self::new_inner_admitted(connection, committed_index, observer, None, None, directory)
     }
 
     fn new_inner_admitted(
@@ -501,6 +513,8 @@ impl WriterConnection {
         observer: Option<Arc<dyn WriterObserver>>,
         policy: Option<writer_budget::OwnedHandlerPolicy>,
         admitted: Option<Arc<crate::store::AdmittedStore>>,
+        #[cfg(any(test, feature = "test-support"))]
+        temporary_directory: Option<Arc<tempfile::TempDir>>,
     ) -> Result<Self> {
         if let Some(policy) = &policy {
             policy.install(&connection)?;
@@ -541,6 +555,10 @@ impl WriterConnection {
                     &observed_fifo,
                 );
                 drop(directory_admission);
+                // A final observer can drop the store on this writer thread. Keep
+                // its scratch until write_queue has closed SQLite, including its WAL.
+                #[cfg(any(test, feature = "test-support"))]
+                drop(temporary_directory);
             })
             .expect("the writer thread starts");
         Ok(Self {
@@ -1207,6 +1225,8 @@ pub struct ReadPool {
     admission: Arc<Semaphore>,
     diagnostic_id: u64,
     admitted: Option<Arc<crate::store::AdmittedStore>>,
+    #[cfg(any(test, feature = "test-support"))]
+    temporary_directory: Option<Arc<tempfile::TempDir>>,
 }
 
 /// A Send, pool-specific capacity token. Once lent to a request, it follows that reader
@@ -1232,6 +1252,9 @@ pub struct ReadConnection {
     // Last: close SQLite before returning capacity if this connection is not pooled.
     permit: Option<ReadPermit>,
     _admitted: Option<Arc<crate::store::AdmittedStore>>,
+    // Last: a retained connection must close before its scratch is deleted.
+    #[cfg(any(test, feature = "test-support"))]
+    _temporary_directory: Option<Arc<tempfile::TempDir>>,
 }
 
 impl Deref for ReadConnection {
@@ -1412,12 +1435,24 @@ impl Drop for PinnedRead<'_> {
 
 impl ReadPool {
     pub fn new(path: &Path, shared_memory: bool) -> Result<Self> {
-        Self::new_with(path, shared_memory, None)
+        Self::new_with(path, shared_memory, None,
+            #[cfg(any(test, feature = "test-support"))] None)
     }
 
     pub(crate) fn new_admitted(admitted: Arc<crate::store::AdmittedStore>) -> Result<Self> {
         let path = admitted.database_path().to_path_buf();
-        Self::new_with(&path, false, Some(admitted))
+        Self::new_with(&path, false, Some(admitted),
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new_temporary(path: &Path, directory: Option<Arc<tempfile::TempDir>>) -> Result<Self> {
+        Self::new_with(path, false, None, directory)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn temporary_directory(&self) -> Option<Arc<tempfile::TempDir>> {
+        self.temporary_directory.clone()
     }
 
     pub(crate) fn is_admitted(&self) -> bool {
@@ -1432,6 +1467,8 @@ impl ReadPool {
         path: &Path,
         shared_memory: bool,
         admitted: Option<Arc<crate::store::AdmittedStore>>,
+        #[cfg(any(test, feature = "test-support"))]
+        temporary_directory: Option<Arc<tempfile::TempDir>>,
     ) -> Result<Self> {
         let mut pool = Self {
             idle: Arc::new(Mutex::new(Vec::new())),
@@ -1442,6 +1479,8 @@ impl ReadPool {
             admission: Arc::new(Semaphore::new(constructor_read_limit())),
             diagnostic_id: read_lifetime::next_pool_id(),
             admitted,
+            #[cfg(any(test, feature = "test-support"))]
+            temporary_directory,
         };
         // Open one now, so a store that cannot be read fails to open.
         let connection = pool.open_connection()?;
@@ -1484,6 +1523,8 @@ impl ReadPool {
             counts: self.counts.clone(),
             permit: None,
             _admitted: self.admitted.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            _temporary_directory: self.temporary_directory.clone(),
         })
     }
 

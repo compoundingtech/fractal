@@ -37,6 +37,8 @@ use crate::sqlite::{
 };
 
 mod admitted;
+#[cfg(any(test, feature = "test-support"))]
+mod temporary;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
 mod proof;
@@ -969,7 +971,8 @@ impl Store {
     /// Open the store at `path`, creating it when it does not exist, with `runtime`'s tables
     /// and projections beside the graph's.
     pub fn open(path: &Path, origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
-        Self::open_with(path, origin.into(), runtime, None, true, |_| {})
+        Self::open_with(path, origin.into(), runtime, None, true, |_| {},
+            #[cfg(any(test, feature = "test-support"))] None)
     }
 
     /// Open only through an admitted, locked directory, without recreating it.
@@ -979,7 +982,8 @@ impl Store {
         runtime: Arc<dyn Runtime>,
     ) -> Result<Self> {
         let path = admitted.database_path().to_path_buf();
-        Self::open_with(&path, origin.into(), runtime, Some(admitted), true, |_| {})
+        Self::open_with(&path, origin.into(), runtime, Some(admitted), true, |_| {},
+            #[cfg(any(test, feature = "test-support"))] None)
     }
 
     /// [`Self::open`] with the initialization of a fresh database committed the way it was
@@ -994,7 +998,7 @@ impl Store {
         defer_fresh_durability: bool,
         prepare: impl FnOnce(&Connection),
     ) -> Result<Self> {
-        Self::open_with(path, origin.into(), runtime, None, defer_fresh_durability, prepare)
+        Self::open_with(path, origin.into(), runtime, None, defer_fresh_durability, prepare, None)
     }
 
     fn open_with(
@@ -1004,6 +1008,8 @@ impl Store {
         admitted: Option<Arc<AdmittedStore>>,
         defer_fresh_durability: bool,
         prepare: impl FnOnce(&Connection),
+        #[cfg(any(test, feature = "test-support"))]
+        temporary_directory: Option<Arc<tempfile::TempDir>>,
     ) -> Result<Self> {
         if admitted.is_none() && let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -1064,7 +1070,10 @@ impl Store {
         let readers = if let Some(admitted) = &admitted {
             ReadPool::new_admitted(admitted.clone())?
         } else {
-            ReadPool::new(&path, false)?
+            #[cfg(any(test, feature = "test-support"))]
+            { ReadPool::new_temporary(&path, temporary_directory)? }
+            #[cfg(not(any(test, feature = "test-support")))]
+            { ReadPool::new(&path, false)? }
         };
         let mut store = Self::from_connection(
             connection, readers, origin, path, false, runtime,
@@ -1073,10 +1082,20 @@ impl Store {
         Ok(store)
     }
 
-    /// Open a new store in shared memory, as tests and short-lived tools use.
-    /// Shared-cache read/write contention returns `SQLITE_LOCKED` immediately;
-    /// concurrent server tests should use the file-backed [`Self::open`] instead.
+    /// Open an isolated temporary WAL store through the normal file-backed path.
+    /// Readers and the writer keep its directory until their last connection closes.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_memory(origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
+        let directory = Arc::new(temporary::directory()?);
+        Self::open_with(&directory.path().join("graph.db"), origin.into(), runtime,
+            None, true, |_| {}, Some(directory.clone()))
+    }
+
+    /// Open SQLite's shared-cache memory mode for tests of that mode itself.
+    /// Shared-cache read/write contention returns `SQLITE_LOCKED` immediately;
+    /// ordinary fixtures should use [`Self::open_memory`] instead.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_shared_memory(origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
         let origin = origin.into();
         let uri = PathBuf::from(format!(
             "file:st3-{}?mode=memory&cache=shared",
@@ -1105,11 +1124,12 @@ impl Store {
 
     /// Check and migrate the schema, then create the graph's tables, the runtime's, and the
     /// triggers that keep digests current.
+    #[cfg(any(test, feature = "test-support"))]
     fn create_schema(connection: &Connection, runtime: &dyn Runtime) -> Result<()> {
         Self::create_schema_with(connection, runtime, false).map(|_| ())
     }
 
-    /// [`Self::create_schema`], returning whether the database began empty. With
+    /// Check and migrate the graph and runtime schema, returning whether the database began empty. With
     /// `defer_fresh_durability`, a fresh database's initialization commits at
     /// synchronous=NORMAL after the core schema: in WAL mode that is corruption-safe and
     /// skips the fsync on each of its many small commits. The caller sets FULL again
@@ -1249,11 +1269,17 @@ impl Store {
                 connection, committed_index.clone(), runtime.writer_observer(), admitted,
             )?
         } else {
+            #[cfg(any(test, feature = "test-support"))]
+            { WriterConnection::new_temporary(connection, committed_index.clone(),
+                runtime.writer_observer(), readers.temporary_directory())? }
+            #[cfg(not(any(test, feature = "test-support")))]
+            {
             match runtime.writer_observer() {
                 Some(observer) => WriterConnection::new_with_observer(
                     connection, committed_index.clone(), observer,
                 )?,
                 None => WriterConnection::new(connection, committed_index.clone()),
+            }
             }
         };
         let finalizing_runtime = runtime.clone();
