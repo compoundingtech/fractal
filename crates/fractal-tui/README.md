@@ -40,8 +40,9 @@ mission and fleet details without blocking keys. A private, actor-and-endpoint-s
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
-The live loop polls input independently of painting. Input, feed results and flowing terminal
-output invalidate the frame; otherwise relative-time displays and non-terminal progress
+The live loop polls input independently of painting. Input, feed results, voice transitions,
+open requests and native-terminal output, geometry or lifecycle changes invalidate the frame;
+otherwise relative-time displays and non-terminal progress
 indicators refresh at most once per second. Input paints before draining queued background
 updates, and each background drain is bounded to 16 ms.
 

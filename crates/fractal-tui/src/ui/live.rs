@@ -220,21 +220,23 @@ pub(super) fn answer_open_requests(
     ui: &mut Ui,
     inbox: &mut super::requests::Inbox,
     ready: bool,
-) {
+) -> bool {
     inbox.read();
     if !ready || !matches!(ui.world.link, super::view::Link::Live) {
-        return;
+        return false;
     }
     let waiting = inbox
         .waiting()
         .map(|(request, since)| (request.clone(), since.elapsed()))
         .collect::<Vec<_>>();
+    let mut changed = false;
     for (request, waited) in waiting {
         let Ok(pane) = super::requests::pane_for(&request.subject) else {
             inbox.answer(&request.id, &super::requests::Answer::NotFound);
             continue;
         };
         if ui.inventory_has(&pane) {
+            changed = true;
             let answer = ui.open_requested(
                 pane,
                 request.place,
@@ -246,6 +248,7 @@ pub(super) fn answer_open_requests(
             inbox.answer(&request.id, &super::requests::Answer::NotFound);
         }
     }
+    changed
 }
 
 fn cancel_initial_subject(subject: &mut Option<String>, input: &Event) {
@@ -687,7 +690,7 @@ pub fn run(context: Context) -> Result<()> {
         }
         let (_, selected) = ui.focus();
         attach.select(&mut ui, selected.as_deref());
-        attach.tick(&mut ui);
+        if attach.tick(&mut ui) { frames.invalidate(); }
         if extras.live && Instant::now() >= limit_next {
             limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
             let client = client.clone();
@@ -1950,7 +1953,9 @@ pub fn run(context: Context) -> Result<()> {
             missions_sent = wanted;
             let _ = commands.send(Command::Missions { follow: wanted });
         }
-        answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready);
+        if answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready) {
+            frames.invalidate();
+        }
         for typed in playback.iter().flat_map(super::playback::Playback::typed) {
             frames.input();
             match typed {
@@ -1960,12 +1965,15 @@ pub fn run(context: Context) -> Result<()> {
                 }
             }
         }
-        ui.step_voice();
+        if ui.step_voice() { frames.invalidate(); }
         ui.step_terminal_hold();
         ui.step_default_view();
         ui.step_terminal_tabs();
         attach.opens.retain(|target, _| ui.terminal_view(target).is_some());
         ui.step_drafts();
+        for native in ui.terminal.iter().chain(ui.parked.iter()).filter_map(|view| view.native.as_ref()) {
+            if native.take_changed() { frames.invalidate(); }
+        }
         let flowing = ui.voice.is_some()
             || ui.terminal.iter().chain(ui.parked.iter())
                 .filter_map(|view| view.native.as_ref()).any(|native| native.flowing());
@@ -3851,11 +3859,11 @@ mod tests {
         assert!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o077 == 0);
 
         // Cached inventory is not a reason to open anything.
-        answer_open_requests(&mut ui, &mut inbox, false);
+        assert!(!answer_open_requests(&mut ui, &mut inbox, false));
         assert_eq!(ui.live_conversations().iter().filter(|id| **id == known).count(), 0);
         assert!(dir.join(format!("{early}.json")).exists());
 
-        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(answer_open_requests(&mut ui, &mut inbox, true));
         assert_eq!(ui.focus(), (1, Some(known.clone())));
         assert!(!dir.join(format!("{early}.json")).exists());
         let answer = std::fs::read(dir.join(format!("{early}.answer"))).unwrap();
@@ -3863,15 +3871,21 @@ mod tests {
             serde_json::from_slice::<Answer>(&answer).unwrap(),
             Answer::Opened { focused: true }
         );
+        ui.effects.clear();
+        requests::enqueue(&dir, &known, Place::Tab, true, Some("agent/test/requester".into())).unwrap();
+        inbox = Inbox::new(Some(dir.clone()));
+        assert!(answer_open_requests(&mut ui, &mut inbox, true), "keep-focus flashes also invalidate");
+        assert!(ui.flash.is_some());
+        assert!(!ui.effects.iter().any(|effect| matches!(effect, Effect::SaveGlass(_))));
 
         // An agent that is not in the inventory yet waits, and is not found once the grace ends.
         let later = requests::enqueue(&dir, "agent/garden/not-yet", Place::Tab, false, None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(350));
-        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(!answer_open_requests(&mut ui, &mut inbox, true));
         assert!(dir.join(format!("{later}.json")).exists(), "still waiting for Fractal to know it");
         assert_eq!(inbox.waiting().count(), 1);
         inbox.waiting_since_for_test(&later, requests::GRACE);
-        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(!answer_open_requests(&mut ui, &mut inbox, true));
         let answer = std::fs::read(dir.join(format!("{later}.answer"))).unwrap();
         assert_eq!(serde_json::from_slice::<Answer>(&answer).unwrap(), Answer::NotFound);
         assert_eq!(inbox.waiting().count(), 0);

@@ -33,7 +33,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -112,6 +112,7 @@ struct Screen {
     attached: bool,
     /// When output last arrived, so Fractal TUI can draw more often while it flows.
     output_at: Option<Instant>,
+    revision: u64,
     /// What the program asks of the terminal, shared with the emulator that hears it.
     requests: Requests,
     /// Where the selection being dragged began.
@@ -140,6 +141,7 @@ impl Screen {
             attached_at: None,
             attached: false,
             output_at: None,
+            revision: 0,
             requests,
             anchor: None,
             graphics: graphics::Frame::default(),
@@ -161,7 +163,10 @@ impl Screen {
     fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
         self.output_at = Some(Instant::now());
+        self.invalidate();
     }
+
+    fn invalidate(&mut self) { self.revision = self.revision.wrapping_add(1); }
 }
 
 enum Input {
@@ -184,6 +189,7 @@ pub(crate) struct NativeTerminal {
     /// The incarnation attached to; attaching again after a drop is only ever to this one.
     pub(crate) incarnation: String,
     presented: AtomicBool,
+    observed_revision: AtomicU64,
     cell: Mutex<pty_terminal::CellSize>,
     painter: Mutex<graphics::Painter>,
 }
@@ -211,6 +217,7 @@ impl NativeTerminal {
             size: Mutex::new(size),
             incarnation,
             presented: AtomicBool::new(false),
+            observed_revision: AtomicU64::new(0),
             cell: Mutex::new(pty_terminal::CellSize::default()),
             painter: Mutex::new(graphics::Painter::default()),
         }
@@ -226,6 +233,7 @@ impl NativeTerminal {
             screen.ended = None;
             screen.retry_at = None;
             screen.attached = false;
+            screen.invalidate();
         }
         let input = start(stream, name, size, &self.screen);
         *self.input.lock().unwrap_or_else(|error| error.into_inner()) = input;
@@ -252,6 +260,7 @@ impl NativeTerminal {
         if screen.retry_at.is_some_and(|at| Instant::now() >= at) {
             screen.retry_at = None;
             screen.tries += 1;
+            screen.invalidate();
             true
         } else {
             false
@@ -266,6 +275,7 @@ impl NativeTerminal {
         }
         screen.lost = Some(reason);
         screen.retry_at = Some(Instant::now() + retry_delay(screen.tries));
+        screen.invalidate();
     }
 
     /// The reconnect failed for good: say why, and stop trying.
@@ -274,6 +284,7 @@ impl NativeTerminal {
         screen.ended = Some(reason);
         screen.lost = None;
         screen.retry_at = None;
+        screen.invalidate();
     }
 
     fn send(&self, input: Input) {
@@ -548,6 +559,12 @@ impl NativeTerminal {
             .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
     }
 
+    /// Consume output, geometry and lifecycle invalidations, including a silent stream ending.
+    pub(crate) fn take_changed(&self) -> bool {
+        let revision = self.lock().revision;
+        self.observed_revision.swap(revision, Ordering::Relaxed) != revision
+    }
+
     /// Draw the screen, or the history scrolled to, into `area`. With `real_cursor` the cursor
     /// is not drawn but returned, for the person's own terminal cursor to show it.
     pub(crate) fn draw(&self, buf: &mut Buffer, area: Rect, real_cursor: bool) -> Option<Cursor> {
@@ -700,6 +717,7 @@ fn dropped(screen: &mut Screen, reason: String) {
     }
     screen.lost = Some(reason);
     screen.retry_at = Some(Instant::now() + retry_delay(screen.tries));
+    screen.invalidate();
 }
 
 /// The attach thread: ATTACH at `size`, then feed what the session sends into the screen and
@@ -712,7 +730,9 @@ fn run(
 ) {
     let lock = || screen.lock().unwrap_or_else(|error| error.into_inner());
     if let Err(error) = stream.set_nonblocking(false) {
-        lock().ended = Some(error.to_string());
+        let mut screen = lock();
+        screen.ended = Some(error.to_string());
+        screen.invalidate();
         return;
     }
     let mut control = stream.try_clone();
@@ -805,7 +825,7 @@ fn run(
                     columns: screen.term.columns() as u16,
                 };
                 let requests = screen.requests.clone();
-                let (tries, attached_at) = (screen.tries, screen.attached_at);
+                let (tries, attached_at, revision) = (screen.tries, screen.attached_at, screen.revision);
                 let cell = protocol.cell_size();
                 protocol = TerminalActor::new(size.rows, size.columns, HISTORY);
                 protocol.enable_graphics(pty_terminal::GraphicsOptions {
@@ -814,6 +834,7 @@ fn run(
                 });
                 protocol.write(&bytes);
                 *screen = Screen::new(size, requests);
+                screen.revision = revision;
                 screen.tries = tries;
                 screen.attached_at = attached_at;
                 screen.attached = true;
@@ -822,14 +843,18 @@ fn run(
             // The size every attached client shares, before the output drawn at it.
             Ok(Some(SessionEvent::Geometry { rows, cols })) => {
                 protocol.resize(cols.max(1), rows.max(1));
-                lock().term.resize(Size {
+                let mut screen = lock();
+                screen.term.resize(Size {
                     rows: rows.max(1),
                     columns: cols.max(1),
                 });
+                screen.invalidate();
             }
             Ok(Some(SessionEvent::Exit(code))) => {
                 super::slo::METRICS.add("dead_terminal_tabs", 1);
-                lock().ended = Some(format!("the program exited ({code})"));
+                let mut screen = lock();
+                screen.ended = Some(format!("the program exited ({code})"));
+                screen.invalidate();
                 return;
             }
             Ok(Some(SessionEvent::Closed)) => {
@@ -1252,6 +1277,14 @@ mod tests {
         daemon.write_all(&initial).unwrap();
         wait(&|| terminal.attached());
         assert_eq!(terminal.grid_size(), (8, 20));
+        terminal.lock().output_at = None;
+        terminal.take_changed();
+        daemon.write_all(&encode_geometry(8, 19)).unwrap();
+        wait(&|| terminal.grid_size() == (8, 19));
+        assert!(terminal.take_changed(), "geometry without DATA invalidates the frame");
+        assert!(!terminal.flowing());
+        daemon.write_all(&encode_geometry(8, 20)).unwrap();
+        wait(&|| terminal.grid_size() == (8, 20));
 
         terminal.fit(7, 20);
         assert_eq!(next(&mut daemon).type_, MessageType::Resize);
@@ -1322,9 +1355,14 @@ mod tests {
                 .unwrap();
         }
         wait(&|| shown(&terminal).contains("old 9"));
+        terminal.lock().output_at = None;
+        terminal.take_changed();
+        assert!(!terminal.take_changed());
         // The stream drops; the program did not exit.
         drop(daemon);
         wait(&|| terminal.lost().is_some());
+        assert!(terminal.take_changed(), "a silent stream closure invalidates the frame");
+        assert!(!terminal.flowing(), "lifecycle invalidation does not pretend output arrived");
         // Lost is not ended: the program still runs, and Fractal TUI says it is getting back to it.
         assert!(terminal.ended().is_none());
         assert_eq!(terminal.reconnecting().unwrap().0, 0);
@@ -1332,8 +1370,10 @@ mod tests {
         // A try that cannot reach the session waits twice as long before the next.
         std::thread::sleep(retry_delay(0));
         assert!(terminal.take_reattach());
+        assert!(terminal.take_changed(), "retry status invalidates the frame");
         assert!(!terminal.take_reattach(), "one try at a time");
         terminal.retry_failed("unreachable".into());
+        assert!(terminal.take_changed(), "retry failure invalidates the frame");
         let (tries, next) = terminal.reconnecting().unwrap();
         assert_eq!(tries, 1);
         assert!(next.unwrap() > Instant::now() + Duration::from_millis(1500));
@@ -1346,6 +1386,7 @@ mod tests {
             .unwrap();
         wait(&|| shown(&terminal).contains("new") && terminal.lost().is_none());
         assert!(terminal.ended().is_none() && terminal.reconnecting().is_none());
+        assert!(terminal.take_changed(), "screen replay advances rather than resetting the revision");
         // What scrolled off before the drop is still there to scroll back to.
         terminal.wheel(
             20,
