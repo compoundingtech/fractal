@@ -915,6 +915,8 @@ pub struct Store {
     pub trim_chunk_envelopes: AtomicUsize,
     /// Minimum trim rest in microseconds; tests may set zero to disable pacing.
     pub trim_pause_micros: AtomicU64,
+    /// How long a trim's run goes between view refolds, in microseconds; tests may set zero.
+    pub trim_view_refold_micros: AtomicU64,
     /// Extra time each trimmed row takes. Tests only.
     pub trim_row_cost_micros: AtomicU64,
     /// The last seal-identity digest, and the capture epoch it holds for; see
@@ -1302,6 +1304,7 @@ impl Store {
             trim_chunk_hook: Mutex::new(None),
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
             trim_pause_micros: AtomicU64::new(checkpoint_trim::TRIM_MIN_PAUSE.as_micros() as u64),
+            trim_view_refold_micros: AtomicU64::new(checkpoint_trim::TRIM_VIEW_REFOLD_INTERVAL.as_micros() as u64),
             trim_row_cost_micros: AtomicU64::new(0),
             sealed_identity_memo: Mutex::new(None),
             runtime,

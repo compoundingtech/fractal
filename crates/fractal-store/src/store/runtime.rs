@@ -572,8 +572,8 @@ impl Runtime for FractalRuntime {
     }
 
     fn claims_trimmed(&self) {
-        // A trim's run goes on: the roster and the lists that fold from nothing refold, keeping
-        // their generation, so a fold under way still publishes and readers keep their rows.
+        // A trim's run goes on: every list refolds, keeping its generation, so a fold under way
+        // still publishes and readers keep their rows.
         // Forgetting them here, after every chunk, restarted the roster's fold of seconds
         // before it could publish, all through the run. The trim forgets the views once when
         // the run stops, which also drops what the caches hold of the claims it deleted.
@@ -581,7 +581,17 @@ impl Runtime for FractalRuntime {
         self.published_missions.refold();
         self.published_work.refold();
         self.published_runtimes.refold();
+        // Glasses and arrangements read again only the people whose rows changed, so they reread
+        // everyone, keeping their generation. The attention list refolds from nothing on its own
+        // clock (30 s), and the summary's shared counts recompute when the roster publishes and
+        // every period; forgetting either would only drop a fold under way.
+        self.glass_list.refold();
+        self.arrangement_list.refold();
+        self.published_views.invalidate();
         self.wake_read_roster();
+        if let Some(wake) = self.attention_list.refresher.get() {
+            wake.notify_one();
+        }
     }
 
     fn projection_advanced(&self, caught_up: bool) {

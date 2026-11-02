@@ -365,6 +365,37 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
     assert!(published.iter().all(|done| *done), "the agents source reset while materializing its publication: {published:?}");
 }
 
+/// A local cut's run lets the views refold once the interval is due, keeping the roster's
+/// generation; within the interval it leaves them serving.
+#[test]
+fn a_local_cut_refolds_the_views_within_its_run_once_the_interval_is_due() {
+    for (interval, refolds) in [(std::time::Duration::ZERO, true), (smallclaims::store::checkpoint_trim::TRIM_VIEW_REFOLD_INTERVAL, false)] {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = local_member("alder");
+        store.set_trim_pause(std::time::Duration::ZERO);
+        store.set_trim_chunk_envelopes(1);
+        store.set_trim_view_refold_interval(interval);
+        for n in 0..30 {
+            apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+        }
+        let fractal = Arc::clone(&store.fractal);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hook_seen = Arc::clone(&seen);
+        let mut generation = None;
+        *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+            let now = fractal.presented_agents.generation();
+            let refolded = fractal.glass_list.refold.swap(false, std::sync::atomic::Ordering::AcqRel);
+            hook_seen.lock().unwrap().push((refolded, *generation.get_or_insert(now) == now));
+        }));
+        assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+        store.trim_chunk_hook.lock().unwrap().take();
+        let seen = seen.lock().unwrap();
+        assert!(seen.len() > 4, "{interval:?}: the cut deletes in many chunks ({})", seen.len());
+        assert_eq!(seen.iter().any(|(refolded, _)| *refolded), refolds, "{interval:?}: {seen:?}");
+        assert!(seen.iter().all(|(_, kept)| *kept), "{interval:?}: a refold keeps the roster's generation: {seen:?}");
+    }
+}
+
 /// The claims sequence a page cursor carries, which the final mark of a trim moves on.
 fn claims_sequence(store: &Store) -> i64 {
     store

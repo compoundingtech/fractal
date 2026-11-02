@@ -64,21 +64,23 @@ pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_mil
 /// What a test runs after each chunk a trim deletes, given how many it has deleted.
 pub type TrimChunkHook = Box<dyn FnMut(usize) + Send>;
 
-/// How often a paced trim's run lets the views refold, while it goes on. They are forgotten
-/// once when the run stops.
+/// How often a paced trim's run lets the views refold, while it goes on, unless a test sets
+/// another interval. They are forgotten once when the run stops.
 pub const TRIM_VIEW_REFOLD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What a trim's run owes the views: a refold at most every [`TRIM_VIEW_REFOLD_INTERVAL`] while
 /// it deletes, and one forget when it stops, however it stops.
 struct TrimViews<'a> {
     store: &'a Store,
+    interval: std::time::Duration,
     refolded: std::time::Instant,
     pending: bool,
 }
 
 impl<'a> TrimViews<'a> {
     fn new(store: &'a Store) -> Self {
-        Self { store, refolded: std::time::Instant::now(), pending: false }
+        let interval = std::time::Duration::from_micros(store.trim_view_refold_micros.load(Ordering::Acquire));
+        Self { store, interval, refolded: std::time::Instant::now(), pending: false }
     }
 
     /// A chunk deleted rows: replication reads the inventory again, and the views refold if
@@ -86,7 +88,7 @@ impl<'a> TrimViews<'a> {
     fn deleted(&mut self) {
         self.store.replica_inventory_changed();
         self.pending = true;
-        if self.refolded.elapsed() >= TRIM_VIEW_REFOLD_INTERVAL {
+        if self.refolded.elapsed() >= self.interval {
             self.store.runtime.claims_trimmed();
             self.refolded = std::time::Instant::now();
         }
@@ -318,6 +320,11 @@ impl Tombstones for (&super::checkpoint_staging::StagedSet, &super::checkpoint_s
 
 impl Store {
     /// Set the minimum chunk rest. Tests only; zero disables both the floor and multiplier.
+    /// How long a trim's run goes between view refolds; see [`TRIM_VIEW_REFOLD_INTERVAL`].
+    pub fn set_trim_view_refold_interval(&self, interval: std::time::Duration) {
+        self.trim_view_refold_micros.store(u64::try_from(interval.as_micros()).unwrap_or(u64::MAX), Ordering::Release);
+    }
+
     pub fn set_trim_pause(&self, pause: std::time::Duration) {
         self.trim_pause_micros.store(
             u64::try_from(pause.as_micros()).unwrap_or(u64::MAX),
