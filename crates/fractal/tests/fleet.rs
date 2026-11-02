@@ -6635,9 +6635,8 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     let delivered = send(&o, "delivered-by-release").await;
     let staged = send(&o, "staged-by-release").await;
     let unsent = send(&o, "unsent").await;
-    for lifecycle in ["staged", "delivered"] {
-        step(&o, &delivered, lifecycle).await;
-    }
+    let release_staging = step(&o, &delivered, "staged").await;
+    step(&o, &delivered, "delivered").await;
     step(&o, &staged, "staged").await;
     let lifecycle_claims = |claims: &[Value]| -> usize {
         claims.iter().filter(|claim| claim["kind"].as_str().is_some_and(|kind| kind.starts_with("message.") && kind != "message.sent")).count()
@@ -6675,9 +6674,10 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
             );
         }
     }
-    // A repeated staging of mail already delivered answers as it did, and stages nothing again.
+    // A repeated staging of mail already delivered answers the release's own staging, and stages
+    // nothing again.
     let repeat = step(&o, &delivered, "staged").await;
-    assert_ne!(repeat["kind"], "message.staged", "{repeat}");
+    assert_eq!(repeat["id"], release_staging["id"], "{repeat}");
     assert_eq!(lifecycle_claims(&o.claims().await), claimed + 1, "a hosted seat's delivery, read or close wrote a claim");
     let upgraded = ["closed", "read", "staged"];
     assert_eq!([status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await], upgraded);
