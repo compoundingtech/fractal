@@ -39,7 +39,7 @@ enum Screen {
     Launch { id: String },
     Conversation {
         target: String,
-        #[arg(long)]
+        #[arg(long = "session-id")]
         session_id: Option<String>,
     },
     Terminal { terminal_id: String },
