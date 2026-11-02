@@ -569,6 +569,29 @@ pub fn router(state: AppState) -> Router {
 /// routes listed here. `router` without them is the route table this crate alone answers.
 pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
 
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestMessageMark {
+    message: String,
+    kind: String,
+    consumer: String,
+}
+
+/// Test support: record a consumer's local mark of a graph message, as 4b-2's consumers will.
+#[cfg(feature = "test-support")]
+async fn test_record_message_mark(
+    State(state): State<AppState>,
+    Json(mark): Json<TestMessageMark>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    let store = state.store.clone();
+    let (receipt, _) = blocking_action(move || {
+        crate::store::message_marks::record(&store, &mark.message, &mark.kind, &mark.consumer)
+    })
+    .await?;
+    signal_visible_change(&state);
+    Ok(Json(receipt))
+}
+
 /// [`router`] with the route families of the crates above.
 pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
@@ -993,7 +1016,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(replication::test_shard_items).post(replication::test_shard_append),
         )
         // The worker-only peers route refuses a test caller; this reads the same answer.
-        .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers));
+        .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
+        // Nothing records a message mark until consumers switch (4b-2); tests record one here.
+        .route("/v1/internal/test/message-marks", post(test_record_message_mark));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(

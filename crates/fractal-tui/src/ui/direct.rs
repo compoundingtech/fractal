@@ -279,7 +279,7 @@ async fn over_fabric(
                 "{owner} advertises no Fabric node, and no Fabric peer of this machine has its name"
             ))
         })?;
-    let protocol = fractal_terminal_direct::protocol(&fleet_id);
+    let protocol = fractal_terminal_direct::owner_protocol(&members, owner, &peer, &fleet_id);
     let target = FabricTarget {
         fabric,
         peer,
