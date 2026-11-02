@@ -33,7 +33,7 @@ fn state(root: &Path, name: &str) -> AppState {
     AppState {
         seat_admission: Default::default(),
         owning_person: None,
-        store: Arc::new(Store::open_memory(name).unwrap()),
+        store: Arc::new(Store::open(&root.join("graph.db"), name).unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: name.into(),
@@ -49,6 +49,27 @@ fn state(root: &Path, name: &str) -> AppState {
         assistant_receipts: Default::default(),
         private_notes: Default::default(),
     }
+}
+
+// The server's list refreshers read while its API calls write. In a shared-cache memory store a
+// snapshot's read lock on sqlite_sequence makes an AUTOINCREMENT write fail at once with
+// SQLITE_LOCKED, which no busy timeout waits out, so the fixture store must be file-backed.
+#[test]
+fn the_fixture_store_takes_a_write_while_a_reader_holds_a_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path(), "reader-writer");
+    state.store.read_snapshot(|_| {
+        state.store.append_claim(&ClaimInput {
+            subject: "agent/reader-writer".into(),
+            kind: "runtime.observed".into(),
+            actor: Some("agent/reader-writer".into()),
+            fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })?;
+        Ok(())
+    }).unwrap();
 }
 
 async fn publish_fixture_lists(state: &AppState) {

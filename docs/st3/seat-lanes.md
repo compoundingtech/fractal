@@ -1,8 +1,8 @@
 # Seat lanes (design note)
 
-Status: step 1 built (lanes on agents, behind a per-host switch). Step 2 in progress: missions and
-steps declare capacity (built; a mission's lane is applied, a step's is not yet) and seats start by
-fit (built); applying a step's lane at delivery is next.
+Status: step 1 built (lanes on agents, behind a per-host switch). Step 2 built: missions and steps
+declare capacity, seats start by fit, and a step's lane is applied while its seat holds it. Build
+slots go once lanes have run a day on every Linux member without a guard trip.
 
 ## What a seat lane is
 
@@ -43,8 +43,27 @@ seat's own lane, and what it leaves out stays the seat's. A step may only raise 
 lane's memory under a running harness could kill the harness itself mid-step. Publication refuses a
 step whose capacity is below the lane of a seat the same publication declares (an undeclared seat
 counts at the base lane, 1 core and 3G), and an agentless step with one. A seat declared elsewhere is
-to be held to the same rule when the step is delivered. Until admission lands, a step's capacity is
-recorded and checked at publication only: its seat keeps its own lane.
+held to the same rule when the step is about to be delivered.
+
+A step that raises its seat's lane is delivered only once the raised lane fits the seat's host, as a
+seat's start is: until then it is `blocked` with a reason that starts `step lane`, names the room
+(`step lane 2 cores/16.0G for agent/… does not fit: 12.0G free of the 54.0G this host gives lanes …`),
+and is tried again on every pass and at least every 30 seconds. The figures in the reason are the
+ones from when it was first held; they are not rewritten on each try. Once delivered, the seat's live
+slice is raised (`systemctl --user set-property --runtime`) while the seat holds the step, ready for
+it or claimed, and set back to the seat's own lane when it no longer does; admission counts the seat
+at the raised lane meanwhile. Its cores come back at once, but its memory only once the lane holds
+less than the seat's own lane allows (anonymous and kernel memory), so a job the step left running
+is not reclaimed or killed by the lowering; until then the lane, and what admission counts for it,
+stays up. A resize that fails is logged and tried again on the next pass; the seat's wakes go on. A relaunch of the harness starts the slice at the seat's own lane, so
+the raise is set again for the new launch. A daemon that restarts reads each seat's slice as it is (`cpu.max`,
+`memory.max`), since a raise lasts as long as the slice: a raise a step left behind comes down the
+same way, and admission counts it until it does. A seat that declares no capacity has no slice to raise:
+its steps' capacity is not applied. A step offered to several seats (`available-to`) is not held for
+room, since no one seat holds it until it is claimed; its claimant's lane is raised once it claims it. The
+host that runs the step's mission run checks the fit for a seat on that host; a seat on another host
+has its lane raised when it holds the step, without the wait. An older member runs a step that
+declares capacity in its seat's own lane, and an older run owner does not hold it for room.
 
 The declaration is `capacity`, not `lane`: the mission's named `lane "NAME" { entries … }` block is
 a merge lane (see [lanes.md](lanes.md)) and keeps that one meaning.
@@ -263,6 +282,8 @@ from the next pass. `builds.slice` keeps its own cap and admission and is not co
   run (covered checks skip, a docs-only run needs almost nothing). A burst raises the live scope
   with `systemctl --user set-property --runtime` and lowers it when the command ends. A step may
   adjust the base. A seat in `work wait` holds only its base.
+- **Placement.** A mission that pins no host runs on a member with room for it: see
+  [lane-placement.md](lane-placement.md).
 - **Starvation.** Waiters already wait in order, so the host drains to fit for the first in line
   (built). A lane or burst may declare a minimum and start smaller. After 30
   minutes the seat should move to a host with room (by hand until moves are automatic). A wait

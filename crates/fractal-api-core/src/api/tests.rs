@@ -4119,6 +4119,7 @@ async fn retention_quick_legacy_missing_receipt_is_explicitly_reconstructed() {
 fn retention_event_query(after: u64, owner: Option<&str>, limit: usize) -> EventQuery {
     EventQuery {
         after,
+        messages_after: None,
         subject: None,
         owner_run: owner.map(str::to_owned),
         wait: Some(false),
@@ -4778,6 +4779,7 @@ async fn an_event_wait_ignores_a_wake_without_a_matching_event() {
             State(waiter_state),
             Query(EventQuery {
                 after: 0,
+                messages_after: None,
                 subject: None,
                 owner_run: None,
                 wait: Some(true),
@@ -4817,6 +4819,95 @@ async fn an_event_wait_ignores_a_wake_without_a_matching_event() {
         .unwrap();
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0].kind, "custom.test.recorded");
+}
+
+/// A member that holds the messages stream says how far it has come, and a client that reads the
+/// stream beside the graph gets its message events in `stream_items`; one that does not ask gets
+/// the graph's page exactly as before. A stream item arriving wakes a waiter that asked for them.
+#[tokio::test]
+async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+    let health_of = |state: &AppState| {
+        let state = state.clone();
+        async move { health(State(state)).await.unwrap().0 }
+    };
+    assert!(health_of(&state).await.get("messages_store_index").is_none(), "no shard, no stream index");
+    crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    assert_eq!(health_of(&state).await["messages_store_index"], 0);
+    let query = |messages_after: Option<u64>, wait: bool| EventQuery {
+        after: state.store.index().unwrap(),
+        messages_after,
+        subject: None,
+        owner_run: None,
+        wait: Some(wait),
+        timeout_ms: Some(5_000),
+        limit: None,
+    };
+    let waiter_state = state.clone();
+    let waiting = query(Some(0), true);
+    let waiter = tokio::spawn(async move { events_page(State(waiter_state), Query(waiting)).await.unwrap().0 });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!waiter.is_finished());
+
+    let appended = replication::test_shard_append(
+        State(state.clone()),
+        Json(ClaimInput {
+            subject: "message/00000000000000b1".into(),
+            kind: "message.sent".into(),
+            actor: Some("agent/birch".into()),
+            fields: serde_json::from_value(json!({
+                "from": "agent/birch", "to": "agent/cedar", "content": "on the stream", "status": "sent"
+            }))
+            .unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let woke = tokio::time::timeout(Duration::from_secs(2), waiter)
+        .await
+        .expect("a stream item did not wake the waiter")
+        .unwrap();
+    let woke = serde_json::to_value(&woke).unwrap();
+    assert_eq!(woke["items"], json!([]), "the graph has no new event");
+    assert_eq!(woke["stream_items"][0]["subject"], "message/00000000000000b1");
+    assert_eq!(woke["stream_items"][0]["store_index"], appended.store_index);
+    assert_eq!(woke["messages_next_after"], appended.store_index);
+    assert_eq!(health_of(&state).await["messages_store_index"], appended.store_index);
+
+    let old = serde_json::to_value(&events_page(State(state.clone()), Query(query(None, false))).await.unwrap().0).unwrap();
+    assert!(old.get("stream_items").is_none() && old.get("messages_next_after").is_none());
+    let read = query(Some(appended.store_index), false);
+    let caught_up = serde_json::to_value(&events_page(State(state.clone()), Query(read)).await.unwrap().0).unwrap();
+    assert_eq!(caught_up["stream_items"], json!([]));
+    // The stream item's place in this member's graph order is recorded as it arrives.
+    assert_eq!(
+        crate::store::messages_shard::stream_reads::arrival(&state.store, "message/00000000000000b1").unwrap(),
+        Some(state.store.index().unwrap())
+    );
+}
+
+/// Items the shard admitted stay admitted when this member cannot record where they arrived:
+/// the waiters still wake, and the receive that brought them does not fail, so a peer never
+/// retries an exchange over a local recording.
+#[tokio::test]
+async fn a_stream_arrival_that_cannot_be_recorded_still_wakes_event_waiters() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+    let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    shard.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h26f127af3754 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE stream_arrivals").unwrap();
+    assert!(crate::store::messages_shard::stream_reads::record_arrivals(&state.store).is_err());
+    let mut events = state.event_notify.subscribe();
+    let before = *events.borrow_and_update();
+    replication::stream_admitted(&state).await;
+    assert!(events.has_changed().unwrap(), "a failed recording skipped the wake");
+    assert_eq!(*events.borrow(), before + 1);
 }
 
 #[test]
@@ -9393,13 +9484,17 @@ fn roster_folds_outside_a_request_and_a_snapshot_read_faults_through_scheduling_
         let cut = store.index().unwrap();
         // Test folds call these directly, with no request budget and no pinned snapshot. A
         // pause past the 25 ms work allowance spends no query work: the card keeps its fault.
-        for name in ["cold", "cached", "exact"] {
+        for name in ["selected", "cold", "cached", "exact", "page", "chunk"] {
+            store.forget_current_views();
             Store::stall_next_card_fault_read_for_test(std::time::Duration::from_millis(60));
             let started = std::time::Instant::now();
             let cards = match name {
+                "selected" => client_agent_resources_selected(store, history, cut, None),
                 "cold" => client_agent_resources_uncached(store, history, cut),
                 "cached" => client_agent_resources_cached(store, history, cut),
-                _ => client_exact_agent_resources(store, history, cut, subject),
+                "exact" => client_exact_agent_resources(store, history, cut, subject),
+                _ => client_agent_cards_selected(store, history, cut,
+                    &BTreeSet::from([subject.to_owned()]), name == "chunk"),
             }.unwrap();
             assert!(started.elapsed() >= std::time::Duration::from_millis(60), "the {name} fold must read the stalled faults");
             let card = cards.iter().find(|card| card["id"] == subject).unwrap();
@@ -13843,6 +13938,92 @@ fn doctor_checks_after_the_total_is_spent_say_they_did_not_run() {
     });
     assert_eq!(ran.get(), 2, "a check after the total is spent does not run");
     assert_eq!((skipped[0].status.as_str(), skipped[0].message.as_str()), ("timeout", "not run: doctor's checks used all their time"));
+}
+
+#[test]
+fn doctor_checks_run_together_in_report_order_and_a_slow_one_costs_only_its_own_time() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let clock = DoctorClock::new(Duration::from_secs(5), Duration::from_millis(300));
+    let pass = |name: &str| DoctorCheck { name: name.into(), status: "pass".into(), message: String::new() };
+    let (running, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let mut checks = DoctorChecks::default();
+    checks.push(pass("first"));
+    for name in ["slow", "a", "b", "c", "d", "e"] {
+        let (running, peak) = (&running, &peak);
+        checks.check(name, move || {
+            peak.fetch_max(running.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(if name == "slow" { 600 } else { 150 }));
+            running.fetch_sub(1, Ordering::SeqCst);
+            Ok(vec![pass(name)])
+        });
+    }
+    // A check that can take the writer runs with nothing beside it, and keeps its place.
+    let alone_saw = AtomicUsize::new(usize::MAX);
+    {
+        let (running, alone_saw) = (&running, &alone_saw);
+        checks.check_alone("alone", move || {
+            alone_saw.store(running.load(Ordering::SeqCst), Ordering::SeqCst);
+            Ok(vec![pass("alone")])
+        });
+    }
+    checks.push(pass("last"));
+    let started = Instant::now();
+    let report = checks.run(&clock, &state.store.readers, 3);
+    let elapsed = started.elapsed();
+    let shown = report.iter().map(|check| (check.name.as_str(), check.status.as_str())).collect::<Vec<_>>();
+    assert_eq!(shown, [("first", "pass"), ("slow", "timeout"), ("a", "pass"), ("b", "pass"), ("c", "pass"),
+        ("d", "pass"), ("e", "pass"), ("alone", "pass"), ("last", "pass")]);
+    assert_eq!(alone_saw.load(Ordering::SeqCst), 0, "a check ran beside the one that runs alone");
+    let peak = peak.load(Ordering::SeqCst);
+    assert!((2..=3).contains(&peak), "{peak} checks ran at once");
+    // One after another they take 1.35 s. The peak above is the proof that they ran together.
+    assert!(elapsed < Duration::from_millis(1_350), "{elapsed:?}");
+}
+
+#[test]
+fn a_request_read_still_gets_a_reader_while_doctor_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let limit = 6;
+    let state = smallclaims::sqlite::with_read_limit_for_test(limit, || state(root.path()));
+    let workers = doctor_workers(limit);
+    assert_eq!((workers, doctor_workers(1), doctor_workers(32)), (2, 1, 4));
+    let clock = DoctorClock::new(Duration::from_secs(10), Duration::from_secs(10));
+    let release = std::sync::atomic::AtomicBool::new(false);
+    let (started, running) = std::sync::mpsc::channel();
+    let mut checks = DoctorChecks::default();
+    for name in ["one", "two", "three", "four"] {
+        let (release, started) = (&release, started.clone());
+        let store = &state.store;
+        checks.check(name, move || {
+            store.index().map_err(ApiError::internal)?;
+            started.send(()).unwrap();
+            while !release.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(vec![DoctorCheck { name: name.into(), status: "pass".into(), message: String::new() }])
+        });
+    }
+    std::thread::scope(|scope| {
+        let doctor = scope.spawn(|| checks.run(&clock, &state.store.readers, workers));
+        for _ in 0..workers {
+            running.recv_timeout(Duration::from_secs(5)).expect("doctor's checks did not start together");
+        }
+        // Doctor holds one reader past its caller's own: the rest of the limit is the requests'.
+        let mut admitted = Vec::new();
+        while let Some(permit) = state.store.readers.try_admit_read() {
+            admitted.push(permit);
+        }
+        assert_eq!(admitted.len(), limit - (workers - 1));
+        let permit = admitted.pop().unwrap();
+        let index = state.store.readers.request_read_with_permit(permit, || state.store.index()).unwrap().unwrap();
+        assert_eq!(index, state.store.index().unwrap());
+        drop(admitted);
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        let report = doctor.join().unwrap();
+        assert_eq!(report.iter().filter(|check| check.status == "pass").count(), 4);
+    });
 }
 
 #[tokio::test]
