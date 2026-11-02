@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Setup's sign-in handover for Claude, Codex and OpenCode now starts in the work folder instead of the folder setup was run from, and before Claude's and Codex's handover it writes their first-run state in the config the harness will read: Claude's hasCompletedOnboarding flag (only when absent) and the work folder's trust, Codex's trust entry for the work folder. Claude's handover therefore opens on its sign-in and not a theme chooser or a trust question, and the words setup prints no longer say \"pick a theme\". The writers are the existing ones: only absent keys, idempotent, and no login or key file is read or written. For an instance the config is the instance's own, so nothing is written to the person's default ~/.claude or ~/.codex.",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digests change."},
+  "compatibility": {"status": "none", "detail": "No client, protocol or wire change. The first-run keys were read from Claude Code 2.1.296 and the Codex trust entry format is the one pretrust_codex_at already wrote; the handover has not been run against a real Claude or Codex."},
+  "downtime": {"status": "none", "detail": "No restart is needed beyond the usual daemon upgrade."},
+  "manual": {"status": "none", "detail": "None. A setup that already finished is not rerun, and a work folder already trusted is left as it is."},
+  "recovery": {"status": "none", "detail": "Revert the change. Entries already written stay, which is harmless."}
+}

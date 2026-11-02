@@ -271,6 +271,23 @@ goes backward. An attached program receives Ctrl+L unchanged; use the leader the
 While attention is loading, triage flashes `loading attention…`; an unsuccessful fetch
 flashes `attention unavailable`. Neither state means `all clear` or advances the pass.
 
+The recent-place switcher uses that same history across all spaces, de-duplicated by content.
+Rows show the content title, live state/attention marks and the space name. On every terminal type, Ctrl+^
+(legacy Ctrl+6, 0x1E) opens the popup when detached, with the previous place selected.
+Ctrl+\ then r opens it even over an attached program. Up/Down selects a destination;
+Enter opens it in its recorded location, Escape cancels, and typing filters. Ctrl+^ then Enter
+flips between the last two places. Enhanced Ctrl+Tab cycles forward and Ctrl+Shift+Tab backward.
+Once this terminal has actually reported a Control modifier release, releasing Control commits
+that cycling selection; until then Ctrl+Tab uses the explicit Enter/Escape popup.
+Ctrl+^ and Ctrl+Tab both reach attached programs unchanged. Tabs retain [ ], Ctrl+PageUp
+and Ctrl+PageDown.
+While the popup is open, the first line of pasted text filters its rows and mouse input never
+reaches the underlying terminal. Typing or pasting switches hold cycling to explicit Enter/Escape
+commit. Live state/attention labels refresh while the popup is open.
+The child loses input focus until the popup closes. The selected
+destination remains visible even at the minimum supported viewport.
+
+
 
 ### Starting a mission
 
@@ -616,7 +633,7 @@ agents.
 | | Derivation | Differs from this contract |
 |---|---|---|
 | Terminal UI | Reads `tier`, `kind`, `agent`, `raised_by` and `waiting` (`crates/fractal-tui/src/ui/adapt.rs` `attention()`); a row without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows Fractal's text as an unplaced card where its `alert` flag puts it, with no answer of its own; a message or a fault stays off Now. A launch card shows `launch` (`launch_preview()`), and a prompt's band shows `prompt`'s calls and offers allow only where `allow` says so (`prompt_calls()`, `alerts.rs`); an older Fractal that serves neither gets a card that says so, answered in the terminal. | Also withholds allow when the band cannot show the whole call in its four lines, as a client that cannot show the whole input offers deny only. |
-| Phone | Reads `tier`, `kind` and `waiting` (`clients/typescript/fractal-views/homeView.ts` `homeKind`, `homeRows`; a feedback gate shows as a review); an item without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows as unplaced where its `alert` flag puts it, never dropped; a message or a fault stays off Home. A prompt's calls and answers are `prompt`'s (`servedPrompt`, `servedAnswers`, `apps/ios/screens/Alerts.tsx`), and an older Fractal that serves none gets a card answered in the terminal | Shows launch variants and diagnostics, with no step preview. |
+| Phone | Reads `tier`, `kind` and `waiting` (`clients/typescript/fractal-views/homeView.ts` `homeKind`, `homeRows`; a feedback gate shows as a review); an item without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows as unplaced where its `alert` flag puts it, never dropped; a message or a fault stays off Now. A prompt's calls and answers are `prompt`'s (`servedPrompt`, `servedAnswers`, `apps/ios/screens/Alerts.tsx`), and an older Fractal that serves none gets a card answered in the terminal | Shows launch variants and diagnostics, with no step preview. |
 | Fractal | `projections.ts` `attentionRefs`; its alerts read a prompt's calls from the conversation (`src/conversation/alerts/AgentAlerts.tsx`, with `homeView.ts` `pendingCalls`, `offeredAnswers`) | Moves to `prompt` with `servedPrompt` and `servedAnswers`; then `pendingCalls` and `offeredAnswers` are deleted. |
 
 Settled: `custom.*` kinds are Today requests, as in the terminal UI. Allow depends on

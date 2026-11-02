@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add opt-in Linux seat admission from a strict interactive envelope observation",
+  "replay": {"status": "none", "detail": "Admission observations are local and do not change claims or replay."},
+  "schema": {"status": "none", "detail": "No replicated schema change. Local observations use interactive-envelope.state/v1."},
+  "rules": {"status": "changed", "detail": "When configured, enforce-mode observations queue new seats only while the envelope is exceeded and batch work has remained paused for batchPausedMinSecs. Observe mode admits. Existing seats are not stopped."},
+  "compatibility": {"status": "changed", "detail": "The optional seat_admission table is absent by default. Older binaries reject this new config key; remove it before downgrade. Non-Linux hosts leave admission off."},
+  "downtime": {"status": "none", "detail": "No migration is required."},
+  "manual": {"status": "changed", "detail": "Configure [seat_admission] with stateFile and batchPausedMinSecs. The JSON state must contain schema, host, observedAt, envelopeCgroup, envelopeBytes, usageBytes, exceeded, exceededSince, batchPaused, batchPausedSince and mode (observe or enforce), with no unknown fields. Both nullable timestamps must be present. The reader opens only a regular effective-uid-owned file without following symlinks, limits it to 64 KiB, requires the local host identity, and rejects observations older than 120 seconds or more than 60 seconds in the future. It never reads cgroups."},
+  "recovery": {"status": "changed", "detail": "Missing, unsafe, invalid or stale state fails open with a reason. Future pause timestamps never queue a seat. Remove seat_admission to disable the policy without opening its state file."}
+}

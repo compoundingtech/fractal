@@ -1,9 +1,10 @@
 # macOS installation and signing
 
 Source installs (`scripts/install`) and extracted release installs (`install.sh`) put
-`st3` inside `~/Applications/SmallTalk.app`. The selected bin directory
-contains links to these tools, with `st` linking to `st3`. Other tools remain regular
-executables in that directory. Python 3 is required on macOS.
+physical `fractal` inside `~/Applications/SmallTalk.app/Contents/MacOS`, with
+`CFBundleExecutable=fractal`. The selected bin directory contains `fractal` linking
+to that app executable and temporary reverse aliases `st` and `st3` linking to `fractal`.
+Other tools remain regular executables in that directory. Python 3 is required on macOS.
 
 The app path and bundle identifier stay stable across updates. The installer registers
 the app with Launch Services and points existing direct daemon and replication

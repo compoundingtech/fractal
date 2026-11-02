@@ -364,6 +364,18 @@ pub async fn request_attention(
     )))
 }
 
+/// A bound harness reaches this only as itself (`guard_bound_request`); the store allows a person
+/// or the fleet's fault agent, and only for a fault whose run has ended.
+pub async fn dismiss_fault(
+    State(state): State<AppState>,
+    Json(request): Json<crate::model::FaultDismissRequest>,
+) -> Result<Json<crate::model::FaultDismissal>, ApiError> {
+    let store = state.store.clone();
+    let dismissed = blocking_action(move || store.dismiss_fault_as(&request)).await?;
+    signal_changed(&state);
+    Ok(Json(dismissed))
+}
+
 pub async fn resolve_attention(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,

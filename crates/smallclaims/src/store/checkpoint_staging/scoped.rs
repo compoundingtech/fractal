@@ -1,4 +1,5 @@
-//! A local cut's capture, scoped to the kinds it drops (`LOCAL_TRIM_KINDS`). A full capture
+//! A local cut's capture, scoped to the kinds it drops (`LOCAL_TRIM_KINDS`) and the kinds judging
+//! them reads (`LOCAL_TRIM_CONTEXT_KINDS`). A full capture
 //! stages every sealed envelope, record and claim, and its planner keeps every other kind
 //! anyway (`protect_all_but`). The scoped one stages only what judging a claim of a scoped kind
 //! reads, so its plan drops the same claims and envelopes:
@@ -6,6 +7,8 @@
 //! - the envelopes that hold a record of such a claim, whole, with their records and claims, and
 //!   the envelopes of the claims that share an operation with one, so slots, operations,
 //!   duplicates, envelope and record-count rules see what they see today;
+//! - the same for every claim of a context kind, so the status-history rule judges each seat's
+//!   harness observations with its runtime resets and diagnostics, as a full capture does;
 //! - the protections, looked up for the staged claims by each table's claim index, or read from
 //!   the few rows a repair writes;
 //! - each staged writer's newest envelope before the cut, for the writer's-newest guard, in place

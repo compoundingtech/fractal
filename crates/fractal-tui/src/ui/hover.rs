@@ -67,6 +67,7 @@ impl Ui {
         // Terminal-body motion stays with its program. The rendered frame caches its body,
         // avoiding focus/pane allocations and preventing motion through a floating overlay.
         if let Some(body) = self.frame.borrow().terminal_motion
+            && !self.terminal_details_focused.get()
             && contains(body, point.0, point.1)
             && !self.terminal_selecting
             && !self.terminal_selection_mode
@@ -93,6 +94,7 @@ impl Ui {
             .and_then(|point| self.hover_target(point));
         self.hover.target.set(target);
         let terminal_motion = if self.terminal_focused()
+            && !self.terminal_details_focused.get()
             && !self.help
             && self.popover.is_none()
             && !self.palette_open()

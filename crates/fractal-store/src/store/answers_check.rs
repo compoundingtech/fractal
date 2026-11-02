@@ -1,11 +1,11 @@
 //! Two members that answer differently from the same history have found a bug in trimming,
 //! replication or a reader, never something to repair from a peer. The daily answers check
-//! (`smallclaims::sync`) hands what it found here. A difference is recorded once per pair of
-//! members, as an operational fault on this member's `daemon/NODE` subject that names the kinds
-//! and keys, for the agent `[trim] notify` names. Each difference becomes a failing test and a
-//! fix. A later check of the same pair that agrees ends the fault.
+//! (`smallclaims::sync`) hands what it found here. Each distinct kind/key/answer signature opens
+//! an operational fault on this member's `daemon/NODE` subject. Repeats record local diagnostic
+//! occurrences on that fault without sending another message. A later agreeing check ends the
+//! pair's open faults.
 use super::*;
-use smallclaims::answers::AnswersCheck;
+use smallclaims::answers::{AnswersCheck, KindReport};
 use smallclaims::store::checkpoint::claims_of_kind_in_order;
 
 pub const ANSWERS_CONDITION: &str = "answers-disagreement";
@@ -20,11 +20,39 @@ pub struct TrimSettings {
     pub notify: Mutex<Option<String>>,
 }
 
-/// One episode per member pair, whichever member records it first.
+/// The stable prefix shared by all disagreement signatures of a member pair.
 pub fn episode(local: &str, peer: &str) -> String {
     let (first, second) = if local <= peer { (local, peer) } else { (peer, local) };
     let digest = hex::encode(Sha256::digest(format!("{first}\n{second}").as_bytes()));
     format!("{EPISODE_PREFIX}{}", &digest[..32])
+}
+
+fn answer_signature(local: &str, peer: &str, differences: &[KindReport]) -> Result<String> {
+    let swap = local > peer;
+    let mut kinds = Vec::with_capacity(differences.len());
+    for report in differences {
+        let mut keys = report.keys.iter().map(|key| {
+            let (ours, theirs) = (key.ours.as_deref(), key.theirs.as_deref());
+            let (first, second) = if swap { (theirs, ours) } else { (ours, theirs) };
+            (key.subject.as_str(), key.origin.as_str(), first, second)
+        }).collect::<Vec<_>>();
+        keys.sort_unstable();
+        let (ours, theirs) = (
+            report.ours.as_ref().map(|answer| answer.digest.as_str()),
+            report.theirs.as_ref().map(|answer| answer.digest.as_str()),
+        );
+        let (first, second) = if swap { (theirs, ours) } else { (ours, theirs) };
+        kinds.push((report.kind.as_str(), first, second, keys));
+    }
+    kinds.sort_unstable();
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&kinds)?)))
+}
+
+struct OpenAnswersFailure {
+    id: String,
+    episode: String,
+    signature: Option<String>,
+    initial_cut: Option<u128>,
 }
 
 /// The subjects whose answers fold claims rather than read one: seats (harness state, status
@@ -198,13 +226,13 @@ impl Store {
             .clone()
     }
 
-    /// Open a fault for a check that found differences, unless the pair's fault is still open,
-    /// or end the pair's open fault for a check that agrees.
+    /// Open each distinct disagreement once, record repeat occurrences locally, or recover all
+    /// the pair's open faults when the answers agree.
     pub fn record_answers_check(&self, check: &AnswersCheck) -> Result<(), St3Error> {
         let local = self.origin().to_owned();
         let subject = format!("daemon/{local}");
-        let episode = episode(&local, &check.peer);
-        let open = self.open_answers_failures(&subject, &episode).map_err(internal)?;
+        let pair = episode(&local, &check.peer);
+        let open = self.open_answers_failures(&subject, &pair, &local, &check.peer).map_err(internal)?;
         if check.differences.is_empty() {
             for failure in open {
                 self.append_claim(&ClaimInput {
@@ -212,8 +240,8 @@ impl Store {
                     kind: "operational.recovered".into(),
                     actor: Some("daemon/runtime".into()),
                     fields: BTreeMap::from([
-                        ("episode".into(), json!(episode)),
-                        ("failure".into(), json!(failure)),
+                        ("episode".into(), json!(failure.episode)),
+                        ("failure".into(), json!(failure.id)),
                         (
                             "reason".into(),
                             json!(format!("{local} and {} answer the same again", check.peer)),
@@ -221,14 +249,34 @@ impl Store {
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
-                    idempotency_key: Some(format!("{failure}:recovered")),
+                    idempotency_key: Some(format!("{}:recovered", failure.id)),
                 })?;
             }
             return Ok(());
         }
-        if !open.is_empty() {
+        let signature = answer_signature(&local, &check.peer, &check.differences).map_err(internal)?;
+        if let Some(failure) = open.iter().find(|failure| failure.signature.as_deref() == Some(&signature)) {
+            if failure.initial_cut.is_some_and(|cut| check.cut_unix_ms <= cut) { return Ok(()); }
+            // Existing local-only kind and log: no replicated protocol or schema addition.
+            self.append_claim(&ClaimInput {
+                subject,
+                kind: "daemon.diagnostic".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: BTreeMap::from([
+                    ("severity".into(), json!("warning")),
+                    ("code".into(), json!("answers-disagreement-occurrence")),
+                    ("reason".into(), json!(serde_json::to_string(&json!({
+                        "failure": failure.id, "signature": signature, "peer": check.peer,
+                        "cut_unix_ms": check.cut_unix_ms.to_string(),
+                    })).map_err(internal)?)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("{}:occurrence:{}", failure.id, check.cut_unix_ms)),
+            })?;
             return Ok(());
         }
+        let episode = format!("{pair}/{signature}");
         let peer = check.peer.as_str();
         let cut = chrono::DateTime::from_timestamp_millis(check.cut_unix_ms as i64)
             .map_or_else(|| check.cut_unix_ms.to_string(), |cut| cut.to_rfc3339());
@@ -291,6 +339,7 @@ impl Store {
                     json!({
                         "members": [local, peer],
                         "cut_unix_ms": check.cut_unix_ms.to_string(),
+                        "signature": signature,
                         "differences": check.differences,
                     }),
                 ),
@@ -302,31 +351,38 @@ impl Store {
         Ok(())
     }
 
-    /// The failures of `episode` on `subject` that no recovery names.
-    fn open_answers_failures(&self, subject: &str, episode: &str) -> Result<Vec<String>> {
+    /// Open signatures, including pre-signature failures whose reproduction supplies the identity.
+    fn open_answers_failures(
+        &self, subject: &str, pair: &str, local: &str, peer: &str,
+    ) -> Result<Vec<OpenAnswersFailure>> {
         let connection = self.readers.get();
         let mut query = connection.prepare(
-            "SELECT id, kind, json_extract(body,'$.fields.failure') FROM claims
-             WHERE subject=?1 AND kind IN ('operational.failure','operational.recovered')
-               AND json_extract(body,'$.fields.episode')=?2",
+            "SELECT id, json_extract(body,'$.fields.episode'), json_extract(body,'$.fields.reproduction.signature'),
+                    json_extract(body,'$.fields.reproduction.differences'),
+                    json_extract(body,'$.fields.reproduction.cut_unix_ms')
+             FROM claims failure WHERE subject=?1 AND kind='operational.failure'
+               AND (json_extract(body,'$.fields.episode')=?2
+                    OR substr(json_extract(body,'$.fields.episode'),1,length(?2)+1)=?2||'/')
+               AND NOT EXISTS(SELECT 1 FROM claims recovered
+                              WHERE recovered.subject=failure.subject AND recovered.kind='operational.recovered'
+                                AND json_extract(recovered.body,'$.fields.failure')=failure.id)
+             ORDER BY id",
         )?;
-        let rows = query
-            .query_map(params![subject, episode], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let recovered = rows
-            .iter()
-            .filter(|(_, kind, _)| kind == "operational.recovered")
-            .filter_map(|(.., failure)| failure.as_deref())
-            .collect::<BTreeSet<_>>();
-        let mut open = rows
-            .iter()
-            .filter(|(id, kind, _)| kind == "operational.failure" && !recovered.contains(id.as_str()))
-            .map(|(id, ..)| id.clone())
-            .collect::<Vec<_>>();
-        open.sort();
-        Ok(open)
+        let rows = query.query_map(params![subject, pair], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        )))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(|(id, episode, signature, reproduction, cut)| {
+            let signature = match (signature, reproduction) {
+                (Some(signature), _) => Some(signature),
+                (None, Some(reproduction)) => Some(answer_signature(
+                    local, peer, &serde_json::from_str::<Vec<KindReport>>(&reproduction)?,
+                )?),
+                (None, None) => None,
+            };
+            Ok(OpenAnswersFailure { id, episode, signature, initial_cut: cut.map(|cut| cut.parse()).transpose()? })
+        }).collect()
     }
 }
 
@@ -402,5 +458,145 @@ mod tests {
         assert_eq!(faults(&store).len(), 2);
         store.record_answers_check(&check(differs(), 5_000)).unwrap();
         assert_eq!(faults(&store).len(), 3);
+    }
+
+    fn occurrences(store: &Store) -> Vec<ClaimRecord> {
+        store.local_observations_after(0, 100).unwrap().into_iter()
+            .filter(|claim| claim.body["fields"]["code"] == "answers-disagreement-occurrence").collect()
+    }
+
+    #[test]
+    fn identical_later_cut_records_an_occurrence_on_the_open_fault() {
+        let store = Store::open_memory("alder").unwrap();
+        store.record_answers_check(&check(differs(), 1_000)).unwrap();
+        store.record_answers_check(&check(differs(), 2_000)).unwrap();
+        assert_eq!(faults(&store).len(), 1);
+        let occurrences = occurrences(&store);
+        assert_eq!(occurrences.len(), 1);
+        let fields: Value = serde_json::from_str(occurrences[0].body["fields"]["reason"].as_str().unwrap()).unwrap();
+        assert_eq!(fields["cut_unix_ms"], "2000");
+        let open = store.open_answers_failures("daemon/alder", &episode("alder", "birch"), "alder", "birch").unwrap();
+        assert_eq!(fields["failure"], open[0].id);
+        assert_eq!(fields["signature"], open[0].signature.as_deref().unwrap());
+    }
+
+    #[test]
+    fn a_new_kind_raises_a_new_fault_while_the_first_is_open() {
+        let store = Store::open_memory("alder").unwrap();
+        store.record_answers_check(&check(differs(), 1_000)).unwrap();
+        let mut changed = differs();
+        let mut additional = changed[0].clone();
+        additional.kind = "another.state".into();
+        changed.push(additional);
+        store.record_answers_check(&check(changed, 2_000)).unwrap();
+        assert_eq!(faults(&store).len(), 2);
+        assert!(occurrences(&store).is_empty());
+    }
+
+    #[test]
+    fn a_new_key_raises_a_new_fault_while_the_first_is_open() {
+        let store = Store::open_memory("alder").unwrap();
+        store.record_answers_check(&check(differs(), 1_000)).unwrap();
+        let mut changed = differs();
+        let mut additional = changed[0].keys[0].clone();
+        additional.subject = "item/c".into();
+        changed[0].keys.push(additional);
+        store.record_answers_check(&check(changed, 2_000)).unwrap();
+        assert_eq!(faults(&store).len(), 2);
+    }
+
+    #[test]
+    fn a_changed_answer_raises_a_new_fault_while_the_first_is_open() {
+        let store = Store::open_memory("alder").unwrap();
+        store.record_answers_check(&check(differs(), 1_000)).unwrap();
+        let mut changed = differs();
+        changed[0].keys[0].theirs = Some("different".into());
+        store.record_answers_check(&check(changed, 2_000)).unwrap();
+        assert_eq!(faults(&store).len(), 2);
+    }
+
+    #[test]
+    fn each_cut_records_at_most_one_occurrence_and_the_initial_cut_records_none() {
+        let store = Store::open_memory("alder").unwrap();
+        for cut in [1_000, 1_000, 2_000, 2_000] {
+            store.record_answers_check(&check(differs(), cut)).unwrap();
+        }
+        assert_eq!(faults(&store).len(), 1);
+        assert_eq!(occurrences(&store).len(), 1);
+    }
+
+    #[test]
+    fn agreement_recovers_every_signature_and_a_later_recurrence_opens_again() {
+        let store = Store::open_memory("alder").unwrap();
+        store.record_answers_check(&check(differs(), 1_000)).unwrap();
+        let mut changed = differs();
+        changed[0].keys[0].theirs = None;
+        store.record_answers_check(&check(changed, 2_000)).unwrap();
+        store.record_answers_check(&check(Vec::new(), 3_000)).unwrap();
+        assert_eq!(faults(&store).iter().filter(|(kind, ..)| kind == "operational.recovered").count(), 2);
+        store.record_answers_check(&check(differs(), 4_000)).unwrap();
+        assert_eq!(faults(&store).iter().filter(|(kind, ..)| kind == "operational.failure").count(), 3);
+    }
+
+    #[test]
+    fn signatures_ignore_report_order_cut_and_member_orientation() {
+        let mut reports = differs();
+        let mut other = reports[0].clone();
+        other.kind = "another.state".into();
+        reports.push(other);
+        let expected = answer_signature("alder", "birch", &reports).unwrap();
+        reports.reverse();
+        for report in &mut reports {
+            std::mem::swap(&mut report.ours, &mut report.theirs);
+            for key in &mut report.keys { std::mem::swap(&mut key.ours, &mut key.theirs); }
+        }
+        assert_eq!(answer_signature("birch", "alder", &reports).unwrap(), expected);
+    }
+
+    #[test]
+    fn a_pre_signature_failure_is_reused_from_its_reproduction() {
+        let store = Store::open_memory("alder").unwrap();
+        let failure = store.append_claim(&ClaimInput {
+            subject: "daemon/alder".into(),
+            kind: "operational.failure".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("episode".into(), json!(episode("alder", "birch"))),
+                ("condition".into(), json!(ANSWERS_CONDITION)),
+                ("reproduction".into(), json!({"cut_unix_ms":"1000","differences":differs()})),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        store.record_answers_check(&check(differs(), 2_000)).unwrap();
+        assert_eq!(faults(&store).len(), 1);
+        let metadata: Value = serde_json::from_str(occurrences(&store)[0].body["fields"]["reason"].as_str().unwrap()).unwrap();
+        assert_eq!(metadata["failure"], failure.id);
+    }
+
+    #[test]
+    fn failure_and_local_occurrence_payloads_pass_real_store_admission() {
+        let store = Store::open_memory("alder").unwrap();
+        let failure = store.append_claim(&ClaimInput {
+            subject: "daemon/alder".into(), kind: "operational.failure".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("episode".into(), json!("example")),
+                ("reproduction".into(), json!({"signature":"digest","differences":differs(),"cut_unix_ms":"1000"})),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let metadata = json!({"failure":failure.id,"signature":"digest","peer":"birch","cut_unix_ms":"2000"});
+        let occurrence = store.append_claim(&ClaimInput {
+            subject: "daemon/alder".into(), kind: "daemon.diagnostic".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("severity".into(), json!("warning")),
+                ("code".into(), json!("answers-disagreement-occurrence")),
+                ("reason".into(), json!(metadata.to_string())),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(local_observation_position(&occurrence).is_some());
+        assert_eq!(serde_json::from_str::<Value>(occurrence.body["fields"]["reason"].as_str().unwrap()).unwrap(), metadata);
     }
 }

@@ -69,6 +69,12 @@ pub struct AgentRestartRequest {
     /// handoff that is ready since its last turn, which its new session is given first.
     #[serde(default)]
     fresh_session: bool,
+    /// Start the seat now even if its lane does not fit the host (docs/st3/seat-lanes.md,
+    /// "Admission by fit"). Needs a reason, recorded on the request with its actor.
+    #[serde(default)]
+    ignore_fit: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 pub async fn restart_agent(
@@ -76,6 +82,14 @@ pub async fn restart_agent(
     Json(request): Json<AgentRestartRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-restart-actor")?;
+    let ignore_fit_reason = match (request.ignore_fit, request.reason.as_deref().map(str::trim)) {
+        (false, _) => None,
+        (true, Some(reason)) if !reason.is_empty() => Some(reason.to_owned()),
+        (true, _) => return Err(ApiError::bad(St3Error::new(
+            "restart-ignore-fit-reason",
+            "starting a seat despite its lane's fit needs a reason, which is recorded with who asked",
+        ))),
+    };
     let subject = if request.subject.starts_with("agent/") {
         request.subject
     } else {
@@ -146,6 +160,15 @@ pub async fn restart_agent(
                 "restart needs an active seat declaration; start a stopped seat first",
             ))
         })?;
+    if let Some(run) = desired.owner_run.as_deref()
+        && let Some(view) = state.store.mission_run(run).map_err(ApiError::internal)?
+        && let Some(ended) = view.ended()
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "restart-run-ended",
+            format!("the seat's run {run} has ended ({ended}); a seat of an ended run is not started again"),
+        )));
+    }
     let member = desired
         .member
         .as_ref()
@@ -215,6 +238,10 @@ pub async fn restart_agent(
                 )
             }))
             .chain(request.fresh_session.then(|| ("fresh_session".to_owned(), Value::Bool(true))))
+            .chain(ignore_fit_reason.into_iter().flat_map(|reason| [
+                ("ignore_fit".to_owned(), Value::Bool(true)),
+                ("reason".to_owned(), Value::String(reason)),
+            ]))
             .collect(),
             evidence: vec![token],
             expected_subject: None,
@@ -340,6 +367,44 @@ pub async fn seat_snapshot_chunk(
     crate::seat_snapshot::chunk(&state.state_dir, &request.suspend_operation, request.offset)
         .map(Json)
         .map_err(ApiError::internal)
+}
+
+#[derive(Deserialize)]
+pub struct AgentLaneQuery {
+    pub agent: String,
+}
+
+/// The slice this host's runtime gives the agent's lane, named by the daemon so no caller copies
+/// the naming: `st-test` puts a check that a seat started outside its lane (a unit of its own) back
+/// in it. The name says where the lane is when the seat has one; whether the slice exists and is
+/// capped is the kernel's to say, so a caller reads that from the cgroup tree. `sccache_server_uds`
+/// is the lane's own sccache server, as a laned task's environment names it from the daemon's
+/// runtime directory (null without one): a job in the lane that names no server would compile in
+/// the host's, outside the lane.
+pub async fn agent_lane(
+    State(state): State<AppState>,
+    Query(query): Query<AgentLaneQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let subject = agent_subject(query.agent);
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
+    let lookup = subject.clone();
+    let desired = super::blocking_store(move || state.store.desired_subject_with_writer(&lookup)).await?;
+    let Some(member) = desired.and_then(|(desired, _)| desired.member) else {
+        return Err(ApiError::not_found(format!("{subject} has no declaration with a runtime")));
+    };
+    let slice = fractal_runtime::seat_slice(&member.runtime_id);
+    let sccache = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| fractal_runtime::lane_sccache_socket(&dir, &slice));
+    Ok(Json(json!({
+        "agent": subject,
+        "host": member.host,
+        "runtime_id": member.runtime_id,
+        "slice": slice,
+        "sccache_server_uds": sccache,
+        "lanes_enforced": fractal_runtime::lanes_enforced(),
+    })))
 }
 
 /// Ask the seat's owner to resume a suspended seat on the native session it suspended.
@@ -497,4 +562,43 @@ async fn rename_identity_id(
     let receipt = blocking_action(move || store.rename_identity(kind, &request, &peers)).await?;
     signal_changed(&state);
     Ok(Json(receipt))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameProofExportRequest {
+    name: String,
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    include_co_batched_claims: bool,
+}
+
+pub async fn export_agent_rename_proof(
+    State(state): State<AppState>,
+    Json(request): Json<RenameProofExportRequest>,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    export_identity_rename_proof(state, crate::store::identities::IdentityKind::Agent, request).await
+}
+
+pub async fn export_mission_rename_proof(
+    State(state): State<AppState>,
+    Json(request): Json<RenameProofExportRequest>,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    export_identity_rename_proof(state, crate::store::identities::IdentityKind::Mission, request).await
+}
+
+async fn export_identity_rename_proof(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    request: RenameProofExportRequest,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    if !request.include_co_batched_claims {
+        return Err(ApiError::bad(St3Error::new("rename-proof-disclosure-consent-required",
+            "export requires include_co_batched_claims=true: this fleet-internal bundle contains complete co-batched claims and blobs; do not publish or attach it to public issues")));
+    }
+    let store = state.store.clone();
+    blocking_action(move || {
+        store.export_rename_proof(kind, &request.name, request.revision.as_deref())
+    }).await.map(Json)
 }

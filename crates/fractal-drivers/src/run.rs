@@ -10,8 +10,11 @@
 //! The loop is decoupled Nomad-style: stopping st2 never tears down its agents — they are detached
 //! pty sessions and keep running; only a `retired` spec tears an agent down.
 
+pub use crate::host::{detect_host, use_harness_state_root};
+pub(crate) use crate::host::{harness_state_root, state_root};
+
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::os::unix::fs::MetadataExt as _;
@@ -70,7 +73,7 @@ impl PresentationPatchCursor {
     }
 }
 
-mod process;
+use crate::process;
 pub(crate) use process::*;
 
 /// Resolve a task's working directory: declared `cwd` (expanded), else the agent's `workspace`
@@ -107,13 +110,6 @@ pub trait Runner {
     }
     /// Finally remove an exited session's files (retirement/final garbage collection).
     fn remove(&self, pty_id: &str) -> anyhow::Result<()>;
-    /// The ids the PTY backend alone reported running in the last `list_sessions`. Direct OMP
-    /// actor liveness is PTY evidence only, so a running `exec` task that shares the id must not
-    /// count. `None` means the runner has no separate PTY backend: every running row of its
-    /// snapshot is PTY evidence.
-    fn running_pty_ids(&self) -> Option<BTreeSet<String>> {
-        None
-    }
 }
 
 /// Production [`Runner`]. Shells out to the `pty` CLI for tasks. (M1a routes both `pty` and `exec`
@@ -952,9 +948,6 @@ pub struct SystemRunner {
     exec: ExecBackend,
     /// id → kind, refreshed each `list_sessions`, so kill/remove hit the right backend.
     index: RefCell<HashMap<String, TaskKind>>,
-    /// Ids the PTY backend reported running in the last `list_sessions`. Kept apart from `index`,
-    /// which an `exec` record with the same id overwrites.
-    running_pty: RefCell<BTreeSet<String>>,
 }
 
 impl SystemRunner {
@@ -964,7 +957,6 @@ impl SystemRunner {
             pty: PtyCli::new(catalog_root.clone()),
             exec: ExecBackend::new(exec_state_dir, catalog_root),
             index: RefCell::new(HashMap::new()),
-            running_pty: RefCell::new(BTreeSet::new()),
         }
     }
 
@@ -1068,21 +1060,12 @@ impl Runner for SystemRunner {
         for s in &all {
             idx.insert(s.pty_id.clone(), TaskKind::Pty);
         }
-        *self.running_pty.borrow_mut() = all
-            .iter()
-            .filter(|s| s.alive)
-            .map(|s| s.pty_id.clone())
-            .collect();
         let ex = self.exec.list()?;
         for s in &ex {
             idx.insert(s.pty_id.clone(), TaskKind::Exec);
         }
         all.extend(ex);
         Ok(all)
-    }
-
-    fn running_pty_ids(&self) -> Option<BTreeSet<String>> {
-        Some(self.running_pty.borrow().clone())
     }
 
     fn spawn(&self, target: &TaskTarget, spec_dir: &Path) -> anyhow::Result<()> {
@@ -1126,32 +1109,6 @@ impl Runner for SystemRunner {
             }
         }
     }
-}
-
-/// The machine-local state root shared by host runtime state and supervisor-scoped channels.
-pub(crate) fn state_root() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-}
-
-static HARNESS_STATE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-
-/// Keep this process's harness-session state (Claude resume bindings, OpenCode delivery ledgers,
-/// omp and Codex session state) beneath `root` instead of `$XDG_STATE_HOME/st2`. st3 calls this in
-/// its drivers and hooks, so a seat it launches never writes st2's state directory. The first
-/// call wins.
-pub fn use_harness_state_root(root: PathBuf) {
-    let _ = HARNESS_STATE_ROOT.set(root);
-}
-
-/// Where harness-session state lives: the root a host program chose, else `$XDG_STATE_HOME/st2`.
-pub(crate) fn harness_state_root() -> PathBuf {
-    HARNESS_STATE_ROOT
-        .get()
-        .cloned()
-        .unwrap_or_else(|| state_root().join("st2"))
 }
 
 /// The machine-local runner-state dir for a host's exec tasks: `$XDG_STATE_HOME/st2/<host>/exec`
@@ -1218,9 +1175,6 @@ pub struct UpReport {
     pub other_host: Vec<String>,
     /// identities with no runnable task (unrendered).
     pub unrunnable: Vec<String>,
-    /// bus ids archived out of the live catalog this pass because their retirement, or a direct
-    /// OMP actor's PTY death, outlived `archive-after`.
-    pub archived: Vec<String>,
     /// discovery warnings (mismatches, …).
     pub warnings: Vec<String>,
     /// discovery + execution errors (non-fatal; collected).
@@ -1242,7 +1196,6 @@ impl UpReport {
         self.adopted.append(&mut other.adopted);
         self.other_host.append(&mut other.other_host);
         self.unrunnable.append(&mut other.unrunnable);
-        self.archived.append(&mut other.archived);
         self.warnings.append(&mut other.warnings);
         self.errors.append(&mut other.errors);
     }
@@ -1256,7 +1209,6 @@ impl UpReport {
             || !self.gc.is_empty()
             || !self.flapping.is_empty()
             || !self.unparked.is_empty()
-            || !self.archived.is_empty()
             || !self.warnings.is_empty()
             || !self.errors.is_empty()
     }
@@ -1785,7 +1737,7 @@ fn reconcile_pass_with_residency(
     resource_profiles: Option<&crate::resource_profile_supervisor::ResourceProfileSupervisor>,
     residency_policy: Option<crate::residency_host::HostPolicy>,
 ) -> UpReport {
-    let catalog_lock = {
+    let _catalog_lock = {
         let span = catalog_lock_span();
         let entered = span.as_ref().map(tracing::Span::enter);
         let result = crate::CatalogLock::shared(root);
@@ -2110,103 +2062,7 @@ fn reconcile_pass_with_residency(
             ));
         }
     }
-    // Auto-archive is an authoring mutation, so it needs the exclusive lock this pass's shared
-    // guard blocks. Release the read fence first: the archive step re-discovers under its own
-    // exclusive lock, which is what makes its eligibility decision current rather than a snapshot
-    // this pass took before it launched anything.
-    drop(catalog_lock);
-    archive_expired_retirements(root, this_host, &found, runner, &sessions, &mut report);
     report
-}
-
-/// Most seats one auto-archive step may move. A catalog holding hundreds of retirements drains
-/// over several passes instead of one pass holding the exclusive authoring lock through all of
-/// them — the same bound `MAX_PRESENTATION_PATCHES_PER_PASS` puts on presentation repair.
-const MAX_AUTO_ARCHIVED_PER_PASS: usize = 25;
-
-/// Archive retired seats and dead direct OMP actors whose grace period expired — the supervisor's
-/// half of `st2 catalog archive` (dotfiles#2411, Q11).
-///
-/// `archive-after "0"` in `catalog.kdl` disables the step entirely. It never queues for the
-/// exclusive lock: a pass blocked behind `st2 catalog apply` would stall every live agent's
-/// reconciliation, and a due seat is still due next pass. Failures land as warnings, not errors —
-/// maintenance must not fail a pass that reconciled correctly.
-fn archive_expired_retirements(
-    root: &Path,
-    this_host: &str,
-    found: &crate::Discovered,
-    runner: &dyn Runner,
-    sessions: &[Session],
-    report: &mut UpReport,
-) {
-    let grace = match crate::catalog::load(root) {
-        Ok(config) => crate::catalog::archive_after(&config),
-        Err(error) => {
-            report
-                .warnings
-                .push(format!("read archive-after from catalog.kdl: {error:#}"));
-            return;
-        }
-    };
-    if grace.is_zero() {
-        return;
-    }
-    // Direct actor liveness is PTY evidence only: an `exec` task sharing a dead actor's PTY id
-    // must not keep the actor live.
-    let running_pty = runner.running_pty_ids().unwrap_or_else(|| {
-        sessions
-            .iter()
-            .filter(|session| session.alive)
-            .map(|session| session.pty_id.clone())
-            .collect()
-    });
-    if !crate::catalog_archive::pass_has_work(root, this_host, found, &running_pty, grace) {
-        return;
-    }
-
-    let attempt =
-        crate::catalog_archive::auto_archive(crate::catalog_archive::AutoArchiveRequest {
-            catalog: root.to_path_buf(),
-            host: this_host.to_owned(),
-            grace,
-            limit: MAX_AUTO_ARCHIVED_PER_PASS,
-        });
-    match attempt {
-        // Contended: someone is authoring the catalog right now, and the seats stay due.
-        Ok(None) => {}
-        Ok(Some(pass)) => {
-            for entry in pass.archive.archived {
-                tracing::info!(
-                    target: "st",
-                    id = %entry.id,
-                    to = %entry.to,
-                    "archived an agent out of the live catalog"
-                );
-                report.archived.push(entry.id);
-            }
-            for refusal in pass.archive.refused {
-                report.warnings.push(format!(
-                    "auto-archive skipped {} [{}] {}",
-                    refusal.id, refusal.code, refusal.message
-                ));
-            }
-            if pass.deferred > 0 {
-                report.warnings.push(format!(
-                    "auto-archive examined {} due retired seats and deferred {} to the next pass",
-                    pass.scanned, pass.deferred
-                ));
-            }
-            if pass.direct_deferred > 0 {
-                report.warnings.push(format!(
-                    "auto-archive examined {} due dead direct actors and deferred {} to the next pass",
-                    pass.direct_scanned, pass.direct_deferred
-                ));
-            }
-        }
-        Err(error) => report
-            .warnings
-            .push(format!("auto-archive retired agents: {error:#}")),
-    }
 }
 
 /// A missing Codex, pi, or omp agent must not launch against stale lifecycle hooks. Suppress the
@@ -3331,25 +3187,6 @@ pub fn surface_crash_loop(catalog_root: &Path, this_host: &str, cl: &CrashLoop) 
             cl.pty_id
         );
     }
-}
-
-/// Best-effort detection of this machine's short hostname (the catalog's host segment), used as the
-/// default reconcile host filter. Reads the kernel hostname without depending on PATH, and falls
-/// back to `localhost` if the syscall fails or the short name is empty.
-pub fn detect_host() -> String {
-    // Linux and macOS hostnames fit in 256 bytes, including the terminating NUL.
-    let mut name = [0_u8; 256];
-    // SAFETY: name points to a writable buffer of exactly the length passed to gethostname.
-    if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } == 0 {
-        let len = name.iter().position(|&byte| byte == 0).unwrap_or(name.len());
-        let full = String::from_utf8_lossy(&name[..len]);
-        if let Some(short) = full.trim().split('.').next()
-            && !short.is_empty()
-        {
-            return short.to_string();
-        }
-    }
-    "localhost".to_string()
 }
 
 #[cfg(test)]

@@ -22,7 +22,6 @@
         "clients",
         "components",
         "crates",
-        "docs/st2",
         "docs/st3",
         "docs/vrs",
         "evals",
@@ -34,9 +33,7 @@
         "plugins",
         "scripts",
         "slo",
-        "src",
         "templates",
-        "tests",
         "vendor",
         "wit"
       ],
@@ -198,17 +195,14 @@
         "clippy.toml",
         "components",
         "crates",
-        "docs/st2/invariants.md",
         "docs/st3/action-coverage.json",
         "docs/st3/client-v0",
         "docs/st3/invariants.md",
         "docs/st3/onboarding-guide.md",
         "docs/st3/operational-state/cli-commands.json",
         "docs/st3/schema.md",
-        "docs/vrs/requirements.md",
         "examples/client-tui",
         "examples/fractal",
-        "examples/native/agent-codex.kdl",
         "fixtures",
         "flake.lock",
         "flake.nix",
@@ -228,7 +222,6 @@
         "scripts/ci-mail-redelivery-canaries",
         "scripts/ci-nextest",
         "scripts/ci-nextest-flaky",
-        "scripts/ci-nextest-targets",
         "scripts/ci-perf-cache",
         "scripts/ci-rustc-wrapper",
         "scripts/ci-rustc-wrapper-test",
@@ -268,8 +261,6 @@
         "scripts/script_process.py",
         "scripts/sqlite_large_values.py",
         "slo/targets.toml",
-        "src",
-        "tests",
         "vendor/libghostty-vt-sys",
         "wit"
       ],
@@ -436,17 +427,14 @@
         "crates/fractal-wire",
         "crates/pty-launch-environment.rs",
         "crates/smallclaims",
-        "docs/st2/invariants.md",
         "docs/st3/action-coverage.json",
         "docs/st3/client-v0",
         "docs/st3/invariants.md",
         "docs/st3/onboarding-guide.md",
         "docs/st3/operational-state/cli-commands.json",
         "docs/st3/schema.md",
-        "docs/vrs/requirements.md",
         "examples/client-tui",
         "examples/fractal",
-        "examples/native/agent-codex.kdl",
         "fixtures",
         "flake.lock",
         "flake.nix",
@@ -458,7 +446,7 @@
         "scripts/ci-build-snapshot-test",
         "scripts/ci-cargo-tools-env",
         "scripts/ci-cargo-tools-env-test",
-        "scripts/ci-fleet-compat-keyed",
+        "scripts/ci-fleet-compat-result",
         "scripts/ci-install-built-hooks",
         "scripts/ci-linux",
         "scripts/ci-local",
@@ -466,7 +454,6 @@
         "scripts/ci-mail-redelivery-canaries",
         "scripts/ci-nextest",
         "scripts/ci-nextest-flaky",
-        "scripts/ci-nextest-targets",
         "scripts/ci-perf-cache",
         "scripts/ci-rustc-wrapper",
         "scripts/ci-rustc-wrapper-test",
@@ -529,18 +516,16 @@
           "by_level": {
             "host": {
               "command": [
-                "nix",
-                "develop",
-                "-c",
-                "bash",
-                "scripts/ci-fleet-compat-keyed"
+                "python3",
+                "scripts/ci-fleet-compat-result"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
                 "wrapper_sha256",
                 "system",
-                "attempt"
+                "attempt",
+                "run_command_sha256"
               ],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
@@ -553,18 +538,16 @@
             },
             "agent": {
               "command": [
-                "nix",
-                "develop",
-                "-c",
-                "bash",
-                "scripts/ci-fleet-compat-keyed"
+                "python3",
+                "scripts/ci-fleet-compat-result"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
                 "wrapper_sha256",
                 "system",
-                "attempt"
+                "attempt",
+                "run_command_sha256"
               ],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
@@ -577,18 +560,16 @@
             },
             "queue": {
               "command": [
-                "nix",
-                "develop",
-                "-c",
-                "bash",
-                "scripts/ci-fleet-compat-keyed"
+                "python3",
+                "scripts/ci-fleet-compat-result"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
                 "wrapper_sha256",
                 "system",
-                "attempt"
+                "attempt",
+                "run_command_sha256"
               ],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
@@ -898,8 +879,7 @@
         "packages/fractal-ui/.gitignore",
         "pnpm-lock.yaml",
         "pnpm-workspace.yaml",
-        "scripts",
-        "src/main.rs"
+        "scripts"
       ],
       "kinds": {
         "observed": {

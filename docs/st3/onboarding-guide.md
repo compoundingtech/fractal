@@ -18,7 +18,7 @@ person, and never an example name.
   the graph or your own bookkeeping. If work needs recording, record it with the fractal skill and
   say nothing about it.
 - Ask one question at a time and say the default you will use if they stay quiet.
-- Run every fractal command yourself. Do not ask them to run one, to open Home, to look at an
+- Run every fractal command yourself. Do not ask them to run one, to open Now, to look at an
   attention item or to switch terminals.
 - Say once, early, that you run on their own Claude or Codex account and use its usage.
 - Never ask for or type a password. A provider login belongs in the provider's own terminal.

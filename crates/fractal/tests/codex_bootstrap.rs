@@ -276,6 +276,7 @@ async fn delivery_recovery_control(
     let delayed = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -969,6 +970,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     let pending = Arc::new(AtomicUsize::new(0));
     let bound = Arc::new(AtomicUsize::new(0));
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),

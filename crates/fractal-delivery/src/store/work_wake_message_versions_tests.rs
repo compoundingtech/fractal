@@ -60,6 +60,35 @@ fn point_work_wakes(store: &Store, agent: &str) -> Result<Vec<MessageView>> {
 }
 
 #[test]
+fn fractal_work_wakes_keep_sql_selection_and_quiet_classification() {
+    let store = Store::open_memory("fixture").unwrap();
+    for (id, prefix) in [("old", "st3-"), ("new", "fractal-")] {
+        let before = store.index().unwrap();
+        send(
+            &store,
+            id,
+            "agent/worker",
+            vec![format!("{prefix}work:step-run/r/s@1@1@worker")],
+        );
+        assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
+    }
+    let wakes = store
+        .work_wake_messages_for_reconcile("agent/worker")
+        .unwrap();
+    assert_eq!(
+        wakes.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(),
+        ["message/old", "message/new"]
+    );
+    assert_eq!(
+        store
+            .work_wake_messages_for_reconcile("agent/worker")
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn a_pass_reads_only_the_work_wakes_sent_since_the_last() {
     let store = Store::open_memory("fixture").unwrap();
     for index in 0..3 {

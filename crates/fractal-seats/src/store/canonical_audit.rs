@@ -106,6 +106,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_publications",
         "local_client_message_cut_epoch",
         "local_idle_messages",
+        // Member-local consumer marks: never replicated, outside every digest.
+        "local_message_marks",
         "coordination_sends",
         "local_coordination_backfill",
         "stop_deferral_claims",
@@ -117,6 +119,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_publication_bootstrap",
         "local_publication_launch_epoch",
         "local_observations",
+        "claims_stored",
         "client_diagnostic_receipts",
         // Member-local secret authority, not a graph-rebuildable projection.
         "local_push_registrations",
@@ -141,6 +144,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_preparation_claims",
         "local_resource_preparation_pending",
         "local_resource_preparation_dirty",
+        "local_resource_preparation_deferred",
         // Member-local completion-health candidates and hydration progress, rebuilt from claims.
         "local_completion_health_v1_claims",
         "local_completion_health_v1_fields",

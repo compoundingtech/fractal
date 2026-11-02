@@ -34,7 +34,7 @@ pub(crate) fn canonical_tempdir() -> tempfile::TempDir {
 pub mod account;
 pub mod access;
 pub mod catalog;
-pub mod catalog_archive;
+mod catalog_generation;
 pub mod catalog_lock;
 pub mod catalog_transaction;
 pub mod claude_channel;
@@ -49,7 +49,7 @@ pub mod context;
 pub mod contracts;
 pub mod delivery_ledger;
 pub mod ding;
-pub mod direct_actor;
+mod directory;
 pub mod driver;
 pub mod driver_diagnostic;
 pub mod driver_paths;
@@ -73,6 +73,7 @@ pub mod harness_state;
 pub mod harness_timeline;
 pub mod harness_version;
 pub mod hooks;
+pub mod host;
 pub mod host_lock;
 pub mod identity;
 pub mod isolate;
@@ -85,6 +86,7 @@ mod native_channel;
 pub mod omp_session;
 pub mod opencode_session;
 pub mod park;
+mod process;
 pub mod pi_channel;
 /// The launch body shared by the pi-family wrappers; crate-internal, reached through
 /// `pi_session::run` and `omp_session::run`.
@@ -115,9 +117,8 @@ pub mod version;
 pub mod work_claim_failure;
 mod watch;
 
-// The declaration model and the catalog walk live in the `agent-spec` crate, so st2 and any other
-// reader of the same catalog share one implementation. Re-exported under their original paths:
-// `fractal_legacy_runner::spec::…` / `fractal_legacy_runner::discovery::…` keep working for the binary and the test suite.
+// The declaration model and catalog walk live in `agent-spec`. Keep their established
+// driver-library paths for the shared implementation and its callers.
 pub use agent_spec::kdl_version;
 pub use agent_spec::{discovery, spec};
 

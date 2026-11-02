@@ -593,7 +593,9 @@ impl Node {
                 .spawn()
                 .unwrap()
         };
-        let daemon = spawn(&["up"], "daemon.log");
+        let worker = spawn(&["replication-worker"], "worker.log");
+        let worker_pid = worker.id().to_string();
+        let daemon = spawn(&["up", "--replication-worker-pid", &worker_pid], "daemon.log");
         let socket = dir.join("run/st3.sock");
         let started = Instant::now();
         // Opening a large store replays its graph before the socket appears.
@@ -605,7 +607,6 @@ impl Node {
             "the {} daemon did not start",
             dir.display()
         );
-        let worker = spawn(&["replication-worker"], "worker.log");
         Self(vec![worker, daemon])
     }
 }

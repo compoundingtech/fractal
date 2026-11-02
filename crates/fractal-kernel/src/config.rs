@@ -22,6 +22,14 @@ pub enum Lanes {
     Off,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkerIngressGenerationCheck {
+    #[default]
+    Observe,
+    Enforce,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -36,12 +44,18 @@ pub struct Config {
     /// Separate explicit opt-in for non-authorizing legacy topology observations. Off by default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_primary_ownership_observe: Option<bool>,
+    /// Worker socket-generation admission. Absent observes without refusing; restart to change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_ingress_generation_check: Option<WorkerIngressGenerationCheck>,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
     /// Explicit placement for daemon-launched seats without a lane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
+    /// Optional Linux envelope admission policy. Absent means off without reading a state file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seat_admission: Option<fractal_runtime::seat_admission::Config>,
     /// `on` caps each seat that declares `capacity` in its lane (docs/st3/seat-lanes.md). Absent
     /// means `off`: such a seat starts without one. Seats without a declaration never change.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -205,12 +219,16 @@ impl CheckpointConfig {
 /// other members until a person excuses this one. Off by default; nothing changes unless a
 /// member opts in. `notify` names the agent that receives a fault when the daily answers check
 /// finds this member and a peer answering differently; without it the fleet's fault agent does.
+/// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
+/// that drops more goes on the next day where it stopped.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
     pub local: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_claims: Option<u64>,
 }
 
 impl TrimConfig {
@@ -227,6 +245,7 @@ impl TrimConfig {
             }),
             "trim.notify names one agent/... subject"
         );
+        anyhow::ensure!(self.daily_claims != Some(0), "trim.daily_claims is at least 1");
         Ok(())
     }
 }
@@ -505,6 +524,11 @@ pub struct OtlpConfig {
     /// config so that file can be shared.
     #[serde(default)]
     pub headers_file: Option<PathBuf>,
+    /// Where a person reads those observations, such as a Grafana or otelite address. The usage
+    /// pane links to it when set. An older daemon rejects this key, so set it after every member
+    /// runs this build.
+    #[serde(default)]
+    pub ui_url: Option<String>,
 }
 
 impl OtlpConfig {
@@ -515,6 +539,14 @@ impl OtlpConfig {
             matches!(url.scheme(), "http" | "https"),
             "observations.otlp.endpoint must use http or https"
         );
+        if let Some(ui_url) = &self.ui_url {
+            let url = reqwest::Url::parse(ui_url)
+                .with_context(|| format!("parse observations.otlp.ui_url `{ui_url}`"))?;
+            anyhow::ensure!(
+                matches!(url.scheme(), "http" | "https"),
+                "observations.otlp.ui_url must use http or https"
+            );
+        }
         Ok(())
     }
 
@@ -586,8 +618,10 @@ impl Default for Config {
             access_mode: None,
             claude_primary_ownership: None,
             claude_primary_ownership_observe: None,
+            worker_ingress_generation_check: None,
             seat_priority: None,
             unlaned_seat: None,
+            seat_admission: None,
             lanes: None,
             person: None,
             fleet_id: None,
@@ -771,17 +805,22 @@ impl Config {
         Ok((config, unknown))
     }
 
-    /// Resolve the daemon's published endpoint when this client lacks its runtime directory.
-    /// Following the link itself would exceed the Unix socket address limit for long state paths.
+    /// Resolve the daemon's published endpoint when this client lacks its runtime directory, or
+    /// when nothing answers at the runtime default and the published link leads to a daemon that
+    /// does (one started with `--socket` elsewhere). Following the link itself would exceed the
+    /// Unix socket address limit for long state paths.
     pub fn client_socket(&self) -> PathBuf {
-        if env::var_os("XDG_RUNTIME_DIR").is_none() && self.socket == state_socket(&self.state_dir)
-        {
-            return fs::read_link(&self.socket)
+        let published = state_socket(&self.state_dir);
+        match env::var_os("XDG_RUNTIME_DIR") {
+            None if self.socket == published => fs::read_link(&self.socket)
                 .ok()
                 .filter(|target| target.is_absolute())
-                .unwrap_or_else(|| self.socket.clone());
+                .unwrap_or_else(|| self.socket.clone()),
+            Some(runtime) if self.socket == Path::new(&runtime).join("st3.sock") => {
+                fractal_client::runtime_or_published_socket(&self.socket, &published)
+            }
+            _ => self.socket.clone(),
         }
-        self.socket.clone()
     }
 
     /// Merge `STATE/fleet/fleet.toml` from the effective state directory. Call it after
@@ -1248,6 +1287,19 @@ mod tests {
     }
 
     #[test]
+    fn worker_ingress_generation_check_is_strict_and_defaults_to_observe() {
+        use super::WorkerIngressGenerationCheck::{Enforce, Observe};
+        for (text, expected) in [("", Observe),
+            ("worker_ingress_generation_check='observe'", Observe),
+            ("worker_ingress_generation_check='enforce'", Enforce)] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert_eq!(config.worker_ingress_generation_check.unwrap_or_default(), expected);
+        }
+        assert!(toml::from_str::<Config>("worker_ingress_generation_check='enfroce'").is_err());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("worker_ingress_generation_check"));
+    }
+
+    #[test]
     fn seat_priority_defaults_to_background_and_accepts_normal() {
         use fractal_runtime::SeatPriority;
         assert_eq!(Config::default().active_seat_priority(), SeatPriority::Background);
@@ -1271,6 +1323,19 @@ mod tests {
         assert!(toml::from_str::<Config>("[unlaned_seat]\nmemoryMax = 1024\n").is_err());
         assert!(toml::from_str::<Config>(&fields.replace("8589934592", "0")).is_err());
         assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
+    }
+
+    #[test]
+    fn seat_admission_is_optional_and_strict() {
+        assert!(Config::default().seat_admission.is_none());
+        assert!(toml::from_str::<Config>("").unwrap().seat_admission.is_none());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_admission"));
+        let fields = "[seat_admission]\nstateFile = '/run/admission.state'\nbatchPausedMinSecs = 30\n";
+        let configured: Config = toml::from_str(fields).unwrap();
+        let encoded = toml::to_string(&configured).unwrap();
+        assert_eq!(toml::from_str::<Config>(&encoded).unwrap(), configured);
+        assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
+        assert!(toml::from_str::<Config>("[seat_admission]\nstateFile = 'state'\n").is_err());
     }
 
     #[test]
@@ -1560,6 +1625,18 @@ sekrets_profile = "nathan/daemon-gh"
         let mut config = exported.clone();
         config.observations.otlp.as_mut().unwrap().endpoint = "ftp://collector".into();
         assert!(config.validate().is_err());
+        // The address people read the history at is optional, and a link has to be a web address.
+        assert!(!toml::to_string(&exported).unwrap().contains("ui_url"));
+        let linked: Config = toml::from_str(
+            "[observations.otlp]\nendpoint = \"http://127.0.0.1:4318\"\nui_url = \"https://otel.example.test/d/slo\"\n",
+        )
+        .unwrap();
+        linked.validate().unwrap();
+        for bad in ["otel.example.test", "javascript:alert(1)"] {
+            let mut config = linked.clone();
+            config.observations.otlp.as_mut().unwrap().ui_url = Some(bad.into());
+            assert!(config.validate().is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -1586,6 +1663,9 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(config.trim.local);
         assert!(toml::to_string(&config).unwrap().contains("[trim]"));
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
+        let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
+        assert_eq!(config.trim.daily_claims, Some(5000));
+        assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 
     #[test]

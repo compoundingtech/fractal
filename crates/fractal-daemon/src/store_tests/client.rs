@@ -104,6 +104,7 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
     let socket = directory.path().join("st3.sock");
     let store = Arc::new(crate::store::Store::open_memory("message-retry").unwrap());
     let state = crate::api::AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(tokio::sync::Notify::new()),

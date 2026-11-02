@@ -15,7 +15,7 @@ pub(super) static PENDING_QUERY: std::sync::LazyLock<String> = std::sync::LazyLo
     )
 });
 const PREPARATION_SCHEMA: &str =
-    /* sqlite-large-value: allow-for-now lv-hc674146d8179 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
+    /* sqlite-large-value: allow-for-now lv-hcf3bd361bb76 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
     r#"
 CREATE TABLE IF NOT EXISTS local_resource_preparation (
     subject TEXT PRIMARY KEY,
@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS local_resource_preparation_pending (
     claim_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_resource_preparation_dirty (
+    subject TEXT PRIMARY KEY
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_resource_preparation_deferred (
     subject TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 "#;
@@ -277,21 +280,42 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
     // every mate rebuilt each mate subject's whole history per deleted claim, which a local trim
     // that drops one claim from each of thousands of kept batches cannot afford. An older
     // binary may add the broader trigger back; it only marks more.
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3429516f21c9 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS preparation_claims_dirty_DELETE")?;
-    for (event, row, name) in [("UPDATE", "OLD", "UPDATE"), ("DELETE", "OLD", "delete_ranked")] {
-        let rank_changed = if event == "UPDATE" {
-            "(OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index)"
+    //
+    // A deleted claim that a checkpoint recorded (it has a tombstone) is a planned trim drop. The
+    // audited rule keeps every claim the fold reads, so its subject's preparation is the same
+    // without it; its subject is deferred rather than rebuilt per claim, and the trim rebuilds
+    // each deferred subject once, paced, when its day's run stops (`flush_deferred`). Any other
+    // delete rebuilds at once.
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3a97fb63cb60 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS preparation_claims_dirty_DELETE; DROP TRIGGER IF EXISTS preparation_claims_dirty_delete_ranked")?;
+    for (event, row, name) in [("UPDATE", "OLD", "UPDATE"), ("DELETE", "OLD", "delete_deferring")] {
+        let (rank_changed, own) = if event == "UPDATE" {
+            ("(OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index)", "")
         } else {
-            "(claims.store_index>OLD.store_index
+            (
+                "(claims.store_index>OLD.store_index
              AND NOT EXISTS (SELECT 1 FROM claim_positions WHERE claim_id=claims.id)
-             AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id))"
+             AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id))",
+                "AND NOT EXISTS (SELECT 1 FROM checkpoint_claims WHERE id=OLD.id)",
+            )
+        };
+        let deferred = if event == "UPDATE" {
+            ""
+        } else {
+            /* sqlite-large-value: allow-for-now lv-h0d9e7d2f2f5e owner=fractal_store::store::resources_preparation TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO local_resource_preparation_deferred(subject) SELECT OLD.subject
+             WHERE (substr(OLD.subject,1,9)='resource/' OR OLD.kind='resource.observed'
+                 OR EXISTS (SELECT 1 FROM local_resource_preparation WHERE subject=OLD.subject))
+             AND EXISTS (SELECT 1 FROM checkpoint_claims WHERE id=OLD.id)
+             AND NOT EXISTS (SELECT 1 FROM local_resource_preparation_dirty WHERE subject=OLD.subject)
+             AND NOT EXISTS (SELECT 1 FROM local_resource_preparation_deferred WHERE subject=OLD.subject);"
         };
         connection.execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-h3973d20971fd owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_claims_dirty_{name} AFTER {event} ON claims BEGIN
+            /* sqlite-large-value: allow-for-now lv-h3f78c72c5607 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_claims_dirty_{name} AFTER {event} ON claims BEGIN
              INSERT INTO local_resource_preparation_dirty(subject) SELECT {row}.subject
              WHERE (substr({row}.subject,1,9)='resource/' OR {row}.kind='resource.observed'
                  OR EXISTS (SELECT 1 FROM local_resource_preparation WHERE subject={row}.subject))
+             {own}
              AND NOT EXISTS (SELECT 1 FROM local_resource_preparation_dirty WHERE subject={row}.subject);
+             {deferred}
              INSERT INTO local_resource_preparation_dirty(subject)
              SELECT subject FROM claims WHERE batch_id={row}.batch_id AND {rank_changed} AND {relevant}
              AND NOT EXISTS (SELECT 1 FROM local_resource_preparation_dirty dirty WHERE dirty.subject=claims.subject)
@@ -396,10 +420,11 @@ fn supported(connection: &Connection, subject: &str) -> Result<bool> {
 }
 
 pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h88cfdcaabcf6 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h6c0132eacd9f owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
         DELETE FROM local_resource_preparation_claims;
         DELETE FROM local_resource_preparation_pending;
         DELETE FROM local_resource_preparation_dirty;
+        DELETE FROM local_resource_preparation_deferred;
         INSERT INTO local_resource_preparation_dirty(subject)
         SELECT DISTINCT subject FROM claims
         WHERE (claims.subject >= 'resource/' AND claims.subject < 'resource0')
@@ -408,6 +433,8 @@ pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
 }
 
 fn rebuild_subject(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
+    // A rebuild from every claim present is also what a deferral waits for.
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h054022c6a729 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_deferred WHERE subject=?1", [subject])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h59e6ed677dfb owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation WHERE subject=?1", [subject])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h688464025ee2 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_claims WHERE subject=?1", [subject])?;
     if !supported(transaction, subject)? {
@@ -427,6 +454,26 @@ fn rebuild_subject(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         advance(transaction, subject, &id, key)?;
     }
     Ok(())
+}
+
+/// Rebuild the subjects a trim deferred, until `budget` is spent (at least one), and say whether
+/// any is left. A trim calls it once per paced transaction after its day's run.
+pub(super) fn flush_deferred(transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
+    let started = std::time::Instant::now();
+    loop {
+        let subject: Option<String> = transaction
+            .query_row("SELECT subject FROM local_resource_preparation_deferred ORDER BY subject LIMIT 1", [], |row| row.get(0))
+            .optional()?;
+        let Some(subject) = subject else { return Ok(false) };
+        rebuild_subject(transaction, &subject)?;
+        if started.elapsed() >= budget {
+            return Ok(transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred)",
+                [],
+                |row| row.get(0),
+            )?);
+        }
+    }
 }
 
 pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
@@ -463,6 +510,17 @@ pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
             )
             .optional()?;
         if previous.as_ref() == Some(&key) {
+            continue;
+        }
+        // A new claim on a subject a trim deferred folds onto a rebuild, not onto the state the
+        // deleted claims were still part of.
+        let deferred: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred WHERE subject=?1)",
+            [&subject],
+            |row| row.get(0),
+        )?;
+        if deferred {
+            rebuild_subject(transaction, &subject)?;
             continue;
         }
         let latest: Option<Vec<u8>> = transaction

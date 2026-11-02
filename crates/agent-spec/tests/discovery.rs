@@ -1736,9 +1736,8 @@ fn malformed_resource_envelopes_are_rejected_without_defining_downstream_types()
 
 #[test]
 fn catalog_relative_resource_uris_are_an_st2_extension_resolved_against_the_declaration_dir() {
-    // Catalog-relative carrier paths are an st2 extension pending canonical Agent Spec adoption
-    // (see docs/vrs/06-resync): accepted here, resolved by the consumer against the declaration
-    // directory.
+    // Catalog-relative carrier paths are accepted here and resolved by their consumer
+    // against the declaration directory.
     let tmp = tempfile::tempdir().unwrap();
     write(
         tmp.path(),

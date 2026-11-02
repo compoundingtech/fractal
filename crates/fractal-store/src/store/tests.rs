@@ -12297,6 +12297,120 @@ fn a_seats_harness_diagnostics_are_read_again_only_when_they_change() {
     assert_eq!(store.harness_diagnostics(subject).unwrap()[0].id, later.id);
 }
 
+/// The node-local `claims_stored` totals count rows stored into the claims table: an ignored
+/// INSERT OR IGNORE (a duplicate arrival) counts nothing, a delete never lowers them, and a repair
+/// that deletes a claim and inserts it again counts it again.
+#[test]
+fn claims_stored_counts_inserted_rows_not_deletes_or_ignored_duplicates() {
+    let store = Store::open_memory("node").unwrap();
+    let totals = |store: &Store| -> Vec<(String, String, i64)> {
+        store
+            .readers
+            .get()
+            .prepare("SELECT kind, writer, claims FROM claims_stored WHERE kind='harness.observed'")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let claim = store
+        .connection
+        .batched(|transaction| {
+            append_claim_tx(transaction, &store.origin, "agent/node.test", "harness.observed", Some("agent/node.test"),
+                &json!({"fields": {"state": "ready"}}), &[], None)
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(totals(&store), [("harness.observed".to_owned(), "node".to_owned(), 1)]);
+    store
+        .connection
+        .batched(|transaction| -> rusqlite::Result<()> {
+            let ignored = transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hca6115502373 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
+                 SELECT id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE id=?1",
+                [&claim.id],
+            )?;
+            assert_eq!(ignored, 0, "the duplicate is ignored");
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(totals(&store)[0].2, 1, "an ignored insert stores and counts nothing");
+    store
+        .connection
+        .batched(|transaction| -> rusqlite::Result<()> {
+            let row: (String, String, String, String, Option<String>, String, String, String) = transaction.query_row(
+                "SELECT id, batch_id, subject, kind, actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE id=?1",
+                [&claim.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+            )?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hdbe61e572c78 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id])?;
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h0e5ba72f1e3a owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
+                 VALUES(?1, ?2, ?3, ?4, 'node', ?5, ?6, ?7, ?8)",
+                rusqlite::params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(totals(&store)[0].2, 2, "a delete-then-insert repair counts the claim again; the delete lowered nothing");
+}
+
+/// The cost of the `claims_stored_insert` trigger on a bulk admission: 10,000 claims of about
+/// 1.8 KB in one write transaction, with and without the trigger. Run with
+/// `cargo nextest run -p fractal-store --run-ignored only -E 'test(claims_stored_trigger_cost)' --no-capture`.
+#[test]
+#[ignore = "benchmark; prints timings"]
+fn claims_stored_trigger_cost_on_a_bulk_admission() {
+    const CLAIMS: usize = 10_000;
+    let filler = "x".repeat(1_700);
+    let admit = |store: &Store| -> std::time::Duration {
+        let started = std::time::Instant::now();
+        store
+            .connection
+            .batched(|transaction| -> Result<()> {
+                for index in 0..CLAIMS {
+                    append_claim_tx(transaction, &store.origin, &format!("custom/example/seat-{}", index % 50), "custom.example.reading",
+                        None, &json!({"fields": {"reading": index, "note": filler}}), &[], None)?;
+                }
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        started.elapsed()
+    };
+    let mut with = Vec::new();
+    let mut without = Vec::new();
+    for round in 0..5 {
+        for triggered in if round % 2 == 0 { [true, false] } else { [false, true] } {
+            let store = Store::open_memory("node").unwrap();
+            if !triggered {
+                store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hbc4d43337482 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER claims_stored_insert").unwrap();
+            }
+            let held = admit(&store);
+            if triggered {
+                let stored: i64 = store.readers.get()
+                    .query_row("SELECT sum(claims) FROM claims_stored WHERE kind='custom.example.reading'", [], |row| row.get(0)).unwrap();
+                assert_eq!(stored, CLAIMS as i64);
+                with.push(held);
+            } else {
+                without.push(held);
+            }
+        }
+    }
+    with.sort();
+    without.sort();
+    let (with, without) = (with[with.len() / 2], without[without.len() / 2]);
+    println!(
+        "claims_stored trigger, {CLAIMS} claims in one write transaction (median of 5): with {with:?}, without {without:?}, \
+         {:.1}% more, {:.1} us per claim",
+        (with.as_secs_f64() / without.as_secs_f64() - 1.0) * 100.0,
+        (with.as_secs_f64() - without.as_secs_f64()) * 1e6 / CLAIMS as f64
+    );
+}
+
 #[test]
 fn a_parked_seat_lookup_seeks_each_seat_and_never_ranges_over_every_decision() {
     let store = Store::open_memory("node").unwrap();

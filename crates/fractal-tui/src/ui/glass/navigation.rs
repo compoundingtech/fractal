@@ -39,6 +39,7 @@ impl Ui {
             tab_id: group.tabs.get(group.current).map(|tab| tab.id.clone()),
             pane,
             selection,
+            visited: 0,
         })
     }
 
@@ -46,7 +47,7 @@ impl Ui {
         if self.glasses.restoring {
             return;
         }
-        let Some(after) = self.current_place() else {
+        let Some(mut after) = self.current_place() else {
             return;
         };
         if before.as_ref() == Some(&after) {
@@ -54,17 +55,33 @@ impl Ui {
         }
         let glasses = &mut self.glasses;
         // A higher-level open may surround show_in; record that destination only once.
-        if glasses.history.get(glasses.history_cursor) == Some(&after) {
+        if glasses
+            .history
+            .get(glasses.history_cursor)
+            .is_some_and(|place| same_place(place, &after))
+        {
             return;
         }
+        let mut visited = glasses
+            .history
+            .iter()
+            .map(|place| place.visited)
+            .max()
+            .unwrap_or(0);
         glasses
             .history
             .truncate(glasses.history_cursor.saturating_add(1));
-        if let Some(before) = before
-            && glasses.history.last() != Some(&before)
+        if let Some(mut before) = before
+            && !glasses
+                .history
+                .last()
+                .is_some_and(|place| same_place(place, &before))
         {
+            visited += 1;
+            before.visited = visited;
             glasses.history.push(before);
         }
+        after.visited = visited + 1;
         glasses.history.push(after);
         if glasses.history.len() > 50 {
             glasses.history.drain(..glasses.history.len() - 50);
@@ -202,6 +219,14 @@ impl Ui {
             self.glasses.restoring = false;
             if restored {
                 self.glasses.history_cursor = cursor;
+                self.glasses.history[cursor].visited = self
+                    .glasses
+                    .history
+                    .iter()
+                    .map(|place| place.visited)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
                 self.glasses.save();
                 self.flash(if forward { "Forward" } else { "Back" });
                 return;
@@ -224,6 +249,72 @@ impl Ui {
         self.navigate_history(forward);
         true
     }
+
+    pub(in crate::ui) fn recent_places(&self) -> Vec<StoredPlace> {
+        let mut places = Vec::new();
+        let mut seen = HashSet::new();
+        let mut history: Vec<_> = self.glasses.history.iter().enumerate().collect();
+        history.sort_by_key(|(index, place)| std::cmp::Reverse((place.visited, *index)));
+        for place in self
+            .current_place()
+            .into_iter()
+            .chain(history.into_iter().map(|(_, place)| place.clone()))
+        {
+            let identity = place.selection.as_ref().map_or_else(
+                || place.pane.clone(),
+                |id| Pane::Home(Some(id.clone())).key(),
+            );
+            if seen.insert(identity) && self.place_exists(&place) {
+                places.push(place);
+            }
+        }
+        places
+    }
+
+    pub(in crate::ui) fn place_label(&self, place: &StoredPlace) -> String {
+        let space = self
+            .glasses
+            .all
+            .iter()
+            .find(|glass| glass.id == place.space)
+            .map_or("", |glass| glass.name.as_str());
+        let pane = if let Some(selection) = &place.selection {
+            Pane::Home(Some(selection.clone()))
+        } else {
+            let Some(pane) = Pane::parse(&place.pane) else {
+                return space.into();
+            };
+            pane
+        };
+        let tab = Tab {
+            id: String::new(),
+            title: None,
+            pane: place.pane.clone(),
+        };
+        let badge = self.tab_badge(&tab, Some(&pane));
+        let attention = if badge.ask {
+            "?"
+        } else if badge.needs_person {
+            "◆"
+        } else {
+            ""
+        };
+        format!(
+            "{} {}{} · {}",
+            badge.activity,
+            self.pane_title(&pane),
+            attention,
+            space
+        )
+    }
+}
+
+fn same_place(left: &StoredPlace, right: &StoredPlace) -> bool {
+    left.space == right.space
+        && left.group_id == right.group_id
+        && left.tab_id == right.tab_id
+        && left.pane == right.pane
+        && left.selection == right.selection
 }
 
 fn history_chord(key: KeyEvent, enhanced: bool) -> Option<bool> {
@@ -491,7 +582,12 @@ mod tests {
         ui.drop_tab((0, 0), Drop::Strip { group: 1, index: 1 });
         assert_eq!(ui.glasses.glass().layout.groups().len(), 1);
         ui.prune_place_history();
-        assert!(ui.glasses.history.contains(&first));
+        assert!(
+            ui.glasses
+                .history
+                .iter()
+                .any(|place| same_place(place, &first))
+        );
         ui.navigate_history(false);
         assert_eq!(ui.focused_pane(), Some(b.clone()));
         ui.navigate_history(false);

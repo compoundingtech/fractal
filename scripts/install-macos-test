@@ -98,7 +98,7 @@ class Installer(unittest.TestCase):
         self.source = self.home / 'built'
         self.source.mkdir()
         self.built = {}
-        for name in ['st3']:
+        for name in ['fractal']:
             p = self.source / name
             p.write_bytes((name + '-one').encode())
             p.chmod(0o755)
@@ -108,6 +108,165 @@ class Installer(unittest.TestCase):
                                     IDENTIFIER='com.example.smalltalk')
         self.stack.start()
         self.addCleanup(self.stack.stop)
+        self.original_path = os.environ.get('PATH', os.defpath)
+        environment = patch.dict(os.environ, PATH='')
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_foreign_canonical_refusal_preserves_installed_app_and_commands(self):
+        with patch.object(m, 'command', side_effect=self.command), \
+                patch.object(m, 'exchange', side_effect=self.exchange):
+            app, _, _ = m.prepare(self.home, self.job, self.built)
+            m.install(app, self.home, self.job)
+            installed = m.fixed(self.home)
+            inode = installed.stat().st_ino
+            original = {p.relative_to(installed): p.read_bytes()
+                        for p in installed.rglob('*') if p.is_file()}
+            canonical = m.bin_dir(self.home) / 'fractal'
+            canonical.unlink()
+            canonical.write_bytes(b'foreign canonical owner')
+            self.built['fractal'].write_bytes(b'fractal-two')
+            second_job = self.home / 'second'
+            second_job.mkdir()
+            app, _, _ = m.prepare(self.home, second_job, self.built)
+            had_app = m.backup(self.home, second_job)
+            with self.assertRaisesRegex(RuntimeError, 'foreign fractal'):
+                m.install(app, self.home, second_job)
+            self.assertEqual(installed.stat().st_ino, inode)
+            self.assertEqual({p.relative_to(installed): p.read_bytes()
+                              for p in installed.rglob('*') if p.is_file()}, original)
+            m.restore(self.home, second_job, had_app)
+        self.assertEqual(canonical.read_bytes(), b'foreign canonical owner')
+        for name in ['st', 'st3']:
+            self.assertEqual(os.readlink(m.bin_dir(self.home) / name), 'fractal')
+
+    def test_path_links_to_our_canonical_app_and_commands_are_owned(self):
+        destination = m.bin_dir(self.home) / 'fractal'
+        path_dir = self.home / 'other-bin'
+        path_dir.mkdir()
+        candidate = path_dir / 'fractal'
+        for target in [m.binaries(m.fixed(self.home))['fractal'], destination,
+                       destination.parent / 'st3']:
+            with self.subTest(target=target), patch.dict(os.environ, PATH=str(path_dir)):
+                candidate.symlink_to(target)
+                self.assertFalse(m.foreign_fractal_on_path(destination, self.home))
+                candidate.unlink()
+
+    def test_release_darwin_ownership_table_matches_helper(self):
+        repo = Path(__file__).resolve().parent.parent
+        fakebin = self.home / 'platform-bin'
+        fakebin.mkdir()
+        uname = fakebin / 'uname'
+        uname.write_text('#!/bin/sh\necho Darwin\n')
+        uname.chmod(0o755)
+        # Expose only tools, never an inherited host fractal command.
+        for name in ('bash', 'python3', 'dirname', 'basename', 'readlink', 'mkdir'):
+            (fakebin / name).symlink_to(shutil.which(name, path=self.original_path))
+        bin_dir = self.home / 'commands'
+        bin_dir.mkdir()
+        canonical = bin_dir / 'fractal'
+        other = self.home / 'other-bin'
+        other.mkdir()
+        parent_alias = self.home / 'commands-alias'
+        parent_alias.symlink_to(bin_dir, target_is_directory=True)
+        for mode in ('default', 'custom', 'instance'):
+            # --source-preflight follows the source helper's instance default,
+            # unlike the archive wrapper's later explicit shared --app.
+            app = (self.home / 'custom/Fractal.app' if mode == 'custom'
+                   else self.home / '.st-instance/table/app/SmallTalk.app' if mode == 'instance'
+                   else self.home / 'Applications/SmallTalk.app')
+            environment = dict(os.environ, HOME=str(self.home),
+                               FRACTAL_MACOS_INSTALL_HOME=str(self.home),
+                               FRACTAL_MACOS_APP_PATH=str(app),
+                               FRACTAL_INSTANCE='table' if mode == 'instance' else '',
+                               ST_INSTANCE='')
+            if mode != 'custom':
+                environment.pop('FRACTAL_MACOS_APP_PATH')
+                environment.pop('ST_MACOS_APP_PATH', None)
+            instance = environment['FRACTAL_INSTANCE'] or None
+            app_binary = str(app / 'Contents/MacOS/fractal')
+            # (form, raw target, shell ownership, helper ownership)
+            rows = [
+                ('absent', None, True, True),
+                ('link', 'st3', True, True),
+                ('link', str(bin_dir / 'st3'), True, True),
+                ('link', app_binary, True, True),
+                ('link', str(app / 'Contents/MacOS/st3'), False, False),
+                ('link', str(app / 'Contents/MacOS/../MacOS/fractal'), False, False),
+                ('link', '/missing/foreign-st3', False, False),
+                ('file', None, False, False),
+                ('one-alias', None, False, False),
+                # HM's physical+two-alias marker is owned by the early guard;
+                # helper physical->app conversion refusal is inherited.
+                ('physical', None, True, False),
+                ('directory', None, False, False),
+            ]
+            for form, target, shell_owned, helper_owned in rows:
+                with self.subTest(mode=mode, form=form, target=target):
+                    if form == 'link':
+                        canonical.symlink_to(target)
+                    elif form == 'directory':
+                        canonical.mkdir()
+                    elif form != 'absent':
+                        canonical.write_text('#!/bin/sh\nexit 99\n')
+                        canonical.chmod(0o755)
+                        if form in ('physical', 'one-alias'):
+                            (bin_dir / 'st').symlink_to('fractal')
+                        if form == 'physical':
+                            (bin_dir / 'st3').symlink_to(str(canonical))
+                    env = dict(environment, PATH=str(fakebin))
+                    result = subprocess.run(
+                        [str(repo / 'scripts/install-release'), '--source-preflight',
+                         '--bin-dir', str(bin_dir)], env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, shell_owned, result.stderr)
+                    with patch.multiple(m, APP=str(app), BIN_DIR=str(bin_dir), INSTANCE=instance):
+                        actual = not (canonical.exists() or canonical.is_symlink()) or m.owns_fractal(canonical, self.home)
+                        self.assertEqual(actual, helper_owned)
+                    if canonical.is_dir() and not canonical.is_symlink():
+                        canonical.rmdir()
+                    else:
+                        canonical.unlink(missing_ok=True)
+                    for name in ('st', 'st3'):
+                        (bin_dir / name).unlink(missing_ok=True)
+            # PATH targets share the helper's literal comparisons. Instances
+            # bypass this scan, but never bypass the destination table above.
+            canonical.symlink_to('st3')
+            candidate = other / 'fractal'
+            path_rows = [
+                (str(canonical), True), (str(bin_dir / 'st3'), True),
+                (app_binary, True), ('st3', False),
+                (str(app / 'Contents/MacOS/st3'), False),
+                ('/missing/foreign', False), (None, False),
+            ]
+            for target, owned in path_rows:
+                with self.subTest(mode=mode, path_target=target):
+                    if target is None:
+                        candidate.write_text('#!/bin/sh\nexit 99\n')
+                        candidate.chmod(0o755)
+                    else:
+                        candidate.symlink_to(target)
+                    path = os.pathsep.join([str(other), str(fakebin)])
+                    env = dict(environment, PATH=path)
+                    result = subprocess.run(
+                        [str(repo / 'scripts/install-release'), '--source-preflight',
+                         '--bin-dir', str(bin_dir)], env=env, capture_output=True, text=True)
+                    expected = owned or instance is not None
+                    self.assertEqual(result.returncode == 0, expected, result.stderr)
+                    with patch.multiple(m, APP=str(app), BIN_DIR=str(bin_dir), INSTANCE=instance), \
+                            patch.dict(os.environ, PATH=path):
+                        self.assertEqual(not m.foreign_fractal_on_path(canonical, self.home), expected)
+                    candidate.unlink()
+            # A PATH spelling of the destination's physical directory is not
+            # an unrelated command, including a literal-st3 canonical link.
+            path = os.pathsep.join([str(parent_alias), str(fakebin)])
+            result = subprocess.run(
+                [str(repo / 'scripts/install-release'), '--source-preflight', '--bin-dir', str(bin_dir)],
+                env=dict(environment, PATH=path), capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with patch.multiple(m, APP=str(app), BIN_DIR=str(bin_dir), INSTANCE=instance), \
+                    patch.dict(os.environ, PATH=path):
+                self.assertFalse(m.foreign_fractal_on_path(canonical, self.home))
+            canonical.unlink()
 
     def command(self, args):
         args = list(map(str, args))
@@ -145,7 +304,7 @@ class Installer(unittest.TestCase):
             os.replace(staged, destination)
 
     def test_embedded_web_assets_are_signed_and_identified(self):
-        web = self.built['st3'].parent.parent / 'share/fractal-web'
+        web = self.built['fractal'].parent.parent / 'share/fractal-web'
         web.mkdir(parents=True)
         (web / 'index.html').write_text('embedded web')
         (web / 'index.html').chmod(0o444)
@@ -223,8 +382,23 @@ class Installer(unittest.TestCase):
                 m.prepare(self.home, self.job, self.built)
         self.assertFalse(any('--sign' in call for call in self.calls))
 
+    def test_named_instance_still_refuses_foreign_destination(self):
+        with patch.object(m, 'INSTANCE', 'try'):
+            destination = m.bin_dir(self.home)
+            destination.mkdir(parents=True)
+            canonical = destination / 'fractal'
+            canonical.write_bytes(b'foreign instance command')
+            identity = (canonical.stat().st_dev, canonical.stat().st_ino)
+            with self.assertRaisesRegex(RuntimeError, 'foreign fractal'):
+                m.install(self.source, self.home, self.job)
+            self.assertEqual(canonical.read_bytes(), b'foreign instance command')
+            self.assertEqual((canonical.stat().st_dev, canonical.stat().st_ino), identity)
+            self.assertFalse((destination / 'st').exists())
+            self.assertFalse((destination / 'st3').exists())
+
     def test_fractal_collisions_and_rollback(self):
-        for kind in ['free', 'owned-relative', 'owned-absolute', 'file', 'link', 'dangling', 'directory', 'path']:
+        for kind in ['free', 'owned-relative', 'owned-absolute', 'owned-app',
+                     'file', 'link', 'dangling', 'directory', 'path']:
             with self.subTest(kind=kind):
                 home = self.home / kind
                 job = home / 'job'
@@ -238,10 +412,12 @@ class Installer(unittest.TestCase):
                     alias.symlink_to('st3')
                 elif kind == 'owned-absolute':
                     alias.symlink_to(destination / 'st3')
+                elif kind == 'owned-app':
+                    alias.symlink_to(m.binaries(m.fixed(home))['fractal'])
                 elif kind == 'file':
                     alias.write_text('foreign')
                 elif kind == 'link':
-                    alias.symlink_to(self.built['st3'])
+                    alias.symlink_to(self.built['fractal'])
                 elif kind == 'dangling':
                     alias.symlink_to('/missing/fractal')
                 elif kind == 'directory':
@@ -251,18 +427,22 @@ class Installer(unittest.TestCase):
                 previous = os.readlink(alias) if alias.is_symlink() else None
                 with patch.dict(os.environ, PATH=str(path_dir)), \
                         patch.object(m, 'command', side_effect=self.command), \
-                        patch.object(m, 'exchange', side_effect=self.exchange), \
-                        contextlib.redirect_stderr(io.StringIO()) as errors:
+                        patch.object(m, 'exchange', side_effect=self.exchange):
                     app, _, _ = m.prepare(home, job, self.built)
                     had_app = m.backup(home, job)
-                    m.install(app, home, job)
-                    if kind in ['free', 'owned-relative', 'owned-absolute']:
-                        self.assertEqual(os.readlink(alias), 'st3')
-                        self.assertEqual(errors.getvalue(), '')
+                    if kind in ['free', 'owned-relative', 'owned-absolute', 'owned-app']:
+                        m.install(app, home, job)
+                        self.assertEqual(os.readlink(alias), str(m.binaries(m.fixed(home))['fractal']))
+                        for name in ['st', 'st3']:
+                            self.assertEqual(os.readlink(destination / name), 'fractal')
+                            self.assertEqual((destination / name).read_bytes(), b'fractal-one')
+                        m.restore(home, job, had_app)
                     else:
-                        self.assertIn('leaving fractal unchanged:', errors.getvalue())
-                    self.assertEqual((destination / 'st').read_bytes(), b'st3-one')
-                    m.restore(home, job, had_app)
+                        with self.assertRaisesRegex(RuntimeError, 'foreign fractal'):
+                            m.install(app, home, job)
+                        self.assertFalse(m.fixed(home).exists())
+                        self.assertFalse((destination / 'st').exists())
+                        self.assertFalse((destination / 'st3').exists())
                 if previous is not None:
                     self.assertEqual(os.readlink(alias), previous)
                 elif kind == 'file':
@@ -376,7 +556,7 @@ class Installer(unittest.TestCase):
                 patch.object(m, 'exchange', side_effect=self.exchange):
             app, _, _ = m.prepare(self.home, self.job, self.built)
             m.install(app, self.home, self.job)
-        executable = str(m.binaries(m.fixed(self.home))['st3'])
+        executable = str(m.binaries(m.fixed(self.home))['fractal'])
         for path, definition in definitions.items():
             definition['ProgramArguments'][0] = executable
             if 'Program' in definition:
@@ -577,10 +757,16 @@ class Installer(unittest.TestCase):
             m.install(app, self.home, self.job)
             self.assertFalse((bin_dir / 'stui').exists())
             self.assertFalse((bin_dir / 'stui').is_symlink())
-            self.assertEqual(set(p.name for p in (m.fixed(self.home) / 'Contents/MacOS').iterdir()), {'st3'})
-            self.assertEqual(os.readlink(bin_dir / 'st3'), str(m.binaries(m.fixed(self.home))['st3']))
+            self.assertEqual(set(p.name for p in (m.fixed(self.home) / 'Contents/MacOS').iterdir()), {'fractal'})
+            self.assertEqual(os.readlink(bin_dir / 'fractal'), str(m.binaries(m.fixed(self.home))['fractal']))
+            self.assertEqual(os.readlink(bin_dir / 'st'), 'fractal')
+            self.assertEqual(os.readlink(bin_dir / 'st3'), 'fractal')
+            info = plistlib.loads((m.fixed(self.home) / 'Contents/Info.plist').read_bytes())
+            self.assertEqual(info['CFBundleExecutable'], 'fractal')
+            self.assertEqual(info['CFBundleName'], 'Fractal')
+            self.assertEqual(info['CFBundleIdentifier'], m.IDENTIFIER)
             args = plistlib.loads(service.read_bytes())['ProgramArguments']
-            self.assertEqual(args, [str(m.binaries(m.fixed(self.home))['st3']), 'daemon', '--socket', 'keep.sock'])
+            self.assertEqual(args, [str(m.binaries(m.fixed(self.home))['fractal']), 'daemon', '--socket', 'keep.sock'])
             self.calls.clear()
             _, identity, _ = m.prepare(self.home, self.job, self.built)
             self.assertTrue(identity['payload_unchanged'])
@@ -612,8 +798,55 @@ class Installer(unittest.TestCase):
         info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
         self.assertIn('NSMicrophoneUsageDescription', info)
 
+    def test_historical_signed_st3_bundle_restores_without_rewriting_bytes(self):
+        historical = m.fixed(self.home)
+        executable = historical / 'Contents/MacOS/st3'
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b'historical signed st3')
+        executable.chmod(0o755)
+        info = historical / 'Contents/Info.plist'
+        info.write_bytes(plistlib.dumps({
+            'CFBundleExecutable': 'st3', 'CFBundleName': 'St3',
+            'CFBundleIdentifier': m.IDENTIFIER}))
+        resources = historical / 'Contents/Resources'
+        resources.mkdir()
+        metadata = resources / 'deploy-payload.json'
+        metadata.write_text(json.dumps({
+            'hashes': {'st3': m.sha(executable)}, 'certificate': CERT,
+            'team': 'EXAMPLE123', 'identifier': m.IDENTIFIER}) + '\n')
+        signature = historical / 'Contents/_CodeSignature/CodeResources'
+        signature.parent.mkdir()
+        signature.write_bytes(b'historical sealed resource bytes')
+        original = {p.relative_to(historical): p.read_bytes()
+                    for p in historical.rglob('*') if p.is_file()}
+        commands = m.bin_dir(self.home)
+        commands.mkdir(parents=True)
+        (commands / 'st3').symlink_to(executable)
+        (commands / 'st').symlink_to('st3')
+        (commands / 'fractal').symlink_to('st3')
+        with patch.object(m, 'command', side_effect=self.command), \
+                patch.object(m, 'exchange', side_effect=self.exchange):
+            app, identity, payload = m.prepare(self.home, self.job, self.built)
+            self.assertFalse(identity['payload_unchanged'])
+            self.assertEqual(set(payload), {'fractal'})
+            had_app = m.backup(self.home, self.job)
+            self.assertEqual((self.job / 'previous-app/Contents/Resources/deploy-payload.json').read_bytes(),
+                             original[Path('Contents/Resources/deploy-payload.json')])
+            m.install(app, self.home, self.job)
+            self.assertFalse((historical / 'Contents/MacOS/st3').exists())
+            self.calls.clear()
+            m.restore(self.home, self.job, had_app)
+        self.assertEqual({p.relative_to(historical): p.read_bytes()
+                          for p in historical.rglob('*') if p.is_file()}, original)
+        self.assertEqual(os.readlink(commands / 'st3'), str(executable))
+        self.assertEqual(os.readlink(commands / 'st'), 'st3')
+        self.assertEqual(os.readlink(commands / 'fractal'), 'st3')
+        self.assertFalse(any('--sign' in call for call in self.calls))
+        self.assertTrue(any('--extract-certificates=' in arg
+                            for call in self.calls for arg in call))
+
     def test_upgrade_restores_previous_whole_app(self):
-        web = self.built['st3'].parent.parent / 'share/fractal-web'
+        web = self.built['fractal'].parent.parent / 'share/fractal-web'
         web.mkdir(parents=True)
         (web / 'index.html').write_text('embedded web')
         with patch.object(m, 'command', side_effect=self.command), patch.object(m, 'exchange', side_effect=self.exchange):
@@ -625,10 +858,10 @@ class Installer(unittest.TestCase):
             first = {name: m.sha(path) for name, path in m.binaries(m.fixed(self.home)).items()}
             second_job = self.home / 'second'; second_job.mkdir()
             had_app = m.backup(self.home, second_job)
-            self.built['st3'].write_bytes(b'st3-two')
+            self.built['fractal'].write_bytes(b'fractal-two')
             app, _, _ = m.prepare(self.home, second_job, self.built)
             m.install(app, self.home, second_job)
-            self.assertNotEqual(m.sha(m.binaries(m.fixed(self.home))['st3']), first['st3'])
+            self.assertNotEqual(m.sha(m.binaries(m.fixed(self.home))['fractal']), first['fractal'])
             m.restore(self.home, second_job, had_app)
             self.assertEqual({name: m.sha(path) for name, path in m.binaries(m.fixed(self.home)).items()}, first)
             self.assertTrue(installed_web.stat().st_mode & 0o200)
@@ -647,7 +880,7 @@ class Installer(unittest.TestCase):
             m.main()
         self.assertTrue(m.fixed(self.home).is_dir())
         self.assertEqual(plistlib.loads(service.read_bytes())['ProgramArguments'],
-                         [str(m.binaries(m.fixed(self.home))['st3']), 'daemon', '--socket', 'keep.sock'])
+                         [str(m.binaries(m.fixed(self.home))['fractal']), 'daemon', '--socket', 'keep.sock'])
         self.assertTrue(list((self.home / '.local/state/st3/macos-installs').glob('*.lock')))
 
     def test_a_named_instance_installs_beside_the_default_without_touching_it(self):
@@ -659,8 +892,11 @@ class Installer(unittest.TestCase):
             path.write_bytes(plistlib.dumps({'ProgramArguments': ['default-st3', 'up', '--socket', 'keep.sock']}))
         default_bin = self.home / '.local/bin'
         default_bin.mkdir(parents=True)
-        (default_bin / 'st3').write_bytes(b'default executable')
-        before = {p: p.read_bytes() for p in (default_service, default_replication, default_bin / 'st3')}
+        (default_bin / 'fractal').write_bytes(b'default executable')
+        for name in ('st', 'st3'):
+            (default_bin / name).symlink_to('fractal')
+        before = {p: p.read_bytes() for p in (default_service, default_replication, default_bin / 'fractal')}
+        identities = {p: (p.lstat().st_dev, p.lstat().st_ino) for p in default_bin.iterdir()}
         instance = self.home / '.st-instance/try'
         labels = ['com.compoundingtech.st3.instance.try', 'com.compoundingtech.st3.instance.try.replication']
         for label in labels:
@@ -668,6 +904,7 @@ class Installer(unittest.TestCase):
         argv = ['install-macos', '--from', str(self.source), '--home', str(self.home), '--job', str(self.job),
                 '--identifier', 'com.compoundingtech.smalltalk.instance.try']
         with patch.object(m, 'INSTANCE', 'try'), patch.object(m, 'SERVICES', labels), \
+                patch.dict(os.environ, {'PATH': str(default_bin) + os.pathsep + os.environ.get('PATH', '')}), \
                 patch.object(sys, 'argv', argv), \
                 patch.object(Path, 'home', side_effect=AssertionError('must not use real user home')), \
                 patch.object(m, 'command', side_effect=self.command), \
@@ -684,10 +921,14 @@ class Installer(unittest.TestCase):
         self.assertFalse((self.home / '.local/state').exists())
         for label in labels:
             program = plistlib.loads((agents / (label + '.plist')).read_bytes())['ProgramArguments'][0]
-            self.assertEqual(program, str(app / 'Contents/MacOS/st3'))
+            self.assertEqual(program, str(app / 'Contents/MacOS/fractal'))
         for path, content in before.items():
             self.assertEqual(path.read_bytes(), content, path)
-        self.assertEqual(sorted(p.name for p in default_bin.iterdir()), ['st3'])
+        self.assertEqual(sorted(p.name for p in default_bin.iterdir()), ['fractal', 'st', 'st3'])
+        for path, identity in identities.items():
+            self.assertEqual((path.lstat().st_dev, path.lstat().st_ino), identity)
+        for name in ('st', 'st3'):
+            self.assertEqual(os.readlink(default_bin / name), 'fractal')
 
     def test_an_invalid_instance_name_is_refused_before_anything_is_chosen(self):
         for bad in ['Try', 'a b', '../x', '-a', 'a--b', 'x' * 25]:
@@ -702,18 +943,31 @@ class Installer(unittest.TestCase):
         (fakebin / 'uname').write_text('#!/bin/sh\necho Darwin\n')
         helper = fakebin / 'python3'
         helper.write_text('#!' + sys.executable + '\n' +
-            'import os,pathlib,sys\n' +
+            'import os,pathlib,shutil,sys\n' +
             'if sys.argv[1] == "-": os.execv(sys.executable, [sys.executable] + sys.argv[1:])\n' +
             'source=pathlib.Path(sys.argv[sys.argv.index("--from")+1])\n' +
             'destination=pathlib.Path(sys.argv[sys.argv.index("--bin-dir")+1])\n' +
-            'for name in ["st3"]:\n' +
-            '    (destination/name).symlink_to(source/name)\n')
+            'instance=os.environ.get("FRACTAL_INSTANCE")\n' +
+            'if instance:\n' +
+            '    app=pathlib.Path(os.environ["ST_MACOS_INSTALL_HOME"])/".st-instance"/instance/"app/SmallTalk.app/Contents/MacOS"\n' +
+            '    app.mkdir(parents=True,exist_ok=True)\n' +
+            '    shutil.copy2(source/"fractal",app/"fractal")\n' +
+            '    source=app\n' +
+            'for name in ["fractal"]:\n' +
+            '    (destination/name).unlink(missing_ok=True)\n' +
+            '    (destination/name).symlink_to(source/name)\n' +
+            'for name in ["st", "st3"]:\n' +
+            '    (destination/name).unlink(missing_ok=True)\n' +
+            '    (destination/name).symlink_to("fractal")\n')
         for path in fakebin.iterdir():
             path.chmod(0o755)
-        for name in ['st3', 'st3-migrate', 'pty']:
+        for name in ('bash', 'dirname', 'basename', 'readlink', 'mkdir', 'mktemp',
+                     'ln', 'cp', 'chmod', 'mv', 'rm', 'rmdir', 'stat', 'tr'):
+            (fakebin / name).symlink_to(shutil.which(name, path=self.original_path))
+        for name in ['fractal', 'st3-migrate', 'pty']:
             path = self.source / name
             path.write_text('#!/bin/sh\nexit 0\n'); path.chmod(0o755)
-        env = dict(os.environ, PATH=str(fakebin) + os.pathsep + os.environ['PATH'],
+        env = dict(os.environ, PATH=str(fakebin),
                    ST_MACOS_INSTALL_HOME=str(self.home))
         first = self.home / 'source-bin'
         subprocess.run([str(repo / 'scripts/install'), '--from', str(self.source), '--bin-dir', str(first)],
@@ -727,26 +981,38 @@ class Installer(unittest.TestCase):
         subprocess.run([str(package / 'install.sh'), '--bin-dir', str(second)],
                        env=env, check=True, stdout=subprocess.PIPE)
         for destination in [first, second]:
-            self.assertTrue((destination / 'st3').is_symlink())
+            self.assertTrue((destination / 'fractal').is_symlink())
+            self.assertEqual(os.readlink(destination / 'fractal'), str(self.source / 'fractal')
+                             if destination == first else str(package / 'bin/fractal'))
+            self.assertEqual(os.readlink(destination / 'st3'), 'fractal')
             self.assertFalse((destination / 'stui').exists())
             self.assertFalse((destination / 'stui').is_symlink())
-            self.assertEqual(os.readlink(destination / 'st'), 'st3')
+            self.assertEqual(os.readlink(destination / 'st'), 'fractal')
             self.assertFalse((destination / 'st3-migrate').is_symlink())
+        # A second source install must accept its own instance app link, not
+        # mistake it for the archive wrapper's shared-app --app override.
+        instance_bin = self.home / 'source-instance-bin'
+        command = [str(repo / 'scripts/install'), '--instance', 'upgrade',
+                   '--from', str(self.source), '--bin-dir', str(instance_bin)]
+        for _ in range(2):
+            subprocess.run(command, env=env, check=True, stdout=subprocess.PIPE)
+        self.assertEqual(os.readlink(instance_bin / 'fractal'),
+                         str(self.home / '.st-instance/upgrade/app/SmallTalk.app/Contents/MacOS/fractal'))
 
     @unittest.skipUnless(sys.platform == 'darwin', 'native macOS signing and atomic directory exchange')
     def test_native_ad_hoc_install_upgrade_and_rollback(self):
-        shutil.copyfile('/usr/bin/true', self.built['st3'])
+        shutil.copyfile('/usr/bin/true', self.built['fractal'])
         app, _, _ = m.prepare(self.home, self.job, self.built)
         m.install(app, self.home, self.job)
-        first = m.sha(m.binaries(m.fixed(self.home))['st3'])
+        first = m.sha(m.binaries(m.fixed(self.home))['fractal'])
         second_job = self.home / 'native-second'; second_job.mkdir()
         had_app = m.backup(self.home, second_job)
-        shutil.copyfile('/bin/echo', self.built['st3'])
+        shutil.copyfile('/bin/echo', self.built['fractal'])
         app, _, _ = m.prepare(self.home, second_job, self.built)
         m.install(app, self.home, second_job)
-        self.assertNotEqual(m.sha(m.binaries(m.fixed(self.home))['st3']), first)
+        self.assertNotEqual(m.sha(m.binaries(m.fixed(self.home))['fractal']), first)
         m.restore(self.home, second_job, had_app)
-        self.assertEqual(m.sha(m.binaries(m.fixed(self.home))['st3']), first)
+        self.assertEqual(m.sha(m.binaries(m.fixed(self.home))['fractal']), first)
         m.verify(m.fixed(self.home))
 
 

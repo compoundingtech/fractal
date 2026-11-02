@@ -72,8 +72,8 @@ fn migration_restart_hint(legacy_toggle: bool, json_output: bool) -> &'static st
     match (legacy_toggle, json_output) {
         (true, true) => "Restart st3 replication-worker for this to take effect.",
         (true, false) => "Restart fractal replication-worker for this to take effect.",
-        (false, true) => "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.",
-        (false, false) => "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.",
+        (false, true) => "Start st3 replication-worker first, then st3 up --replication-worker-pid PID; legacy exchanges stay accepted until st fleet migrate --finish.",
+        (false, false) => "Start fractal replication-worker first, then fractal up --replication-worker-pid PID; legacy exchanges stay accepted until fractal fleet migrate --finish.",
     }
 }
 
@@ -124,7 +124,7 @@ fn read_code_without_echo() -> Result<String> {
     Ok(line.trim().to_owned())
 }
 
-const FABRIC_PAIRING_UNAVAILABLE: &str = "Fabric invitations need st-fabric-adapter installed and \
+const FABRIC_PAIRING_UNAVAILABLE: &str = "Fabric invitations need fractal-fabric-adapter installed and \
      Fabric running with --runtime-peers; use --via tailscale for a Tailscale-only invitation";
 
 /// A configured path that is not a file counts as no helper, so `auto` invitations
@@ -497,7 +497,7 @@ async fn bootstrap_fabric_invite(
     let output = child.wait_with_output().await?;
     anyhow::ensure!(
         output.status.success(),
-        "Fabric pairing failed; it needs st-fabric-adapter running on this machine and Fabric \
+        "Fabric pairing failed; it needs fractal-fabric-adapter running on this machine and Fabric \
          running with --runtime-peers"
     );
     #[derive(serde::Deserialize)]
@@ -541,6 +541,15 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
     }
     let client = Client::new(endpoint.clone());
     match command {
+        FleetCommand::Anchor { command: FleetAnchorCommand::Show } => {
+            let anchor = generated_client(endpoint, None)?.fleet_anchor().await?;
+            if json_output {
+                print_value(&anchor, true)
+            } else {
+                println!("{}", anchor.fleet_anchor);
+                Ok(())
+            }
+        }
         FleetCommand::Create(args) => {
             anyhow::ensure!(
                 fractal_daemon::config::FleetFile::load(&config.state_dir)?.is_none(),
@@ -835,8 +844,8 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 }
             } else if !json_output {
                 println!(
-                    "Start fractal up and fractal replication-worker to begin syncing; fractal fleet wait \
-                     waits for the first sync to end and checks it."
+                    "Start fractal replication-worker first, then fractal up --replication-worker-pid PID; \
+                     fractal fleet wait waits for the first sync to end and checks it."
                 );
             }
             if !json_output {
@@ -1713,8 +1722,8 @@ mod output_tests {
 
     #[test]
     fn migrate_anchor_and_join_without_services_preserve_json_stdout() {
-        assert_eq!(migration_restart_hint(false, true), "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.");
-        assert_eq!(migration_restart_hint(false, false), "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.");
+        assert_eq!(migration_restart_hint(false, true), "Start st3 replication-worker first, then st3 up --replication-worker-pid PID; legacy exchanges stay accepted until st fleet migrate --finish.");
+        assert_eq!(migration_restart_hint(false, false), "Start fractal replication-worker first, then fractal up --replication-worker-pid PID; legacy exchanges stay accepted until fractal fleet migrate --finish.");
     }
 }
 
