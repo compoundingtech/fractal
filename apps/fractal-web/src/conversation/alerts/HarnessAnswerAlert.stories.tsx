@@ -97,7 +97,7 @@ const interaction: NonNullable<Story['play']> = async ({ canvasElement, args }) 
   for (const radio of radios) await expect(radio).not.toBeChecked()
   const recommended = alert.getByRole('radio', { name: 'One seat first (recommended)' })
   await expect(recommended).toHaveAttribute('value', '1')
-  await expect(recommended).toHaveAccessibleDescription(`Start with the current seat, review its transcript, then expand the rollout. conversation_surface = "canary" seat = "${canvas.getByText(/^Pending omp ask · /).textContent!.replace('Pending omp ask · ', '')}"`)
+  await expect(recommended).toHaveAccessibleDescription(`Start with the current seat, review its transcript, then expand the rollout. conversation_surface = "canary"\nseat = "${canvas.getByText(/^Pending omp ask · /).textContent!.replace('Pending omp ask · ', '')}"`)
   await expect(alert.getByText('conversation_surface = "enabled" rollout_percent = 100', { exact: true })).toBeVisible()
   // Native radio interaction is keyboard-only; selecting one must clear the previous choice.
   radios[0]!.focus()
