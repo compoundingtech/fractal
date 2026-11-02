@@ -1,8 +1,0 @@
-#!/usr/bin/env python3
-# arn:lmig:smalltalk:2026-10-27-st-test-shim — invert after every supported base contains this bridge, then contract.
-import os
-from pathlib import Path
-import sys
-
-path = str(Path(__file__).resolve().with_name('st-test'))
-os.execv(sys.executable, [sys.executable, path, *sys.argv[1:]])
