@@ -3,6 +3,7 @@ import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import { useAtomValue } from '@effect/atom-react'
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
+import { DeferredSurfaceBoundary } from '../../../../packages/fractal-ui/src/assistant-ui/composition/DeferredSurfaceBoundary.tsx'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource } from '../data/react.tsx'
 import { agentDeclarationState, declarationSubject, missionDeclarationState } from '../declarations/model.ts'
@@ -22,11 +23,13 @@ export const DeclarationDialog = ({ subject, isOpen, onOpenChange }: {
   <ThemePortal>
     <Aria.ModalOverlay isDismissable {...(isOpen === undefined ? {} : { isOpen })} {...(onOpenChange === undefined ? {} : { onOpenChange })} {...stylex.props(styles.overlay)}>
       <Aria.Modal {...stylex.props(styles.modal)}>
+        <DeferredSurfaceBoundary fallback={<Aria.Dialog aria-label={subject} {...stylex.props(styles.dialog)}>{({ close }) => <><p role="alert">This declaration view could not load.</p><Aria.Button onPress={close} {...stylex.props(styles.button)}>Close declaration</Aria.Button></>}</Aria.Dialog>}>
         <Suspense fallback={<Aria.Dialog aria-label={subject} {...stylex.props(styles.dialog)}>{({ close }) => <Aria.Button onPress={close} {...stylex.props(styles.button)}>Close declaration</Aria.Button>}</Aria.Dialog>}>
         <Aria.Dialog data-testid="declaration-dialog" {...stylex.props(styles.dialog)}>
           {({ close }) => <DeclarationContents subject={subject} close={<Aria.Button aria-label="Close declaration" onPress={close} {...stylex.props(styles.button)}>Close</Aria.Button>} />}
         </Aria.Dialog>
         </Suspense>
+        </DeferredSurfaceBoundary>
       </Aria.Modal>
     </Aria.ModalOverlay>
   </ThemePortal>

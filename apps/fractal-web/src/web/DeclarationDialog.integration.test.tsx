@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { PublicationDefinition, decodeUnknownSync } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { within } from 'storybook/test'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, unavailable } from '../data/source.ts'
@@ -71,5 +72,28 @@ describe('declaration dialog', () => {
     await render('schedule/nightly', false)
     await render('schedule/nightly', true)
     expect(dialog()?.textContent).toContain('Only agents and missions have a declaration to show.')
+  })
+
+  it('contains a rejected declaration chunk inside a dismissable local dialog', async () => {
+    vi.resetModules()
+    vi.doMock('../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx', () => { throw new Error('Chunk unavailable') })
+    try {
+      // A fresh lazy identity is required to exercise rejection rather than the already-loaded panel.
+      const { DeclarationDialog: DeferredDeclarationDialog } = await import('./DeclarationDialog.tsx')
+      await act(async () => root.render(<><button type="button">Workspace remains available</button><DeferredDeclarationDialog subject="schedule/nightly" isOpen={false} onOpenChange={onOpenChange} /></>))
+      const workspace = within(host).getByRole('button', { name: 'Workspace remains available' })
+      await act(async () => root.render(<><button type="button">Workspace remains available</button><DeferredDeclarationDialog subject="schedule/nightly" isOpen onOpenChange={onOpenChange} /></>))
+      expect((await within(host).findByRole('alert')).textContent).toBe('This declaration view could not load.')
+      expect(host.contains(workspace)).toBe(true)
+      const close = within(host).getByRole('button', { name: 'Close declaration' })
+      await act(async () => close.click())
+      expect(onOpenChange).toHaveBeenCalledWith(false)
+      await act(async () => root.render(<><button type="button">Workspace remains available</button><DeferredDeclarationDialog subject="schedule/nightly" isOpen={false} onOpenChange={onOpenChange} /></>))
+      expect(within(host).getByRole('button', { name: 'Workspace remains available' })).toBe(workspace)
+      workspace.focus()
+      expect(document.activeElement).toBe(workspace)
+    } finally {
+      vi.doUnmock('../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx')
+    }
   })
 })

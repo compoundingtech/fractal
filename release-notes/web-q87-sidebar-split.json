@@ -4,7 +4,7 @@
   "replay": { "status": "none", "detail": "No graph or storage change." },
   "schema": { "status": "none", "detail": "No schema change." },
   "rules": { "status": "none", "detail": "No rule change." },
-  "compatibility": { "status": "none", "detail": "No API or wire change. Optional row actions and hover-card contents may wait for their chunk on first use; the roster remains interactive." },
+  "compatibility": { "status": "none", "detail": "No API or wire change. Optional row actions and hover-card contents may wait for their chunk on first use; the roster remains interactive. A failed optional overlay or declaration chunk shows a local failure without unmounting the workspace." },
   "downtime": { "status": "none", "detail": "Takes effect with the next web build; no daemon restart is required." },
   "manual": { "status": "none", "detail": "No operator step." },
   "recovery": { "status": "none", "detail": "Revert this commit and rebuild the web app to restore eager row overlays." }

@@ -1,7 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, DialogTrigger, MenuTrigger, VisuallyHidden } from 'react-aria-components'
+import { Button, Dialog, DialogTrigger, MenuTrigger, Popover, VisuallyHidden } from 'react-aria-components'
 import { Icon } from '../composition/Icons'
+import { DeferredSurfaceBoundary } from '../composition/DeferredSurfaceBoundary.tsx'
 import { ThemePortal } from '../taste/ThemePortal'
 import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import type { SidebarActions, SidebarAgentRow as Row } from './model'
@@ -13,7 +14,7 @@ const AgentRowMenu = React.lazy(() => import('./RowOverlays.tsx').then(module =>
 const AgentReportedDetails = React.lazy(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentReportedDetails })))
 const HoverCardContents = React.lazy(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentHoverCard })))
 export function AgentHoverCard(props: { readonly row: Row; readonly reportedStatusOnly?: boolean } & SidebarClock) {
-  return <React.Suspense fallback={null}><HoverCardContents {...props} /></React.Suspense>
+  return <DeferredSurfaceBoundary fallback={<span role="alert">This agent hover card could not load.</span>}><React.Suspense fallback={null}><HoverCardContents {...props} /></React.Suspense></DeferredSurfaceBoundary>
 }
 
 export interface AgentRowActionsProps extends SidebarClock {
@@ -45,16 +46,17 @@ export const AgentRowActions = (props: AgentRowActionsProps) => {
         if (active === button?.ownerDocument.body || active === props.anchorRef.current || active === props.anchorRef.current?.closest('[role="row"]')) button?.focus()
       })
     }}>{props.wrapDetailsTrigger === undefined ? trigger : props.wrapDetailsTrigger(trigger)}
-      {detailsOpen && <React.Suspense fallback={null}><AgentReportedDetails {...props} /></React.Suspense>}
+      {detailsOpen && <DeferredSurfaceBoundary fallback={<Popover triggerRef={props.menuTriggerRef} placement="bottom end" {...stylex.props(styles.failureSurface)}><Dialog aria-label={`Reported details for ${props.row.title}`}><p role="alert">These agent details could not load.</p><Button onPress={() => setDetailsOpen(false)}>Close</Button></Dialog></Popover>}><React.Suspense fallback={null}><AgentReportedDetails {...props} /></React.Suspense></DeferredSurfaceBoundary>}
     </DialogTrigger>
     <MenuTrigger isOpen={menuOpen} onOpenChange={open => { setMenuOpen(open); props.onMenuOpenChange?.(open) }}>
       <Button ref={props.menuTriggerRef} data-agent-menu="true" aria-label={`Actions for ${props.row.title}`} className={state => stylex.props(props.menuButtonStyle(state), touch && styles.menuNarrow).className ?? ''}><Icon name="chevron-right" /></Button>
-      {menuOpen && <React.Suspense fallback={null}><AgentRowMenu {...props} onDetailsPress={() => { props.onDetailsPress?.(); setDetailsOpen(true) }} /></React.Suspense>}
+      {menuOpen && <DeferredSurfaceBoundary fallback={<Popover placement="bottom end" {...stylex.props(styles.failureSurface)}><Dialog aria-label={`Actions for ${props.row.title}`}><p role="alert">These agent actions could not load.</p><Button onPress={() => { setMenuOpen(false); props.onMenuOpenChange?.(false) }}>Close</Button></Dialog></Popover>}><React.Suspense fallback={null}><AgentRowMenu {...props} onDetailsPress={() => { props.onDetailsPress?.(); setDetailsOpen(true) }} /></React.Suspense></DeferredSurfaceBoundary>}
     </MenuTrigger>
   </ThemePortal>
 }
 
 const styles = stylex.create({
+  failureSurface: { backgroundColor: surface.raised, color: ink.fg, padding: s.lg, borderRadius: r.md, maxWidth: 'calc(100vw - 32px)' },
   menuNarrow: { gridColumn: '-2 / -1', gridRow: '1 / -1', width: g.touchTarget, height: g.touchTarget, opacity: 1 },
   detailsTouchTarget: { width: g.touchTarget, height: g.touchTarget },
   iconButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, minHeight: g.controlSm, borderWidth: 0, padding: s.zero, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, cursor: 'pointer', ':hover': { color: ink.fg, backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
