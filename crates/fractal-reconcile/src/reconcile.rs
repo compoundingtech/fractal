@@ -41788,8 +41788,13 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
     }
 
     /// The observer `repo` on acme/garden, a subscription so it polls, and its revision.
-    fn one_look_fixture(source: &str) -> (Arc<Store>, String) {
-        let store = Arc::new(Store::open_memory("node").unwrap());
+    /// The store for this file's multi-threaded look tests. A look task writes while the test
+    /// reads, and a shared-cache memory store fails one of them at once with SQLITE_LOCKED, which
+    /// no busy timeout waits out (#4720), so it is file-backed. The tempdir comes first so a caller's
+    /// binding drops it after the store.
+    fn one_look_fixture(source: &str) -> (tempfile::TempDir, Arc<Store>, String) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
         apply_source(
             &store,
             r#"version 2
@@ -41803,7 +41808,24 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
             source,
         );
         let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
-        (store, revision)
+        (root, store, revision)
+    }
+
+    #[test]
+    fn the_look_fixture_store_takes_a_write_while_a_reader_holds_a_snapshot() {
+        let (_root, store, _) = one_look_fixture("reader-writer");
+        store.read_snapshot(|_| {
+            store.append_claim(&ClaimInput {
+                subject: "agent/reader-writer".into(),
+                kind: "runtime.observed".into(),
+                actor: Some("agent/reader-writer".into()),
+                fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })?;
+            Ok(())
+        }).unwrap();
     }
 
     /// One look's listing: issue 1 titled `title`, and the cursor `cursor`.
@@ -41865,7 +41887,7 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
                 None
             }
         }
-        let (store, revision) = one_look_fixture("one-look");
+        let (_root, store, revision) = one_look_fixture("one-look");
         let asked = Arc::new(Mutex::new(Vec::new()));
         let (reached_tx, reached) = std::sync::mpsc::channel();
         let (release, release_rx) = std::sync::mpsc::channel();
@@ -41918,7 +41940,7 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
                 }
             }
         }
-        let (store, revision) = one_look_fixture("one-look-limit");
+        let (_root, store, revision) = one_look_fixture("one-look-limit");
         let asked = Arc::new(Mutex::new(Vec::new()));
         let mut reconciler = Reconciler::new(
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),

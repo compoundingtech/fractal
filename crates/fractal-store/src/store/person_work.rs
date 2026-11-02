@@ -230,6 +230,7 @@ const STEP_QUERY: &str = "SELECT subject, run_id, step_path, definition_hash, st
  FROM step_runs WHERE subject=?1";
 
 pub fn step(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
+    smallclaims::touched::note_read(|| subject.to_owned());
     memoized(connection, |memo| &mut memo.steps, subject.to_owned(), || Ok(connection
         .query_row(/* sqlite-large-value: allow-for-now lv-he9da72925547 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ STEP_QUERY, [subject], step_run_from_row)
         .optional()?))
@@ -242,14 +243,20 @@ pub fn step(connection: &Connection, subject: &str) -> Result<Option<StepRunView
 #[derive(Default)]
 struct CutMemo {
     connection: Option<usize>,
-    liveness: HashMap<(String, Option<String>, bool), std::result::Result<(), String>>,
-    declarations: HashMap<String, bool>,
-    headers: HashMap<String, Option<MissionRunView>>,
-    steps: HashMap<String, Option<StepRunView>>,
-    desired: HashMap<String, Option<DesiredRow>>,
-    claims: HashMap<String, Option<ClaimRecord>>,
-    extensions: HashMap<(String, u32, u128), u64>,
+    liveness: HashMap<LivenessKey, Remembered<std::result::Result<(), String>>>,
+    declarations: HashMap<String, Remembered<bool>>,
+    headers: HashMap<String, Remembered<Option<MissionRunView>>>,
+    steps: HashMap<String, Remembered<Option<StepRunView>>>,
+    desired: HashMap<String, Remembered<Option<DesiredRow>>>,
+    claims: HashMap<String, Remembered<Option<ClaimRecord>>>,
+    extensions: HashMap<(String, u32, u128), Remembered<u64>>,
 }
+
+/// A run, the generation it must be on, and whether a failure keeps it live.
+type LivenessKey = (String, Option<String>, bool);
+
+/// An answer, and the keys reading it noted (`smallclaims::touched`).
+type Remembered<V> = (V, BTreeSet<String>);
 
 thread_local! {
     static CUT_MEMO: std::cell::RefCell<Option<CutMemo>> = const { std::cell::RefCell::new(None) };
@@ -279,7 +286,7 @@ pub fn with_cut_memo<T>(read: impl FnOnce() -> T) -> T {
 
 fn memoized<K: Eq + std::hash::Hash, V: Clone>(
     connection: &Connection,
-    table: fn(&mut CutMemo) -> &mut HashMap<K, V>,
+    table: fn(&mut CutMemo) -> &mut HashMap<K, Remembered<V>>,
     key: K,
     read: impl FnOnce() -> Result<V>,
 ) -> Result<V> {
@@ -289,13 +296,19 @@ fn memoized<K: Eq + std::hash::Hash, V: Clone>(
     let found = CUT_MEMO.with(|memo| {
         in_cut(&mut memo.borrow_mut(), at).and_then(|memo| table(memo).get(&key).cloned())
     });
-    if let Some(found) = found {
+    // A remembered answer notes again what reading it noted, so a caller that records its
+    // reads sees the same keys either way.
+    if let Some((found, reads)) = found {
+        for read in reads {
+            smallclaims::touched::note_read(|| read);
+        }
         return Ok(found);
     }
-    let value = read()?;
+    let (value, reads) = smallclaims::touched::record(read);
+    let value = value?;
     CUT_MEMO.with(|memo| {
         if let Some(memo) = in_cut(&mut memo.borrow_mut(), at) {
-            table(memo).insert(key, value.clone());
+            table(memo).insert(key, (value.clone(), reads));
         }
     });
     Ok(value)
@@ -322,18 +335,22 @@ pub fn step_timeout_extension_in_cut(
     attempt: u32,
     as_of: u128,
 ) -> Result<u64> {
+    smallclaims::touched::note_read(|| subject.to_owned());
     memoized(connection, |memo| &mut memo.extensions, (subject.to_owned(), attempt, as_of), || {
         Ok(step_timeout_extension_at(connection, subject, attempt, as_of)?)
     })
 }
 
 fn run_header(connection: &Connection, run: &str) -> Result<Option<MissionRunView>> {
+    smallclaims::touched::note_read(|| format!("mission-run/{run}"));
+    smallclaims::touched::note_read(|| format!("generations:mission-run/{run}"));
     memoized(connection, |memo| &mut memo.headers, run.to_owned(), || {
         Ok(mission_run_header_tx(connection, run).optional()?)
     })
 }
 
 fn desired_row(connection: &Connection, subject: &str) -> Result<Option<DesiredRow>> {
+    smallclaims::touched::note_read(|| subject.to_owned());
     memoized(connection, |memo| &mut memo.desired, subject.to_owned(), || current_desired_row(connection, subject))
 }
 
