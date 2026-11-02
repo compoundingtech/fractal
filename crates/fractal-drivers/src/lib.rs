@@ -34,7 +34,6 @@ pub(crate) fn canonical_tempdir() -> tempfile::TempDir {
 pub mod account;
 pub mod access;
 pub mod catalog;
-pub mod catalog_archive;
 mod catalog_generation;
 pub mod catalog_lock;
 pub mod catalog_transaction;
@@ -50,7 +49,6 @@ pub mod context;
 pub mod contracts;
 pub mod delivery_ledger;
 pub mod ding;
-pub mod direct_actor;
 mod directory;
 pub mod driver;
 pub mod driver_diagnostic;
