@@ -116,7 +116,7 @@ function InlineCode({ children }: React.ComponentProps<'code'>) {
 }
 
 /** Only token coloring is deferred; parsed prose and the code box stay ready for the first frame. */
-let grammar: Promise<typeof highlightSource> | undefined
+let grammar: Promise<typeof highlightSource | undefined> | undefined
 const languages: Readonly<Record<string, true>> = { typescript: true, tsx: true, javascript: true, json: true, bash: true, diff: true, rust: true, nix: true, python: true, yaml: true, markdown: true, css: true }
 const languageAliases: Readonly<Record<string, string>> = {
   ts: 'typescript', js: 'javascript', sh: 'bash', shell: 'bash', shellscript: 'bash',
@@ -144,16 +144,21 @@ function SyntaxToken({ node }: { node: SyntaxNode }): React.ReactNode {
   )}>{node.children.map((child, index) => <SyntaxToken key={index} node={child} />)}</span>
 }
 
-function SyntaxTokens({ code, language }: { code: string; language: string }) {
-  const highlight = React.use(grammar ??= import('./syntaxGrammar').then(module => module.highlightSource))
-  const nodes = React.useMemo(() => highlight(code, language), [highlight, code, language])
-  return <>{nodes.map((node, index) => <SyntaxToken key={index} node={node} />)}</>
+function SyntaxTokens({ code, language, pending }: { code: string; language: string; pending: Promise<typeof highlightSource | undefined> }) {
+  const highlight = React.use(pending)
+  const nodes = React.useMemo(() => highlight?.(code, language), [highlight, code, language])
+  return nodes === undefined ? code : <>{nodes.map((node, index) => <SyntaxToken key={index} node={node} />)}</>
 }
 
 export function HighlightedSource({ code, language }: { code: string; language: string }) {
   const normalized = language.toLowerCase()
   const canonical = Object.hasOwn(languageAliases, normalized) ? languageAliases[normalized]! : normalized
-  return Object.hasOwn(languages, canonical) ? <React.Suspense fallback={code}><SyntaxTokens code={code} language={canonical} /></React.Suspense> : code
+  // Keep this render's fulfilled plain-text result stable; only a later host render retries.
+  const pending = Object.hasOwn(languages, canonical) ? grammar ??= import('./syntaxGrammar').then(
+    module => module.highlightSource,
+    () => { grammar = undefined; return undefined },
+  ) : undefined
+  return pending === undefined ? code : <React.Suspense fallback={code}><SyntaxTokens code={code} language={canonical} pending={pending} /></React.Suspense>
 }
 
 const CodeBlock = React.memo(function CodeBlock({ code, language }: { code: string; language: string }) {
