@@ -1519,7 +1519,8 @@ def tree_users(directory, proc='/proc', execution_only=False):
 
 
 def sibling_sizing(pid, proc='/proc'):
-    """Whether `pid` is another st-test's du_gb: `du -sk [--] PATH` whose parent's argv runs an st-test. It names a pool tree only to
+    """Whether `pid` is another st-test's du_gb: `du -sk [--] PATH` whose parent's argv runs an st-test (RUNNER_NAMES: fractal-test too, for
+    when the shim inversion makes it the implementation). It names a pool tree only to
     size it (evict_to_cap, the closing target line), for seconds, and refusing a tree for it failed a run that had waited an hour for
     one (2026-11-02)."""
     try:
@@ -1531,9 +1532,10 @@ def sibling_sizing(pid, proc='/proc'):
         return False
     argv = [arg for arg in argv if arg]
     sizing = len(argv) in (3, 4) and os.path.basename(argv[0]) == 'du' and argv[1] == '-sk' and argv[2:-1] in ([], ['--'])
-    return sizing and any(os.path.basename(arg) == 'st-test' for arg in parent_argv[:2])
+    return sizing and any(os.path.basename(arg) in RUNNER_NAMES for arg in parent_argv[:2])
 
 
+RUNNER_NAMES = ('st-test', 'fractal-test')  # what a running runner's file is called: the base copy is st-test, the shim's sibling may become fractal-test
 ARGV_SETTLE = 30.0  # seconds an argv-only reference may take to go away before the tree is refused for it
 
 
