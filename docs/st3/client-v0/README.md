@@ -1374,7 +1374,15 @@ Only a ready, unclaimed step in the live generation qualifies, acknowledged or n
 assignment to the handing agent and advances readiness without changing completion, acceptance,
 evidence, progress, answers or gates. The resolved note no longer requires acknowledgment.
 The actor, step, note, disposition and reason bind the key; retries recover the original
-disposition record even after subsequent work. This store transition has no client operation.
+disposition record even after subsequent work. Client actions `work.withdraw-handoff`
+(`control.work`, handing agent only) and `work.decline-handoff` (`control.attention`, assigned
+person only, not a delegated assistant) take `{target_id,message,reason}` and the normal work
+fence. `message` names the exact handoff note; `reason` is nonblank and at most 2048 UTF-8 bytes.
+Errors are typed: `stale-handoff` (409) refuses an old/resolved note or ineligible return;
+`stale-fence` (409) refuses changed work fences; `validation-failed` (422) refuses invalid
+parameters/reasons; `forbidden` (403) refuses actor/session roles; `idempotency-conflict` (409)
+refuses conflicting key reuse. Neither action completes work, acknowledges a note or answers asks.
+The legacy withdrawal adapter also reports `invalid-handoff-return` (422) for a missing retry key.
 
 Asks, attention actions, message sends and held effects are not pinned by this local-response
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.

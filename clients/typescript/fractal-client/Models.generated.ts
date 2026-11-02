@@ -43,6 +43,8 @@ export type ActionCommon = {
   | "work.ask"
   | "work.done"
   | "work.cancel-ask"
+  | "work.withdraw-handoff"
+  | "work.decline-handoff"
   | "work.claim"
   | "work.renew"
   | "work.progress"
@@ -1727,6 +1729,8 @@ export type ErrorCode = (
   | "issuer-required"
   | "suspend-authored-session-selection"
   | "stale-fence"
+  | "stale-handoff"
+  | "invalid-handoff-return"
   | "cursor-gap"
   | "page-cursor-expired"
   | "agent-roster-not-ready"
@@ -1856,6 +1860,12 @@ export type GlassTab = {
 };
 
 export type GoldenResourceSet = Array<Resource>;
+
+export type HandoffReturnParameters = {
+  message: Id;
+  reason: string;
+  target_id: Id;
+};
 
 export type HarnessAnswerInput = {
   positions: Array<number>;
@@ -4270,6 +4280,7 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.cancel-ask'; parameters: PersonStepParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.claim'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.complete'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.decline-handoff'; parameters: HandoffReturnParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.done'; parameters: PersonStepParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.fail'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.progress'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
@@ -4285,6 +4296,7 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.retry'; parameters: {
   reason: string;
   target_id: Id;
-}; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> });
+}; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.withdraw-handoff'; parameters: HandoffReturnParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> });
 export type ActionOf<T extends ActionRequest['type']> = Extract<ActionRequest, { type: T }>;
 export type EnvelopeOf<T> = Omit<Envelope, 'value'> & { value: T };

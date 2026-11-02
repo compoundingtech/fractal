@@ -354,6 +354,8 @@ const ACTIONS: &[&str] = &[
     "prompt.respond",
     "work.done",
     "work.cancel-ask",
+    "work.withdraw-handoff",
+    "work.decline-handoff",
     "work.claim",
     "work.renew",
     "work.progress",
@@ -413,6 +415,8 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "work.ask",
     "work.done",
     "work.cancel-ask",
+    "work.withdraw-handoff",
+    "work.decline-handoff",
     "work.claim",
     "work.renew",
     "work.progress",
@@ -4360,7 +4364,7 @@ pub fn action_scope(action: &str) -> Option<&'static str> {
     ) {
         return Some("control.runtimes");
     }
-    if matches!(action, "work.done" | "custom.reply" | "prompt.respond") {
+    if matches!(action, "work.done" | "work.decline-handoff" | "custom.reply" | "prompt.respond") {
         return Some("control.attention");
     }
     Some(match action.split_once('.')?.0 {
