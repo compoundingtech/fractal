@@ -68,7 +68,8 @@ or to the path in ST_TEST_RUNS (`off` records nothing); scripts/fractal-test-rep
 (docs/st3/gate-evidence.md). Recording never changes the result: a file that cannot be written is one line on stderr.
 
 Exit 0 when every selected check passed and was signed (with --out, exported but not verified); 1 when a check failed, timed out or
-could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered. A tree that edits
+could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument, or a branch whose merge with the base fails CI's
+upgrade-impact check, a missing release-notes/NAME.json); 3 from --status when the tree is not covered or that check fails. A tree that edits
 a check's lane is signed like any other (the note carries the edited lane's digest). The run exits 4 when nothing failed but a check was not signed: only
 against a base whose evidence-wrap still refuses a lane edit (before 2026-10-26) is that check left "not signed" for CI, or rust-tests left a crate unsigned
 because one of its tests passed only on a retry (CI's own per-crate notes refuse such a crate too, so CI runs it; linux-gate still signs and records them
@@ -2740,9 +2741,11 @@ def run_main(argv, cleanup):
             if not args.check:
                 # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
                 rows += [(name, True, 'CI runs it', 'no local command') for name in policy_checks(args.base) if name not in LOCAL]
-                impact = release_impact(args.base)  # CI runs it on every pull request, outside the skip policy: asked here as a run asks it
+                # CI runs it on every pull request, outside the skip policy: asked here as a run asks it. "not covered", as the pre-push
+                # hook (scripts/evidence-prepush) reads a row it refuses: a run would stop on it, so a push it lets go would fail in CI.
+                impact = release_impact(args.base)
                 if impact is not None:
-                    rows.append((IMPACT_CHECK, not impact, 'NO RELEASE NOTE' if impact else 'checked', impact or 'the merge with the base has its release note'))
+                    rows.append((IMPACT_CHECK, not impact, 'not covered' if impact else 'checked', impact or 'the merge with the base has its release note'))
         for name, is_covered, label, why in rows:
             print(f'  {name:<24} {label:<22} {why}')
         return 0 if all(row[1] for row in rows) else 3

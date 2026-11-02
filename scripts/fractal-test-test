@@ -701,7 +701,7 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.statements(), [])
         code, out, err = self.run_st_test('--status')
         self.assertEqual(code, 3, out + err)
-        self.assertRegex(out, r'upgrade-impact +NO RELEASE NOTE +the upgrade-impact check')
+        self.assertRegex(out, r'upgrade-impact +not covered +the upgrade-impact check')
         (self.work / 'release-notes').mkdir()
         self.commit('release-notes/b.json', '{}\n')
         code, out, err = self.run_st_test('--status')
