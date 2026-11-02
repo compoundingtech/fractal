@@ -1152,7 +1152,7 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(claim) = person_work::claim_in_cut(&connection, &failure.request, || self.claim_by_id(&failure.request))? else {
+        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || self.claim_by_id(&failure.request))? else {
             return Ok(None);
         };
         smallclaims::touched::note_read(|| claim.subject.clone());
@@ -1165,12 +1165,12 @@ impl Store {
         let [run, generation, result, rest @ ..] = failure.targets.as_slice() else {
             return Ok(None);
         };
-        if !person_work::run_live(&connection, run, Some(generation), false)? {
+        if !person_work::run_live(connection, run, Some(generation), false)? {
             return Ok(None);
         }
         let step = rest.first().cloned();
         if let Some(step) = &step {
-            let Some(view) = person_work::step(&connection, step)? else {
+            let Some(view) = person_work::step(connection, step)? else {
                 return Ok(None);
             };
             if matches!(view.status.as_str(), "completed" | "failed" | "cancelled") {
@@ -1276,7 +1276,7 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(claim) = person_work::claim_in_cut(&connection, &failure.request, || self.claim_by_id(&failure.request))? else {
+        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || self.claim_by_id(&failure.request))? else {
             return Ok(None);
         };
         smallclaims::touched::note_read(|| claim.subject.clone());
@@ -1300,7 +1300,7 @@ impl Store {
                     params![source, MISSING_AGENT_CONDITION], |row| row.get(0),
                 ).optional()?;
                 if latest.as_deref() != Some(claim.id.as_str())
-                    || !person_work::run_live(&connection, source, None, true)?
+                    || !person_work::run_live(connection, source, None, true)?
                 {
                     return Ok(None);
                 }
@@ -1335,17 +1335,17 @@ impl Store {
             if cleanup_fault {
                 smallclaims::touched::note_due(failure.requested_at_unix_ms.saturating_add(FINAL_STEP_FAULT_MS));
             }
-            if !cleanup_fault && !person_work::run_live(&connection, source, None, true)? {
+            if !cleanup_fault && !person_work::run_live(connection, source, None, true)? {
                 return Ok(None);
             }
         } else if source.starts_with("step-run/") {
             // A timeout fault holds while its attempt is still running past the same budget:
             // an extension, a completion, a failure or a release ends it.
-            let Some(step) = person_work::step(&connection, source)? else {
+            let Some(step) = person_work::step(connection, source)? else {
                 return Ok(None);
             };
             let extension =
-                person_work::step_timeout_extension_in_cut(&connection, source, step.attempt, as_of)?;
+                person_work::step_timeout_extension_in_cut(connection, source, step.attempt, as_of)?;
             if !matches!(step.status.as_str(), "claimed" | "working" | "ready")
                 || claim.body["fields"]["episode"].as_str()
                     != Some(step_timeout_episode(source, step.attempt, extension).as_str())
@@ -1364,7 +1364,7 @@ impl Store {
                 return Ok(None);
             }
         } else if !source.starts_with("daemon/")
-            && !person_work::declaration_live(&connection, source)?
+            && !person_work::declaration_live(connection, source)?
         {
             return Ok(None);
         }

@@ -243,7 +243,7 @@ pub fn step(connection: &Connection, subject: &str) -> Result<Option<StepRunView
 #[derive(Default)]
 struct CutMemo {
     connection: Option<usize>,
-    liveness: HashMap<(String, Option<String>, bool), Remembered<std::result::Result<(), String>>>,
+    liveness: HashMap<LivenessKey, Remembered<std::result::Result<(), String>>>,
     declarations: HashMap<String, Remembered<bool>>,
     headers: HashMap<String, Remembered<Option<MissionRunView>>>,
     steps: HashMap<String, Remembered<Option<StepRunView>>>,
@@ -251,6 +251,9 @@ struct CutMemo {
     claims: HashMap<String, Remembered<Option<ClaimRecord>>>,
     extensions: HashMap<(String, u32, u128), Remembered<u64>>,
 }
+
+/// A run, the generation it must be on, and whether a failure keeps it live.
+type LivenessKey = (String, Option<String>, bool);
 
 /// An answer, and the keys reading it noted (`smallclaims::touched`).
 type Remembered<V> = (V, BTreeSet<String>);

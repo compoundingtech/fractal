@@ -137,7 +137,7 @@ impl Store {
         if FAULT_CACHE_PARITY.with(std::cell::Cell::get) {
             let expected = self.read_failure_faults(&failures, as_of)?;
             assert_eq!(
-                serde_json::to_value(&(&operational, &gates))?,
+                serde_json::to_value((&operational, &gates))?,
                 serde_json::to_value(&expected)?,
                 "the fault cache answered differently from a full reading at {as_of}",
             );

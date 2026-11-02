@@ -845,7 +845,7 @@ fn the_cache_rebuilds_every_five_minutes_then_every_half_hour_after_a_quiet_day(
     assert_eq!(reads(rebuilt + 25 * MINUTE), 1, "no rebuild within half an hour after a quiet day");
     // A change the feed cannot see: only a rebuild finds it, as a correction.
     store.connection.write().execute(
-        "UPDATE mission_runs SET status='cancelled', phase='terminal' WHERE id=?1", [&run.id],
+        /* sqlite-large-value: allow-for-now lv-h37a2a6cf390b owner=fractal_missions::store::fault_history_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='cancelled', phase='terminal' WHERE id=?1", [&run.id],
     ).unwrap();
     assert_eq!(reads(rebuilt + 29 * MINUTE), 1, "the cache still answers from before the change");
     let at = rebuilt + 30 * MINUTE;
