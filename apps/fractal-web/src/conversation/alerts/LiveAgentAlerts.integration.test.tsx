@@ -86,6 +86,37 @@ it('groups simultaneous native questions without creating duplicate navigation l
   container.remove()
 })
 
+it('keeps selections and tab markers for prototype-shaped native question ids', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  data.attention = []
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const ids = ['constructor', 'toString', '__proto__']
+  const call = {
+    _tag: 'ToolCall', id: 'item/prototype-ids', callId: 'prototype-ids', name: 'ask', status: 'running', callSeen: true,
+    input: { questions: ids.map(id => ({ id, question: `${id}?`, options: [{ label: 'Choose this' }] })) },
+  }
+  await act(async () => root.render(<LiveAgentAlerts agentRef={seat} items={[call]} />))
+  const tabs = [...container.querySelectorAll<HTMLElement>('[role="tab"]')]
+  expect(tabs).toHaveLength(ids.length)
+  for (const [index, id] of ids.entries()) {
+    const tab = tabs[index]!
+    expect(tab.getAttribute('aria-label')).toBe(`${id}?`)
+    expect(tab.textContent).not.toContain('✓')
+    await act(async () => tab.click())
+    const input = container.querySelector<HTMLInputElement>('input[type="radio"]')!
+    expect(input.checked).toBe(false)
+    await act(async () => input.click())
+    expect(input.checked).toBe(true)
+    expect(tab.textContent).toContain('✓')
+  }
+  await act(async () => tabs[0]!.click())
+  expect(container.querySelector<HTMLInputElement>('input[type="radio"]')?.checked).toBe(true)
+  await act(async () => root.unmount())
+  container.remove()
+})
+
 it('shows native OMP asks without attention, opens the terminal and clears the draft on native settlement', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   data.attention = []

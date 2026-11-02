@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Store native question selections in a Map so prototype-shaped identifiers cannot break question rendering or tab markers.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "none", "detail": "Native question identifiers including constructor, toString and __proto__ remain ordinary keys. Selections remain local and are not sent." },
+  "downtime": { "status": "none", "detail": "No downtime required." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Revert this presentation-state fix if necessary; no stored answers or backend delivery state change." }
+}

@@ -113,11 +113,11 @@ export const HarnessAnswerAlert = ({
 }): React.ReactNode => {
   const base = React.useId()
   const noteId = `${base}-note`
-  const [selections, setSelections] = React.useState<Readonly<Record<string, readonly number[]>>>({})
+  const [selections, setSelections] = React.useState<ReadonlyMap<string, readonly number[]>>(() => new Map())
   const [tab, setTab] = React.useState<string | undefined>(ask.questions[0]?.id)
   const fields = ask.questions.map((each) => (
-    <Question key={each.id} question={each} name={`${base}-${each.id}`} picked={selections[each.id] ?? []}
-      onPick={(positions) => setSelections((previous) => ({ ...previous, [each.id]: positions }))} />
+    <Question key={each.id} question={each} name={`${base}-${each.id}`} picked={selections.get(each.id) ?? []}
+      onPick={(positions) => setSelections((previous) => new Map(previous).set(each.id, positions))} />
   ))
   return (
     <section role="group" aria-label={ask.title} {...stylex.props(styles.alert)}>
@@ -127,7 +127,7 @@ export const HarnessAnswerAlert = ({
           <Aria.TabList aria-label="Questions" {...stylex.props(styles.tabList)}>
             {ask.questions.map((each) => (
               <Aria.Tab key={each.id} id={each.id} aria-label={each.title} {...stylex.props(styles.tab)}>
-                <span {...stylex.props(styles.tabLabel)}>{each.title}{(selections[each.id]?.length ?? 0) > 0 ? ' ✓' : ''}</span>
+                <span {...stylex.props(styles.tabLabel)}>{each.title}{(selections.get(each.id)?.length ?? 0) > 0 ? ' ✓' : ''}</span>
               </Aria.Tab>
             ))}
           </Aria.TabList>
