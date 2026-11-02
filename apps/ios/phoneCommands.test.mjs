@@ -28,9 +28,10 @@ const flush = async () => { for (let n = 0; n < 10; n++) await Promise.resolve()
 function setup() {
   state = router.getInitialState(config); ready = true;
   const gate = new ForegroundGate('active'), calls = [], acted = new Set();
-  let online = true, deny = false, loseReport = false;
+  let online = true, deny = false, loseReport = false, backgroundOnFence = false;
   const client = new FractalClient({ baseUrl: 'https://phone.test', fetchImpl: async (url, init) => {
     const body = init.body ? JSON.parse(init.body) : undefined; calls.push({ url, body });
+    if (url.endsWith('/capabilities') && backgroundOnFence) gate.update('background');
     if (url.endsWith('/device-results') && loseReport) { loseReport = false; throw new TypeError('Network request failed'); }
     if (url.endsWith('/actions') && deny) return Response.json({ api_version: API_VERSION, error_version: 'st3.client.error.v0', code: 'scope-denied', message: 'Denied', retryable: false, details: {} }, { status: 403 });
     return Response.json({ api_version: API_VERSION, snapshot, value: url.endsWith('/capabilities') ? { capabilities: [], session_actor: 'client/phone' } : {} });
@@ -40,10 +41,10 @@ function setup() {
     foreground: () => gate.active, online: () => online,
     inspect: () => inspectPhone({ connection: { status: online ? 'online' : 'offline', route: 'HTTPS' }, foreground: gate.active, session_actor: 'client/phone', windows: { attention: 1, missions: 0, agents: 0 } }),
     navigate: navigatePhone,
-    markRead: id => readPhoneMessage(id, attention, async item => { await markMessageRead(client, item, acted, () => 'action/read'); return true; }),
+    markRead: (id, allowed) => readPhoneMessage(id, attention, async item => { await markMessageRead(client, item, acted, () => 'action/read', allowed); return true; }),
   };
   const executor = new PhoneCommands(client, () => bindings);
-  return { gate, calls, acted, executor, deny: () => { deny = true; }, offline: () => { online = false; }, loseReport: () => { loseReport = true; }, results: () => calls.filter(call => call.url.endsWith('/device-results')).map(call => call.body) };
+  return { gate, calls, acted, executor, backgroundOnFence: () => { backgroundOnFence = true; }, deny: () => { deny = true; }, offline: () => { online = false; }, loseReport: () => { loseReport = true; }, results: () => calls.filter(call => call.url.endsWith('/device-results')).map(call => call.body) };
 }
 
 test('probe gates subscription, frames dispatch once, reconnect reprobes, background closes the socket', async () => {
@@ -104,4 +105,11 @@ test('a lost result retries the result POST, never the write', async () => {
   await h.executor.receive([command('read', 'phone.message.read', { attention_id: 'attention/message' })], snapshot);
   assert.equal(h.results().length, 2); assert.equal(h.calls.filter(call => call.url.endsWith('/actions')).length, 1);
   assert.deepEqual(h.results()[0], h.results()[1]);
+});
+
+test('backgrounding during the real fresh fence prevents the subsequent write and result report', async () => {
+  const h = setup(); h.backgroundOnFence();
+  await h.executor.receive([command('background-fence', 'phone.message.read', { attention_id: 'attention/message' })], snapshot);
+  assert.equal(h.calls.filter(call => call.url.endsWith('/actions')).length, 0);
+  assert.equal(h.results().length, 0);
 });

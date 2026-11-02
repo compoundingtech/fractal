@@ -7,7 +7,7 @@ export type PhoneBindings = {
   online(): boolean;
   inspect(): unknown;
   navigate(args: PhoneNavigateArgs): Promise<unknown>;
-  markRead(id: string): Promise<boolean>;
+  markRead(id: string, allowed: () => boolean): Promise<boolean>;
 };
 
 /** One executor per paired client, surviving socket reconnects. Deadlines use daemon time plus
@@ -40,7 +40,7 @@ export class PhoneCommands {
         case 'phone.inspect': report.result = bindings.inspect(); break;
         case 'phone.navigate': report.result = await bindings.navigate(command.args); break;
         case 'phone.message.read':
-          if (!await bindings.markRead(command.args.attention_id)) report = { ...report, outcome: 'refused', error_code: 'attention-unavailable' };
+          if (!await bindings.markRead(command.args.attention_id, () => available() && this.bindings().foreground() && this.bindings().online())) report = { ...report, outcome: 'refused', error_code: 'attention-unavailable' };
           break;
       }
     } catch (error) {

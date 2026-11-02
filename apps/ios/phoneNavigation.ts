@@ -10,7 +10,8 @@ export const inspectPhone = (state: { connection: { status: string; route: strin
 
 /** Dispatch into the focused tab's real stack (the root ref itself names tabs, not screens). */
 export const navigatePhone = async (args: PhoneNavigateArgs): Promise<{ route: string }> => {
-  if (!navigationRef.isReady()) throw new Error('Navigation is not ready');
+  const root = navigationRef.getRootState();
+  if (!navigationRef.isReady() || !root) throw new Error('Navigation is not ready');
   const params = 'params' in args ? args.params : undefined;
   const { promise, resolve, reject } = Promise.withResolvers<{ route: string }>();
   const reached = () => {
@@ -21,7 +22,6 @@ export const navigatePhone = async (args: PhoneNavigateArgs): Promise<{ route: s
   };
   const stop = navigationRef.addListener('state', () => { if (reached()) { clearTimeout(timer); stop(); } });
   const timer = setTimeout(() => { stop(); reject(new Error('Navigation did not reach the requested screen')); }, 1000);
-  const root = navigationRef.getRootState();
   const tab = args.screen === 'NowRoot' ? 'Now' : root.routes[root.index]?.name;
   navigationRef.dispatch(CommonActions.navigate({ name: tab, params: { screen: args.screen, ...(params ? { params } : {}), initial: false } }));
   if (reached()) { clearTimeout(timer); stop(); }

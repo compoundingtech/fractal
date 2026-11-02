@@ -479,7 +479,7 @@ function useAppStore(proof?: FabricProfile) {
       session_actor: caps?.session_actor, windows: { attention: data.attention.length, missions: data.missions.length, agents: data.agents.length },
     }),
     navigate: navigatePhone,
-    markRead: id => readPhoneMessage(id, data.attention, item => markRead(item, true)),
+    markRead: (id, allowed) => readPhoneMessage(id, data.attention, item => markRead(item, true, allowed)),
   };
   const commandBindings = useRef(bindings); commandBindings.current = bindings;
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
@@ -688,9 +688,9 @@ function useAppStore(proof?: FabricProfile) {
     setBusy(true);
     try { await retryTransient(8, action, retryable); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); if (reportFailure) throw e; return false; } finally { setBusy(false); }
   }
-  async function markRead(item: Attention, reportFailure = false): Promise<boolean> {
+  async function markRead(item: Attention, reportFailure = false, allowed?: () => boolean): Promise<boolean> {
     if (!client) return false;
-    return runAction(() => markMessageRead(client, item, acted.current, actionId), [], () => false, reportFailure);
+    return runAction(() => markMessageRead(client, item, acted.current, actionId, allowed), [], () => false, reportFailure);
   }
 
   /**
