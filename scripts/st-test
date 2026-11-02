@@ -68,8 +68,9 @@ or to the path in ST_TEST_RUNS (`off` records nothing); scripts/fractal-test-rep
 (docs/st3/gate-evidence.md). Recording never changes the result: a file that cannot be written is one line on stderr.
 
 Exit 0 when every selected check passed and was signed (with --out, exported but not verified); 1 when a check failed, timed out or
-could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument, or a branch whose merge with the base fails CI's
-upgrade-impact check, a missing release-notes/NAME.json); 3 from --status when the tree is not covered or that check fails. A tree that edits
+could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument, or, for the whole suite, a branch whose merge with
+the base fails CI's upgrade-impact check: a missing release-notes/NAME.json, which --status shows as a warning); 3 from --status when
+the tree is not covered. A tree that edits
 a check's lane is signed like any other (the note carries the edited lane's digest). The run exits 4 when nothing failed but a check was not signed: only
 against a base whose evidence-wrap still refuses a lane edit (before 2026-10-26) is that check left "not signed" for CI, or rust-tests left a crate unsigned
 because one of its tests passed only on a retry (CI's own per-crate notes refuse such a crate too, so CI runs it; linux-gate still signs and records them
@@ -421,10 +422,10 @@ RELEASE_IMPACT = ('check-release-impact', 'release_notes.py')  # upgrade-impact'
 def release_impact(base):
     """Why the upgrade-impact check CI runs on a pull request (scripts/check-release-impact: the PR needs a fresh release-notes/NAME.json)
     fails for this branch, '' when it passes, or None when it was not asked. It is asked of what CI asks it of: the merge of the head
-    with the base, the base as first parent, by that merge's own copy of the check. A run asks it before any wait, so a missing note
+    with the base, the base as first parent, by that merge's own copy of the check. The whole-suite run asks it before any wait, so a missing note
     stops the run in seconds here rather than ejecting the pull request from the merge queue (#4669, 2026-11-02). It is not asked when
     there is nothing to ask: no branch commit of its own, no clean merge (CI cannot make one either), or no check in the merge (an older
-    base). Not for --seed, which names its tree."""
+    base). Not for --seed, which names its tree. Only the whole-suite run stops on it; --status shows it as a warning."""
     if TARGET:
         return None
     head = head_commit()
@@ -450,8 +451,9 @@ def release_impact(base):
     if done.returncode == 0:
         return ''
     said = done.stderr.decode(errors='replace').strip().splitlines() or [f'exit {done.returncode}']
-    return (f'the upgrade-impact check CI runs fails on the merge of this branch with {base} ({said[-1].replace(commit, "the merge")[:400]}); '
-            'the merge queue would eject it: add the note and commit it first')
+    return (f'the upgrade-impact check CI runs fails on the merge of this branch with {base} ({said[-1].replace(commit, "the merge")[:400]}), '
+            'and the merge queue would eject it. To fix: add release-notes/NAME.json (a name of its own; copy the fields of any note there '
+            'and say what this branch changes), commit it, and run again')
 
 
 CHECKS = ()  # the checks this run signs (main sets it): the gate decides per check whether main's protected changes are that check's
@@ -2778,18 +2780,21 @@ def run_main(argv, cleanup):
             if not args.check:
                 # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
                 rows += [(name, True, 'CI runs it', 'no local command') for name in policy_checks(args.base) if name not in LOCAL]
-                # CI runs it on every pull request, outside the skip policy: asked here as a run asks it. "not covered", as the pre-push
-                # hook (scripts/evidence-prepush) reads a row it refuses: a run would stop on it, so a push it lets go would fail in CI.
+                # CI runs it on every pull request, outside the skip policy: asked here as a run asks it. A missing note is a warning
+                # and leaves the exit code alone: the pre-push hook (scripts/evidence-prepush) refuses on exit 3, and seats hand work
+                # over by pushing work-in-progress branches. The whole-suite run refuses it (below).
                 impact = release_impact(args.base)
                 if impact is not None:
-                    rows.append((IMPACT_CHECK, not impact, 'not covered' if impact else 'checked', impact or 'the merge with the base has its release note'))
+                    rows.append((IMPACT_CHECK, True, 'warning: no note' if impact else 'checked', impact or 'the merge with the base has its release note'))
         for name, is_covered, label, why in rows:
             print(f'  {name:<24} {label:<22} {why}')
         return 0 if all(row[1] for row in rows) else 3
     status = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
     if status:
         raise Failure('the checkout has uncommitted changes to tracked files; commit them first, the note is for the committed tree')
-    impact = release_impact(args.base)  # before any wait: CI fails the pull request on it, and the merge queue ejects it
+    # The whole suite, the run that signs a branch for its pull request, refuses a missing release note before any wait: CI fails the
+    # pull request on it, and the merge queue ejects it. A run of some checks only (--check) does not ask.
+    impact = release_impact(args.base) if set(default_checks) <= set(checks) else None
     if impact:
         raise Failure(impact)
     preflight(checks if not (args.push and not args.out and not TARGET) else all_checks, merges=bool(args.push) and not TARGET)  # before any wait
