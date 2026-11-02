@@ -569,6 +569,29 @@ pub fn router(state: AppState) -> Router {
 /// routes listed here. `router` without them is the route table this crate alone answers.
 pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
 
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestMessageMark {
+    message: String,
+    kind: String,
+    consumer: String,
+}
+
+/// Test support: record a consumer's local mark of a graph message, as 4b-2's consumers will.
+#[cfg(feature = "test-support")]
+async fn test_record_message_mark(
+    State(state): State<AppState>,
+    Json(mark): Json<TestMessageMark>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    let store = state.store.clone();
+    let (receipt, _) = blocking_action(move || {
+        crate::store::message_marks::record(&store, &mark.message, &mark.kind, &mark.consumer)
+    })
+    .await?;
+    signal_visible_change(&state);
+    Ok(Json(receipt))
+}
+
 /// [`router`] with the route families of the crates above.
 pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
@@ -993,7 +1016,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(replication::test_shard_items).post(replication::test_shard_append),
         )
         // The worker-only peers route refuses a test caller; this reads the same answer.
-        .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers));
+        .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
+        // Nothing records a message mark until consumers switch (4b-2); tests record one here.
+        .route("/v1/internal/test/message-marks", post(test_record_message_mark));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
@@ -3193,11 +3218,13 @@ pub fn client_agent_cards_selected(
         add_agent_todos(store, &mut cards, index)?;
         Ok(cards)
     };
-    if chunk {
-        store.cached_agent_resources_chunk(index, history, selected, build)
-    } else {
-        store.cached_agent_resources_for(index, history, Some(selected), build)
-    }
+    pinned_unless_enclosed(store, || {
+        if chunk {
+            store.cached_agent_resources_chunk(index, history, selected, build)
+        } else {
+            store.cached_agent_resources_for(index, history, Some(selected), build)
+        }
+    })
 }
 
 fn client_agent_cards_from_cached(
@@ -3575,14 +3602,16 @@ fn client_agent_resources_selected(
     snapshot_index: u64,
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
-        changed.map(|(subjects, _)| subjects), snapshot_index, history,
-    ))?;
-    client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+    pinned_unless_enclosed(store, || {
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
+            changed.map(|(subjects, _)| subjects), snapshot_index, history,
+        ))?;
+        client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+    })
 }
 
-/// Every agent card at `snapshot_index` of a quiet store, folded as the roster folds them but
-/// outside a read snapshot: on a store just opened, nothing is kept yet, as at a daemon start.
+/// Every agent card at `snapshot_index` of a quiet store, with no enclosing read snapshot
+/// and no retained cards, as at a daemon start. The selected fold pins its own snapshot.
 /// For load measurements; it returns how many cards it folded.
 #[doc(hidden)]
 pub fn cold_agent_roster_rebuild(store: &Store, snapshot_index: u64) -> anyhow::Result<usize> {

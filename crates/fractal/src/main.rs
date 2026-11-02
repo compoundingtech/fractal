@@ -8501,11 +8501,12 @@ async fn fabric_route(
         .with_context(|| {
             format!("`{owner}` advertises no Fabric node, and no Fabric peer of this machine has its name")
         })?;
+    let protocol = fractal_daemon::terminal_fabric::owner_protocol(&view.members, owner, &peer, &fleet_id);
     Ok((
         fractal_daemon::terminal_fabric::FabricTarget {
             fabric,
             peer,
-            protocol: fractal_daemon::terminal_fabric::protocol(&fleet_id),
+            protocol,
         },
         fractal_daemon::terminal_fabric::RouteRequest::new(runtime_id, subject, incarnation),
     ))
@@ -20502,7 +20503,7 @@ async fn expire_completed_responses(
         changed.borrow_and_update();
         let read_store = store.clone();
         let deadline =
-            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
+            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
                 Ok(Ok(deadline)) => deadline,
                 Ok(Err(error)) if maintenance_contention(&error) => {
                     stderr_message("st3", format_args!("response expiry read contention; retrying in {retry:?}: {error:#}"));
@@ -20537,7 +20538,7 @@ async fn expire_completed_responses(
             continue;
         }
         let clock_store = store.clone();
-        let clock_limit = match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.response_expiry_clock", || {
+        let clock_limit = match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_clock", || {
             clock_store.idempotency_clock_limit()
         }))
         .await
@@ -20685,6 +20686,21 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         {
             stderr_message("st3", format_args!("usage response trim failed: {error:#}"));
         }
+        // Message marks a further-along record supersedes, and those of messages gone (message_marks.rs).
+        let marks_store = store.clone();
+        let marks = match marks_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("message_marks.trim", || {
+            fractal_daemon::store::message_marks::trim(&marks_store, now_ms(), LOCAL_OBSERVATION_TRIM_CHUNK)
+        })).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => {
+                stderr_message("st3", format_args!("message mark trim failed: {error:#}"));
+                0
+            }
+            Err(error) => {
+                stderr_message("st3", format_args!("message mark trim stopped: {error}"));
+                0
+            }
+        };
         let trim = match trimmed {
             Ok(Ok(trim)) => Some(trim),
             Ok(Err(error)) => {
@@ -20718,7 +20734,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         // One line a pass, so a slow one shows without a blocked checkpoint to name it.
         if let Some(trim) = trim {
             stderr_message("st3", format_args!(
-                "local observation trim: deleted {} rows, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
+                "local observation trim: deleted {} rows and {marks} message marks, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
                 trim.deleted,
                 trim.longest_writer_hold.as_millis(),
                 pass_started.elapsed().as_millis(),
