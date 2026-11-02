@@ -914,6 +914,8 @@ pub struct Store {
     pub trim_fault: Mutex<Option<checkpoint_trim::TrimFault>>,
     /// What a test runs after each chunk a trim deletes, given how many it has deleted.
     pub trim_chunk_hook: Mutex<Option<checkpoint_trim::TrimChunkHook>>,
+    /// What a test sees of the lines a trim writes to stderr.
+    pub trim_log_hook: Mutex<Option<checkpoint_trim::TrimLogHook>>,
     pub trim_chunk_envelopes: AtomicUsize,
     /// Minimum trim rest in microseconds; tests may set zero to disable pacing.
     pub trim_pause_micros: AtomicU64,
@@ -1331,6 +1333,7 @@ impl Store {
             shared_memory,
             trim_fault: Mutex::new(None),
             trim_chunk_hook: Mutex::new(None),
+            trim_log_hook: Mutex::new(None),
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
             trim_pause_micros: AtomicU64::new(checkpoint_trim::TRIM_MIN_PAUSE.as_micros() as u64),
             trim_view_refold_micros: AtomicU64::new(checkpoint_trim::TRIM_VIEW_REFOLD_INTERVAL.as_micros() as u64),

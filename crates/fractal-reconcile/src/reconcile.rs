@@ -31393,17 +31393,37 @@ schedule "first" {{
             ),
             "first-unpinned",
         );
+        let wake = Arc::new(Notify::new());
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
             "node".into(),
-            Arc::new(Notify::new()),
+            wake.clone(),
         );
+        // The schedule's timer task writes the work request, then wakes the reconciler. Its wake
+        // keeps a permit, so one that comes before the wait still ends it; the bound only catches none.
+        // A loaded host can stall this one runtime thread past the timer's deadline and a fixed sleep
+        // alike, and then block_on polls the test before the timer task. Each wait first stalls the
+        // thread that way, so a wait that only sleeps fails here every time.
+        let requested = |subject: &'static str| {
+            let (store, wake) = (store.clone(), wake.clone());
+            tokio::spawn(async { std::thread::sleep(Duration::from_millis(120)) });
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let request = store.claims_for(subject, Some("schedule.work-requested")).unwrap();
+                        if !request.is_empty() {
+                            return request;
+                        }
+                        wake.notified().await;
+                    }
+                })
+                .await
+                .expect("the schedule's timer requested its work")
+            }
+        };
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        let first_request = store
-            .claims_for("schedule/first", Some("schedule.work-requested"))
-            .unwrap();
+        let first_request = requested("schedule/first").await;
         assert_eq!(first_request.len(), 1);
         assert_eq!(first_request[0].body["fields"]["mission_revision"], first);
 
@@ -31447,7 +31467,7 @@ schedule "second" {{
             "second-unpinned",
         );
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        requested("schedule/second").await;
         reconciler.reconcile_once().unwrap();
         let request = store
             .claims_for("schedule/second", Some("schedule.work-requested"))
@@ -41768,8 +41788,13 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
     }
 
     /// The observer `repo` on acme/garden, a subscription so it polls, and its revision.
-    fn one_look_fixture(source: &str) -> (Arc<Store>, String) {
-        let store = Arc::new(Store::open_memory("node").unwrap());
+    /// The store for this file's multi-threaded look tests. A look task writes while the test
+    /// reads, and a shared-cache memory store fails one of them at once with SQLITE_LOCKED, which
+    /// no busy timeout waits out (#4720), so it is file-backed. The tempdir comes first so a caller's
+    /// binding drops it after the store.
+    fn one_look_fixture(source: &str) -> (tempfile::TempDir, Arc<Store>, String) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
         apply_source(
             &store,
             r#"version 2
@@ -41783,7 +41808,24 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
             source,
         );
         let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
-        (store, revision)
+        (root, store, revision)
+    }
+
+    #[test]
+    fn the_look_fixture_store_takes_a_write_while_a_reader_holds_a_snapshot() {
+        let (_root, store, _) = one_look_fixture("reader-writer");
+        store.read_snapshot(|_| {
+            store.append_claim(&ClaimInput {
+                subject: "agent/reader-writer".into(),
+                kind: "runtime.observed".into(),
+                actor: Some("agent/reader-writer".into()),
+                fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })?;
+            Ok(())
+        }).unwrap();
     }
 
     /// One look's listing: issue 1 titled `title`, and the cursor `cursor`.
@@ -41845,7 +41887,7 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
                 None
             }
         }
-        let (store, revision) = one_look_fixture("one-look");
+        let (_root, store, revision) = one_look_fixture("one-look");
         let asked = Arc::new(Mutex::new(Vec::new()));
         let (reached_tx, reached) = std::sync::mpsc::channel();
         let (release, release_rx) = std::sync::mpsc::channel();
@@ -41898,7 +41940,7 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
                 }
             }
         }
-        let (store, revision) = one_look_fixture("one-look-limit");
+        let (_root, store, revision) = one_look_fixture("one-look-limit");
         let asked = Arc::new(Mutex::new(Vec::new()));
         let mut reconciler = Reconciler::new(
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),

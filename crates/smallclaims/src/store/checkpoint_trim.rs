@@ -64,6 +64,9 @@ pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_mil
 /// What a test runs after each chunk a trim deletes, given how many it has deleted.
 pub type TrimChunkHook = Box<dyn FnMut(usize) + Send>;
 
+/// What a test sees of each line a trim writes to the daemon's stderr.
+pub type TrimLogHook = Box<dyn FnMut(&str) + Send>;
+
 /// How often a paced trim's run lets the views refold, while it goes on, unless a test sets
 /// another interval. They are forgotten once when the run stops.
 pub const TRIM_VIEW_REFOLD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -147,32 +150,6 @@ struct TrimWalState {
 
 /// A trim chunk that holds the writer longer than this logs one line saying what it did.
 pub const LOGGED_TRIM_CHUNK: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Log one line for a trim chunk held over `LOGGED_TRIM_CHUNK`: its phase, the envelopes and
-/// claims it took, the bytes of the claim bodies it deleted, and its hold split into the steps
-/// and the commit, so a member attributes its own outliers.
-fn log_if_slow_trim_chunk(
-    phase: &str,
-    held: std::time::Duration,
-    commit: std::time::Duration,
-    envelopes: usize,
-    claims: usize,
-    body_bytes: u64,
-) {
-    if held <= LOGGED_TRIM_CHUNK {
-        return;
-    }
-    tracing::warn!(
-        phase,
-        held_ms = held.as_millis() as u64,
-        step_ms = held.saturating_sub(commit).as_millis() as u64,
-        commit_ms = commit.as_millis() as u64,
-        envelopes,
-        claims,
-        body_bytes,
-        "a trim chunk held the store's writer over 1 s",
-    );
-}
 
 /// The bytes of the bodies of `claims` that this store still holds.
 fn claim_body_bytes(transaction: &Transaction<'_>, claims: &[ClaimTombstone]) -> Result<u64> {
@@ -377,6 +354,46 @@ impl Store {
             .min(std::time::Duration::from_secs(5))
     }
 
+    /// Write one line to the daemon's stderr, as its WAL checkpoint lines are: `up` sets no
+    /// stderr tracing subscriber unless telemetry export is on, so a tracing line from a trim
+    /// never reached a member's journal. A test's `trim_log_hook` sees the line too.
+    fn trim_log(&self, line: std::fmt::Arguments<'_>) {
+        let line = format!("st3: {line}");
+        if let Some(hook) = self.trim_log_hook.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+            hook(&line);
+        }
+        eprintln!("{line}");
+    }
+
+    /// Log one line for a trim chunk held over `LOGGED_TRIM_CHUNK`: its phase, the envelopes and
+    /// claims it took, the bytes of the claim bodies it deleted, and its hold split into the steps
+    /// and the commit, so a member attributes its own outliers.
+    fn log_if_slow_trim_chunk(
+        &self,
+        phase: &str,
+        held: std::time::Duration,
+        commit: std::time::Duration,
+        envelopes: usize,
+        claims: usize,
+        body_bytes: u64,
+    ) {
+        if held <= LOGGED_TRIM_CHUNK {
+            return;
+        }
+        self.trim_log(format_args!(
+            "a trim chunk held the store's writer over 1 s {}",
+            serde_json::json!({
+                "phase": phase,
+                "held_ms": held.as_millis(),
+                "step_ms": held.saturating_sub(commit).as_millis(),
+                "commit_ms": commit.as_millis(),
+                "envelopes": envelopes,
+                "claims": claims,
+                "body_bytes": body_bytes,
+            }),
+        ));
+    }
+
     pub fn set_trim_wal(&self, limits: TrimWal) {
         *self.trim_wal.lock().unwrap_or_else(PoisonError::into_inner) = limits;
     }
@@ -414,13 +431,11 @@ impl Store {
             held_ms = held_ms.max(report.truncate_ms.unwrap_or(0));
             if report.recycled || started.elapsed() >= limits.wait {
                 let restarted = report.recycled;
-                // The daemon's own stderr, as its WAL checkpoint lines are: `up` sets no stderr
-                // tracing subscriber.
-                eprintln!(
-                    "st3: {} {}",
+                self.trim_log(format_args!(
+                    "{} {}",
                     if restarted { "a trim restarted the WAL" } else { "a trim could not restart the WAL and stops until the next step" },
                     serde_json::json!({"frames": frames, "attempts": attempts, "held": held, "held_ms": held_ms, "pause_ms": started.elapsed().as_millis()}),
-                );
+                ));
                 wal.checked = Some(std::time::Instant::now());
                 return Ok(restarted);
             }
@@ -1095,7 +1110,7 @@ impl Store {
                 let committing = std::time::Instant::now();
                 transaction.commit()?;
                 let held = held_since.elapsed();
-                log_if_slow_trim_chunk("record", held, committing.elapsed(), envelope - envelope_before, claim - claim_before, 0);
+                self.log_if_slow_trim_chunk("record", held, committing.elapsed(), envelope - envelope_before, claim - claim_before, 0);
                 drop(connection);
                 chunks += 1;
                 self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
@@ -1267,7 +1282,7 @@ impl Store {
             transaction.commit()?;
             let held = held_since.elapsed();
             let phase = if envelopes.is_empty() { "claims" } else { "envelopes" };
-            log_if_slow_trim_chunk(phase, held, committing.elapsed(), envelopes.len(), claims.len(), body_bytes);
+            self.log_if_slow_trim_chunk(phase, held, committing.elapsed(), envelopes.len(), claims.len(), body_bytes);
             drop(connection);
             // A cursor-only chunk inspected already-absent rows. A chunk that deletes tells
             // replication at once, and leaves the views serving until a refold is due: their
@@ -1335,7 +1350,7 @@ impl Store {
             let committing = std::time::Instant::now();
             transaction.commit()?;
             let held = held_since.elapsed();
-            log_if_slow_trim_chunk("rebuild", held, committing.elapsed(), 0, 0, 0);
+            self.log_if_slow_trim_chunk("rebuild", held, committing.elapsed(), 0, 0, 0);
             drop(connection);
             if !more {
                 return Ok(());
