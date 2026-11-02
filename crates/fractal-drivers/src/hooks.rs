@@ -777,12 +777,11 @@ pub fn install_at(root: &Path, replace: bool) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    /// The example declaration is the hand-authored half of the one canonical Claude hook
-    /// registration; expansion emits the other half from [`claude_settings_registration`]. If the
-    /// two drift, a driver-declared and a hand-authored seat stop registering the same hooks.
+    /// The retained declaration fixture pins the hand-authored half of the canonical Claude
+    /// hook registration; expansion emits the other half from [`claude_settings_registration`].
     #[test]
     fn example_claude_declaration_registers_the_canonical_hook_settings() {
-        let path = test_env!("CARGO_MANIFEST_DIR", "/../../examples/native/agent-claude.kdl");
+        let path = test_env!("CARGO_MANIFEST_DIR", "/tests/fixtures/catalog-hook-declaration.kdl");
         let raw = std::fs::read_to_string(path).unwrap();
         let document: kdl::KdlDocument = raw.parse().unwrap();
         let agent = document.get("agent").unwrap();
