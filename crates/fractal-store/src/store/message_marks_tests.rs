@@ -4,11 +4,12 @@ use super::*;
 const RECIPIENT: &str = "agent/node.birch";
 const SENDER: &str = "agent/node.alder";
 /// Lifecycle a message ends at: as claims on one store, as marks on the other.
-const PATTERNS: [&[&str]; 4] = [
+const PATTERNS: [&[&str]; 5] = [
     &[],
-    &["message.delivered"],
-    &["message.delivered", "message.read"],
-    &["message.delivered", "message.read", "message.closed"],
+    &["message.staged"],
+    &["message.staged", "message.delivered"],
+    &["message.staged", "message.delivered", "message.read"],
+    &["message.staged", "message.delivered", "message.read", "message.closed"],
 ];
 
 fn sent(subject: &str, to: &str, tags: &[&str]) -> ClaimInput {
@@ -125,7 +126,8 @@ fn marks_make_the_projections_views_and_pages_lifecycle_claims_make() {
         }
     }
     assert!(claims.readers.get().query_row("SELECT COUNT(*) FROM local_message_marks", [], |row| row.get::<_, i64>(0)).unwrap() == 0);
-    assert!(marks.claims_for("message/marks-0-3", Some("message.closed")).unwrap().is_empty(), "marks wrote a claim");
+    assert!(marks.claims_for("message/marks-0-4", Some("message.closed")).unwrap().is_empty(), "marks wrote a claim");
+    assert!(marks.claims_for("message/marks-0-1", Some("message.staged")).unwrap().is_empty(), "a staging wrote a claim");
     // Marks are outside the projection digest every member computes alike.
     assert_eq!(digest(&marks), unmarked, "a mark changed the shared projection digest");
     let (by_claims, by_marks) = (projections(&claims), projections(&marks));
@@ -165,7 +167,10 @@ fn a_repeated_mark_answers_its_first_receipt_and_an_unknown_message_is_refused()
     let (again, inserted) = message_marks::record(&marks, "message/marks-0-1", "message.delivered", RECIPIENT).unwrap();
     assert_eq!((again.id, inserted), (first.id, false));
     assert_eq!(message_marks::record(&marks, "message/unknown", "message.read", RECIPIENT).unwrap_err().code, "missing-message");
-    assert_eq!(message_marks::record(&marks, "message/marks-0-1", "message.staged", RECIPIENT).unwrap_err().code, "invalid-message-mark");
+    assert_eq!(message_marks::record(&marks, "message/marks-0-1", "message.sent", RECIPIENT).unwrap_err().code, "invalid-message-mark");
+    let (staged, inserted) = message_marks::record(&marks, "message/marks-0-1", "message.staged", RECIPIENT).unwrap();
+    assert!(inserted && staged.id.starts_with("offset-receipt/"));
+    assert_eq!(message_marks::record(&marks, "message/marks-0-1", "message.staged", RECIPIENT).unwrap().0.id, staged.id);
 }
 
 #[test]
@@ -195,20 +200,25 @@ fn trimming_keeps_every_state_and_bounds_the_marks() {
             message_marks::record(&marks, &subject, kind, &to).unwrap();
         }
     }
-    let count = |store: &Store| store.readers.get().query_row("SELECT COUNT(*) FROM local_message_marks", [], |row| row.get::<_, i64>(0)).unwrap();
+    let count = |store: &Store| store.readers.get().query_row(
+        "SELECT (SELECT COUNT(*) FROM local_message_marks) + (SELECT COUNT(*) FROM local_message_staged)", [], |row| row.get::<_, i64>(0)).unwrap();
     let recorded = count(&marks);
     // Fresh marks stay, whatever supersedes them.
     assert_eq!(message_marks::trim(&marks, now_ms(), 3).unwrap(), 0);
     let before = projections(&marks);
     let statuses = |store: &Store| messages().into_iter().map(|(subject, _, _)| store.message(&subject).unwrap().unwrap().status).collect::<Vec<_>>();
     let status_before = statuses(&marks);
-    marks.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h6fc07a0220dd owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_message_marks SET recorded_at_unix_ms=1", []).unwrap();
+    marks.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h6fc07a0220dd owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_message_marks SET recorded_at_unix_ms=1; UPDATE local_message_staged SET recorded_at_unix_ms=1").unwrap();
     let trimmed = message_marks::trim(&marks, now_ms(), 3).unwrap();
     // A read supersedes a delivery; a close supersedes neither, since unread and idle mail count
-    // a read apart from a close.
+    // a read apart from a close. Any later mark supersedes a staging.
     let kept: i64 = messages()
         .iter()
-        .map(|(_, _, ends)| if ends.contains(&"message.read") { ends.len() as i64 - 1 } else { ends.len() as i64 })
+        .map(|(_, _, ends)| {
+            let marks = ends.iter().filter(|kind| **kind != "message.staged").count() as i64;
+            let marks = if ends.contains(&"message.read") { marks - 1 } else { marks };
+            marks + i64::from(ends == &["message.staged"])
+        })
         .sum();
     assert_eq!((trimmed as i64, count(&marks)), (recorded - kept, kept));
     assert_eq!(statuses(&marks), status_before);

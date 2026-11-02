@@ -15,6 +15,11 @@ use super::*;
 /// The marks a consumer records, in rank order: a later one is further along.
 pub const MARKS: [&str; 3] = ["message.delivered", "message.read", "message.closed"];
 
+/// The staging of a message for a seat's native transport, recorded like a mark but in
+/// `local_message_staged`, so a build that reads `local_message_marks` (4b-1) never meets a kind
+/// it does not know, and a backup of marks restores on it. It ranks below every mark.
+pub const STAGED: &str = "message.staged";
+
 /// How long a mark that something further along has superseded stays.
 pub const SUPERSEDED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -32,6 +37,14 @@ CREATE TABLE IF NOT EXISTS local_message_marks (
 );
 CREATE INDEX IF NOT EXISTS local_message_marks_consumer ON local_message_marks(consumer, message);
 CREATE INDEX IF NOT EXISTS local_message_marks_age ON local_message_marks(recorded_at_unix_ms);
+CREATE TABLE IF NOT EXISTS local_message_staged (
+    message TEXT NOT NULL,
+    consumer TEXT NOT NULL,
+    recorded_at_unix_ms INTEGER NOT NULL,
+    receipt TEXT NOT NULL,
+    PRIMARY KEY(message, consumer)
+);
+CREATE INDEX IF NOT EXISTS local_message_staged_age ON local_message_staged(recorded_at_unix_ms);
 ",
     )?;
     Ok(())
@@ -75,6 +88,21 @@ BEGIN
     VALUES(OLD.message,-1,1,2)
     ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|2,created_index=created_index+1;
 END;
+-- A staging offers held mail and changes the client header, as a `message.staged` claim does;
+-- idle and unread mail do not count it.
+CREATE TRIGGER IF NOT EXISTS local_message_staged_insert AFTER INSERT ON local_message_staged
+BEGIN
+    UPDATE coordination_sends SET held=0 WHERE subject=NEW.message AND held!=0;
+    INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+    VALUES(NEW.message,-1,1,1)
+    ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|excluded.dirty_flags,created_index=created_index+1;
+END;
+CREATE TRIGGER IF NOT EXISTS local_message_staged_delete AFTER DELETE ON local_message_staged
+BEGIN
+    INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+    VALUES(OLD.message,-1,1,2)
+    ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|2,created_index=created_index+1;
+END;
 ",
     )?;
     Ok(())
@@ -89,20 +117,41 @@ pub fn record(
     kind: &str,
     consumer: &str,
 ) -> Result<(ClaimRecord, bool), St3Error> {
-    if !MARKS.contains(&kind) {
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().map_err(internal)?;
+    let recorded = record_tx(&transaction, &store.origin, message, kind, consumer)?;
+    transaction.commit().map_err(internal)?;
+    Ok(recorded)
+}
+
+/// [`record`] inside the caller's writer transaction, so a fence it checks and the mark commit
+/// together. `kind` is a mark or [`STAGED`].
+pub fn record_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    message: &str,
+    kind: &str,
+    consumer: &str,
+) -> Result<(ClaimRecord, bool), St3Error> {
+    if !MARKS.contains(&kind) && kind != STAGED {
         return Err(St3Error::new("invalid-message-mark", format!("`{kind}` is not a message mark")));
     }
     let fields = BTreeMap::from([("status".to_owned(), json!(kind.trim_start_matches("message.")))]);
-    let receipt = super::messages_shard::lifecycle_receipt(&store.origin, message, kind, Some(consumer), &fields);
-    let mut connection = store.connection.write();
-    let transaction = connection.transaction().map_err(internal)?;
-    let inserted = transaction
-        .execute(
+    let receipt = super::messages_shard::lifecycle_receipt(origin, message, kind, Some(consumer), &fields);
+    let inserted = if kind == STAGED {
+        transaction.execute(
+            "INSERT OR IGNORE INTO local_message_staged(message, consumer, recorded_at_unix_ms, receipt)
+             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS(SELECT 1 FROM message_index WHERE subject=?1)",
+            params![message, consumer, now_ms() as i64, receipt.id],
+        )
+    } else {
+        transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h3644dd9ee6f6 owner=fractal_store::store::message_marks TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_message_marks(message, kind, consumer, recorded_at_unix_ms, receipt)
              SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS(SELECT 1 FROM message_index WHERE subject=?1)",
             params![message, kind, consumer, now_ms() as i64, receipt.id],
         )
-        .map_err(internal)?;
+    }
+    .map_err(internal)?;
     if inserted == 0 {
         let known: bool = transaction
             .query_row("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)", [message], |row| row.get(0))
@@ -113,23 +162,43 @@ pub fn record(
     } else {
         // The client selectors fold their dirty headers at the end of a write, as a claim's
         // commit does: a closed mark closes the message's current header.
-        super::client_messages::finalize_commit(&transaction).map_err(internal)?;
+        super::client_messages::finalize_commit(transaction).map_err(internal)?;
     }
-    transaction.commit().map_err(internal)?;
     Ok((receipt, inserted > 0))
 }
 
-/// The furthest-along mark of `message`, as its status ("delivered", "read" or "closed").
+/// Whether this member records `consumer`'s lifecycle of the graph message `message` as a mark
+/// instead of a lifecycle claim: marks are on ([`super::marks_switch`]), and the consumer is a seat
+/// this member's own declarations place on itself, so the seat's host, which other members ask
+/// about it, holds every mark of it. A person, a seat on another host and a seat this member does
+/// not declare keep lifecycle claims, which replicate, and readers count both.
+pub fn local_consumer(connection: &Connection, origin: &str, message: &str, consumer: &str) -> Result<bool> {
+    if !super::marks_switch::marks_switched_tx(connection)? || !consumer.starts_with("agent/") {
+        return Ok(false);
+    }
+    let graph_message: bool = connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)")?
+        .query_row([message], |row| row.get(0))?;
+    let host: Option<Option<String>> = connection
+        .prepare_cached("SELECT json_extract(member,'$.host') FROM desired WHERE subject=?1")?
+        .query_row([consumer], |row| row.get(0))
+        .optional()?;
+    Ok(graph_message && host.flatten().as_deref() == Some(origin))
+}
+
+/// The furthest-along mark of `message`, as its status ("staged", "delivered", "read" or "closed").
 pub fn status(connection: &Connection, message: &str) -> Result<Option<&'static str>> {
     let kinds: Vec<String> = connection
         .prepare_cached("SELECT kind FROM local_message_marks WHERE message=?1")?
         .query_map([message], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(MARKS
-        .iter()
-        .rev()
-        .find(|mark| kinds.iter().any(|kind| kind == *mark))
-        .map(|mark| mark.trim_start_matches("message.")))
+    if let Some(mark) = MARKS.iter().rev().find(|mark| kinds.iter().any(|kind| kind == *mark)) {
+        return Ok(Some(mark.trim_start_matches("message.")));
+    }
+    let staged: bool = connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM local_message_staged WHERE message=?1)")?
+        .query_row([message], |row| row.get(0))?;
+    Ok(staged.then_some("staged"))
 }
 
 /// When `consumer` (any consumer, for `None`) recorded a mark of one of `kinds` for `message`: the
@@ -170,7 +239,9 @@ pub fn host_marks(
         if held {
             let marks = connection
                 .prepare_cached(
-                    "SELECT kind, consumer, recorded_at_unix_ms, receipt FROM local_message_marks WHERE message=?1",
+                    "SELECT kind, consumer, recorded_at_unix_ms, receipt FROM local_message_marks WHERE message=?1
+                     UNION ALL SELECT 'message.staged', consumer, recorded_at_unix_ms, receipt
+                     FROM local_message_staged WHERE message=?1",
                 )?
                 .query_map([message], |row| {
                     Ok(HostMark {
@@ -256,9 +327,21 @@ pub fn trim(store: &Store, now: u128, chunk: usize) -> Result<usize> {
                 LIMIT ?2)",
             params![cutoff, chunk],
         )?;
+        // A staging stands for nothing once any later lifecycle of the message is recorded.
+        let staged = connection.execute(
+            "DELETE FROM local_message_staged WHERE rowid IN (
+                SELECT staged.rowid FROM local_message_staged AS staged
+                WHERE NOT EXISTS(SELECT 1 FROM message_index WHERE subject=staged.message)
+                   OR (staged.recorded_at_unix_ms < ?1 AND (
+                        EXISTS(SELECT 1 FROM local_message_marks AS later WHERE later.message=staged.message)
+                        OR EXISTS(SELECT 1 FROM claims WHERE claims.subject=staged.message
+                               AND claims.kind IN ('message.delivered','message.read','message.closed'))))
+                LIMIT ?2)",
+            params![cutoff, chunk],
+        )?;
         drop(connection);
-        removed += deleted;
-        if (deleted as i64) < chunk {
+        removed += deleted + staged;
+        if (deleted as i64) < chunk && (staged as i64) < chunk {
             return Ok(removed);
         }
     }
