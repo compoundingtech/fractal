@@ -2665,6 +2665,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened and replayed between actions"
     },
     {
+      "command": "st work handoff withdraw",
+      "description": "Return an unclaimed person handoff to its handing agent without completing it",
+      "tests": [
+        "crates/fractal/tests/adhoc_work.rs::requester_withdraws_exact_person_handoff_and_retries_after_reclaim"
+      ],
+      "verification": "real CLI over a private Unix socket; rejects foreign actors and stale notes, then retries after reclaim"
+    },
+    {
       "command": "st work ls",
       "description": "List current actionable work; use --as to filter one agent or --all for history",
       "tests": [

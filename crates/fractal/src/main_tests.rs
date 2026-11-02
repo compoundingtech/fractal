@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn work_handoff_parses_existing_and_withdraw_forms() {
+    let prefix = ["fractal", "work", "handoff"];
+    for args in [
+        vec!["step-run/example", "--as", "agent/example", "--to", "person/reviewer", "--note", "Review"],
+        vec!["withdraw", "step-run/example", "--as", "agent/example", "--reason", "Resume"],
+        vec!["withdraw", "step-run/example", "--as", "agent/example", "--reason", "Resume", "--message", "message/exact", "--idempotency-key", "retry"],
+    ] {
+        assert!(Cli::try_parse_from(prefix.into_iter().chain(args.clone())).is_ok());
+        assert!(cli_command().try_get_matches_from(
+            ["fractal", "--endpoint", "/tmp/fixture.sock", "--daemon-wait", "0", "--json", "work", "handoff"]
+                .into_iter().chain(args)
+        ).is_ok());
+    }
+    for args in [
+        vec!["withdraw", "step-run/example", "--as", "agent/example"],
+        vec!["withdraw", "step-run/example", "--as", "agent/example", "--reason", ""],
+        vec!["withdraw", "step-run/example", "--reason", "Resume"],
+    ] {
+        assert!(Cli::try_parse_from(prefix.into_iter().chain(args)).is_err());
+    }
+}
+
+#[test]
 fn alias_deprecation_uses_argv0_basename_and_exact_suppression() {
     use std::ffi::OsStr;
     for (path, expected) in [

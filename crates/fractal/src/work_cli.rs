@@ -83,19 +83,50 @@ pub(super) async fn run_work(
             }
         }
         WorkCommand::Handoff(args) => {
-            reject_foreign_agent_actor(&args.actor)?;
+            if let Some(WorkHandoffCommand::Withdraw { subject, actor, reason, message, idempotency_key }) = args.command {
+                anyhow::ensure!(actor.starts_with("agent/"), "handoff withdrawal requires an agent actor");
+                reject_foreign_agent_actor(&actor)?;
+                let subject = if subject.starts_with("step-run/") { subject } else { format!("step-run/{subject}") };
+                let mut before = String::new();
+                let handoff = loop {
+                    let page: ClaimsPage = client.get(&format!(
+                        "/v1/claims?subject={}&order=desc&limit=500{before}", urlencoding::encode(&subject)
+                    )).await?;
+                    if let Some(claim) = page.claims.into_iter().find(|claim|
+                        claim.kind == "work.released" && claim.body["fields"]["handoff_message"].is_string()
+                    ) {
+                        break claim;
+                    }
+                    let cursor = page.next_cursor.context("this step has no handoff note")?;
+                    before = format!("&before_index={cursor}");
+                };
+                let fields = &handoff.body["fields"];
+                let request = fractal_daemon::store::adhoc_work::HandoffReturnRequest {
+                    actor, reason,
+                    message: message.unwrap_or_else(|| fields["handoff_message"].as_str().unwrap().to_owned()),
+                    attempt: serde_json::from_value(fields["attempt"].clone())?,
+                    disposition: fractal_daemon::store::adhoc_work::HandoffDisposition::Withdrawn,
+                    idempotency_key: idempotency_key.unwrap_or_else(|| format!("work-handoff-return:{}", uuid::Uuid::now_v7())),
+                };
+                let result: ClaimRecord = client.post(
+                    &format!("/v1/work/handoff-return/{}", urlencoding::encode(&subject)), &request
+                ).await?;
+                return print_value(&result, json_output);
+            }
+            let actor = args.actor.expect("clap requires --as");
+            reject_foreign_agent_actor(&actor)?;
             let incarnation = match args.incarnation {
                 Some(value) => Some(value),
-                None => current_agent_incarnation(client, &args.actor).await?,
+                None => current_agent_incarnation(client, &actor).await?,
             };
             let response: StepRunView = client
                 .post(
-                    &format!("/v1/work/handoff/{}", urlencoding::encode(&args.subject)),
+                    &format!("/v1/work/handoff/{}", urlencoding::encode(&args.subject.expect("clap requires a step"))),
                     &fractal_daemon::model::WorkHandoffRequest {
-                        actor: args.actor,
+                        actor,
                         incarnation,
-                        to: args.to,
-                        note: args.note,
+                        to: args.to.expect("clap requires --to"),
+                        note: args.note.expect("clap requires --note"),
                         evidence: args.evidence,
                         idempotency_key: args
                             .idempotency_key

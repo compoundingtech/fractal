@@ -4129,20 +4129,41 @@ struct WorkStartArgs {
 }
 
 #[derive(Args)]
+#[command(subcommand_negates_reqs = true, args_conflicts_with_subcommands = true, subcommand_precedence_over_arg = true)]
 struct WorkHandoffArgs {
-    subject: String,
-    #[arg(long = "as", env = "ST_AGENT")]
-    actor: String,
+    #[command(subcommand)]
+    command: Option<WorkHandoffCommand>,
+    #[arg(required = true)]
+    subject: Option<String>,
+    #[arg(long = "as", env = "ST_AGENT", required = true)]
+    actor: Option<String>,
     #[arg(long, env = "ST3_INCARNATION")]
     incarnation: Option<String>,
-    #[arg(long)]
-    to: String,
-    #[arg(long)]
-    note: String,
+    #[arg(long, required = true)]
+    to: Option<String>,
+    #[arg(long, required = true)]
+    note: Option<String>,
     #[arg(long)]
     evidence: Vec<String>,
     #[arg(long)]
     idempotency_key: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum WorkHandoffCommand {
+    /// Return an unclaimed person handoff to the agent who handed it off.
+    Withdraw {
+        subject: String,
+        #[arg(long = "as", value_parser = parse_publication_actor)]
+        actor: String,
+        #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        reason: String,
+        /// Exact handoff message ID; defaults to the latest handoff note.
+        #[arg(long)]
+        message: Option<String>,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -6214,7 +6235,10 @@ fn guard_mutating_cli_actor(
             WorkCommand::Delegation(args) => Some(args.actor.as_str()),
             WorkCommand::Done(args) | WorkCommand::CancelAsk(args) => Some(args.actor.as_str()),
             WorkCommand::Start(args) => Some(args.actor.as_str()),
-            WorkCommand::Handoff(args) => Some(args.actor.as_str()),
+            WorkCommand::Handoff(args) => match &args.command {
+                Some(WorkHandoffCommand::Withdraw { actor, .. }) => Some(actor.as_str()),
+                None => args.actor.as_deref(),
+            },
             WorkCommand::Acknowledge(args) => Some(args.actor.as_str()),
             WorkCommand::Claim(args) | WorkCommand::Renew(args)
             | WorkCommand::Complete(args) | WorkCommand::Fail(args) | WorkCommand::Release(args) => args.actor.as_deref(),
