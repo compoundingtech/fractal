@@ -5,13 +5,18 @@ use super::*;
 use crate::store::checkpoint_agreement_tests_shared_attention_tests::{context, kinds, step};
 use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
 const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
 
 /// A member with both seats declared, so the seat readers have something to answer.
 fn member(trims_locally: bool) -> Store {
-    let store = Store::open_memory("node").unwrap();
+    declared(Store::open_memory("node").unwrap(), trims_locally)
+}
+
+/// `store` with both seats declared.
+fn declared(store: Store, trims_locally: bool) -> Store {
     store.bind_fleet(TEST_FLEET).unwrap();
     let source = "version 2\nagent \"amber\" { command \"true\" }\nagent \"birch\" { command \"true\" }\n";
     let intent = crate::graph::parse_test_intent(source, "node").unwrap();
@@ -283,6 +288,283 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().filter(|entry| {
         entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("capture-")
     }).count(), 0);
+}
+
+/// A local cut that deletes in many chunks leaves the roster's generation alone until its run
+/// stops, so a fold under way publishes. Forgetting the views after every chunk restarted the
+/// roster's fold before it could publish, all through a run.
+#[test]
+fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let all = observer_ids(&store);
+    // A capped day stops at TrimDeferred, and the next day's run reaches the final mark.
+    store.trim_locally_at_most(15);
+    for (day, outcome) in [(0, "deferred"), (1, "trimmed")] {
+        let context = context(scratch.path(), day);
+        let before = answers(&store, context.now_unix_ms);
+        let deleted = all.difference(&observer_ids(&store)).count();
+        let generation = store.fractal.presented_agents.generation();
+        let sequence = claims_sequence(&store);
+        let actions = kinds(&step(&store, &context));
+        assert_eq!(actions.first(), Some(&outcome), "day {day}: {actions:?}");
+        let chunks = all.difference(&observer_ids(&store)).count() - deleted;
+        let forgets = store.fractal.presented_agents.generation() - generation;
+        assert!(chunks > 4, "day {day}: the run deletes in many chunks ({chunks})");
+        // Once when a cut's tombstones are recorded and once when its run stops: the second
+        // day finishes the first cut, then records the next one and stops at the cap.
+        assert!(forgets <= 3, "day {day}: {forgets} forgets for {chunks} chunks");
+        // A stopped run still forgets what the views hold of the claims it deleted, and the
+        // final mark still expires every cursor taken before it.
+        assert!(forgets >= 1, "day {day}: the run's stop forgets the views");
+        assert_eq!(claims_sequence(&store) > sequence, outcome == "trimmed", "day {day}: cursors expire at the final mark");
+        assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}: the readers answer the same");
+    }
+}
+
+/// The agents roster publishes while a local cut deletes in many chunks: a fold begun after
+/// one chunk publishes after the next. Forgetting the views after every chunk failed it with
+/// "the agents source reset while materializing its publication", all through the run.
+#[test]
+fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
+    use super::agents_publication::{AgentsStatusWatermark, PresentedAgents};
+    use super::published_list::Publication;
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let fractal = Arc::clone(&store.fractal);
+    fractal.presented_agents.start();
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let hook_published = Arc::clone(&published);
+    let mut building = None;
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        // A fold begun after one chunk ends after the next, as a fold of seconds does.
+        if let Some(build) = building.take() {
+            let row = serde_json::json!({ "id": format!("agent/example-{chunk}") });
+            let done = fractal.presented_agents.publish_identified(build, |identity| Publication {
+                cut: 1,
+                published_at_unix_ms: 1,
+                valid_until_unix_ms: None,
+                rows: PresentedAgents::new(
+                    uuid::Uuid::nil(), identity, AgentsStatusWatermark { store_index: 1, local_frontier: 1 }, 1,
+                    vec![row], vec![format!("agent/example-{chunk}")],
+                ),
+            });
+            hook_published.lock().unwrap().push(done.is_some());
+        }
+        building = fractal.presented_agents.begin_materialization();
+    }));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let published = published.lock().unwrap();
+    assert!(published.len() > 4, "the cut deletes in many chunks ({})", published.len());
+    assert!(published.iter().all(|done| *done), "the agents source reset while materializing its publication: {published:?}");
+}
+
+/// A local cut's run lets the views refold once the interval is due, keeping the roster's
+/// generation; within the interval it leaves them serving.
+#[test]
+fn a_local_cut_refolds_the_views_within_its_run_once_the_interval_is_due() {
+    for (interval, refolds) in [(std::time::Duration::ZERO, true), (smallclaims::store::checkpoint_trim::TRIM_VIEW_REFOLD_INTERVAL, false)] {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = local_member("alder");
+        store.set_trim_pause(std::time::Duration::ZERO);
+        store.set_trim_chunk_envelopes(1);
+        store.set_trim_view_refold_interval(interval);
+        for n in 0..30 {
+            apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+        }
+        let fractal = Arc::clone(&store.fractal);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hook_seen = Arc::clone(&seen);
+        let mut generation = None;
+        *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+            let now = fractal.presented_agents.generation();
+            let refolded = fractal.glass_list.refold.swap(false, std::sync::atomic::Ordering::AcqRel);
+            hook_seen.lock().unwrap().push((refolded, *generation.get_or_insert(now) == now));
+        }));
+        assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+        store.trim_chunk_hook.lock().unwrap().take();
+        let seen = seen.lock().unwrap();
+        assert!(seen.len() > 4, "{interval:?}: the cut deletes in many chunks ({})", seen.len());
+        assert_eq!(seen.iter().any(|(refolded, _)| *refolded), refolds, "{interval:?}: {seen:?}");
+        assert!(seen.iter().all(|(_, kept)| *kept), "{interval:?}: a refold keeps the roster's generation: {seen:?}");
+    }
+}
+
+/// The frames in a store's WAL, which the next write appends after until a restart starts it
+/// over: `mxFrame` of the WAL-index header, read from the shared-memory file so that looking
+/// checkpoints nothing.
+fn wal_frames(store: &Store) -> i32 {
+    let mut shm = store.path.clone().into_os_string();
+    shm.push("-shm");
+    let header = std::fs::read(shm).unwrap_or_default();
+    header.get(16..20).map_or(0, |frames| i32::from_ne_bytes(frames.try_into().unwrap()))
+}
+
+/// A file-backed member trimming locally, with its trim unpaced and one envelope a chunk, and a
+/// cut's worth of observations to drop.
+fn file_member(scratch: &std::path::Path) -> Arc<Store> {
+    let store = declared(Store::open(&scratch.join("claims.sqlite3"), "node").unwrap(), true);
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..300 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    Arc::new(store)
+}
+
+/// Read transactions of 60 ms on two readers half a read apart, so one is always open and was
+/// begun before the trim's latest commit, as a busy daemon's are; and the daemon's idle recycle
+/// every 20 ms. Stop with `stop`.
+fn busy_daemon(store: &Arc<Store>, stop: &Arc<AtomicBool>) -> Vec<std::thread::JoinHandle<()>> {
+    let mut threads = Vec::new();
+    for offset in [0, 30] {
+        let (store, stop) = (Arc::clone(store), Arc::clone(stop));
+        threads.push(std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(offset));
+            let reader = store.readers.get();
+            while !stop.load(Ordering::Acquire) {
+                let read = reader.unchecked_transaction().unwrap();
+                read.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get::<_, i64>(0)).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                read.commit().unwrap();
+            }
+        }));
+    }
+    let (store, stop) = (Arc::clone(store), Arc::clone(stop));
+    threads.push(std::thread::spawn(move || {
+        let checkpoint = rusqlite::Connection::open(&store.path).unwrap();
+        while !stop.load(Ordering::Acquire) {
+            store.checkpoint_idle_wal_report(&checkpoint).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }));
+    threads
+}
+
+/// A trim writes nearly all the time and a busy daemon always has a reader on an older snapshot,
+/// so the idle recycle never finds the WAL copied: on a large member the WAL grew 650 MB a minute
+/// until the trim was stopped. Past its bound the trim stops deleting and restarts the WAL, so the
+/// WAL stays near the bound for the whole cut however much the cut deletes.
+#[test]
+fn a_paced_local_trim_keeps_the_wal_under_its_bound_with_readers_always_open() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = file_member(scratch.path());
+    let bound = 1_000;
+    store.set_trim_wal(smallclaims::store::checkpoint_trim::TrimWal {
+        frames: bound,
+        check: std::time::Duration::ZERO,
+        ..smallclaims::store::checkpoint_trim::TRIM_WAL
+    });
+    let logged = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&logged);
+    *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
+    let stop = Arc::new(AtomicBool::new(false));
+    let daemon = busy_daemon(&store, &stop);
+    let sampled = Arc::new(Mutex::new((0, 0, 0)));
+    let samples = Arc::clone(&sampled);
+    let hook_store = Arc::clone(&store);
+    let mut last = wal_frames(&store);
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+        let frames = wal_frames(&hook_store);
+        let mut samples = samples.lock().unwrap();
+        // The largest WAL, the most one chunk added, and every frame the trim wrote.
+        samples.0 = samples.0.max(frames);
+        samples.1 = samples.1.max(frames - last);
+        samples.2 += (frames - last).max(0);
+        last = frames;
+    }));
+    let actions = kinds(&step(&store, &context(scratch.path(), 0)));
+    store.trim_chunk_hook.lock().unwrap().take();
+    stop.store(true, Ordering::Release);
+    daemon.into_iter().for_each(|thread| thread.join().unwrap());
+    assert_eq!(actions.first(), Some(&"trimmed"), "{actions:?}");
+    assert!(observer_ids(&store).len() < 10, "the cut dropped the observations");
+    let (largest, chunk, written) = *sampled.lock().unwrap();
+    assert!(written > 10 * bound, "the trim writes far past the bound ({written} frames)");
+    // Past the bound by what one chunk and the run between two looks write, never by the cut.
+    assert!(largest < bound + bound / 4, "the WAL reached {largest} frames, bound {bound}, chunk {chunk}");
+    // Each restart says so on the daemon's stderr.
+    let restarts = logged.lock().unwrap().iter().filter(|line| line.starts_with("st3: a trim restarted the WAL {")).count();
+    assert!(restarts * bound as usize >= written as usize / 2, "{restarts} restart lines for {written} frames");
+}
+
+/// A trim whose WAL will not restart, because a reader holds a snapshot past the trim's wait,
+/// stops where it is, deletes nothing more, and goes on at the next step once the reader is gone.
+#[test]
+fn a_trim_that_cannot_restart_the_wal_stops_until_the_next_step_and_resumes() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = file_member(scratch.path());
+    let bound = 200;
+    store.set_trim_wal(smallclaims::store::checkpoint_trim::TrimWal {
+        frames: bound,
+        busy: std::time::Duration::from_millis(20),
+        wait: std::time::Duration::from_millis(300),
+        check: std::time::Duration::ZERO,
+    });
+    let all = observer_ids(&store);
+    // From the third chunk, one reader holds its snapshot for longer than the trim waits.
+    let (begun, release) = (Arc::new(std::sync::Barrier::new(2)), Arc::new(AtomicBool::new(false)));
+    let holder = Arc::new(Mutex::new(None));
+    let (hook_store, hook_begun, hook_release, hook_holder) =
+        (Arc::clone(&store), Arc::clone(&begun), Arc::clone(&release), Arc::clone(&holder));
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        if chunk == 3 {
+            let (store, begun, release) = (Arc::clone(&hook_store), Arc::clone(&hook_begun), Arc::clone(&hook_release));
+            *hook_holder.lock().unwrap() = Some(std::thread::spawn(move || {
+                let reader = store.readers.get();
+                let read = reader.unchecked_transaction().unwrap();
+                read.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get::<_, i64>(0)).unwrap();
+                begun.wait();
+                while !release.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                read.commit().unwrap();
+            }));
+            hook_begun.wait();
+        }
+    }));
+    let logged = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&logged);
+    *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
+    let actions = kinds(&step(&store, &context(scratch.path(), 0)));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let stopped_at = wal_frames(&store);
+    assert!(
+        logged.lock().unwrap().iter().any(|line| line.starts_with("st3: a trim could not restart the WAL and stops until the next step {")),
+        "the stop is logged: {:?}", logged.lock().unwrap()
+    );
+    let left = observer_ids(&store);
+    release.store(true, Ordering::Release);
+    holder.lock().unwrap().take().unwrap().join().unwrap();
+    assert_eq!(actions.first(), Some(&"deferred"), "{actions:?}");
+    assert!(cut_states(&store).iter().any(|state| state == "trimming"), "{:?}", cut_states(&store));
+    assert!(left.len() < all.len() && left.len() > 10, "the run stopped part way ({} of {} left)", left.len(), all.len());
+    assert!(stopped_at < 2 * bound, "the trim deleted past the bound ({stopped_at} frames)");
+    // The reader gone, the next step restarts the WAL and finishes the cut.
+    store.set_trim_wal(smallclaims::store::checkpoint_trim::TRIM_WAL);
+    let actions = kinds(&step(&store, &context(scratch.path(), 0)));
+    assert_eq!(actions.first(), Some(&"trimmed"), "{actions:?}");
+    assert!(observer_ids(&store).len() < 10, "the cut dropped the observations");
+}
+
+/// The claims sequence a page cursor carries, which the final mark of a trim moves on.
+fn claims_sequence(store: &Store) -> i64 {
+    store
+        .readers
+        .get()
+        .query_row("SELECT seq FROM sqlite_sequence WHERE name='claims'", [], |row| row.get(0))
+        .unwrap()
 }
 
 /// How many claims this member retired, and whether every one of `deleted` is among them.
