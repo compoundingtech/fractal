@@ -122,6 +122,7 @@ pub use harness_questions::{
 };
 pub mod mailbox;
 pub mod mail_backlog;
+pub mod message_reads;
 pub mod delivery_metrics;
 pub mod mailbox_metrics;
 pub mod mission_eligibility_doctor;
@@ -174,7 +175,6 @@ mod agents;
 pub mod client_reads;
 pub mod fleet;
 pub mod launches;
-pub mod message_reads;
 pub mod messages;
 pub mod operations;
 pub mod records;
