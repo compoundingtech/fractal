@@ -4965,13 +4965,35 @@ pub struct PhoneDocumentsParams { #[serde(default, skip_serializing_if = "Option
 #[serde(deny_unknown_fields)]
 pub struct PhoneDocumentParams { pub reference: String, pub trail: Vec<String> }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "screen", content = "params", deny_unknown_fields)]
 pub enum PhoneNavigateArgs {
     NowRoot, Agents, Missions, Usage, History,
     Mission(PhoneIdParams), Attention(PhoneIdParams), Launch(PhoneIdParams),
     Conversation(PhoneConversationParams), Terminal(PhoneTerminalParams),
     Documents(Option<PhoneDocumentsParams>), Document(PhoneDocumentParams),
+}
+impl Serialize for PhoneNavigateArgs {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut map = serializer.serialize_map(None)?;
+        let screen = match self {
+            Self::NowRoot => "NowRoot", Self::Agents => "Agents", Self::Missions => "Missions",
+            Self::Usage => "Usage", Self::History => "History", Self::Mission(_) => "Mission",
+            Self::Attention(_) => "Attention", Self::Launch(_) => "Launch", Self::Conversation(_) => "Conversation",
+            Self::Terminal(_) => "Terminal", Self::Documents(_) => "Documents", Self::Document(_) => "Document",
+        };
+        map.serialize_entry("screen", screen)?;
+        match self {
+            Self::Mission(params) | Self::Attention(params) | Self::Launch(params) => map.serialize_entry("params", params)?,
+            Self::Conversation(params) => map.serialize_entry("params", params)?,
+            Self::Terminal(params) => map.serialize_entry("params", params)?,
+            Self::Documents(Some(params)) => map.serialize_entry("params", params)?,
+            Self::Document(params) => map.serialize_entry("params", params)?,
+            Self::NowRoot | Self::Agents | Self::Missions | Self::Usage | Self::History | Self::Documents(None) => {},
+        }
+        map.end()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
