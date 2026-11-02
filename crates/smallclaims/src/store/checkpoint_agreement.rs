@@ -985,6 +985,14 @@ impl Store {
             return Ok(actions);
         }
         if !verified.contains_key(&self.origin) {
+            // Our first seal lets peers advance, but refreshing it cannot enable verification
+            // while a participant has no seal. Defer the identity walk even if history changed:
+            // once every seal exists we recompute and reseal before comparing terms to verify.
+            if seals.contains_key(&self.origin)
+                && participants.iter().any(|writer| !seals.contains_key(writer))
+            {
+                return Ok(actions);
+            }
             // Register the cut and seal row with the capture guard, as a capture does, so its
             // triggers fence the history the seal reads and the next pass reuses the digest
             // until that history changes. It writes only when a bound grows.
