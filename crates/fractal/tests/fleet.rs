@@ -6272,10 +6272,150 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
 }
 
-/// The previous release never holds the messages shard: it is never dialed for it, and its
-/// graph sync with new members runs as before in both directions. Upgrading it in place opens
-/// the shard and it starts receiving stream items; rolling it back to the release leaves the
-/// shard file in place, keeps graph sync working, and new members stop dialing it.
+/// A seat's conversation and `conversations wait` across the previous release and this build, on
+/// one node upgraded in place and rolled back. The release's mail reads the same after the
+/// upgrade, a stream item joins the conversation behind the graph claim it arrived after, and a
+/// wait ends on a stream reply. A cursor the release gave out resumes on this build; one this
+/// build gave out asks the release for a full read rather than skipping. A CLI of either build
+/// waits on a daemon of the other for graph mail.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_conversation_and_waits_read_stream_items_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let new = PathBuf::from(st3());
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    let reader = "agent/fleet-reader";
+    let _: Value = o
+        .client()
+        .post("/v1/claims", &ClaimInput {
+            subject: reader.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(reader.into()),
+            fields: serde_json::from_value(json!({
+                "status": "running", "runtime_id": "fleet-reader-runtime",
+                "incarnation_id": "fleet-reader-runtime:i1",
+            }))
+            .unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let person = |node: &Node| Client::unix_as(node.socket(), PERSON).unwrap();
+    let changes_path = |after: Option<&str>| {
+        let mut path = format!("/v1/client/conversations/{}/changes", reader.replace('/', "%2F"));
+        if let Some(after) = after {
+            path.push_str(&format!("?after={}", urlencoding::encode(after)));
+        }
+        path
+    };
+    let changes = |node: &Node, after: Option<String>| {
+        let client = person(node);
+        let path = changes_path(after.as_deref());
+        async move {
+            let value: Value = client.get(&path).await.unwrap();
+            let messages = value["items"].as_array().unwrap().iter()
+                .filter(|item| item["type"] == "message")
+                .map(|item| (item["body"]["message_id"].as_str().unwrap().to_owned(), item["sequence"].as_u64().unwrap()))
+                .collect::<Vec<_>>();
+            (value["next_cursor"].as_str().unwrap().to_owned(), messages)
+        }
+    };
+    let send = |node: &Node, key: &str, from: &str, to: &str| {
+        let client = node.client();
+        let body = json!({"idempotency_key": key, "from": from, "to": to, "content": format!("graph mail {key}")});
+        async move {
+            let receipt: Value = client.post("/v1/messages", &body).await.unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    // A wait as the seat, by `binary`'s CLI against `node`'s daemon. A reply it finds is marked
+    // read, so each wait below has its own.
+    let wait = |node: &Node, binary: &Path, extra: &[&str]| -> Value {
+        let mut arguments = vec!["--json", "conversations", "wait", "--as", reader, "--from", "agent/fleet-sender", "--timeout", "0"];
+        arguments.extend_from_slice(extra);
+        let environment = node.command(&[]).get_envs()
+            .filter_map(|(key, value)| Some((key.to_owned(), value?.to_owned())))
+            .collect::<Vec<_>>();
+        let output = fractal_daemon::test_support::command(binary)
+            .args(&arguments).envs(environment).current_dir(&node.root).env("ST_AGENT", reader)
+            .output().unwrap();
+        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    // The release's own conversation.
+    let (opened, _) = changes(&o, None).await;
+    let first = send(&o, "release-first", PERSON, reader).await;
+    let (release_cursor, listed) = changes(&o, Some(opened)).await;
+    assert_eq!(listed.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), std::slice::from_ref(&first));
+    let first_sequence = listed[0].1;
+
+    // Upgrade in place: the release's cursor resumes, and a stream item joins the conversation
+    // after the graph claim it arrived behind.
+    o.stop();
+    o.binary = new.clone();
+    o.start().await;
+    let (cursor, none) = changes(&o, Some(release_cursor.clone())).await;
+    assert!(none.is_empty(), "the release's cursor read nothing new: {none:?}");
+    let stream = "message/0000000000000e01";
+    append_stream_item(&o, stream).await;
+    let (upgraded_cursor, joined) = changes(&o, Some(cursor)).await;
+    assert_eq!(joined.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), [stream], "{joined:?}");
+    assert!(joined[0].1 > first_sequence && joined[0].1 % 4 == 2, "{joined:?}");
+    let health: Value = o.client().get("/v1/health").await.unwrap();
+    assert!(health["messages_store_index"].as_u64().unwrap() > 0, "{health}");
+
+    // A wait after the release's message ends on a stream reply, by either build's CLI: the
+    // release's finds it in the mailbox page this build merges.
+    let (this_reply, release_reply) = ("message/0000000000000e02", "message/0000000000000e03");
+    let release = wait(&o, &old, &["--after", &first]);
+    assert_eq!(release["message"]["subject"], stream, "{release}");
+    append_stream_item(&o, this_reply).await;
+    let this_build = wait(&o, &new, &["--after", &first]);
+    assert_eq!(this_build["message"]["subject"], this_reply, "{this_build}");
+    // After a stream item, a graph reply counts for this build's CLI. The release's CLI
+    // compares indexes across the stores and misses it, as the release note says.
+    let graph_reply = send(&o, "graph-reply", "agent/fleet-sender", reader).await;
+    let this_build = wait(&o, &new, &["--after", this_reply]);
+    assert_eq!(this_build["message"]["subject"], graph_reply, "{this_build}");
+    append_stream_item(&o, release_reply).await;
+    let unseen = send(&o, "graph-unseen", "agent/fleet-sender", reader).await;
+    assert_eq!(wait(&o, &old, &["--after", release_reply])["reply"], false);
+
+    // Roll back: this build's cursor asks the release for a full read; the release's mail and
+    // the graph reply read as before.
+    o.stop();
+    o.binary = old.clone();
+    o.start().await;
+    let refused = person(&o).get::<Value>(&changes_path(Some(&upgraded_cursor))).await.unwrap_err().to_string();
+    assert!(refused.contains("cursor-gap"), "{refused}");
+    let (reopened, _) = changes(&o, None).await;
+    let later = send(&o, "rolled-back", PERSON, reader).await;
+    let (_, after_rollback) = changes(&o, Some(reopened)).await;
+    assert_eq!(after_rollback.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [later]);
+    // Either build's CLI waits on the release for graph mail.
+    let release = wait(&o, &old, &["--after", &first]);
+    assert_eq!(release["message"]["subject"], unseen, "{release}");
+    let last = send(&o, "graph-last", "agent/fleet-sender", reader).await;
+    let this_build = wait(&o, &new, &["--after", &first]);
+    assert_eq!(this_build["message"]["subject"], last, "this build's CLI on the release reads the graph: {this_build}");
+}
+
+/// When the previous release predates the messages shard, it is never dialed for it.
+/// Upgrading it in place opens the shard; rolling it back leaves the shard file in place
+/// and new members stop dialing it. If the release already opens the shard, only these
+/// transition-specific expectations are skipped. Both baselines must retain history,
+/// receive stream items after upgrade, and keep graph sync working without invalid records.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place() {
@@ -6308,8 +6448,15 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
     for node in [&o, &n1] {
         wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
     }
-    assert!(!o.state_dir().join("shards").exists(), "the release opens no shard");
-    assert!(stream_peers(&n1).await.is_empty(), "the release does not advertise the shard");
+    let release_opens_shard = o.state_dir().join("shards").exists();
+    if release_opens_shard {
+        eprintln!(
+            "baseline release already opens shards/: the messages-shard transition is behind \
+             this fleet; skipping only the no-shard/no-advertisement and rollback transition assertions"
+        );
+    } else {
+        assert!(stream_peers(&n1).await.is_empty(), "the release does not advertise the shard");
+    }
     append_stream_item(&n1, "message/0000000000000b01").await;
     o.note("o-mixed").await;
     n1.note("n1-mixed").await;
@@ -6330,12 +6477,14 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
     wait_for_stream_peers(&n1, &["o"], 90).await;
     wait_for_stream_item(&o, "message/0000000000000b01", 90).await;
 
-    // Roll it back to the release: the shard file stays, and the release ignores it.
+    // Roll back in place; a release predating the shard leaves it alone and stops advertising it.
     o.stop();
     o.binary = old;
     o.start().await;
-    assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
-    wait_for_stream_peers(&n1, &[], 90).await;
+    if !release_opens_shard {
+        assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+        wait_for_stream_peers(&n1, &[], 90).await;
+    }
     o.note("o-rolled-back").await;
     n1.note("n1-after-rollback").await;
     expected.extend([

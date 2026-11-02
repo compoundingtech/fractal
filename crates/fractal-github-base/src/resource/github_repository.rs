@@ -149,12 +149,13 @@ fn finish_listing(
     watermark: &mut Option<String>,
     listing: &GithubListing,
     started: &str,
+    initial: &str,
 ) -> bool {
     let newest = newest_updated_at(&listing.values);
     if scan.is_none() && !listing.truncated {
         *watermark = newest.into_iter().chain(watermark.take()).max()
             .map(|at| at.min(started.to_owned()))
-            .or_else(|| Some(watermark_now()));
+            .or_else(|| Some(initial.to_owned()));
         return false;
     }
     let progress = scan.get_or_insert_with(ListingScan::default);
@@ -1283,9 +1284,6 @@ fn merge(items: &mut BTreeMap<u64, Item>, item: Item) {
     }
 }
 
-fn watermark_now() -> String {
-    watermark_at(SystemTime::now().checked_sub(WATERMARK_SKEW).unwrap_or(UNIX_EPOCH))
-}
 
 fn watermark_at(at: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(at)
@@ -1341,6 +1339,14 @@ pub async fn observe_at(
     api_base: &str,
     token: Option<&GithubAuth>,
 ) -> Result<ProviderObservation> {
+    super::github_poll::observe(request, |request| observe_poll(request, api_base, token)).await
+}
+
+async fn observe_poll(
+    request: ObservationRequest,
+    api_base: &str,
+    token: Option<&GithubAuth>,
+) -> Result<ProviderObservation> {
     let cache_for = github_cache_for(&request);
     let token = token
         .filter(|value| value.is_valid())
@@ -1382,7 +1388,9 @@ pub async fn observe_at(
         .and_then(Value::as_str)
         .and_then(|name| name.split_once('/'))
         .unwrap_or((owner, repository));
-    let started = watermark_at(SystemTime::now());
+    let started_at = super::github_poll::started();
+    let started = watermark_at(started_at);
+    let initial = watermark_at(started_at.checked_sub(WATERMARK_SKEW).unwrap_or(UNIX_EPOCH));
     let mut cursor = RepositoryCursor::parse(request.cursor.as_deref());
     // A cursor an earlier build moved past its look's start reads on from now instead.
     for since in [&mut cursor.items_since, &mut cursor.comments_since].into_iter().flatten() {
@@ -1508,7 +1516,7 @@ pub async fn observe_at(
                 }
             }
         }
-        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing, &started);
+        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing, &started, &initial);
         if cursor.items_scan.is_none() {
             retain_boundary(&mut cursor.item_versions, cursor.items_since.as_deref());
         }
@@ -1577,7 +1585,7 @@ pub async fn observe_at(
             match cursor.comments_since.clone() {
                 // The first poll starts the comment watermark now instead of reading every comment
                 // the repository ever had.
-                None => cursor.comments_since = Some(watermark_now()),
+                None => cursor.comments_since = Some(initial.clone()),
                 Some(since) => {
                     let comments = github_listing(
                         &client,
@@ -1599,7 +1607,7 @@ pub async fn observe_at(
                             merge(&mut items, item);
                         }
                     }
-                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments, &started);
+                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments, &started, &initial);
                     if cursor.comments_scan.is_none() {
                         retain_boundary(&mut cursor.comment_versions, cursor.comments_since.as_deref());
                     }
@@ -4743,5 +4751,72 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("repository 8"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn budget_cut_poll_resumes_without_replaying_completed_requests() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route("/repos/acme/garden/issues?state=open&per_page=100",
+            json!([issue(1, "2026-09-10T00:00:00Z", json!({"node_id": "I_orchid"}))]));
+        github.open_pull_requests(json!([]));
+        github.resolved_nodes(json!([{"id": "I_orchid", "state": "OPEN", "number": 1,
+            "url": "https://github.com/acme/garden/issues/1"}]));
+        let error = crate::resource::github_poll::CUTOFF.scope(2,
+            observe_at(request(&["issues"], None, None), &base, Some(&GithubAuth::test("test")))
+        ).await.unwrap_err();
+        assert!(error.downcast_ref::<crate::resource::LocalObserverBudget>().is_some());
+        let cursor = error.downcast_ref::<crate::resource::BudgetContinuation>().unwrap().0.as_deref().unwrap();
+        assert_eq!(github.take_requests().len(), 2);
+        // No ProviderObservation was returned: absence cannot close items mid-poll.
+        let graphql = github.graphql.lock().clone();
+        *github.graphql.lock() = json!({"errors": [{"message": "fixture failure"}]}).to_string();
+        let failed = observe_at(request(&["issues"], Some(cursor), None), &base,
+            Some(&GithubAuth::test("test"))).await.unwrap_err();
+        assert_eq!(failed.downcast_ref::<crate::resource::BudgetContinuation>().unwrap().0, None);
+        assert!(failed.to_string().contains("fixture failure"), "the original error stays visible");
+        *github.graphql.lock() = graphql;
+        let complete = observe_at(request(&["issues"], Some(cursor), None), &base,
+            Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(item(&complete.facts, "issues", 1)["number"], 1);
+        let requests = github.take_requests();
+        assert!(requests.iter().all(|request| !request.starts_with("GET /repos/acme/garden ")));
+        assert!(requests.iter().all(|request| !request.starts_with("GET /repos/acme/garden/issues?")));
+        assert!(complete.cursor.as_deref().is_some_and(|cursor| !cursor.contains("poll_started_ms")));
+    }
+
+    #[tokio::test]
+    async fn non_budget_failure_keeps_no_continuation() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.refused.lock().insert("/repos/acme/garden/issues?state=open&per_page=100".into(),
+            "500 Internal Server Error".into());
+        for _ in 0..2 {
+            let error = observe_at(request(&["issues"], None, None), &base,
+                Some(&GithubAuth::test("test"))).await.unwrap_err();
+            assert!(error.downcast_ref::<crate::resource::BudgetContinuation>().is_none());
+            assert_eq!(github.take_requests().len(), 2, "ordinary failure revalidates the prefix");
+        }
+    }
+
+    #[tokio::test]
+    async fn resumed_empty_listing_keeps_original_watermarks() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
+        github.open_pull_requests(json!([]));
+        let error = crate::resource::github_poll::CUTOFF.scope(2,
+            observe_at(request(&["pull_requests", "comments"], None, None), &base, Some(&GithubAuth::test("test")))
+        ).await.unwrap_err();
+        let cursor = error.downcast_ref::<crate::resource::BudgetContinuation>().unwrap().0.as_deref().unwrap();
+        let mut checkpoint: Value = serde_json::from_str(cursor).unwrap();
+        let started = checkpoint["poll_started_ms"].as_u64().unwrap() - 600_000;
+        checkpoint["poll_started_ms"] = json!(started);
+        let complete = observe_at(request(&["pull_requests", "comments"], Some(&checkpoint.to_string()), None),
+            &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        let cursor = RepositoryCursor::parse(complete.cursor.as_deref());
+        let expected = watermark_at(UNIX_EPOCH + Duration::from_millis(started) - WATERMARK_SKEW);
+        assert_eq!(cursor.items_since.as_deref(), Some(expected.as_str()));
+        assert_eq!(cursor.comments_since.as_deref(), Some(expected.as_str()));
     }
 }

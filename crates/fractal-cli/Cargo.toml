@@ -1,0 +1,22 @@
+[package]
+name = "fractal-cli"
+version = "0.1.0"
+edition = "2024"
+description = "The fractal executable: Fractal's CLI and daemon (crates/fractal) with this build's identity"
+license = "MIT"
+# The binary and the test of the identity it bakes. Only this package depends on the stamp, so a new
+# commit relinks fractal and rebuilds none of the libraries or tests below it (see crates/fractal-build-stamp).
+
+[dependencies]
+fractal = { path = "../fractal" }
+fractal-build-stamp = { path = "../fractal-build-stamp" }
+
+[dev-dependencies]
+fractal-daemon = { path = "../fractal-daemon", features = ["test-support"] }
+fractal-drivers = { path = "../fractal-drivers" }
+serde_json = "1"
+tempfile = "3"
+
+[[bin]]
+name = "fractal"
+path = "src/main.rs"

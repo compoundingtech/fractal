@@ -11,6 +11,7 @@ test-support = ["fractal-secrets/test-support"]
 
 [dependencies]
 fractal-secrets = { path = "../fractal-secrets" }
+fractal-runtime = { path = "../fractal-runtime" }
 anyhow = "1"
 hex = "0.4"
 kdl = "6"

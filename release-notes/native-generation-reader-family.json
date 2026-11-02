@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Move the shared catalog generation reader family into a private leaf module while preserving its existing paths.",
+  "replay": {"status": "none", "detail": "The four function bodies and their error handling are unchanged; no replay or state write changes."},
+  "schema": {"status": "none", "detail": "The control directory, generation filename and newline-terminated counter format remain unchanged."},
+  "rules": {"status": "none", "detail": "Authoring locks, generation fences, incomplete markers and reader validation retain their existing behavior."},
+  "compatibility": {"status": "none", "detail": "The leaf module is private. Existing catalog_lock constant and function paths remain through re-exports, including native message, resource-observe and runner callers."},
+  "downtime": {"status": "none", "detail": "An internal code move requires no new restart or service interruption."},
+  "manual": {"status": "none", "detail": "No operator action or migration. This prerequisite does not retire catalog writers or compatibility callers."},
+  "recovery": {"status": "none", "detail": "No state conversion; reverting restores the previous source layout without changing persisted files."}
+}
