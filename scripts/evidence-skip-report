@@ -14,6 +14,8 @@ check of each run is counted once, as:
               an author is not listed, the branch is too far behind) and no note covered it: a pushed head's note could not count
   not_signed  no note covered the tree (outcome no_note; for rust-tests, a crate without a note) although the pull request leaves the lane
               alone: it was pushed unsigned
+  shadow_unsigned  the same, for a check whose skip is not turned on at the run's base (enforce is not true in the skip policy): the
+              check runs whether it is signed or not, so nothing was lost; counted apart so a shadow check does not read as an unsigned push
   failed      a note covered the tree but recorded a failure (reason check_failed)
   protected   a trusted note covered it but the pull request changes a file that decides skipping (the gate, verifier, policy, keys...)
   sampled     a trusted note covered it and the run was sampled to run anyway (one in five)
@@ -39,10 +41,11 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
 LANES = '.st/required-lanes.json'
+POLICY = '.st/evidence-skip-policy.json'
 _loader = importlib.machinery.SourceFileLoader('evidence_flip_ready', str(Path(__file__).resolve().parent / 'evidence-flip-ready'))
 flip = importlib.util.module_from_spec(importlib.util.spec_from_loader(_loader.name, _loader))
 _loader.exec_module(flip)
-CATEGORIES = ('skipped', 'lane_edit', 'merge_tree', 'not_signed', 'failed', 'protected', 'sampled', 'shadow', 'other')
+CATEGORIES = ('skipped', 'lane_edit', 'merge_tree', 'not_signed', 'failed', 'protected', 'sampled', 'shadow', 'shadow_unsigned', 'other')
 
 
 def lanes_at(root, base, runner, cache):
@@ -63,6 +66,22 @@ def lanes_at(root, base, runner, cache):
     lanes = {name: list(lane.get('definition_paths') or []) for name, lane in (data.get('lanes') or data).items()}
     cache[base] = lanes
     return cache[base]
+
+
+def enforced_at(root, base, runner, cache, check):
+    """Whether the skip policy at the run's base turns skipping on for `check` (enforce true). True when the policy cannot be read or does
+    not name the check: an unreadable base never hides an unsigned push."""
+    if base not in cache:
+        revision = base or 'origin/main'
+        try:
+            path = flip.config_path(root, POLICY, revision, runner)
+            cache[base] = json.loads(flip.git(root, 'show', f'{revision}:{path}', runner=runner)).get('checks')
+        except (RuntimeError, ValueError, AttributeError):
+            cache[base] = None
+    checks = cache[base]
+    if not isinstance(checks, dict) or not isinstance(checks.get(check), dict):
+        return True
+    return checks[check].get('enforce') is True
 
 
 def touches(files, paths):
@@ -132,7 +151,7 @@ def report(github, root, runner, since, until, actors, receipts):
     counts = collections.defaultdict(collections.Counter)
     others = collections.defaultdict(collections.Counter)
     unsigned = {}
-    lane_cache, file_cache = {}, {}
+    lane_cache, file_cache, policy_cache = {}, {}, {}
     for run in runs:
         jobs = github.items(f'repos/{github.repo}/actions/runs/{run["id"]}/jobs?per_page=100&filter=latest', 'jobs')
         number, branch = None, run.get('head_branch')
@@ -151,6 +170,8 @@ def report(github, root, runner, since, until, actors, receipts):
                 lanes = lanes_at(root, fields.get('base'), runner, lane_cache)
                 lane_edit = bool(number) and check in lanes and touches(pr_files(github, number, file_cache), lanes[check])
             category = classify(fields, lane_edit)
+            if category == 'not_signed' and not enforced_at(root, fields.get('base'), runner, policy_cache, check):
+                category = 'shadow_unsigned'
             counts[check][category] += 1
             if category == 'other':
                 others[check][f'{fields.get("outcome")}:{(fields.get("reason") or "")[:40]}'] += 1
@@ -169,8 +190,9 @@ def report(github, root, runner, since, until, actors, receipts):
 def markdown(result):
     lines = [f"**Our pull request runs**, {result['window']['since']} .. {result['window']['until']}: {result['runs']} runs"
              + (f" (accounts: {', '.join(result['actors'])})" if result['actors'] else ''), '',
-             '| check | skipped | ran: lane edit | ran: merge tree | ran: not signed | ran: failed | ran: protected file | ran: sampled | ran: shadow | ran: other |',
-             '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
+             '| check | skipped | ran: lane edit | ran: merge tree | ran: not signed | ran: failed | ran: protected file | ran: sampled | ran: shadow '
+             '| ran: shadow, unsigned | ran: other |',
+             '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
     for check, row in result['checks'].items():
         lines.append(f"| {check} | " + ' | '.join(str(row[category]) for category in CATEGORIES) + ' |')
     if result['not_signed']:
