@@ -60,6 +60,9 @@ pub fn hold_pre_boot_mail(
             && if mailbox_reads::is_stream_item(message) {
                 mailbox_reads::lifecycle_step(store, &message.subject, "message.staged")?
                     .is_some_and(|(actor, at)| at >= since && actor == peer.agent)
+            } else if let Some((consumer, at)) = crate::store::message_marks::staged(&store.readers.get(), &message.subject)? {
+                // A staging this member recorded as a mark has no graph index either.
+                at >= since && consumer == peer.agent
             } else {
                 store
                     .latest_claim(&message.subject, Some("message.staged"))?

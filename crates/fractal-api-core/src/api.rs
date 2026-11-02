@@ -4747,9 +4747,16 @@ fn client_message_resources_at(
         let sent_at = first
             .map(|claim| claim.accepted_at_unix_ms)
             .unwrap_or_default();
-        let updated_at = last
+        let mut updated_at = last
             .map(|claim| claim.accepted_at_unix_ms)
             .unwrap_or(sent_at);
+        let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
+        // A seat this member hosts moves its message by a local mark, which no claim records.
+        if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
+            && at >= updated_at
+        {
+            (revision, updated_at) = (receipt, at);
+        }
         let session_id = first
             .and_then(|claim| {
                 claim
@@ -4770,7 +4777,7 @@ fn client_message_resources_at(
         let mut resource = json!({
             "id": message.subject,
             "kind": "message",
-            "revision": last.map(|claim| claim.id.as_str()).unwrap_or("message/unknown"),
+            "revision": revision,
             "updated_at": client_timestamp(updated_at),
             "from": message.from,
             "to": message.to,

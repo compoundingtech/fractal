@@ -13,7 +13,8 @@ const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The dispatcher's position: the graph's claims, its local observations, and the messages
 /// shard, whose items and local lifecycle are not graph claims.
-pub type WakeCursor = (u64, u64, mailbox_reads::StreamPosition);
+/// Claims, local observations, the messages shard, and local mark events (message_marks.rs).
+pub type WakeCursor = (u64, u64, mailbox_reads::StreamPosition, u64);
 
 async fn dispatch(
     store: std::sync::Weak<Store>,
@@ -169,7 +170,7 @@ impl MailboxWakesStore for Store {
                     COALESCE((SELECT MAX(id) FROM local_observations),0)",
             )?
             .query_row(/* sqlite-large-value: allow-for-now lv-hb895da732cc2 owner=fractal_delivery::store::mailbox_wakes TODO=trace-statement-and-value-representation */ [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok((index, local, mailbox_reads::position(self)?))
+        Ok((index, local, mailbox_reads::position(self)?, fractal_store::store::message_marks::event_position(&connection)?))
     }
 
     fn mailbox_wake_batch(
@@ -230,7 +231,15 @@ impl MailboxWakesStore for Store {
             }
             dependencies.insert(Dependency::Subject(subject));
         }
-        Ok((next, dependencies, graph_full || local_full || stream_full))
+        // A seat's mark wakes its mailbox and the message, as its lifecycle claim would.
+        let marks = fractal_store::store::message_marks::events_after(&connection, cursor.3, 1024)?;
+        let marks_full = marks.len() == 1024;
+        for (id, subject, consumer) in marks {
+            next.3 = id;
+            dependencies.insert(Dependency::Recipient(normalize_message_party(&consumer)));
+            dependencies.insert(Dependency::Subject(subject));
+        }
+        Ok((next, dependencies, graph_full || local_full || stream_full || marks_full))
     }
 }
 

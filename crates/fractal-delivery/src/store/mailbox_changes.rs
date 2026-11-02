@@ -5,6 +5,9 @@ use super::*;
 pub use fractal_store::store::mailbox_changes::*;
 use fractal_store::store::messages_shard::mailbox_reads;
 
+/// The most mark events one change read takes; past them the stream resyncs.
+const MARK_EVENTS_READ: usize = 4_096;
+
 const MESSAGE_CHANGES: &str = "SELECT DISTINCT changed.subject FROM claims changed NOT INDEXED
                  WHERE changed.store_index>?1 AND changed.subject GLOB 'message/*'
                    AND (changed.subject IN (SELECT value FROM json_each(?4))
@@ -116,6 +119,18 @@ impl MailboxChangesStore for Store {
             changed.sort();
             changed.dedup();
         }
+        // A seat's marks are this member's own records too: each names its message and consumer.
+        let mut marks_behind = false;
+        if fence.component == "delivery" && mark.marks != previous.marks {
+            let listed = messages.iter().map(|message| message.subject.as_str()).collect::<std::collections::HashSet<_>>();
+            let events = fractal_store::store::message_marks::events_after(&connection, previous.marks, MARK_EVENTS_READ)?;
+            marks_behind = events.len() == MARK_EVENTS_READ || mark.marks < previous.marks;
+            changed.extend(events.into_iter().filter_map(|(_, subject, consumer)| {
+                (consumer == recipient || consumer == bare || listed.contains(subject.as_str())).then_some(subject)
+            }));
+            changed.sort();
+            changed.dedup();
+        }
         // Binding replacement and incarnation validity are independent of message content.
         // No history fold on idle rechecks; a changed seat or owner still checks the full fence.
         if seat || mark.owner != previous.owner {
@@ -127,7 +142,8 @@ impl MailboxChangesStore for Store {
                 || mark.index < previous.index
                 || mark.local < previous.local
                 || mark.stream.admitted < previous.stream.admitted
-                || mark.stream.lifecycle < previous.stream.lifecycle,
+                || mark.stream.lifecycle < previous.stream.lifecycle
+                || marks_behind,
             mark,
             messages: changed,
         })

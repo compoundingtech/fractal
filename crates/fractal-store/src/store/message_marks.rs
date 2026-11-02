@@ -20,6 +20,24 @@ pub const MARKS: [&str; 3] = ["message.delivered", "message.read", "message.clos
 /// it does not know, and a backup of marks restores on it. It ranks below every mark.
 pub const STAGED: &str = "message.staged";
 
+/// How many of the newest mark events stay (`local_message_mark_events`).
+pub const EVENTS_KEPT: i64 = 16_384;
+
+/// The newest mark event, or 0: a position readers of mark changes start from.
+pub fn event_position(connection: &Connection) -> Result<u64> {
+    Ok(connection
+        .prepare_cached("SELECT COALESCE(MAX(id), 0) FROM local_message_mark_events")?
+        .query_row([], |row| row.get(0))?)
+}
+
+/// The mark events after `after`, at most `limit`, as (id, message, consumer).
+pub fn events_after(connection: &Connection, after: u64, limit: usize) -> Result<Vec<(u64, String, String)>> {
+    Ok(connection
+        .prepare_cached("SELECT id, message, consumer FROM local_message_mark_events WHERE id>?1 ORDER BY id LIMIT ?2")?
+        .query_map(params![after, limit as i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 /// How long a mark that something further along has superseded stays.
 pub const SUPERSEDED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -45,6 +63,13 @@ CREATE TABLE IF NOT EXISTS local_message_staged (
     PRIMARY KEY(message, consumer)
 );
 CREATE INDEX IF NOT EXISTS local_message_staged_age ON local_message_staged(recorded_at_unix_ms);
+-- Each new mark or staging, in order: what a mailbox wake or a cache reads as a change, since a
+-- mark moves no claim index. The trim keeps the newest EVENTS_KEPT.
+CREATE TABLE IF NOT EXISTS local_message_mark_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message TEXT NOT NULL,
+    consumer TEXT NOT NULL
+);
 ",
     )?;
     Ok(())
@@ -87,6 +112,14 @@ BEGIN
     INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
     VALUES(OLD.message,-1,1,2)
     ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|2,created_index=created_index+1;
+END;
+CREATE TRIGGER IF NOT EXISTS local_message_marks_event AFTER INSERT ON local_message_marks
+BEGIN
+    INSERT INTO local_message_mark_events(message, consumer) VALUES(NEW.message, NEW.consumer);
+END;
+CREATE TRIGGER IF NOT EXISTS local_message_staged_event AFTER INSERT ON local_message_staged
+BEGIN
+    INSERT INTO local_message_mark_events(message, consumer) VALUES(NEW.message, NEW.consumer);
 END;
 -- A staging offers held mail and changes the client header, as a `message.staged` claim does;
 -- idle and unread mail do not count it.
@@ -165,6 +198,69 @@ pub fn record_tx(
         super::client_messages::finalize_commit(transaction).map_err(internal)?;
     }
     Ok((receipt, inserted > 0))
+}
+
+/// Who staged `message` and when, if a seat this member hosts staged it as a mark.
+pub fn staged(connection: &Connection, message: &str) -> Result<Option<(String, u128)>> {
+    Ok(connection
+        .prepare_cached("SELECT consumer, recorded_at_unix_ms FROM local_message_staged WHERE message=?1 ORDER BY recorded_at_unix_ms LIMIT 1")?
+        .query_row([message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)))
+        .optional()?)
+}
+
+/// The receipt of `kind` (a mark or [`STAGED`]) already recorded for `message`, when that mark is
+/// as far as the message got: what a repeated write answers, as a repeated claim answers the
+/// claim. A message further along answers its head claim instead, as it would without marks.
+pub fn recorded(connection: &Connection, origin: &str, message: &str, kind: &str) -> Result<Option<ClaimRecord>> {
+    let requested = kind.trim_start_matches("message.");
+    if status(connection, message)? != Some(requested) {
+        return Ok(None);
+    }
+    let claimed = connection
+        .prepare_cached("SELECT kind FROM claims WHERE subject=?1 AND kind IN
+            ('message.staged','message.delivered','message.read','message.closed')")?
+        .query_map([message], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if claimed.iter().any(|kind| rank(kind.trim_start_matches("message.")) >= rank(requested)) {
+        return Ok(None);
+    }
+    let consumer: Option<String> = if kind == STAGED {
+        connection
+            .prepare_cached("SELECT consumer FROM local_message_staged WHERE message=?1 ORDER BY recorded_at_unix_ms LIMIT 1")?
+            .query_row([message], |row| row.get(0))
+            .optional()?
+    } else if MARKS.contains(&kind) {
+        connection
+            .prepare_cached("SELECT consumer FROM local_message_marks WHERE message=?1 AND kind=?2 ORDER BY recorded_at_unix_ms LIMIT 1")?
+            .query_row([message, kind], |row| row.get(0))
+            .optional()?
+    } else {
+        None
+    };
+    Ok(consumer.map(|consumer| {
+        let fields = BTreeMap::from([("status".to_owned(), json!(kind.trim_start_matches("message.")))]);
+        super::messages_shard::lifecycle_receipt(origin, message, kind, Some(&consumer), &fields)
+    }))
+}
+
+/// The newest mark or staging of `message`: its receipt and when it was recorded. A resource
+/// revised by a mark names it, since no claim moved.
+pub fn latest(connection: &Connection, message: &str) -> Result<Option<(String, u128)>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT receipt, recorded_at_unix_ms FROM (
+                 SELECT receipt, recorded_at_unix_ms FROM local_message_marks WHERE message=?1
+                 UNION ALL SELECT receipt, recorded_at_unix_ms FROM local_message_staged WHERE message=?1)
+             ORDER BY recorded_at_unix_ms DESC, receipt DESC LIMIT 1",
+        )?
+        .query_row([message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)))
+        .optional()?)
+}
+
+/// Whether `id` is a mark's (or a stream item's lifecycle) receipt rather than a graph claim: it
+/// is no predecessor, no evidence and no subject head.
+pub fn is_receipt(id: &str) -> bool {
+    id.starts_with("offset-receipt/")
 }
 
 /// Whether this member records `consumer`'s lifecycle of the graph message `message` as a mark
@@ -338,6 +434,10 @@ pub fn trim(store: &Store, now: u128, chunk: usize) -> Result<usize> {
                                AND claims.kind IN ('message.delivered','message.read','message.closed'))))
                 LIMIT ?2)",
             params![cutoff, chunk],
+        )?;
+        connection.execute(
+            "DELETE FROM local_message_mark_events WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM local_message_mark_events) - ?1",
+            [EVENTS_KEPT],
         )?;
         drop(connection);
         removed += deleted + staged;
