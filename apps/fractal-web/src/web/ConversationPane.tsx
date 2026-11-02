@@ -221,7 +221,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   // Recorded semantic evidence stands in for the kit summary line; the kit keeps raw input/output and Open beside it.
   const renderSemanticDetail = React.useCallback((item: ToolCallItem, call: WorkLogCall) => recordedToolDetail(item, call, () => onOpenTool(call)), [onOpenTool])
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
-    <AgentNotes agentRef={agentRef} />
+    <AgentNotes agentRef={agentRef} targetLabel={agentName} />
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
     {state._tag === 'Unavailable' ? <ThreadUnavailable classification={state.classification} reason={state.availability._tag === 'Unavailable' ? state.availability.reason : ''} detail={state.availability._tag === 'Unavailable' ? state.availability.detail : undefined} onRetry={retryUnavailable} /> : <ConversationTranscript
