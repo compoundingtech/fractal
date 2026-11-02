@@ -10,6 +10,8 @@ use anyhow::{Context as _, Result, bail};
 /// What the built-in `merged` and `ci-passed` gates read from GitHub.
 pub mod github_gates;
 mod github_repository;
+mod github_poll;
+pub use github_poll::{BudgetContinuation, completed_poll_cursor};
 pub mod github_workflows;
 pub use github_repository::{
     RECENT_COMMENTS, merge_recent_comments, recent_comment_key, replicated_cursor,
@@ -486,11 +488,12 @@ fn github_cache_for(request: &ObservationRequest) -> Duration {
         .min(GITHUB_CACHE_FOR)
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct GithubPayload {
     value: Value,
     etag: Option<String>,
     next: Option<String>,
+    #[serde(skip, default = "Instant::now")]
     checked_at: Instant,
 }
 
@@ -752,6 +755,16 @@ async fn github_json(
     token: &GithubAuth,
     cache_for: Duration,
 ) -> Result<GithubPayload> {
+    let key = format!("REST {} {url}", token.cache_principal());
+    github_poll::read(key, github_json_read(client, url, token, cache_for)).await
+}
+
+async fn github_json_read(
+    client: &reqwest::Client,
+    url: String,
+    token: &GithubAuth,
+    cache_for: Duration,
+) -> Result<GithubPayload> {
     let selected = crate::github_http::read_auth_for_url(&url, token);
     let token = &selected;
     let entry = {
@@ -903,6 +916,17 @@ async fn github_listing_at_field(
 /// Ask GitHub's GraphQL API one query. GraphQL has its own hourly budget, reports a refusal in a
 /// successful response, and has no conditional request.
 async fn github_graphql_with_cache_eligibility(
+    client: &reqwest::Client,
+    api_base: &str,
+    token: &GithubAuth,
+    query: &str,
+    variables: Value,
+) -> Result<(Value, bool)> {
+    let key = format!("GraphQL {} {api_base} {query} {variables}", token.cache_principal());
+    github_poll::read(key, github_graphql_read(client, api_base, token, query, variables)).await
+}
+
+async fn github_graphql_read(
     client: &reqwest::Client,
     api_base: &str,
     token: &GithubAuth,

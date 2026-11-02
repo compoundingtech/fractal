@@ -1,4 +1,9 @@
 //! Version inspection needs neither a daemon nor the caller's source checkout.
+
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 use std::process::Command;
 
 fn version(directory: &std::path::Path, args: &[&str]) -> String {
@@ -6,6 +11,7 @@ fn version(directory: &std::path::Path, args: &[&str]) -> String {
         .args(args)
         .current_dir(directory)
         .env_clear()
+        .env("FRACTAL_SUPPRESS_DEPRECATION", "1")
         // Runtime stamp variables must never replace the binary's compile-time stamp.
         .env(
             "CLI_BUILD_STAMP",
@@ -54,7 +60,7 @@ fn version_is_baked_and_available_without_a_daemon() {
         .unwrap();
     assert!(commit.status.success(), "{commit:?}");
     std::fs::write(root.path().join("untracked"), "different source").unwrap();
-    // The identity the binary bakes and hands to the library at startup, as st3's `main` does.
+    // The identity the binary bakes and hands to the library at startup, as this package's `main` does.
     fractal_drivers::version::set_build_stamps(
         fractal_build_stamp::CLI_BUILD_STAMP,
         fractal_build_stamp::ST_BUILD_STAMP_LOCAL,
@@ -94,4 +100,33 @@ fn human_version_keeps_the_embedded_package_version_and_source_revision() {
     let human = version(root.path(), &["--version"]);
     assert!(human.starts_with(&format!("fractal {base}")), "{human}");
     assert!(human.contains(revision), "{human}");
+}
+
+#[test]
+fn executable_alias_warning_is_one_stderr_line_without_changing_json_stdout() {
+    let root = tempfile::tempdir().unwrap();
+    let expected = version(root.path(), &["--version", "--json"]);
+    for name in ["st", "st3", "fractal", "git-other"] {
+        let executable = root.path().join(name);
+        std::os::unix::fs::symlink(test_env!("CARGO_BIN_EXE_fractal"), &executable).unwrap();
+        for suppressed in [false, true] {
+            let mut command = Command::new(&executable);
+            command.args(["--version", "--json"]).env_clear()
+                .env("HOME", root.path())
+                .env("COMPLETE", "0");
+            if suppressed {
+                command.env("FRACTAL_SUPPRESS_DEPRECATION", "1");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+            let basename = std::path::Path::new(name).file_name().unwrap().to_str().unwrap();
+            let warning = if !suppressed && matches!(basename, "st" | "st3") {
+                format!("warning: '{basename}' is deprecated; use 'fractal' instead. '{basename}' will be removed on 2026-11-16.\n")
+            } else {
+                String::new()
+            };
+            assert_eq!(String::from_utf8(output.stderr).unwrap(), warning);
+        }
+    }
 }

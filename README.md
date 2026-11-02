@@ -40,6 +40,14 @@ setup still need a manual rehearsal; native builds do not establish that evidenc
 (override with the `FRACTAL_WEB_URL` environment variable); it does not start a
 server. If no browser opener is available, it prints the URL instead.
 
+The legacy executable names `st` and `st3` emit a deprecation warning on stderr,
+including in JSON mode, and will be removed on 2026-11-16. Use `fractal` instead.
+Scripts that need the old names temporarily can set `FRACTAL_SUPPRESS_DEPRECATION=1`
+to suppress this warning; stdout and exit status are unchanged.
+Shell-completion callbacks stay silent. Managed background services and internal
+daemon/seat re-executions suppress the warning because they retain replaceable
+binary paths rather than choosing a human-facing command name.
+
 Read the **[Fractal documentation](https://fractal.how/docs)** or browse its
 [Introduction](docs/site/index.md),
 [installation guide](docs/site/getting-started/install.md), and

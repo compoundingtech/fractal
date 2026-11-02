@@ -1492,7 +1492,6 @@ dependencies = [
  "data-encoding",
  "flate2",
  "fractal",
- "fractal-build-stamp",
  "fractal-chatgpt",
  "fractal-client",
  "fractal-conversation-ui",
@@ -1725,6 +1724,18 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fractal-cli"
+version = "0.1.0"
+dependencies = [
+ "fractal",
+ "fractal-build-stamp",
+ "fractal-daemon",
+ "fractal-drivers",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

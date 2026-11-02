@@ -578,6 +578,8 @@ pub(super) async fn run_agents(
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
                         "now": args.now,
                         "fresh_session": args.fresh_session,
+                        "ignore_fit": args.ignore_fit,
+                        "reason": args.reason,
                     }),
                 )
                 .await?;
