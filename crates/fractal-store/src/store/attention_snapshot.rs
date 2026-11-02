@@ -21,6 +21,10 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// A read that no change in the feed names: a failure whose answer rests on one is read again
+/// at every snapshot (`fault_cache`).
+pub(super) const UNKEYED_READ: &str = "fault-cache:unkeyed";
+
 /// How long a run whose cleanup failed shows that fault after it finishes.
 const FINAL_STEP_FAULT_MS: u128 = 24 * 60 * 60 * 1000;
 /// How long a declared seat may go without any runtime observation before that is a fault. A seat
@@ -1126,46 +1130,64 @@ impl Store {
         let connection = self.readers.get();
         let mut items = Vec::new();
         for failure in failures {
-            if failure.status != "pending"
-                || failure.requested_at_unix_ms > as_of
-                || person.is_some_and(|person| person != failure.reviewer)
-            {
-                continue;
-            }
-            let Some(claim) = person_work::claim_in_cut(&connection, &failure.request, || self.claim_by_id(&failure.request))? else {
-                continue;
-            };
-            if claim.body["fields"]["condition"] != GATE_BROKEN_CONDITION {
-                continue;
-            }
-            let [run, generation, result, rest @ ..] = failure.targets.as_slice() else {
-                continue;
-            };
-            if !person_work::run_live(&connection, run, Some(generation), false)? {
-                continue;
-            }
-            let step = rest.first().cloned();
-            if let Some(step) = &step {
-                let Some(view) = person_work::step(&connection, step)? else {
-                    continue;
-                };
-                if matches!(view.status.as_str(), "completed" | "failed" | "cancelled") {
-                    continue;
-                }
-            }
-            let (run, result) = (run.clone(), result.clone());
-            let mut item = attention_item_from_failure(failure);
-            item.episode = claim.id;
-            item.subject = run.clone();
-            item.mission_run = Some(run.clone());
-            item.step = step;
-            item.actions = vec![
-                attention_action("inspect gate", &["st", "subject", "show", &result]),
-                attention_action("inspect run", &["st", "missions", "show", &run]),
-            ];
-            items.push(item);
+            items.extend(self.broken_gate_item(&connection, failure, person, as_of)?);
         }
         Ok(items)
+    }
+
+    /// The broken-gate item one operational failure is now, if it still is one.
+    pub(super) fn broken_gate_item(
+        &self,
+        connection: &Connection,
+        failure: AttentionRequestView,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<Option<AttentionItemView>> {
+        if failure.requested_at_unix_ms > as_of {
+            smallclaims::touched::note_due(failure.requested_at_unix_ms);
+        }
+        if failure.status != "pending"
+            || failure.requested_at_unix_ms > as_of
+            || person.is_some_and(|person| person != failure.reviewer)
+        {
+            return Ok(None);
+        }
+        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || self.claim_by_id(&failure.request))? else {
+            return Ok(None);
+        };
+        smallclaims::touched::note_read(|| claim.subject.clone());
+        for target in &failure.targets {
+            smallclaims::touched::note_read(|| target.clone());
+        }
+        if claim.body["fields"]["condition"] != GATE_BROKEN_CONDITION {
+            return Ok(None);
+        }
+        let [run, generation, result, rest @ ..] = failure.targets.as_slice() else {
+            return Ok(None);
+        };
+        if !person_work::run_live(connection, run, Some(generation), false)? {
+            return Ok(None);
+        }
+        let step = rest.first().cloned();
+        if let Some(step) = &step {
+            let Some(view) = person_work::step(connection, step)? else {
+                return Ok(None);
+            };
+            if matches!(view.status.as_str(), "completed" | "failed" | "cancelled") {
+                return Ok(None);
+            }
+        }
+        let (run, result) = (run.clone(), result.clone());
+        let mut item = attention_item_from_failure(failure);
+        item.episode = claim.id;
+        item.subject = run.clone();
+        item.mission_run = Some(run.clone());
+        item.step = step;
+        item.actions = vec![
+            attention_action("inspect gate", &["st", "subject", "show", &result]),
+            attention_action("inspect run", &["st", "missions", "show", &run]),
+        ];
+        Ok(Some(item))
     }
 
     // The independently folding operational reader is now used only by parity controls.
@@ -1213,213 +1235,255 @@ impl Store {
         // Negative results matter too. This map is discarded before the next snapshot,
         // and is filled lazily at the original incarnation fence's first use.
         let mut incarnations = BTreeMap::<String, Option<String>>::new();
+        let mut items = self.operational_fault_families(person, as_of)?;
+        let failures = self.operational_failures()?;
+        for failure in &failures {
+            items.extend(self.operational_failure_item::<MEMOIZE>(&connection, failure, person, as_of, &mut incarnations)?);
+        }
+        Ok((items, failures))
+    }
+
+    /// The operational faults that do not come from a failure episode.
+    pub(super) fn operational_fault_families(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<Vec<AttentionItemView>> {
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
         items.extend(self.missing_admission_clock_faults(person)?);
         items.extend(self.parked_runtime_attention_items(person, as_of)?);
         items.extend(self.unstarted_seat_attention_items(person, as_of)?);
-        let failures = self.operational_failures()?;
-        for failure in &failures {
-            if failure.status != "pending"
-                || failure.requested_at_unix_ms > as_of
-                || person.is_some_and(|person| person != failure.reviewer)
-            {
-                continue;
-            }
-            let Some(claim) = person_work::claim_in_cut(&connection, &failure.request, || self.claim_by_id(&failure.request))? else {
-                continue;
-            };
-            let source = &claim.subject;
-            if source.starts_with("loop-run/") || source.starts_with("observer/") {
-                continue;
-            }
-            // `broken_gate_items` reads broken gates, for their publisher.
-            if claim.body["fields"]["condition"] == GATE_BROKEN_CONDITION {
-                continue;
-            }
-            if source.starts_with("mission-run/") {
-                if claim.body["fields"]["condition"] == MISSING_AGENT_CONDITION {
-                    let latest: Option<String> = connection.query_row(
-                        /* sqlite-large-value: allow-for-now lv-h70b00685de00 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='operational.failure' AND json_extract(body,'$.fields.condition')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-                        params![source, MISSING_AGENT_CONDITION], |row| row.get(0),
-                    ).optional()?;
-                    if latest.as_deref() != Some(claim.id.as_str())
-                        || !person_work::run_live(&connection, source, None, true)?
-                    {
-                        continue;
-                    }
-                    let run =
-                        self.mission_run_for_reconcile(source.trim_start_matches("mission-run/"))?;
-                    let generation = failure.targets.get(1);
-                    if generation != Some(&run.generation) {
-                        continue;
-                    }
-                    let Some(step) = failure
-                        .targets
-                        .get(2)
-                        .and_then(|subject| run.steps.iter().find(|s| &s.subject == subject))
-                    else {
-                        continue;
-                    };
-                    if !self.missing_agent_fault_is_current(&run, step)? {
-                        continue;
-                    }
-                    if claim.body["fields"]["episode"].as_str()
-                        != Some(mission_eligibility::episode(&run, step).as_str())
-                    {
-                        continue;
-                    }
-                }
-                // A finished run's failed cleanup is a fault on a run that completed, so the run
-                // is no longer live. It stays for a day, then the failed step is all that remains.
-                let cleanup_fault = claim.body["fields"]["episode"]
-                    .as_str()
-                    .is_some_and(|episode| episode.starts_with("final-steps:"))
-                    && as_of.saturating_sub(failure.requested_at_unix_ms) < FINAL_STEP_FAULT_MS;
-                if !cleanup_fault && !person_work::run_live(&connection, source, None, true)? {
-                    continue;
-                }
-            } else if source.starts_with("step-run/") {
-                // A timeout fault holds while its attempt is still running past the same budget:
-                // an extension, a completion, a failure or a release ends it.
-                let Some(step) = person_work::step(&connection, source)? else {
-                    continue;
-                };
-                let extension =
-                    person_work::step_timeout_extension_in_cut(&connection, source, step.attempt, as_of)?;
-                if !matches!(step.status.as_str(), "claimed" | "working" | "ready")
-                    || claim.body["fields"]["episode"].as_str()
-                        != Some(step_timeout_episode(source, step.attempt, extension).as_str())
-                {
-                    continue;
-                }
-            } else if claim.body["fields"]["condition"] == "stop-deferred" {
-                // A retained stop belongs to a terminal run, so declaration_live deliberately
-                // excludes it. Its own revision, incarnation and runtime fences decide instead.
-                if !self
-                    .stop_deferral_faults_for(std::slice::from_ref(source), self.index()?)?
-                    .contains_key(source)
-                {
-                    continue;
-                }
-            } else if !source.starts_with("daemon/")
-                && !person_work::declaration_live(&connection, source)?
-            {
-                continue;
-            }
-            let f = &claim.body["fields"];
-            if f["condition"] == crate::restart::WHEN_IDLE {
-                let Some(request) = crate::restart::latest_request(self, source)? else {
-                    continue;
-                };
-                if request.body["fields"]["action"] != crate::restart::WHEN_IDLE
-                    || failure.subject != crate::restart::attention_episode(&request)
-                    || self
-                        .operation_claim(&crate::restart::release_key(&request))?
-                        .is_some()
-                    || self
-                        .operation_claim(&format!("agent-restart-completed:{}", request.id))?
-                        .is_some()
-                {
-                    continue;
-                }
-            }
-            // Upgrades retain historical operational episodes. A current login with a concrete
-            // person has one derived person item; the old agent fault must not ask again.
-            if f["condition"] == "provider-auth"
-                && let Some(harness) = self.current_harness(source)?
-            {
-                let update_menu = self.claim_by_id(&harness.claim)?.is_some_and(|claim| {
-                    claim.body["fields"]["code"] == "provider-update-prompt"
-                });
-                // The visible update modal takes priority without restoring authentication.
-                // Once it clears, an unresolved login exposes its fallback fault again.
-                if update_menu
-                    || (harness.state == "needs-login" && self.agent_person(source)?.is_some())
-                {
-                    continue;
-                }
-            }
-            if matches!(
-                f["condition"].as_str(),
-                Some("readiness" | "provider-auth" | "provider-trust" | "provider-update")
-            ) {
-                if self
-                    .current_harness(source)?
-                    .is_some_and(|harness| harness.is_ready())
-                {
-                    continue;
-                }
-            }
-            if let Some(revision) = f["source_revision"].as_str() {
-                if self.selected_desired_token(source)?.as_deref() != Some(revision) {
-                    continue;
-                }
-            }
-            if let Some(incarnation) = f["incarnation"].as_str() {
-                if !MEMOIZE || !incarnations.contains_key(source.as_str()) {
-                    let actual = self.latest_actual_value(source)?;
-                    let current = actual.as_ref().and_then(|v| {
-                        v.pointer("/fields/incarnation_id").or_else(|| v.get("incarnation_id"))
-                    }).and_then(Value::as_str).map(str::to_owned);
-                    #[cfg(any(test, feature = "test-support"))]
-                    FAULT_INCARNATION_READ_HOOK.with(|hook| {
-                        if let Some(hook) = hook.borrow_mut().as_mut() {
-                            hook(source);
-                        }
-                    });
-                    incarnations.insert(source.clone(), current);
-                }
-                if incarnations.get(source.as_str()).and_then(|value| value.as_deref()) != Some(incarnation) {
-                    continue;
-                }
-            }
-            // Diagnostic history stays immutable; current work/runtime state decides whether
-            // this episode still needs an owner. This changes no canonical timing fold.
-            let wake = if f["condition"] == "work-wake-exhausted" {
-                let Some(context) = self.current_exhausted_work_wake::<MEMOIZE>(failure, as_of)? else {
-                    continue;
-                };
-                Some(context)
-            } else {
-                None
-            };
-            let mut item = attention_item_from_failure(failure.clone());
-            item.kind = "fault".into();
-            if f["condition"] == MISSING_AGENT_CONDITION {
-                item.mission_run = Some(source.clone());
-                item.step = item.targets.get(2).cloned();
-            }
-            item.subject = source.clone();
-            item.episode = claim.id;
-            item.priority = if claim.body["fields"]["severity"] == "warning" {
-                "normal"
-            } else {
-                "high"
-            }
-            .into();
-            item.actions = vec![attention_action(
-                "inspect source",
-                &["st", "subject", source],
-            )];
-            if f["condition"] == "stop-deferred" {
-                item.actions = vec![attention_action(
-                    "inspect retained seat",
-                    &["st", "agents", "show", source, "--all"],
-                )];
-            }
-            if let Some((step, diagnostic)) = wake {
-                item.step = Some(step.subject.clone());
-                item.mission_run = Some(step.run);
-                item.actions = vec![
-                    attention_action("inspect step", &["st", "work", "show", &step.subject]),
-                    attention_action("inspect seat history", &["st", "trace", "show", &diagnostic.subject, "--limit", "20"]),
-                ];
-            }
-            items.push(item);
+        Ok(items)
+    }
+
+    /// The fault one operational failure is now, if it still is one.
+    pub(super) fn operational_failure_item<const MEMOIZE: bool>(
+        &self,
+        connection: &Connection,
+        failure: &AttentionRequestView,
+        person: Option<&str>,
+        as_of: u128,
+        incarnations: &mut BTreeMap<String, Option<String>>,
+    ) -> Result<Option<AttentionItemView>> {
+        if failure.requested_at_unix_ms > as_of {
+            smallclaims::touched::note_due(failure.requested_at_unix_ms);
         }
-        Ok((items, failures))
+        if failure.status != "pending"
+            || failure.requested_at_unix_ms > as_of
+            || person.is_some_and(|person| person != failure.reviewer)
+        {
+            return Ok(None);
+        }
+        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || self.claim_by_id(&failure.request))? else {
+            return Ok(None);
+        };
+        smallclaims::touched::note_read(|| claim.subject.clone());
+        for target in &failure.targets {
+            smallclaims::touched::note_read(|| target.clone());
+        }
+        let source = &claim.subject;
+        if source.starts_with("loop-run/") || source.starts_with("observer/") {
+            return Ok(None);
+        }
+        // `broken_gate_items` reads broken gates, for their publisher.
+        if claim.body["fields"]["condition"] == GATE_BROKEN_CONDITION {
+            return Ok(None);
+        }
+        if source.starts_with("mission-run/") {
+            if claim.body["fields"]["condition"] == MISSING_AGENT_CONDITION {
+                // Whether any agent is eligible now rests on every declaration, not this run's.
+                smallclaims::touched::note_read(|| UNKEYED_READ.into());
+                let latest: Option<String> = connection.query_row(
+                    /* sqlite-large-value: allow-for-now lv-h70b00685de00 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='operational.failure' AND json_extract(body,'$.fields.condition')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                    params![source, MISSING_AGENT_CONDITION], |row| row.get(0),
+                ).optional()?;
+                if latest.as_deref() != Some(claim.id.as_str())
+                    || !person_work::run_live(connection, source, None, true)?
+                {
+                    return Ok(None);
+                }
+                let run =
+                    self.mission_run_for_reconcile(source.trim_start_matches("mission-run/"))?;
+                let generation = failure.targets.get(1);
+                if generation != Some(&run.generation) {
+                    return Ok(None);
+                }
+                let Some(step) = failure
+                    .targets
+                    .get(2)
+                    .and_then(|subject| run.steps.iter().find(|s| &s.subject == subject))
+                else {
+                    return Ok(None);
+                };
+                if !self.missing_agent_fault_is_current(&run, step)? {
+                    return Ok(None);
+                }
+                if claim.body["fields"]["episode"].as_str()
+                    != Some(mission_eligibility::episode(&run, step).as_str())
+                {
+                    return Ok(None);
+                }
+            }
+            // A finished run's failed cleanup is a fault on a run that completed, so the run
+            // is no longer live. It stays for a day, then the failed step is all that remains.
+            let cleanup_fault = claim.body["fields"]["episode"]
+                .as_str()
+                .is_some_and(|episode| episode.starts_with("final-steps:"))
+                && as_of.saturating_sub(failure.requested_at_unix_ms) < FINAL_STEP_FAULT_MS;
+            if cleanup_fault {
+                smallclaims::touched::note_due(failure.requested_at_unix_ms.saturating_add(FINAL_STEP_FAULT_MS));
+            }
+            if !cleanup_fault && !person_work::run_live(connection, source, None, true)? {
+                return Ok(None);
+            }
+        } else if source.starts_with("step-run/") {
+            // A timeout fault holds while its attempt is still running past the same budget:
+            // an extension, a completion, a failure or a release ends it.
+            let Some(step) = person_work::step(connection, source)? else {
+                return Ok(None);
+            };
+            let extension =
+                person_work::step_timeout_extension_in_cut(connection, source, step.attempt, as_of)?;
+            if !matches!(step.status.as_str(), "claimed" | "working" | "ready")
+                || claim.body["fields"]["episode"].as_str()
+                    != Some(step_timeout_episode(source, step.attempt, extension).as_str())
+            {
+                return Ok(None);
+            }
+        } else if claim.body["fields"]["condition"] == "stop-deferred" {
+            // A retained stop belongs to a terminal run, so declaration_live deliberately
+            // excludes it. Its own revision, incarnation and runtime fences decide instead.
+            // They include replica repairs, which the change feed does not carry.
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+            if !self
+                .stop_deferral_faults_for(std::slice::from_ref(source), self.index()?)?
+                .contains_key(source)
+            {
+                return Ok(None);
+            }
+        } else if !source.starts_with("daemon/")
+            && !person_work::declaration_live(connection, source)?
+        {
+            return Ok(None);
+        }
+        let f = &claim.body["fields"];
+        if f["condition"] == crate::restart::WHEN_IDLE {
+            // Its release is an operation, found by key, not by a subject the feed names.
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+            let Some(request) = crate::restart::latest_request(self, source)? else {
+                return Ok(None);
+            };
+            if request.body["fields"]["action"] != crate::restart::WHEN_IDLE
+                || failure.subject != crate::restart::attention_episode(&request)
+                || self
+                    .operation_claim(&crate::restart::release_key(&request))?
+                    .is_some()
+                || self
+                    .operation_claim(&format!("agent-restart-completed:{}", request.id))?
+                    .is_some()
+            {
+                return Ok(None);
+            }
+        }
+        // Upgrades retain historical operational episodes. A current login with a concrete
+        // person has one derived person item; the old agent fault must not ask again.
+        if f["condition"] == "provider-auth" {
+            // The person a seat works for comes from its launcher and run, outside the feed.
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+        }
+        if f["condition"] == "provider-auth"
+            && let Some(harness) = self.current_harness(source)?
+        {
+            let update_menu = self.claim_by_id(&harness.claim)?.is_some_and(|claim| {
+                claim.body["fields"]["code"] == "provider-update-prompt"
+            });
+            // The visible update modal takes priority without restoring authentication.
+            // Once it clears, an unresolved login exposes its fallback fault again.
+            if update_menu
+                || (harness.state == "needs-login" && self.agent_person(source)?.is_some())
+            {
+                return Ok(None);
+            }
+        }
+        if matches!(
+            f["condition"].as_str(),
+            Some("readiness" | "provider-auth" | "provider-trust" | "provider-update")
+        ) {
+            if self
+                .current_harness(source)?
+                .is_some_and(|harness| harness.is_ready())
+            {
+                return Ok(None);
+            }
+        }
+        if let Some(revision) = f["source_revision"].as_str() {
+            if self.selected_desired_token(source)?.as_deref() != Some(revision) {
+                return Ok(None);
+            }
+        }
+        if let Some(incarnation) = f["incarnation"].as_str() {
+            if !MEMOIZE || !incarnations.contains_key(source.as_str()) {
+                let actual = self.latest_actual_value(source)?;
+                let current = actual.as_ref().and_then(|v| {
+                    v.pointer("/fields/incarnation_id").or_else(|| v.get("incarnation_id"))
+                }).and_then(Value::as_str).map(str::to_owned);
+                #[cfg(any(test, feature = "test-support"))]
+                FAULT_INCARNATION_READ_HOOK.with(|hook| {
+                    if let Some(hook) = hook.borrow_mut().as_mut() {
+                        hook(source);
+                    }
+                });
+                incarnations.insert(source.clone(), current);
+            }
+            if incarnations.get(source.as_str()).and_then(|value| value.as_deref()) != Some(incarnation) {
+                return Ok(None);
+            }
+        }
+        // Diagnostic history stays immutable; current work/runtime state decides whether
+        // this episode still needs an owner. This changes no canonical timing fold.
+        let wake = if f["condition"] == "work-wake-exhausted" {
+            let Some(context) = self.current_exhausted_work_wake::<MEMOIZE>(failure, as_of)? else {
+                return Ok(None);
+            };
+            Some(context)
+        } else {
+            None
+        };
+        let mut item = attention_item_from_failure(failure.clone());
+        item.kind = "fault".into();
+        if f["condition"] == MISSING_AGENT_CONDITION {
+            item.mission_run = Some(source.clone());
+            item.step = item.targets.get(2).cloned();
+        }
+        item.subject = source.clone();
+        item.episode = claim.id;
+        item.priority = if claim.body["fields"]["severity"] == "warning" {
+            "normal"
+        } else {
+            "high"
+        }
+        .into();
+        item.actions = vec![attention_action(
+            "inspect source",
+            &["st", "subject", source],
+        )];
+        if f["condition"] == "stop-deferred" {
+            item.actions = vec![attention_action(
+                "inspect retained seat",
+                &["st", "agents", "show", source, "--all"],
+            )];
+        }
+        if let Some((step, diagnostic)) = wake {
+            item.step = Some(step.subject.clone());
+            item.mission_run = Some(step.run);
+            item.actions = vec![
+                attention_action("inspect step", &["st", "work", "show", &step.subject]),
+                attention_action("inspect seat history", &["st", "trace", "show", &diagnostic.subject, "--limit", "20"]),
+            ];
+        }
+        Ok(Some(item))
     }
 
     fn current_exhausted_work_wake<const MINIMAL: bool>(
@@ -1434,6 +1498,9 @@ impl Store {
             return Ok(None);
         };
         let fields = &diagnostic.body["fields"];
+        if diagnostic.accepted_at_unix_ms > as_of {
+            smallclaims::touched::note_due(diagnostic.accepted_at_unix_ms);
+        }
         if diagnostic.kind != "harness.diagnostic"
             || &diagnostic.subject != agent
             || diagnostic.accepted_at_unix_ms > as_of
@@ -1451,16 +1518,18 @@ impl Store {
         let Some(step) = current else {
             return Ok(None);
         };
+        let live = person_work::run_live(&self.readers.get(), &step.run, Some(&step.generation), false)?;
+        // An open step's effective state expires its lease by the clock and reads asks on other
+        // subjects, so while its run is live the wake is read again at every snapshot. An ended
+        // step or run stays ended, keyed by its subject.
+        if live && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled") {
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+        }
         if step.status != "ready"
             || step.assigned_to.as_ref() != Some(agent)
             || fields["attempt"].as_u64() != Some(u64::from(step.attempt))
             || fields["readiness_epoch"].as_u64() != Some(u64::from(step.readiness_epoch))
-            || !person_work::run_live(
-                &self.readers.get(),
-                &step.run,
-                Some(&step.generation),
-                false,
-            )?
+            || !live
         {
             return Ok(None);
         }
