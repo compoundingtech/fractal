@@ -798,8 +798,8 @@ fn an_unchanged_snapshot_reads_no_dead_failure_again_however_many_there_are() {
         // A reading of every fault whenever raised neither uses the cache nor replaces it.
         store.fault_snapshot(u128::MAX).unwrap();
         let (statements, reads) = cached_snapshot_cost(&store, as_of + 2_000);
-        // The fixture's exhausted wake rests on the clock, so it alone is read every snapshot.
-        assert_eq!(reads, 1, "no other failure is read again when nothing it read changed");
+        // The fixture's exhausted wake ended with its run, so it too stays cached.
+        assert_eq!(reads, 0, "no failure is read again when nothing it read changed");
         costs.push(statements);
     }
     assert_eq!(costs[0], costs[1], "a snapshot's statements do not grow with dead failures: {costs:?}");
@@ -813,7 +813,7 @@ fn a_change_to_one_run_reads_only_its_failures_again() {
     fail_run(&store, &run, 3, "touched");
     let as_of = now_ms();
     let faults = store.fault_snapshot(as_of).unwrap().len();
-    assert_eq!(cached_snapshot_cost(&store, as_of + 1_000).1, 1, "only the wake, read every snapshot");
+    assert_eq!(cached_snapshot_cost(&store, as_of + 1_000).1, 1, "only the wake of a live run's open step, read every snapshot");
     store.set_mission_run_state(&run.id, "cancelled", "terminal", Some("ended")).unwrap();
     let (_, reads) = cached_snapshot_cost(&store, now_ms().max(as_of + 2_000));
     assert_eq!(reads, 4, "the run's three failures and the wake on its step, not the agent's other twelve");

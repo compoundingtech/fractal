@@ -1498,9 +1498,6 @@ impl Store {
             return Ok(None);
         };
         let fields = &diagnostic.body["fields"];
-        // The step's effective state expires its lease by the clock and reads asks on other
-        // subjects: a wake fault is read again at every snapshot. There are few of them.
-        smallclaims::touched::note_read(|| UNKEYED_READ.into());
         if diagnostic.accepted_at_unix_ms > as_of {
             smallclaims::touched::note_due(diagnostic.accepted_at_unix_ms);
         }
@@ -1521,16 +1518,18 @@ impl Store {
         let Some(step) = current else {
             return Ok(None);
         };
+        let live = person_work::run_live(&self.readers.get(), &step.run, Some(&step.generation), false)?;
+        // An open step's effective state expires its lease by the clock and reads asks on other
+        // subjects, so while its run is live the wake is read again at every snapshot. An ended
+        // step or run stays ended, keyed by its subject.
+        if live && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled") {
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+        }
         if step.status != "ready"
             || step.assigned_to.as_ref() != Some(agent)
             || fields["attempt"].as_u64() != Some(u64::from(step.attempt))
             || fields["readiness_epoch"].as_u64() != Some(u64::from(step.readiness_epoch))
-            || !person_work::run_live(
-                &self.readers.get(),
-                &step.run,
-                Some(&step.generation),
-                false,
-            )?
+            || !live
         {
             return Ok(None);
         }
