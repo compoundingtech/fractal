@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "The Inbox tab shows every nonzero needs-you count, including one, and keeps its digits before other tabs on narrow strips. Incomplete attention windows use the server alert total; complete windows respect local snoozes.",
+  "summary": "The Inbox tab shows every nonzero needs-you count, including one, and keeps its digits before other tabs on narrow strips without unnecessary padding displacing overflow navigation. Inbox and the top status bar use the same alert total: incomplete windows use a current connection's server summary at least as recent as the attention snapshot; complete windows respect local snoozes.",
   "replay": {"status": "none", "detail": "No runtime replay change."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rules change."},

@@ -2528,15 +2528,7 @@ impl Ui {
         spans.push(Span::styled(link_text, bar(theme::fg(color))));
         // Now opens over the glass from its count of alerts (Nathan, 2026-10-04: one way in,
         // named as `st now` is). No alert prints nothing at all (Nathan, 2026-10-10).
-        let alerts = self
-            .world
-            .attention
-            .items()
-            .iter()
-            .filter(|item| {
-                item.is_alert() && !self.snoozed.contains(&item.id) && !self.closed.contains(&item.id)
-            })
-            .count();
+        let alerts = self.tab_statuses.inbox.alerts;
         // A fresh workspace names its host and where to start instead of counting nothing.
         // Until st has sent the first real state, the bar says only how it is connected: a
         // placeholder that turns into the counts a moment later reads as flicker (Nathan, 2026-10-11).
@@ -2737,7 +2729,9 @@ impl Ui {
             .iter()
             .map(|(title, badge)| {
                 let width = if badge.inbox {
-                    label_width.max(badge.width(title, true).min(usize::from(strip_room)))
+                    let full = badge.width(title, true);
+                    let preferred = if compact_fits { full } else { full.saturating_sub(2) };
+                    label_width.max(preferred.min(usize::from(strip_room)))
                 } else {
                     label_width
                 };
@@ -5654,12 +5648,30 @@ mod tests {
     }
 
     #[test]
+    fn tab_badge_inbox_and_status_line_share_effective_alert_total() {
+        let mut ui = tab_badge_world();
+        ui.world.settled = true;
+        ui.world.agents = Load::Ready(Vec::new());
+        ui.world.attention = Load::Ready(Vec::new());
+        for total in [None, Some(0), Some(251)] {
+            ui.world.inbox_alerts = total;
+            ui.refresh_tab_statuses();
+            let area = Rect::new(0, 0, 120, 1);
+            let mut buffer = Buffer::empty(area);
+            ui.status_line(&mut buffer, area, ui.glasses.glass());
+            let row = (0..120).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+            assert_eq!(row.contains("◆ 251 alerts"), total == Some(251), "{row}");
+            assert_eq!(row.contains("nothing running yet"), total != Some(251), "{row}");
+        }
+    }
+
+    #[test]
     fn tab_badge_inbox_keeps_digits_when_other_tabs_surrender_them() {
         let mut ui = tab_badge_world();
         let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
         group.tabs.retain(|tab| tab.pane == "agent:agent/a" || tab.pane == "list:home");
         group.current = 1;
-        for width in [40, 26, 18, 9] {
+        for width in [40, 26, 18, 12, 9] {
             let row = tab_badge_strip(&ui, width);
             println!("INBOX {width}: |{row}|");
             assert!(row.contains("Inbox ?2"), "{width}: {row}");
@@ -5792,7 +5804,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_badge_small_strips_keep_overflow_targets_unless_inbox_needs_the_room() {
+    fn tab_badge_small_strips_keep_overflow_targets_when_unpadded_inbox_fits() {
         let mut ui = tab_badge_world();
         for current in [0, 2, 4] {
             ui.glasses.glass_mut().layout.group_mut(0).unwrap().current = current;
@@ -5803,9 +5815,12 @@ mod tests {
                     assert!(shown.contains("Inbox ?2"), "{width}: {shown}");
                 } else {
                     assert!(!shown.contains("?2"), "{width}: {shown}");
-                    if current > 0 { assert!(shown.contains('‹'), "{width}: {shown}"); }
-                    assert!(shown.contains('›'), "{width}: {shown}");
                 }
+                if current > 0 {
+                    assert!(shown.contains('‹'), "{width}: {shown}");
+                    assert!(ui.frame.borrow().hits.iter().any(|(_, hit)| *hit == Hit::GlassTabMore(0, current - 1)));
+                }
+                if current < 4 { assert!(shown.contains('›'), "{width}: {shown}"); }
                 for (rect, hit) in &ui.frame.borrow().hits {
                     if matches!(hit, Hit::GlassTabMore(..) | Hit::GlassTab(..)) {
                         assert!(rect.right() <= width, "{width}: {hit:?} {rect:?}");
