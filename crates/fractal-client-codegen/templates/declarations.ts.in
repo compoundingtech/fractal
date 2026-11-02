@@ -1,0 +1,72 @@
+// KDL uses braced Unicode escapes, not JSON's four-digit Unicode escapes.
+const quote = (value: string): string => `"${value.replace(
+  /["\\\u0000-\u001f\u007f-\u009f\u200e-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/gu,
+  (character) => {
+    switch (character) {
+      case '"': return '\\"'
+      case '\\': return '\\\\'
+      case '\n': return '\\n'
+      case '\r': return '\\r'
+      case '\t': return '\\t'
+      default: return `\\u{${character.codePointAt(0)?.toString(16)}}`
+    }
+  },
+)}"`
+
+// The parser folds simple IDs through the ambient default host. This SDK never guesses it.
+const canonicalAgentId = (id: string): string => {
+  if (!id.includes('.') && !id.includes('/')) {
+    throw new Error(`Agent ID ${JSON.stringify(id)} would be host-folded; use an ID containing "." or "/"`)
+  }
+  return id
+}
+
+const agentSubject = (agent: AgentReference): string => {
+  if (typeof agent === 'string') {
+    if (!agent.startsWith('agent/')) throw new Error('Agent references must start with "agent/"')
+    return `agent/${canonicalAgentId(agent.slice('agent/'.length))}`
+  }
+  return `agent/${canonicalAgentId(agent.id)}`
+}
+
+/** Encode authoring data. Mission revisions must come from `st validate`. */
+export const encodeKdl = (declarations: Declarations): string => {
+  const lines: string[] = ['version 2']
+  for (const agent of declarations.agents ?? []) {
+    lines.push('', `agent ${quote(canonicalAgentId(agent.id))} {`, `  workspace ${quote(agent.workspace)}`)
+    if (agent.under !== undefined) {
+      lines.push(`  under ${quote(agentSubject(agent.under.agent))} reason=${quote(agent.under.reason)}`)
+    }
+    if (agent.launch.argv !== undefined) {
+      lines.push(`  argv ${agent.launch.argv.map(quote).join(' ')}`)
+    } else {
+      lines.push(`  command ${quote(agent.launch.command)}`)
+    }
+    lines.push('}')
+  }
+  for (const mission of declarations.missions ?? []) {
+    lines.push('', `mission ${quote(mission.id)} state=${quote(mission.state)} report-to=${quote(agentSubject(mission.reportTo))} {`)
+    for (const goal of mission.goals) lines.push(`  goal ${quote(goal)}`)
+    lines.push('  completion {', `    when ${quote(mission.completion)}`, '  }')
+    for (const step of mission.steps) {
+      lines.push(`  step ${quote(step.id)} {`, `    assigned-to ${quote(agentSubject(step.assignedTo))}`)
+      for (const goal of step.goals) lines.push(`    goal ${quote(goal)}`)
+      lines.push('  }')
+    }
+    lines.push('}')
+  }
+  for (const schedule of declarations.schedules ?? []) {
+    const missionId = typeof schedule.work.mission === 'string' ? schedule.work.mission : schedule.work.mission.id
+    lines.push('', `schedule ${quote(schedule.id)} {`,
+      `  host ${quote(schedule.host)}`,
+      `  every ${quote(schedule.every)}`,
+      `  anchor ${quote(schedule.anchor)}`,
+      `  catch-up ${quote(schedule.catchUp)}`)
+    if (schedule.maxCatchUp !== undefined) lines.push(`  max-catch-up ${schedule.maxCatchUp}`)
+    lines.push('  work {',
+      `    mission ${quote(`mission/${missionId}@${schedule.work.revision}`)}`,
+      `    workspace ${quote(schedule.work.workspace)}`,
+      '  }', '}')
+  }
+  return `${lines.join('\n')}\n`
+}

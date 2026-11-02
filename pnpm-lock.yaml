@@ -218,6 +218,12 @@ importers:
         specifier: 8.22.0
         version: 8.22.0
 
+  clients/typescript/fractal-declarations:
+    devDependencies:
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
   clients/typescript/fractal-scenarios:
     dependencies:
       '@fractal/client':

@@ -9,6 +9,9 @@ anyhow = "1"
 serde_json = "1"
 sha2 = "0.10"
 
+[dev-dependencies]
+fractal-store = { path = "../fractal-store" }
+
 [[bin]]
 name = "fractal-client-codegen"
 path = "src/main.rs"

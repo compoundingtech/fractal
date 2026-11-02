@@ -37,9 +37,6 @@
       "clippy::large_enum_variant": 1,
       "clippy::manual_is_multiple_of": 1
     },
-    "fractal-client-codegen": {
-      "clippy::useless_format": 2
-    },
     "fractal-feed": {
       "clippy::filter_map_bool_then": 1,
       "clippy::if_same_then_else": 1,
