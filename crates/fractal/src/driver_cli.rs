@@ -601,8 +601,8 @@ async fn resume_native_driver(
 }
 
 /// How long a driver whose loop has ended waits for its provider to stop. The wrapper escalates
-/// to SIGKILL of the terminal's process group five seconds after the stop, which ends the
-/// driver with it.
+/// to SIGKILL of its process group five seconds after the stop, which ends the driver with it;
+/// a driver still waiting past this exits by itself.
 const UNSERVED_PROVIDER_STOP: Duration = Duration::from_secs(15);
 
 /// The driver's loop has ended, for example because the daemon fenced this incarnation's
@@ -632,10 +632,12 @@ async fn stop_unserved_provider(
     );
     fractal_drivers::provider_session::request_stop();
     if tokio::time::timeout(UNSERVED_PROVIDER_STOP, &mut task).await.is_err() {
+        // Returning would wait for the provider's blocking task without limit.
         let _ = write_driver_log(
             subject,
-            &format!("the {driver} provider did not stop within {}s of the stop", UNSERVED_PROVIDER_STOP.as_secs()),
+            &format!("the {driver} provider did not stop within {}s of the stop; the driver exits without it", UNSERVED_PROVIDER_STOP.as_secs()),
         );
+        std::process::exit(2);
     }
     outcome
 }

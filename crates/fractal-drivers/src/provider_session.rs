@@ -33,9 +33,15 @@ pub fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }
 
+/// Set once a driver can no longer serve its provider. Unlike a signal's stop, a wrapper that
+/// installs its handlers afterwards keeps it, so a provider not yet launched is stopped too.
+static DRIVER_STOP: AtomicBool = AtomicBool::new(false);
+
 /// Stop the provider as a stop signal would: its wrapper ends the child, records the end and
-/// returns. A driver that can no longer serve its provider asks for this.
+/// returns. A driver that can no longer serve its provider asks for this, possibly before the
+/// wrapper has started.
 pub fn request_stop() {
+    DRIVER_STOP.store(true, Ordering::SeqCst);
     STOP.store(true, Ordering::SeqCst);
 }
 
@@ -192,7 +198,7 @@ extern "C" fn on_stop_signal(_signal: libc::c_int) {
 extern "C" fn on_interrupt_signal(_signal: libc::c_int) {}
 
 pub(crate) fn install_signal_handler() {
-    STOP.store(false, Ordering::SeqCst);
+    STOP.store(DRIVER_STOP.load(Ordering::SeqCst), Ordering::SeqCst);
     install_stop_handlers();
 }
 
@@ -803,6 +809,15 @@ pub(crate) fn stop_provider_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_driver_stop_survives_a_wrapper_that_starts_after_it() {
+        // The driver can give up before its provider's wrapper reaches its handler install,
+        // for example when the daemon refuses the mailbox at once.
+        request_stop();
+        install_signal_handler();
+        assert!(stop_requested());
+    }
 
     #[test]
     fn native_supervision_keeps_observations_without_creating_status() {
