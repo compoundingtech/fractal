@@ -166,11 +166,16 @@ pub fn unix_socket_path_fits(socket: &Path) -> bool {
 pub fn default_unix_socket(runtime: &Path, published: &Path) -> PathBuf {
     let primary = runtime_or_published_socket(runtime, published);
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction.
+    let legacy_name = match runtime.file_name().and_then(|name| name.to_str()) {
+        Some("fractal.sock") => "st3.sock",
+        Some("fractal-client.sock") => "st3-client.sock",
+        _ => return primary,
+    };
     let primary_fits = unix_socket_path_fits(&primary);
     if !primary_fits || std::os::unix::net::UnixStream::connect(&primary).is_err() {
         let legacy = runtime_or_published_socket(
-            &runtime.with_file_name("st3.sock"),
-            &published.with_file_name("st3.sock"),
+            &runtime.with_file_name(legacy_name),
+            &published.with_file_name(legacy_name),
         );
         if unix_socket_path_fits(&legacy)
             && (!primary_fits || std::os::unix::net::UnixStream::connect(&legacy).is_ok())
@@ -5778,14 +5783,19 @@ mod tests {
 
     #[test]
     fn socket_names_prefer_fractal_and_fall_back_to_a_legacy_only_daemon() {
-        let root = tempfile::tempdir().unwrap();
-        let primary = root.path().join("fractal.sock");
-        let legacy = root.path().join("st3.sock");
-        assert_eq!(default_unix_socket(&primary, &primary), primary);
-        let _old_daemon = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
-        assert_eq!(default_unix_socket(&primary, &primary), legacy);
-        let _new_daemon = std::os::unix::net::UnixListener::bind(&primary).unwrap();
-        assert_eq!(default_unix_socket(&primary, &primary), primary);
+        for (primary_name, legacy_name) in [
+            ("fractal.sock", "st3.sock"),
+            ("fractal-client.sock", "st3-client.sock"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let primary = root.path().join(primary_name);
+            let legacy = root.path().join(legacy_name);
+            assert_eq!(default_unix_socket(&primary, &primary), primary);
+            let _old_daemon = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+            assert_eq!(default_unix_socket(&primary, &primary), legacy);
+            let _new_daemon = std::os::unix::net::UnixListener::bind(&primary).unwrap();
+            assert_eq!(default_unix_socket(&primary, &primary), primary);
+        }
     }
 
     #[test]
@@ -5903,14 +5913,19 @@ mod tests {
 
     #[test]
     fn socket_names_skip_a_primary_that_exceeds_the_platform_path_budget() {
-        let mut directory = String::from("/");
-        while unix_socket_path_fits(&Path::new(&directory).join("fractal.sock")) {
-            directory.push('x');
+        for (primary_name, legacy_name) in [
+            ("fractal.sock", "st3.sock"),
+            ("fractal-client.sock", "st3-client.sock"),
+        ] {
+            let mut directory = String::from("/");
+            while unix_socket_path_fits(&Path::new(&directory).join(primary_name)) {
+                directory.push('x');
+            }
+            let primary = Path::new(&directory).join(primary_name);
+            let legacy = Path::new(&directory).join(legacy_name);
+            assert!(unix_socket_path_fits(&legacy));
+            assert_eq!(default_unix_socket(&primary, &primary), legacy);
         }
-        let primary = Path::new(&directory).join("fractal.sock");
-        let legacy = Path::new(&directory).join("st3.sock");
-        assert!(unix_socket_path_fits(&legacy));
-        assert_eq!(default_unix_socket(&primary, &primary), legacy);
     }
 
     #[test]

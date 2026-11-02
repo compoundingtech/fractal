@@ -9054,7 +9054,10 @@ async fn run_devices_fabric(
             fabric
                 .expose_socket(
                     &service,
-                    &fractal_daemon::config::socket_binding_path(&config.client_gateway_socket),
+                    &fractal_client::default_unix_socket(
+                        &config.client_gateway_socket,
+                        &config.client_gateway_socket,
+                    ),
                 )
                 .await
                 .context("Fabric could not expose the client gateway; nothing changed")?;
