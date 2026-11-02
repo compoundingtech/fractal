@@ -19,6 +19,9 @@ test('subject notes use rich open audiences and nullable archive patches', async
     const patch = { text: null, expires_at: null };
     assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteUpdate)(Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')(patch)), patch);
     assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteUpdate)(Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')({})), {});
+    for (const partial of [{ text: null }, { expires_at: null }, { text: 'keep expiry' }, { expires_at: '2026-10-15T09:00:00.000Z' }]) {
+        assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteUpdate)(Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')(partial)), partial);
+    }
     const create = require('../../../docs/st3/client-v0/fixtures/subject-note-create.json');
     assert.equal(Rich.decodeUnknownSync(Rich.SubjectNoteCreate, 'strict')(create).target, create.target);
     assert.throws(() => Rich.decodeUnknownSync(Rich.SubjectNoteCreate, 'strict')({ ...create, session: 'incarnation/example' }));

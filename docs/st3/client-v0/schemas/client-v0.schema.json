@@ -45,9 +45,10 @@
     },
     "SubjectNoteUpdate": {
       "type": "object", "additionalProperties": false,
+      "description": "Patch fields preserve omission (unchanged), null (clear), and a supplied value.",
       "properties": {
-        "text": {"type": ["string", "null"], "minLength": 1, "maxLength": 1024},
-        "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+        "text": {"x-st-preserve-omission": true, "type": ["string", "null"], "minLength": 1, "maxLength": 1024},
+        "expires_at": {"x-st-preserve-omission": true, "oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
       }
     },
     "Note": {
