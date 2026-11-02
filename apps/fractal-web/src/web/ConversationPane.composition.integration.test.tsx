@@ -175,6 +175,27 @@ const mount = async (ux?: UxTelemetry, strictMode = false) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('forwards terminal navigation through the pane to a pending harness alert', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [{ _tag: 'ToolCall', id: 'pending-ask', callId: 'native-ask', name: 'ask',
+        input: { questions: [{ id: 'rollout', question: 'Ship?', options: [{ label: 'Yes' }] }] },
+        status: 'running', callSeen: true, at: at(0) }],
+      hasOlder: false, observation: { empty: false },
+    } }
+    const openTerminal = vi.fn()
+    await act(async () => root!.render(
+      <HumanClockProvider clock={clock}>
+        <ConversationPane agentRef="agent/selected" agentName="Example Agent" onOpenTool={call => opened.push(call)} onOpenTerminal={openTerminal} />
+      </HumanClockProvider>,
+    ))
+    expect(container.querySelector('[data-testid="conversation-alerts"]')).not.toBeNull()
+    const terminal = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Open terminal')!
+    expect(terminal).toBeDefined()
+    expect(terminal.disabled).toBe(false)
+    await act(async () => terminal.click())
+    expect(openTerminal).toHaveBeenCalledOnce()
+  })
+
   it('keeps the parent composer mounted while child tabs remain read-only', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: {
       items: scenario, hasOlder: false, observation: { empty: false },
