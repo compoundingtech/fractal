@@ -1381,6 +1381,7 @@ fence. `message` names the exact handoff note; `reason` is nonblank and at most 
 `st work handoff withdraw STEP --reason TEXT --as AGENT` withdraws the current note; optional
 `--message NOTE` pins an explicitly observed note and `--idempotency-key KEY` recovers the original
 note and attempt on retry, including after a replacement handoff.
+Exact durable returns are recovered before mutable subject-revision fences, including lost-receipt retries.
 Errors are typed: `stale-handoff` (409) refuses an old/resolved note or ineligible return;
 `stale-fence` (409) refuses changed work fences; `validation-failed` (422) refuses invalid
 parameters/reasons; `forbidden` (403) refuses actor/session roles; `idempotency-conflict` (409)
