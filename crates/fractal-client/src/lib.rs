@@ -5792,9 +5792,15 @@ mod tests {
             let legacy = root.path().join(legacy_name);
             assert_eq!(default_unix_socket(&primary, &primary), primary);
             let _old_daemon = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
-            assert_eq!(default_unix_socket(&primary, &primary), legacy);
+            assert_eq!(
+                default_unix_socket(&primary, &primary),
+                legacy.canonicalize().unwrap()
+            );
             let _new_daemon = std::os::unix::net::UnixListener::bind(&primary).unwrap();
-            assert_eq!(default_unix_socket(&primary, &primary), primary);
+            assert_eq!(
+                default_unix_socket(&primary, &primary),
+                primary.canonicalize().unwrap()
+            );
         }
     }
 

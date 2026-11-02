@@ -7045,6 +7045,6 @@ fn cli_devices_fabric_enable_status_and_disable_touch_only_st_peers() {
     );
     assert_eq!(
         recorded().strip_prefix(&previous).unwrap(),
-        format!("expose st3-client-v0 --socket {}\n", legacy.display())
+        format!("expose st3-client-v0 --socket {}\n", legacy.canonicalize().unwrap().display())
     );
 }
