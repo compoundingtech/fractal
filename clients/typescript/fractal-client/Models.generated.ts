@@ -2899,7 +2899,8 @@ export type RequestSubject = {
 export type Resource = (Note | ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
 
 export type ResourceCollectionName = 
-  "missions"
+  "notes"
+  | "missions"
   | "attention"
   | "agents"
   | "work"

@@ -3608,6 +3608,7 @@ export type ResourceEncoded = typeof Resource.Encoded
 
 /** Collections whose windows hold resources. */
 export const ResourceCollectionName = /*#__PURE__*/ (() => Schema.Literals([
+  "notes",
   "missions",
   "attention",
   "agents",
