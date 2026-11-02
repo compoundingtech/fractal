@@ -5,6 +5,7 @@ import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 import { loadWorld } from '@fractal/scenarios'
+import { collectResponse } from './response-wait.mjs'
 
 // Run in the web Nix shell: its Playwright driver and Chromium are also used by the kit gate.
 const started = performance.now()
@@ -182,7 +183,9 @@ try {
     assert(elapsed <= offset, `Replay clock already passed requested offset ${offset}: ${elapsed}`)
     await page.clock.runFor(offset - elapsed)
   }
-  const paneResponse = page.waitForResponse(response =>
+  // The pane's module can load at any point after navigation; it is collected from here and bounded
+  // only where the click needs it, so a slow setup cannot reject the wait before it is awaited.
+  const paneResponse = collectResponse(page, response =>
     new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'))
   await page.goto(`${origin}/?scenario=${scenario}&open=missions:detail`)
   await roster.waitFor({ state: 'visible' })
@@ -203,7 +206,7 @@ try {
   await agent.click()
   assert(new URL(page.url()).pathname.startsWith('/w/agent/'), 'agent selection must navigate in-app')
   assert.equal(new URL(page.url()).searchParams.get('scenario'), scenario)
-  await (await paneResponse).finished()
+  await (await paneResponse.within(10_000, 'ConversationPane.tsx after the agent click')).finished()
   const pane = page.getByTestId('conversation-history-host')
   const transcript = page.getByTestId('transcript-scroll')
   while (!await pane.isVisible() || !await transcript.getByTestId('transcript-empty').isVisible()) {
