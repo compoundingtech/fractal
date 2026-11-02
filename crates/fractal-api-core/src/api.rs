@@ -3193,11 +3193,13 @@ pub fn client_agent_cards_selected(
         add_agent_todos(store, &mut cards, index)?;
         Ok(cards)
     };
-    if chunk {
-        store.cached_agent_resources_chunk(index, history, selected, build)
-    } else {
-        store.cached_agent_resources_for(index, history, Some(selected), build)
-    }
+    pinned_unless_enclosed(store, || {
+        if chunk {
+            store.cached_agent_resources_chunk(index, history, selected, build)
+        } else {
+            store.cached_agent_resources_for(index, history, Some(selected), build)
+        }
+    })
 }
 
 fn client_agent_cards_from_cached(
