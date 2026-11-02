@@ -230,9 +230,96 @@ const STEP_QUERY: &str = "SELECT subject, run_id, step_path, definition_hash, st
  FROM step_runs WHERE subject=?1";
 
 pub fn step(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
-    Ok(connection
+    memoized(|memo| &mut memo.steps, subject.to_owned(), || Ok(connection
         .query_row(/* sqlite-large-value: allow-for-now lv-he9da72925547 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ STEP_QUERY, [subject], step_run_from_row)
-        .optional()?)
+        .optional()?))
+}
+
+/// What one fault snapshot reads again for every failure under the same run, step or
+/// declaration: thousands of failures share a few hundred runs. Each answer holds only for the
+/// read cut it came from, so the memo lives exactly as long as [`with_cut_memo`].
+#[derive(Default)]
+struct CutMemo {
+    liveness: HashMap<(String, Option<String>, bool), std::result::Result<(), String>>,
+    declarations: HashMap<String, bool>,
+    headers: HashMap<String, Option<MissionRunView>>,
+    steps: HashMap<String, Option<StepRunView>>,
+    desired: HashMap<String, Option<DesiredRow>>,
+    claims: HashMap<String, Option<ClaimRecord>>,
+    extensions: HashMap<(String, u32, u128), u64>,
+}
+
+thread_local! {
+    static CUT_MEMO: std::cell::RefCell<Option<CutMemo>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `read` with repeated run, step, declaration and claim reads answered once. The caller
+/// must hold one read cut for all of `read` (`read_snapshot`) and write nothing inside it.
+pub fn with_cut_memo<T>(read: impl FnOnce() -> T) -> T {
+    struct Scope(bool);
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            if self.0 {
+                CUT_MEMO.with(|memo| memo.borrow_mut().take());
+            }
+        }
+    }
+    let _scope = Scope(CUT_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        let outermost = memo.is_none();
+        if outermost {
+            *memo = Some(CutMemo::default());
+        }
+        outermost
+    }));
+    read()
+}
+
+fn memoized<K: Eq + std::hash::Hash, V: Clone>(
+    table: fn(&mut CutMemo) -> &mut HashMap<K, V>,
+    key: K,
+    read: impl FnOnce() -> Result<V>,
+) -> Result<V> {
+    let found = CUT_MEMO.with(|memo| {
+        memo.borrow_mut().as_mut().and_then(|memo| table(memo).get(&key).cloned())
+    });
+    if let Some(found) = found {
+        return Ok(found);
+    }
+    let value = read()?;
+    CUT_MEMO.with(|memo| {
+        if let Some(memo) = memo.borrow_mut().as_mut() {
+            table(memo).insert(key, value.clone());
+        }
+    });
+    Ok(value)
+}
+
+/// The claim `id`, read once per cut inside [`with_cut_memo`].
+pub fn claim_in_cut(id: &str, read: impl FnOnce() -> Result<Option<ClaimRecord>>) -> Result<Option<ClaimRecord>> {
+    memoized(|memo| &mut memo.claims, id.to_owned(), read)
+}
+
+/// [`step_timeout_extension_at`], read once per cut inside [`with_cut_memo`].
+pub fn step_timeout_extension_in_cut(
+    connection: &Connection,
+    subject: &str,
+    attempt: u32,
+    as_of: u128,
+) -> Result<u64> {
+    memoized(|memo| &mut memo.extensions, (subject.to_owned(), attempt, as_of), || {
+        Ok(step_timeout_extension_at(connection, subject, attempt, as_of)?)
+    })
+}
+
+fn run_header(connection: &Connection, run: &str) -> Result<Option<MissionRunView>> {
+    memoized(|memo| &mut memo.headers, run.to_owned(), || {
+        Ok(mission_run_header_tx(connection, run).optional()?)
+    })
+}
+
+fn desired_row(connection: &Connection, subject: &str) -> Result<Option<DesiredRow>> {
+    memoized(|memo| &mut memo.desired, subject.to_owned(), || current_desired_row(connection, subject))
 }
 
 pub fn request(connection: &Connection, subject: &str) -> Result<Option<ClaimRecord>> {
@@ -250,7 +337,11 @@ pub fn request(connection: &Connection, subject: &str) -> Result<Option<ClaimRec
 }
 
 pub fn declaration_live(connection: &Connection, subject: &str) -> Result<bool> {
-    let row = current_desired_row(connection, subject)?;
+    memoized(|memo| &mut memo.declarations, subject.to_owned(), || declaration_live_uncached(connection, subject))
+}
+
+fn declaration_live_uncached(connection: &Connection, subject: &str) -> Result<bool> {
+    let row = desired_row(connection, subject)?;
     let Some(row) = row else { return Ok(false) };
     let body: Value = serde_json::from_str(&row.body)?;
     if row.kind == "stop"
@@ -288,6 +379,19 @@ pub fn run_liveness(
     generation: Option<&str>,
     failure: bool,
 ) -> Result<std::result::Result<(), String>> {
+    memoized(
+        |memo| &mut memo.liveness,
+        (run.to_owned(), generation.map(str::to_owned), failure),
+        || run_liveness_uncached(connection, run, generation, failure),
+    )
+}
+
+fn run_liveness_uncached(
+    connection: &Connection,
+    run: &str,
+    generation: Option<&str>,
+    failure: bool,
+) -> Result<std::result::Result<(), String>> {
     let mut run = run.strip_prefix("mission-run/").unwrap_or(run).to_owned();
     let mut expected_generation = generation.map(str::to_owned);
     let mut seen = BTreeSet::new();
@@ -297,7 +401,7 @@ pub fn run_liveness(
                 "mission run `mission-run/{run}` is its own ancestor"
             )));
         }
-        let header = mission_run_header_tx(connection, &run).optional()?;
+        let header = run_header(connection, &run)?;
         let Some(header) = header else {
             return Ok(Err(format!("mission run `mission-run/{run}` is gone")));
         };
@@ -321,7 +425,7 @@ pub fn run_liveness(
                 // Subscription and schedule deliveries use their declaration as the parent,
                 // normalized with a step-run prefix. They do not create a synthetic work step.
                 let subject = parent.strip_prefix("step-run/").unwrap_or(parent);
-                let Some(owner) = current_desired_row(connection, subject)? else {
+                let Some(owner) = desired_row(connection, subject)? else {
                     return Ok(Err(format!("`{subject}`, which started it, is gone")));
                 };
                 let body: Value = serde_json::from_str(&owner.body)?;
@@ -342,9 +446,7 @@ pub fn run_liveness(
                         "`{subject}`, which started it, has no owning run"
                     )));
                 };
-                let owner_header =
-                    mission_run_header_tx(connection, owner_run.trim_start_matches("mission-run/"))
-                        .optional()?;
+                let owner_header = run_header(connection, owner_run.trim_start_matches("mission-run/"))?;
                 if owner_header
                     .is_none_or(|owner| owner.root_mission_run != header.root_mission_run)
                 {
@@ -367,11 +469,7 @@ pub fn run_liveness(
             run = parent.run.trim_start_matches("mission-run/").into();
             expected_generation = Some(parent.generation);
         } else {
-            let root = mission_run_header_tx(
-                connection,
-                header.root_mission_run.trim_start_matches("mission-run/"),
-            )
-            .optional()?;
+            let root = run_header(connection, header.root_mission_run.trim_start_matches("mission-run/"))?;
             return Ok(match root {
                 None => Err(format!(
                     "its root mission run `{}` is gone",
