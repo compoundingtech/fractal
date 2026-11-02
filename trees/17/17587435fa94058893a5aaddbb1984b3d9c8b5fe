@@ -3,3 +3,4 @@ record 15d07169cd97503e5760bd7f02909eb268f2c238 genie-freshness 0 host/anvil 202
 record 0b264d911923d20f8509c0be78b4132737243054 ci-script-tests 0 host/anvil 2026-11-02T13:31:57Z
 record 5451783c0882c8e8aad324e211844f719c6afc1d linux-clippy 0 host/anvil 2026-11-02T14:08:31Z
 record d1301337a12bd352cca46040493bbd30188dd83f linux-gate 0 host/anvil 2026-11-02T14:07:43Z
+record fe13a4b2c044cba0a9fe03f77664c6b1b97a90c4 linux-fleet-compat 0 host/anvil 2026-11-02T14:09:17Z
