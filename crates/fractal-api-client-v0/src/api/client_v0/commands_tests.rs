@@ -142,11 +142,13 @@ async fn phone_command_message_read_admission_uses_daemon_state() {
         let phone = pair(&state, "device/target", "person/ada", &["read.projections", "control.messages"]);
         let foreign = pair(&state, "device/other", "person/ada", &["read.projections", "control.messages"]);
         let owner = ClientSession::local(Some("person/ada")).unwrap();
-        let sent = accept_message(&state, MessageSendRequest {
-            idempotency_key: "admission-message".into(), from: "person/ada".into(),
-            to: "person/ada".into(), content: "read me".into(), title: None,
-            in_reply_to: None, tags: vec![], attachments: vec![],
-        }, None, None).unwrap().0;
+        let sent = state.store.append_claim(&ClaimInput {
+            subject: "message/admission".into(), kind: "message.sent".into(),
+            actor: Some("agent/worker".into()), fields: BTreeMap::from([
+                ("from".into(), json!("agent/worker")), ("to".into(), json!("person/ada")),
+                ("content".into(), json!("Read this existing message.")), ("status".into(), json!("sent")),
+            ]), evidence: vec![], expected_subject: None, idempotency_key: Some("admission-message".into()),
+        }).unwrap();
         let card = client_attention_resources(&state.store, Some("person/ada"), false).unwrap()
             .into_iter().find(|card| card["source_id"] == sent.subject).unwrap();
         let mut request = request("device/target", if case == "verb" { "phone.inspect" } else { "phone.message.read" });
