@@ -24,13 +24,19 @@ fn overdue(
         {
             continue;
         }
-        // A later projection must not make an already read or closed message eligible again.
+        // A later projection must not make an already read or closed message eligible again,
+        // whether a claim or a local mark records it.
+        let marked = |kind: &str| -> anyhow::Result<bool> {
+            Ok(crate::store::message_marks::recorded_at(&store.readers.get(), &message.subject, &[kind], None)?.is_some())
+        };
         if store
             .latest_claim(&message.subject, Some("message.closed"))?
             .is_some()
-            || (store
+            || marked("message.closed")?
+            || ((store
                 .latest_claim(&message.subject, Some("message.read"))?
                 .is_some()
+                || marked("message.read")?)
                 && !(resume_archives && unfinished_archive(store, &message)?))
         {
             continue;

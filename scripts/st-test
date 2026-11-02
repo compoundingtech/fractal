@@ -68,7 +68,9 @@ or to the path in ST_TEST_RUNS (`off` records nothing); scripts/fractal-test-rep
 (docs/st3/gate-evidence.md). Recording never changes the result: a file that cannot be written is one line on stderr.
 
 Exit 0 when every selected check passed and was signed (with --out, exported but not verified); 1 when a check failed, timed out or
-could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered. A tree that edits
+could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument, or, for the whole suite, a branch whose merge with
+the base fails CI's upgrade-impact check: a missing release-notes/NAME.json, which --status shows as a warning); 3 from --status when
+the tree is not covered. A tree that edits
 a check's lane is signed like any other (the note carries the edited lane's digest). The run exits 4 when nothing failed but a check was not signed: only
 against a base whose evidence-wrap still refuses a lane edit (before 2026-10-26) is that check left "not signed" for CI, or rust-tests left a crate unsigned
 because one of its tests passed only on a retry (CI's own per-crate notes refuse such a crate too, so CI runs it; linux-gate still signs and records them
@@ -209,7 +211,7 @@ TREE_FREE_FALLBACK_SECONDS = 60  # a tree this waiter has seen free this long, u
 POOL_KEEP = ('/repos/', 'node_modules/', '/target/compat-baselines/')
 POOL_SETTINGS = {}  # the ST_TEST_* settings (pool, pool cap, signing jobs, member limit, runs file) as the caller set them: read before the seat scrub drops every ST_* name
 SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_TMP', 'ST_TEST_POOL_MAX_GB', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT', 'ST_TEST_RUNS',
-                 'ST_TEST_MAX_LOAD', 'ST_TEST_LOAD_WAIT_MINUTES')
+                 'ST_TEST_MAX_LOAD', 'ST_TEST_LOAD_WAIT_MINUTES', 'ST_TEST_POOL_RANK')
 POOL_MAX_GB = 60.0  # all repositories' pools together under the pool directory; ST_TEST_POOL_MAX_GB (0 or off: no cap) replaces it
 
 
@@ -411,6 +413,47 @@ def gate_commit(base):
         result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
     GATE_TREE[key] = result
     return result
+
+
+IMPACT_CHECK = 'upgrade-impact'
+RELEASE_IMPACT = ('check-release-impact', 'release_notes.py')  # upgrade-impact's command and the module it imports, beside it
+
+
+def release_impact(base):
+    """Why the upgrade-impact check CI runs on a pull request (scripts/check-release-impact: the PR needs a fresh release-notes/NAME.json)
+    fails for this branch, '' when it passes, or None when it was not asked. It is asked of what CI asks it of: the merge of the head
+    with the base, the base as first parent, by that merge's own copy of the check. The whole-suite run asks it before any wait, so a missing note
+    stops the run in seconds here rather than ejecting the pull request from the merge queue (#4669, 2026-11-02). It is not asked when
+    there is nothing to ask: no branch commit of its own, no clean merge (CI cannot make one either), or no check in the merge (an older
+    base). Not for --seed, which names its tree. Only the whole-suite run stops on it; --status shows it as a warning."""
+    if TARGET:
+        return None
+    head = head_commit()
+    base_commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
+    if not base_commit or git('merge-base', '--is-ancestor', head, base_commit, check=False).returncode == 0:
+        return None
+    merged = git('merge-tree', '--write-tree', '--no-messages', base_commit, head, check=False)
+    if merged.returncode != 0:
+        return None
+    env = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid', 'GIT_COMMITTER_NAME': 'st-test',
+           'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
+    commit = text(git('commit-tree', merged.stdout.decode().split()[0], '-p', base_commit, '-p', head, '-m',
+                      f'merge of {head[:12]} into {base}', env=env))
+    with tempfile.TemporaryDirectory(prefix='st-test-impact-') as scratch:
+        for name in RELEASE_IMPACT:
+            shown = git('show', f'{commit}:scripts/{name}', check=False)
+            if shown.returncode != 0:
+                return None
+            (Path(scratch) / name).write_bytes(shown.stdout)
+        # -E -s, not -I: the check imports release_notes from its own directory, which -I leaves off sys.path.
+        done = subprocess.run([sys.executable, '-E', '-s', str(Path(scratch) / RELEASE_IMPACT[0]), '--repo', text(git('rev-parse', '--show-toplevel')),
+                               '--base', base_commit, '--source', commit], capture_output=True)
+    if done.returncode == 0:
+        return ''
+    said = done.stderr.decode(errors='replace').strip().splitlines() or [f'exit {done.returncode}']
+    return (f'the upgrade-impact check CI runs fails on the merge of this branch with {base} ({said[-1].replace(commit, "the merge")[:400]}), '
+            'and the merge queue would eject it. To fix: add release-notes/NAME.json (a name of its own; copy the fields of any note there '
+            'and say what this branch changes), commit it, and run again')
 
 
 CHECKS = ()  # the checks this run signs (main sets it): the gate decides per check whether main's protected changes are that check's
@@ -1089,6 +1132,7 @@ def pool_base():
 TMP_NAMES = ('TMPDIR', 'TMP', 'TEMP')
 RUN_TMP_PREFIX = 'st-test.'
 KEPT = 'KEPT'  # in a run's TMPDIR that --keep kept: no later run removes it
+WEB_KEPT = 'ci-local-web-kept'  # in a kept run's TMPDIR: where scripts/ci-local-web left its scratch (CI_LOCAL_KEEP), one line each
 RUN_TMP_FRESH = 600  # seconds: a run TMPDIR younger than this is never swept, as its run may not have locked it yet
 
 
@@ -1160,6 +1204,9 @@ def run_tmpdir(keep=False):
         if keep:
             (path / KEPT).touch()
             print(f'fractal-test: kept this run\'s TMPDIR {path} (--keep): no later run removes it, so remove it when you are done', file=sys.stderr)
+            kept_web = (path / WEB_KEPT).read_text().split('\n') if (path / WEB_KEPT).exists() else []
+            for scratch in filter(None, kept_web):
+                print(f'fractal-test: kept fractal-web\'s scratch {scratch} too (its kit play receipts, browser traces and screenshots)', file=sys.stderr)
         else:
             remove_tree(path)
         os.close(fd)
@@ -1248,6 +1295,37 @@ PRIORITY_AGING_SECONDS, PRIORITY_FLOOR = 120, 5  # the cargo shim's rank aging: 
 PRIORITY_MAX_WAIT_SECONDS = 2 * 3600  # a pool-tree ticket that has waited this long is served before every younger ticket whatever its rank (oldest first): ranks under the floor never age, so without a limit a steady stream of them starves rank-50 runs indefinitely (hetz2, 2026-10-29: five rank-50 tickets waited 4 to 12.5 hours)
 
 
+# Last in the pool (2026-11-01, Factory, from the 10-31 st-test SLO report: on one build host the shadow queue signer's seed held 18% of the
+# pool's tree-hours in a day, 20 runs of main's tips queued like any seat's). ST_TEST_POOL_RANK=last takes a ticket of this rank, which never
+# ages and is never overdue, and its waiter never takes a tree another ticket waits for (no TREE_FREE_FALLBACK_SECONDS): it gets a tree only
+# while no other ticket waits. Aging and the two-hour rule would otherwise bring any rank to the front within two hours. It also takes a tree
+# only while another is free, which it leaves to a seat that comes during its run (a seed holds its tree 35 to 58 minutes).
+POOL_LAST_RANK = 999
+
+
+def another_tree_free(root, trees, taken):
+    """Whether a pool tree other than `taken` is free now: its flock taken without waiting and let go at once."""
+    for n in range(trees):
+        if n == taken:
+            continue
+        with open(root / f'tree-{n}.lock', 'w') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            return True
+    return False
+
+
+def pool_rank():
+    """This run's pool-ticket rank: POOL_LAST_RANK with ST_TEST_POOL_RANK=last, else the host's priority rank (priority_rank)."""
+    value = POOL_SETTINGS.get('ST_TEST_POOL_RANK', '')
+    if value and value != 'last':
+        raise Failure(f'ST_TEST_POOL_RANK={value!r} must be "last" or unset')
+    return POOL_LAST_RANK if value else priority_rank()
+
+
 def priority_rank(environment=None):
     """The caller's rank in the build host's priority file (lines 'RANK GLOB', first glob matching the caller; lower is served first), as the cargo
     shim reads it: the caller is ST_AGENT, else CARGO_PRIORITY_CALLER (a run that carries only that one ranked 50 here while the shim ranked it
@@ -1280,7 +1358,8 @@ def process_started_ns(pid):
 
 def tree_queue(queue, now_ns, rules=None, own=None):
     """The live tickets waiting for a pool tree (name RANK.NANOS.PID), best first: the shim's order, effective rank (aged) then arrival, except that a
-    ticket past PRIORITY_MAX_WAIT_SECONDS goes before all the others, oldest first (a limit on starvation, which ranks under the floor would otherwise cause). A ticket
+    ticket past PRIORITY_MAX_WAIT_SECONDS goes before all the others, oldest first (a limit on starvation, which ranks under the floor would otherwise cause),
+    and a POOL_LAST_RANK ticket goes after all the others however long it has waited. A ticket
     whose process is gone is removed, and so is one whose pid now names a process that started after the ticket was taken (a waiter killed
     with SIGKILL leaves its ticket; a reused pid must not keep its place). With `rules`, a ticket written under older rules than those (ticket_rules)
     is left out, except `own`: this waiter does not defer to it."""
@@ -1306,7 +1385,9 @@ def tree_queue(queue, now_ns, rules=None, own=None):
         if rules is not None and name != own and ticket_rules(queue / name) < rules:
             continue
         effective = rank if rank < PRIORITY_FLOOR else max(PRIORITY_FLOOR, rank - (now_ns - nanos) // (PRIORITY_AGING_SECONDS * 10**9))
-        if now_ns - nanos >= PRIORITY_MAX_WAIT_SECONDS * 10**9:
+        if rank >= POOL_LAST_RANK:
+            effective = POOL_LAST_RANK  # last in the pool: never aged, never overdue; among themselves by arrival
+        elif now_ns - nanos >= PRIORITY_MAX_WAIT_SECONDS * 10**9:
             effective = -1  # past the maximum wait: ahead of every ticket that has not, and the overdue ones among themselves by arrival
         found.append((effective, nanos, name))
     return sorted(found)
@@ -1390,11 +1471,12 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
     queue.mkdir(exist_ok=True)
     ticket = handed_ticket(queue)
     if ticket is None:
-        ticket = queue / f'{priority_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
+        ticket = queue / f'{pool_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
     write_ticket(ticket)
+    last = int(ticket.name.split('.')[0]) >= POOL_LAST_RANK  # never takes a tree while another ticket waits (POOL_LAST_RANK)
     waited, handing = False, False
     began = time.monotonic() - (time.time_ns() - int(ticket.name.split('.')[1])) / 1e9  # since the ticket was taken, by this copy or the one before
-    slot_waited, slot_seen, slot_told = 0.0, None, False
+    slot_waited, slot_seen, slot_told, spare_told = 0.0, None, False, False
     free_since = {}  # tree number -> when this waiter first saw it free (not the head's, so only watched)
 
     def taken(n, lock):
@@ -1421,6 +1503,13 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                     except BlockingIOError:
                         lock.close()
                         continue
+                    if last and not another_tree_free(root, trees, n):
+                        lock.close()
+                        if not spare_told:
+                            spare_told = True
+                            print(f'fractal-test: tree-{n} is the only free tree; a run last in the pool (ST_TEST_POOL_RANK=last) leaves it '
+                                  f'to a seat and waits for two', file=sys.stderr, flush=True)
+                        break
                     try:
                         clear_tree_orphans(root / f'tree-{n}')
                     except BaseException:
@@ -1446,7 +1535,7 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                         print(f'fractal-test: tree-{n} is free, but a build started now would wait for a slot ({why}); waiting for one '
                               f'without holding a tree (at most {TREE_SLOT_WAIT_LIMIT}s)', file=sys.stderr, flush=True)
                     break  # every free tree would wait for the same slot
-            elif trees:
+            elif trees and not last:
                 # Not the head of this waiter's order. Normally it leaves free trees to the head. But another waiter may run an older or newer copy of this
                 # order and defer to this one while this one defers to it (an old copy's overdue rank-50 ticket and a new copy's rank-3 one), so nobody
                 # would try a free tree. Liveness: a tree seen free for TREE_FREE_FALLBACK_SECONDS that the head has not taken may be tried here; the flock
@@ -1518,10 +1607,39 @@ def tree_users(directory, proc='/proc', execution_only=False):
     return sorted(found)
 
 
-def clear_tree_orphans(directory, grace=2.0, proc='/proc'):
-    """With the flock held, terminate only execution-backed orphans; argv-only references block reuse without authorizing a signal."""
-    users = tree_users(directory, proc, execution_only=True)
-    references = set(tree_users(directory, proc)) - set(users)
+def sibling_sizing(pid, proc='/proc'):
+    """Whether `pid` is another st-test's du_gb: `du -sk [--] PATH` whose parent's argv runs an st-test (RUNNER_NAMES: fractal-test too, for
+    when the shim inversion makes it the implementation). It names a pool tree only to
+    size it (evict_to_cap, the closing target line), for seconds, and refusing a tree for it failed a run that had waited an hour for
+    one (2026-11-02)."""
+    try:
+        argv = Path(proc, str(pid), 'cmdline').read_text(errors='surrogateescape').split('\0')
+        status = Path(proc, str(pid), 'status').read_text()
+        parent = int(next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:')))
+        parent_argv = Path(proc, str(parent), 'cmdline').read_text(errors='surrogateescape').split('\0')
+    except (OSError, StopIteration, ValueError, IndexError):
+        return False
+    argv = [arg for arg in argv if arg]
+    sizing = len(argv) in (3, 4) and os.path.basename(argv[0]) == 'du' and argv[1] == '-sk' and argv[2:-1] in ([], ['--'])
+    return sizing and any(os.path.basename(arg) in RUNNER_NAMES for arg in parent_argv[:2])
+
+
+RUNNER_NAMES = ('st-test', 'fractal-test')  # what a running runner's file is called: the base copy is st-test, the shim's sibling may become fractal-test
+ARGV_SETTLE = 30.0  # seconds an argv-only reference may take to go away before the tree is refused for it
+
+
+def clear_tree_orphans(directory, grace=2.0, proc='/proc', settle=ARGV_SETTLE):
+    """With the flock held, terminate only execution-backed orphans; argv-only references block reuse without authorizing a signal.
+    Another st-test sizing the tree (sibling_sizing) is no reference, and any other must still be there after `settle` seconds."""
+    def argv_only():
+        users = tree_users(directory, proc, execution_only=True)
+        return users, {pid for pid in set(tree_users(directory, proc)) - set(users) if not sibling_sizing(pid, proc)}
+
+    deadline = time.monotonic() + settle
+    users, references = argv_only()
+    while references and time.monotonic() < deadline:
+        time.sleep(0.5)
+        users, references = argv_only()
     if references:
         commands = {}
         for pid in sorted(references):
@@ -1751,11 +1869,41 @@ def base_input_values(verifier, directory, tree, check, base, repository, keyed=
     return found
 
 
+OWN_LEVELS_AT = {}  # base commit: (the gate's PROTECTED, its OWN_LEVELS), as the base has them
+
+
+def own_levels(directory, tree, base, lane_base):
+    """(levels, edits): when `tree` edits a file that decides skipping, the signer levels whose note alone covers our pull request in CI,
+    and those edits; else (None, []). The gate's own PROTECTED and OWN_LEVELS, from the base, so the two cannot drift: our pull request
+    that edits a protected file skips only on our hosts' note (ci-evidence-gate's own_pull_request), so a note another level signed for
+    the same inputs (CI's, on any other pull request) is not 'already signed' here either. Compared from `lane_base`, the branch point
+    (the base itself for a merge tree), as the gate compares the branch's own edits (choose_tree) or the merge with the base."""
+    if not lane_base:
+        return None, []
+    base_commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', cwd=directory, check=False))
+    if base_commit not in OWN_LEVELS_AT:
+        gate = load_base_gate(base_commit) if base_commit else None
+        OWN_LEVELS_AT[base_commit] = (tuple(getattr(gate, 'PROTECTED', ())), tuple(getattr(gate, 'OWN_LEVELS', ())))
+    protected, levels = OWN_LEVELS_AT[base_commit]
+    if not protected or not levels:
+        return None, []
+    diff = git('diff', '--no-renames', '--name-only', '-z', lane_base, tree, cwd=directory, check=False)
+    if diff.returncode != 0:
+        return levels, ['<comparison failed>']
+    edits = [path for path in diff.stdout.decode(errors='replace').split('\0') if path in protected]
+    return (levels, edits) if edits else (None, [])
+
+
 def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
-    """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None."""
+    """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None.
+    When the tree edits a protected file, only a note at the gate's own levels covers it (own_levels), and the verifier is asked for the
+    newest pass at those levels, as the gate asks it. Per crate, as in the gate, the verifier is not asked to prefer a level."""
     command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--keys-from', base]
+    levels, edits = own_levels(directory, tree, base, lane_base)
     if crate_key:
         command += ['--crate-key', crate_key]
+    elif levels and b'--prefer-levels' in Path(verifier).read_bytes():
+        command += ['--prefer-levels', ','.join(levels)]
     if repository:
         command += ['--policy-from', base, '--repository', repository]
         if lane_base and b'--lane-base' in Path(verifier).read_bytes():
@@ -1768,6 +1916,9 @@ def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=N
     except ValueError:
         return False, 'verifier gave no answer: ' + (done.stderr.strip().splitlines() or ['-'])[-1][:120], None
     if done.returncode == 0:
+        if levels and result.get('trust_level') not in levels:
+            return False, (f'only a {result.get("trust_level")} note covers it ({str(result.get("record", ""))[:12]}), and this tree edits '
+                           f'{", ".join(edits[:3])}: CI takes only a {"/".join(levels)} note for it'), None
         return True, f'covered by {result.get("kind")} {result.get("record", "")[:12]}', result.get('record')
     return False, result.get('reason') or 'not covered', None
 
@@ -2298,10 +2449,11 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
 
 
 # scripts/ci-local's closing stage table (one line per stage it ran: name, start, end, seconds, and for a stage its exit code and the build
-# queue it waited in), as `printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss'` prints it after the `ci-local:` prefix; setup has no exit.
+# queue it waited in), as `printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss'` prints it after the `ci-local:` prefix; setup has no exit,
+# and its queue (the setup's admission waits) since 2026-11-02.
 CI_LOCAL = 'scripts/ci-local'
 STAGE_LINE = re.compile(r'ci-local:\s+(\S+)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d+)s'
-                        r'(?:\s+exit\s+(\S+)(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?)?\s*')
+                        r'(?:\s+exit\s+(\S+))?(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?\s*')
 # How long a check's output is still copied after the check itself exited: a process it left behind may hold the pipe open.
 STREAM_GRACE = 5
 QUEUE_LIMIT = 14400  # default --queue-limit: the build-slot waits a check may spend, apart from its --time-limit
@@ -2700,12 +2852,23 @@ def run_main(argv, cleanup):
             if not args.check:
                 # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
                 rows += [(name, True, 'CI runs it', 'no local command') for name in policy_checks(args.base) if name not in LOCAL]
+                # CI runs it on every pull request, outside the skip policy: asked here as a run asks it. A missing note is a warning
+                # and leaves the exit code alone: the pre-push hook (scripts/evidence-prepush) refuses on exit 3, and seats hand work
+                # over by pushing work-in-progress branches. The whole-suite run refuses it (below).
+                impact = release_impact(args.base)
+                if impact is not None:
+                    rows.append((IMPACT_CHECK, True, 'warning: no note' if impact else 'checked', impact or 'the merge with the base has its release note'))
         for name, is_covered, label, why in rows:
             print(f'  {name:<24} {label:<22} {why}')
         return 0 if all(row[1] for row in rows) else 3
     status = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
     if status:
         raise Failure('the checkout has uncommitted changes to tracked files; commit them first, the note is for the committed tree')
+    # The whole suite, the run that signs a branch for its pull request, refuses a missing release note before any wait: CI fails the
+    # pull request on it, and the merge queue ejects it. A run of some checks only (--check) does not ask.
+    impact = release_impact(args.base) if set(default_checks) <= set(checks) else None
+    if impact:
+        raise Failure(impact)
     preflight(checks if not (args.push and not args.out and not TARGET) else all_checks, merges=bool(args.push) and not TARGET)  # before any wait
     limit = load_limit()
     if limit:
@@ -2822,6 +2985,11 @@ def run_main(argv, cleanup):
                     environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                     if target and name in BUILDS:
                         environment['CARGO_TARGET_DIR'] = str(target)
+                    if args.keep and name == WEB:
+                        # scripts/ci-local-web removes its scratch (the kit play receipts, browser traces and screenshots) when it ends
+                        # unless CI_LOCAL_KEEP is set, and writes where it is to that file: the run's end names it (run_tmpdir). It stays
+                        # where it is, not in this TMPDIR, whose longer path would leave less room for the browsers' sockets.
+                        environment['CI_LOCAL_KEEP'] = str(Path(os.environ['TMPDIR']) / WEB_KEPT)
                     # The nix wrapper admits a `nix develop`/`nix shell` start as heavy unless told the shell compiles no Rust: a check that
                     # builds nothing starts as light (as the pre-sign worker starts .#web and .#genie), and one that builds never does.
                     if name in BUILDS:

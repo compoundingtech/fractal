@@ -247,9 +247,9 @@ allow the peer port. See [Tailscale](st3/tailscale.md) for setup.
 
 ### Fabric
 
-Run Fabric with `--runtime-peers` and install the external `st-fabric-adapter` on
-both machines. Keep the adapter running on the sponsor. No prior peer trust is
-needed:
+Run Fabric with `--runtime-peers` and install the external `fractal-fabric-adapter` on
+both machines. The old executable name `st-fabric-adapter` is still accepted.
+Keep the adapter running on the sponsor. No prior peer trust is needed:
 
 ```sh
 # On a member:
@@ -288,8 +288,11 @@ the exposure. The adapter maintains trust and grants; Fractal does not edit
 
 #### Adapter helper boundary
 
-The CLI discovers `st-fabric-adapter` beside its executable or on `PATH`;
-`ST_FABRIC_ADAPTER` selects an explicit helper for isolated tests.
+The CLI discovers `fractal-fabric-adapter` beside its executable or on `PATH`,
+then accepts `st-fabric-adapter` within each searched directory.
+`FRACTAL_FABRIC_ADAPTER` selects an explicit helper for isolated tests;
+`ST_FABRIC_ADAPTER` is still accepted. If both variables are set, they must name
+the same path.
 `pairing-invite` accepts one JSON line `{"code":"..."}` on standard input and
 returns a JSON line containing the augmented `code`. `pairing-join` is a
 private interactive JSON-line protocol: the code produces `node_id`, the signed
