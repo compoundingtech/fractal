@@ -135,10 +135,11 @@ pub fn reconcile_agent(store: &Store, agent: &str) -> Result<(bool, Option<u128>
                 + u128::from(at.timestamp_subsec_nanos() % 1_000_000 != 0);
             Ok(Some(earliest.map_or(expiry, |earliest| earliest.min(expiry))))
         })?;
-    if notes.is_empty() {
-        if !store.messages(Some(agent), true)?.iter().any(|message| {
+    if notes.is_empty()
+        && !store.messages(Some(agent), true)?.iter().any(|message| {
             message.from == "daemon/runtime" && message.tags.iter().any(|value| value == TAG)
-        }) { return Ok((false, expiry)); }
+        }) {
+        return Ok((false, expiry));
     }
     Ok((emit_notes(store, agent, &incarnation, true, &notes)?, expiry))
 }

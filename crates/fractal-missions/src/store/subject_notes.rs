@@ -39,10 +39,9 @@ fn current(store: &Store, id: &str, now: u128) -> Result<Option<SubjectNote>> {
     }
     let target = fields["target"].as_str().context("note target missing")?;
     let session = fields["session"].as_str();
-    if let Some(session) = session {
-        if store.current_subject_note_incarnation(target)?.as_deref() != Some(session) {
-            return Ok(None);
-        }
+    if let Some(session) = session
+        && store.current_subject_note_incarnation(target)?.as_deref() != Some(session) {
+        return Ok(None);
     }
     let created: String = connection.query_row(
         &canonical_sql("SELECT accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='note.set'
@@ -135,8 +134,9 @@ impl SubjectNotesStore for Store {
             let now = now_ms();
             let mut notes = Vec::new();
             for id in ids {
-                if let Some(note) = current(self, &id, now)? {
-                    if self.subject_note_readable(&note, reader)? { notes.push(note); }
+                if let Some(note) = current(self, &id, now)?
+                    && self.subject_note_readable(&note, reader)? {
+                    notes.push(note);
                 }
             }
             Ok(notes)
@@ -145,11 +145,10 @@ impl SubjectNotesStore for Store {
 
     fn set_subject_note(&self, id: &str, actor: &str, target: &str, text: Option<&str>,
         session: Option<&str>, expires_at: Option<&str>) -> Result<Option<SubjectNote>, St3Error> {
-        if actor.starts_with("agent/") && actor != target {
-            if !(target.starts_with("mission-run/") || target.starts_with("step-run/"))
-                || !self.subject_note_agents(target).map_err(internal)?.contains(actor) {
-                return Err(St3Error::new("note-target-access", "agents may note only themselves or assigned mission/step runs"));
-            }
+        if actor.starts_with("agent/") && actor != target
+            && (!(target.starts_with("mission-run/") || target.starts_with("step-run/"))
+                || !self.subject_note_agents(target).map_err(internal)?.contains(actor)) {
+            return Err(St3Error::new("note-target-access", "agents may note only themselves or assigned mission/step runs"));
         }
         let mut fields = BTreeMap::from([
             ("target".into(), json!(target)), ("text".into(), json!(text)), ("audience".into(), json!("agent"))]);
