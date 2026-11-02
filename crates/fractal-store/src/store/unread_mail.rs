@@ -70,7 +70,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     )?;
     if !filled {
         connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h0c4b774d59d8 owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
+            /* sqlite-large-value: allow-for-now lv-he0ee7a5b7b4e owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
              DELETE FROM unread_mail;
              DELETE FROM unread_mail_prefixes;
              INSERT INTO unread_mail(subject,sent_time)
@@ -78,6 +78,9 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
              WHERE kind='message.sent' AND NOT EXISTS (
                  SELECT 1 FROM claims terminal WHERE terminal.subject=claims.subject
                  AND terminal.kind IN ('message.read','message.closed')
+             ) AND NOT EXISTS (
+                 SELECT 1 FROM local_message_marks mark WHERE mark.message=claims.subject
+                 AND mark.kind IN ('message.read','message.closed')
              ) GROUP BY subject;
              DELETE FROM unread_mail_pending;
              INSERT INTO meta(key,value) VALUES('unread_mail_prefixes','1');

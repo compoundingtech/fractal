@@ -35,6 +35,7 @@ pub mod account;
 pub mod access;
 pub mod catalog;
 pub mod catalog_archive;
+mod catalog_generation;
 pub mod catalog_lock;
 pub mod catalog_transaction;
 pub mod claude_channel;
@@ -118,9 +119,8 @@ pub mod version;
 pub mod work_claim_failure;
 mod watch;
 
-// The declaration model and the catalog walk live in the `agent-spec` crate, so st2 and any other
-// reader of the same catalog share one implementation. Re-exported under their original paths:
-// `fractal_legacy_runner::spec::…` / `fractal_legacy_runner::discovery::…` keep working for the binary and the test suite.
+// The declaration model and catalog walk live in `agent-spec`. Keep their established
+// driver-library paths for the shared implementation and its callers.
 pub use agent_spec::kdl_version;
 pub use agent_spec::{discovery, spec};
 

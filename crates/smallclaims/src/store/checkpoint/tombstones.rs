@@ -383,9 +383,15 @@ impl Store {
     /// or deletes dropped rows. The next replication snapshot reads the inventory again.
     #[cfg_attr(not(test), allow(dead_code))] // The trim calls it (P5).
     pub fn replica_rows_changed(&self) {
-        self.replica_generation.fetch_add(1, Ordering::AcqRel);
+        self.replica_inventory_changed();
         // A trim deleted claims, so answers read from them may no longer hold.
         self.runtime.forget_views();
+    }
+
+    /// Envelope rows changed without a new store index, and the views are left to the caller:
+    /// the next replication snapshot reads the inventory again.
+    pub fn replica_inventory_changed(&self) {
+        self.replica_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Whether evidence may cite this claim: it is stored, or a checkpoint dropped it.
