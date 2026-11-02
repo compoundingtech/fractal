@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test runs the upgrade-impact check (scripts/check-release-impact, from the merge's tree) on the merge of the head with the base before any wait and stops the run when the branch lacks a fresh release-notes/NAME.json; --status shows it as an upgrade-impact row",
+  "replay": {
+    "status": "none",
+    "detail": "No record, signature or storage format changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No evidence rule changes; CI's upgrade-impact job is unchanged and still decides."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "A branch that lacks a release note now stops before st-test signs anything, where it used to sign and then fail upgrade-impact in CI. A base without scripts/check-release-impact is not asked."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the change to scripts/st-test."
+  }
+}
