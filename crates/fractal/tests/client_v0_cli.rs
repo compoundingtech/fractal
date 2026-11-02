@@ -5216,3 +5216,76 @@ async fn alerts_cli_uses_granted_agent_identity_and_sender_owned_update_sources(
     server.abort();
     let _ = server.await;
 }
+
+#[tokio::test]
+async fn phone_command_cli_real_daemon_outcomes() {
+    use fractal_daemon::api::{client_commands, client_presence};
+    use fractal_daemon::api::client_v0::paired_client_session;
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let grant = "custom/client/phone-cli";
+    state.store.append_claim(&ClaimInput {
+        subject: grant.into(), kind: "custom.client.pairing-completed".into(),
+        actor: Some("person/alex".into()),
+        fields: serde_json::from_value(serde_json::json!({
+            "device_id":"device/phone-cli", "person_id":"person/alex",
+            "session_actor":"person/alex/session/phone-cli",
+            "scopes":["read.projections","control.messages"],
+            "expires_at_unix_ms":u64::MAX / 2
+        })).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let claim = state.store.claims_for_subject_kind_at(
+        grant, "custom.client.pairing-completed", None, true, 1,
+    ).unwrap().claims.remove(0);
+    let phone = paired_client_session(&state, &claim, "fabric-loopback", false).unwrap();
+    let socket = root.path().join("phone.sock");
+    let served = socket.clone();
+    let app = fractal_daemon::api::router(state.clone());
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
+    for _ in 0..200 {
+        if socket.exists() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    for (verb, outcome, exit) in [
+        (vec!["inspect"], "completed", 0),
+        (vec!["navigate", "Conversation", "agent/worker", "--session-id", "session/example"], "refused", 3),
+        (vec!["mark-read", "attention/example"], "failed", 1),
+        (vec!["navigate", "Agents"], "expired", 4),
+        (vec!["inspect"], "not-foreground", 5),
+    ] {
+        let stream = (outcome == "expired").then(|| client_presence::open_stream(
+            &state.node, &phone, &axum::http::HeaderMap::new(), 0,
+        ));
+        let mut changes = client_commands::subscribe();
+        let socket = socket.clone();
+        let ttl = if matches!(outcome, "expired" | "not-foreground") { "20" } else { "30000" };
+        let run = tokio::spawn(async move {
+            let mut args = vec!["devices", "--as", "person/alex", "command", "device/phone-cli", "--ttl", ttl];
+            args.extend(verb);
+            run_cli(&socket, &args).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), changes.recv()).await.unwrap().unwrap();
+        if !matches!(outcome, "expired" | "not-foreground") {
+            let rows = client_commands::collection_items(&state, &phone).unwrap();
+            let row = rows.iter().find(|row| matches!(row["state"].as_str(), Some("pending" | "delivered"))).unwrap();
+            client_commands::report(&state, &phone, serde_json::from_value(serde_json::json!({
+                "command_id": row["id"], "outcome":outcome, "result":{"route":"Agents"}
+            })).unwrap()).unwrap();
+        }
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), run).await.unwrap().unwrap();
+        assert_eq!(output.status.code(), Some(exit), "{}", String::from_utf8_lossy(&output.stderr));
+        let row: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(row["value"]["state"], outcome);
+        assert_eq!(row["value"]["issued_by"], "person/alex");
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+        drop(stream);
+    }
+    let output = run_cli_human(&socket, &["devices", "--as", "person/alex", "command", "device/phone-cli", "--ttl", "1", "inspect"]).await;
+    assert_eq!(output.status.code(), Some(5));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("not-foreground"));
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    let denied = run_cli(&socket, &["devices", "--as", "person/stranger", "command", "device/phone-cli", "inspect"]).await;
+    assert!(!denied.status.success());
+    server.abort();
+}
