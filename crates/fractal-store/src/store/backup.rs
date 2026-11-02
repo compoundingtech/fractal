@@ -458,7 +458,8 @@ impl Store {
         {
             anyhow::ensure!(
                 projections_match,
-                "restored graph digest differs from backup"
+                "restored graph digest differs from backup in {:?}",
+                actual.tables.iter().filter(|(name, digest)| header.tables.get(*name) != Some(*digest)).map(|(name, _)| name).collect::<Vec<_>>()
             );
         }
         Ok(RestoreReport {
@@ -1336,6 +1337,61 @@ mod tests {
         assert!(restored_ledgers.contains_key("retired_claim_ids"));
         assert_ne!(restored_ledgers, ledgers(&source));
         assert!(!restored_ledgers.contains_key("retired_claim_withdrawals"));
+    }
+
+    #[test]
+    fn a_backup_with_message_marks_is_version_four_and_restores_them_without_redelivery() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open_memory("alder").unwrap();
+        let send = |subject: &str| ClaimInput {
+            subject: subject.into(),
+            kind: "message.sent".into(),
+            actor: Some("agent/node.alder".into()),
+            fields: serde_json::from_value(json!({"from": "agent/node.alder", "to": "agent/node.birch", "content": "hello", "status": "sent"})).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        for subject in ["message/backup-a", "message/backup-b", "message/backup-c"] {
+            source.append_claim(&send(subject)).unwrap();
+        }
+        for (subject, kinds) in [
+            ("message/backup-a", &["message.delivered"][..]),
+            ("message/backup-b", &["message.delivered", "message.read", "message.closed"][..]),
+        ] {
+            for kind in kinds {
+                super::super::message_marks::record(&source, subject, kind, "agent/node.birch").unwrap();
+            }
+        }
+        let path = root.path().join("marks.jsonl");
+        let header = archive(&source, &path);
+        assert_eq!(header.version, super::super::backup_format::VERSION_WITH_MARKS);
+        assert_eq!(header.ledgers["local_message_marks"].count, 4);
+        let target = root.path().join("restored.db");
+        let report = backup::restore(&path, &target, root.path()).unwrap();
+        assert!(report.projections_match);
+        let restored = Store::open(&target, &report.writer).unwrap();
+        assert_eq!(ledgers(&restored)["local_message_marks"], ledgers(&source)["local_message_marks"]);
+        // Every state the marks recorded survives the restore: nothing reads undelivered again.
+        for (subject, status) in [("message/backup-a", "delivered"), ("message/backup-b", "closed"), ("message/backup-c", "sent")] {
+            assert_eq!(restored.message(subject).unwrap().unwrap().status, status, "{subject}");
+        }
+        let unread: i64 = restored
+            .readers
+            .get()
+            .query_row("SELECT COUNT(*) FROM local_idle_messages WHERE pending=1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(unread, 1, "a restored mark folds into the local projections");
+        drop(restored);
+        // Marks in an archive that declares an older version are refused before restore, as an
+        // older build refuses this version outright.
+        rewrite(&path, |records| {
+            if let Record::Header(header) = &mut records[0] {
+                header.version = super::super::backup_format::VERSION_WITH_LEDGERS;
+            }
+        });
+        let error = backup::verify_file(&path).unwrap_err().to_string();
+        assert!(error.contains("message marks in an archive that does not declare them"), "{error}");
     }
 
     #[test]

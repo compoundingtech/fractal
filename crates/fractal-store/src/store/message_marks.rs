@@ -4,9 +4,11 @@
 //! `stream_lifecycle` instead; both answer with the same receipt (`messages_shard::lifecycle_receipt`).
 //!
 //! A reader decides one state per message: its lifecycle claims or its marks, whichever is
-//! further along. The projections the lifecycle claims maintain (`message_index`, idle mail,
-//! unread mail, coordination holds, client selectors) are maintained by marks the same way, by
-//! the triggers below, in the mark's own transaction.
+//! further along. The member-local projections the lifecycle claims maintain (idle mail, unread
+//! mail, coordination holds, client selectors) are maintained by marks the same way, by the
+//! triggers below, in the mark's own transaction. `message_index` is shared, in the projection
+//! digest every member computes alike, so a mark never changes it: a reader of its `closed`
+//! also asks for a closed mark.
 
 use super::*;
 
@@ -44,8 +46,6 @@ pub fn create_triggers(connection: &Connection) -> Result<()> {
 -- claim carries a status field, so it always marks the client selector dirty; a mark does too.
 CREATE TRIGGER IF NOT EXISTS local_message_marks_insert AFTER INSERT ON local_message_marks
 BEGIN
-    UPDATE message_index SET closed=1
-    WHERE subject=NEW.message AND NEW.kind='message.closed' AND closed=0;
     UPDATE local_idle_messages SET pending=0,
         delivered=CASE WHEN NEW.kind IN ('message.delivered','message.read') THEN 1 ELSE delivered END
     WHERE subject=NEW.message AND (pending<>0 OR
@@ -61,10 +61,6 @@ END;
 -- removed claim is.
 CREATE TRIGGER IF NOT EXISTS local_message_marks_delete AFTER DELETE ON local_message_marks
 BEGIN
-    UPDATE message_index SET closed=(
-        EXISTS(SELECT 1 FROM claims WHERE subject=OLD.message AND kind='message.closed')
-        OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=OLD.message AND kind='message.closed'))
-    WHERE subject=OLD.message;
     UPDATE local_idle_messages SET
         pending=NOT (EXISTS(SELECT 1 FROM claims WHERE subject=OLD.message
                          AND kind IN ('message.delivered','message.read','message.closed'))

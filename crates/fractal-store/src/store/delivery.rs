@@ -433,7 +433,8 @@ impl Store {
         // open messages, or all of them, without reading their lifecycle claims.
         let mut statement = connection.prepare_cached(
             "SELECT subject, created_index FROM message_index
-             WHERE (?1 OR closed=0) AND ?2 IS NULL
+             WHERE (?1 OR (closed=0 AND NOT EXISTS(SELECT 1 FROM local_message_marks
+                     WHERE message=message_index.subject AND kind='message.closed'))) AND ?2 IS NULL
                AND created_index>?3 AND created_index<=?4
              ORDER BY created_index, subject LIMIT ?5",
         )?;

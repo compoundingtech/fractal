@@ -1059,15 +1059,12 @@ BEGIN
         created_index = MIN(created_index, excluded.created_index),
         closed = MAX(closed, excluded.closed);
 END;
--- v2 also counts a closed mark (message_marks.rs): a store opened before marks has v1.
-DROP TRIGGER IF EXISTS message_index_claim_delete;
-CREATE TRIGGER IF NOT EXISTS message_index_claim_delete_v2 AFTER DELETE ON claims
+CREATE TRIGGER IF NOT EXISTS message_index_claim_delete AFTER DELETE ON claims
 WHEN OLD.subject LIKE 'message/%'
 BEGIN
     DELETE FROM message_index WHERE subject = OLD.subject;
     INSERT INTO message_index(subject, created_index, closed)
     SELECT subject, MIN(store_index), MAX(kind = 'message.closed')
-        OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=OLD.subject AND kind='message.closed')
     FROM claims WHERE subject = OLD.subject GROUP BY subject;
 END;
 
@@ -2544,7 +2541,6 @@ fn backfill_message_index(connection: &Connection) -> Result<()> {
         /* sqlite-large-value: allow-for-now lv-heae1c0e34440 owner=fractal_store::store TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
          INSERT OR REPLACE INTO message_index(subject, created_index, closed)
          SELECT subject, MIN(store_index), MAX(kind = 'message.closed')
-             OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=claims.subject AND kind='message.closed')
          FROM claims WHERE subject LIKE 'message/%'
          GROUP BY subject;
          INSERT INTO meta(key, value) VALUES ('message_index', '1');

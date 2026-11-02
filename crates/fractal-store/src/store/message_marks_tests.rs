@@ -90,7 +90,9 @@ fn projections(store: &Store) -> BTreeMap<&'static str, Vec<String>> {
             .unwrap()
     };
     BTreeMap::from([
-        ("message_index", rows("SELECT subject, created_index, closed FROM message_index ORDER BY subject")),
+        // The shared index never takes a mark; what a reader of it sees is its closed or a closed mark.
+        ("message_index", rows("SELECT subject, created_index, closed OR EXISTS(SELECT 1 FROM local_message_marks
+            WHERE message=message_index.subject AND kind='message.closed') FROM message_index ORDER BY subject")),
         ("local_idle_messages", rows("SELECT * FROM local_idle_messages ORDER BY subject")),
         ("unread_mail", rows("SELECT subject, sent_time FROM unread_mail ORDER BY subject")),
         ("unread_mail_pending", rows("SELECT subject FROM unread_mail_pending ORDER BY subject")),
@@ -114,6 +116,8 @@ fn projections(store: &Store) -> BTreeMap<&'static str, Vec<String>> {
 fn marks_make_the_projections_views_and_pages_lifecycle_claims_make() {
     let (_root, claims, marks) = twins();
     assert_eq!(projections(&claims), projections(&marks), "the twins start equal");
+    let digest = |store: &Store| crate::store::projection_digest::tables(&store.readers.get()).unwrap();
+    let unmarked = digest(&marks);
     for (subject, to, ends) in messages() {
         for kind in ends {
             claims.append_claim(&lifecycle(&subject, kind, &to)).unwrap();
@@ -122,6 +126,8 @@ fn marks_make_the_projections_views_and_pages_lifecycle_claims_make() {
     }
     assert!(claims.readers.get().query_row("SELECT COUNT(*) FROM local_message_marks", [], |row| row.get::<_, i64>(0)).unwrap() == 0);
     assert!(marks.claims_for("message/marks-0-3", Some("message.closed")).unwrap().is_empty(), "marks wrote a claim");
+    // Marks are outside the projection digest every member computes alike.
+    assert_eq!(digest(&marks), unmarked, "a mark changed the shared projection digest");
     let (by_claims, by_marks) = (projections(&claims), projections(&marks));
     for (table, rows) in &by_claims {
         assert_eq!(rows, &by_marks[table], "{table}");
