@@ -61,7 +61,7 @@ const inFlow = (element: HTMLElement, root: HTMLElement) => {
 export const Narrow: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const column = canvas.getByTestId('phone-column')
-  const composer = canvas.getByRole('form', { name: 'Message composer, Row projection' })
+  const composer = canvas.getByRole('group', { name: 'Message composer, Row projection' })
   await expect(canvasElement.querySelector('[data-testid="kit-composer"]')).toHaveAttribute('data-narrow', 'true')
   await expect(inFlow(composer, column)).toBe(true)
   const field = canvas.getByRole('textbox', { name: 'Message' })
