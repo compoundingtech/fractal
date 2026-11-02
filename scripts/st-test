@@ -1751,11 +1751,41 @@ def base_input_values(verifier, directory, tree, check, base, repository, keyed=
     return found
 
 
+OWN_LEVELS_AT = {}  # base commit: (the gate's PROTECTED, its OWN_LEVELS), as the base has them
+
+
+def own_levels(directory, tree, base, lane_base):
+    """(levels, edits): when `tree` edits a file that decides skipping, the signer levels whose note alone covers our pull request in CI,
+    and those edits; else (None, []). The gate's own PROTECTED and OWN_LEVELS, from the base, so the two cannot drift: our pull request
+    that edits a protected file skips only on our hosts' note (ci-evidence-gate's own_pull_request), so a note another level signed for
+    the same inputs (CI's, on any other pull request) is not 'already signed' here either. Compared from `lane_base`, the branch point
+    (the base itself for a merge tree), as the gate compares the branch's own edits (choose_tree) or the merge with the base."""
+    if not lane_base:
+        return None, []
+    base_commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', cwd=directory, check=False))
+    if base_commit not in OWN_LEVELS_AT:
+        gate = load_base_gate(base_commit) if base_commit else None
+        OWN_LEVELS_AT[base_commit] = (tuple(getattr(gate, 'PROTECTED', ())), tuple(getattr(gate, 'OWN_LEVELS', ())))
+    protected, levels = OWN_LEVELS_AT[base_commit]
+    if not protected or not levels:
+        return None, []
+    diff = git('diff', '--no-renames', '--name-only', '-z', lane_base, tree, cwd=directory, check=False)
+    if diff.returncode != 0:
+        return levels, ['<comparison failed>']
+    edits = [path for path in diff.stdout.decode(errors='replace').split('\0') if path in protected]
+    return (levels, edits) if edits else (None, [])
+
+
 def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
-    """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None."""
+    """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None.
+    When the tree edits a protected file, only a note at the gate's own levels covers it (own_levels), and the verifier is asked for the
+    newest pass at those levels, as the gate asks it. Per crate, as in the gate, the verifier is not asked to prefer a level."""
     command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--keys-from', base]
+    levels, edits = own_levels(directory, tree, base, lane_base)
     if crate_key:
         command += ['--crate-key', crate_key]
+    elif levels and b'--prefer-levels' in Path(verifier).read_bytes():
+        command += ['--prefer-levels', ','.join(levels)]
     if repository:
         command += ['--policy-from', base, '--repository', repository]
         if lane_base and b'--lane-base' in Path(verifier).read_bytes():
@@ -1768,6 +1798,9 @@ def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=N
     except ValueError:
         return False, 'verifier gave no answer: ' + (done.stderr.strip().splitlines() or ['-'])[-1][:120], None
     if done.returncode == 0:
+        if levels and result.get('trust_level') not in levels:
+            return False, (f'only a {result.get("trust_level")} note covers it ({str(result.get("record", ""))[:12]}), and this tree edits '
+                           f'{", ".join(edits[:3])}: CI takes only a {"/".join(levels)} note for it'), None
         return True, f'covered by {result.get("kind")} {result.get("record", "")[:12]}', result.get('record')
     return False, result.get('reason') or 'not covered', None
 
