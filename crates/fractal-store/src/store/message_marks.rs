@@ -20,6 +20,17 @@ pub const MARKS: [&str; 3] = ["message.delivered", "message.read", "message.clos
 /// it does not know, and a backup of marks restores on it. It ranks below every mark.
 pub const STAGED: &str = "message.staged";
 
+/// Whether a hosted seat's staging is recorded as a mark. Not yet: a build that reads marks but not
+/// `local_message_staged` (v0.3.25) would read a staged mark as unoffered mail and offer it again
+/// after a rollback, so a staging stays a claim until a release that reads these exists. Readers
+/// read both already.
+pub const RECORDS_STAGED: bool = false;
+
+/// Whether the claim append path records `kind` as a mark for a hosted seat.
+pub fn recorded_as_mark(kind: &str) -> bool {
+    MARKS.contains(&kind) || RECORDS_STAGED && kind == STAGED
+}
+
 /// How many of the newest mark events stay (`local_message_mark_events`).
 pub const EVENTS_KEPT: i64 = 16_384;
 

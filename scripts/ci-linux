@@ -56,7 +56,7 @@ fleet_compat() {
     fleet::previous_release_beside_a_member_recording_message_marks \
     fleet::previous_release_reads_beside_message_marks_across_upgrade_backup_and_rollback \
     fleet::previous_release_hosts_a_seat_a_new_member_reads_from_its_claims \
-    fleet::previous_release_member_keeps_a_new_hosts_seat_writing_lifecycle_claims \
+    fleet::previous_release_member_reads_a_new_hosts_seat_lifecycle \
     fleet::previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid_delivery 2>&1 | tee "$logs/compat-marks-result.log" || return
   grep -q "test result: ok. 5 passed" "$logs/compat-marks-result.log" || return
   # linux-fleet-compat's note is signed from this stage (scripts/st-test): its cargo messages, and `passed` last, only when the whole

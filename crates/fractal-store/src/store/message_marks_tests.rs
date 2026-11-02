@@ -173,6 +173,58 @@ fn a_repeated_mark_answers_its_first_receipt_and_an_unknown_message_is_refused()
     assert_eq!(message_marks::record(&marks, "message/marks-0-1", "message.staged", RECIPIENT).unwrap().0.id, staged.id);
 }
 
+/// Once marks are on, the claim append path records a seat placed on this member delivering,
+/// reading and closing graph mail as marks, and its staging still as a claim (RECORDS_STAGED: a
+/// release that reads marks but no stagings must not offer the mail again after a rollback). A
+/// seat placed on another host, a person, and anything before the switch write claims. Each mark
+/// moves the mark-event position mailbox wakes and changes read.
+#[test]
+fn a_hosted_seat_marks_delivery_read_and_close_once_marks_are_on_and_stages_as_a_claim() {
+    let store = Store::open_memory("node").unwrap();
+    let intent = crate::graph::parse_intent(
+        "version 2\nagent \"birch\" { host \"node\"; command \"true\"; }\nagent \"cedar\" { host \"other\"; command \"true\"; }",
+        "node",
+    ).unwrap();
+    crate::store::card_fold_tests_shared_missions::declare(&store, &intent, "hosted-and-elsewhere");
+    let elsewhere = "agent/node.cedar";
+    let kinds = |subject: &str| {
+        let mut kinds = store.claims_for(subject, None).unwrap().into_iter().map(|claim| claim.kind).collect::<Vec<_>>();
+        kinds.sort();
+        kinds
+    };
+    let lifecycle_of = |subject: &str, to: &str| {
+        store.append_claim(&sent(subject, to, &[])).unwrap();
+        ["message.staged", "message.delivered", "message.read", "message.closed"]
+            .map(|kind| store.append_claim(&lifecycle(subject, kind, to)).unwrap().id)
+    };
+    let every = ["message.closed", "message.delivered", "message.read", "message.sent", "message.staged"];
+    lifecycle_of("message/before", RECIPIENT);
+    assert_eq!(kinds("message/before"), every, "marks were on before the switch");
+
+    assert_eq!(store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+    let position = message_marks::event_position(&store.readers.get()).unwrap();
+    let [staged, delivered, read, closed] = lifecycle_of("message/hosted", RECIPIENT);
+    assert!(!staged.starts_with("offset-receipt/"), "a staging was recorded as a mark: {staged}");
+    for receipt in [&delivered, &read, &closed] {
+        assert!(receipt.starts_with("offset-receipt/"), "{receipt}");
+    }
+    assert_eq!(kinds("message/hosted"), ["message.sent", "message.staged"]);
+    assert!(message_marks::staged(&store.readers.get(), "message/hosted").unwrap().is_none());
+    assert_eq!(message_marks::status(&store.readers.get(), "message/hosted").unwrap(), Some("closed"));
+    assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 3);
+    // A repeat answers its mark's receipt and records nothing again.
+    assert_eq!(store.append_claim(&lifecycle("message/hosted", "message.closed", RECIPIENT)).unwrap().id, closed);
+    assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 3);
+
+    for (subject, to) in [("message/elsewhere", elsewhere), ("message/person", "person/avery")] {
+        for receipt in lifecycle_of(subject, to) {
+            assert!(!receipt.starts_with("offset-receipt/"), "{subject}: {receipt}");
+        }
+        assert_eq!(kinds(subject), every, "{subject}");
+    }
+    assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 3);
+}
+
 #[test]
 fn a_mark_refolds_no_published_list() {
     let (_root, _claims, marks) = twins();
