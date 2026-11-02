@@ -63,6 +63,12 @@ pub fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
     changes().subscribe()
 }
 
+/// Foreground command expiry considers any currently open stream for this session.
+pub fn has_open_stream(member: &str, actor: &str) -> bool {
+    presence().lock().is_ok_and(|presence| presence.streams.values()
+        .any(|stream| stream.key.member == member && stream.key.actor == actor))
+}
+
 pub fn changed(member: &str) {
     let _ = changes().send(member.to_owned());
 }

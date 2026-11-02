@@ -147,6 +147,7 @@ mod directive_notes;
 mod request_latency;
 mod client_observations;
 pub mod client_push;
+pub mod client_commands;
 pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
