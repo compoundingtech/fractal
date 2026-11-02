@@ -53,7 +53,7 @@ export class PhoneCommands {
         case 'phone.inspect': report.result = bindings.inspect(); break;
         case 'phone.navigate': report.result = await bindings.navigate(command.args); break;
         case 'phone.message.read':
-          if (!await bindings.markRead(command.args.attention_id, check, command.id)) report = { ...report, outcome: 'refused', error_code: 'attention-unavailable' };
+          if (!await bindings.markRead(command.args.message_id, check, command.id)) report = { ...report, outcome: 'refused', error_code: 'message-unavailable' };
           break;
       }
     } catch (error) {

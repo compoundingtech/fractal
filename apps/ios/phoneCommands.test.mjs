@@ -37,15 +37,15 @@ function setup() {
     if (url.endsWith('/actions') && body.device_command && now === command('expired').expires_at) return Response.json({ api_version: API_VERSION, error_version: 'st3.client.error.v0', code: 'forbidden', message: 'Expired command', retryable: false, details: { device_command: body.device_command, reason: 'expired' } }, { status: 403 });
     return Response.json({ api_version: API_VERSION, snapshot: { ...snapshot, created_at: staleSnapshot ? snapshot.created_at : now }, value: url.endsWith('/capabilities') ? { capabilities: [], session_actor: 'client/phone' } : {} });
   } });
-  const attention = [{ id: 'attention/message', revision: '7', source_id: 'message/source', actions: ['message.read'] }];
+  const attention = [{ id: 'attention/unrelated', revision: '7', source_id: 'message/unrelated', actions: ['message.read'] }];
   const bindings = {
     online: () => online,
     inspect: () => inspectPhone({ connection: { status: online ? 'online' : 'offline', route: 'HTTPS' }, foreground: gate.active, session_actor: 'client/phone', windows: { attention: 1, missions: 0, agents: 0 } }),
     navigate: navigatePhone,
-    markRead: (id, check, deviceCommand) => readPhoneMessage(id, attention, async item => { await markMessageRead(client, item, acted, () => 'action/read', check, deviceCommand); return true; }),
+    markRead: async (id, check, deviceCommand) => { await readPhoneMessage(client, id, () => 'action/read', check, deviceCommand); return true; },
   };
   const executor = new PhoneCommands(client, () => bindings, gate);
-  return { gate, calls, acted, executor, expire: () => { now = command('expired').expires_at; }, staleSnapshot: () => { staleSnapshot = true; }, cycleAt: at => { cycle = at; }, deny: () => { deny = true; }, offline: () => { online = false; }, loseReport: () => { loseReport = true; }, results: () => calls.filter(call => call.url.endsWith('/device-results')).map(call => call.body) };
+  return { client, attention, gate, calls, acted, executor, expire: () => { now = command('expired').expires_at; }, staleSnapshot: () => { staleSnapshot = true; }, cycleAt: at => { cycle = at; }, deny: () => { deny = true; }, offline: () => { online = false; }, loseReport: () => { loseReport = true; }, results: () => calls.filter(call => call.url.endsWith('/device-results')).map(call => call.body) };
 }
 
 test('probe gates subscription, frames dispatch once, reconnect reprobes, background closes the socket', async () => {
@@ -78,25 +78,33 @@ test('typed navigation dispatches to the real stack router and reports the reach
   assert.equal(h.results()[1].outcome, 'failed');
 });
 
-test('markRead uses real fresh fences, acted bookkeeping, generated actions and reports scope refusal', async () => {
+test('message read uses the real generated action without a held attention card and reports scope refusal', async () => {
   const h = setup();
-  await h.executor.receive([command('read', 'phone.message.read', { attention_id: 'attention/message' })], snapshot);
-  assert.equal(h.acted.has('attention/message'), true);
-  assert.deepEqual(h.calls.find(call => call.url.endsWith('/actions')).body.fence, { snapshot_id: snapshot.id, subject_revisions: { 'attention/message': '7' } });
+  await h.executor.receive([command('read', 'phone.message.read', { message_id: 'message/source' })], snapshot);
+  assert.equal(h.acted.size, 0);
+  assert.deepEqual(h.calls.find(call => call.url.endsWith('/actions')).body.fence, { snapshot_id: snapshot.id, subject_revisions: {} });
   assert.equal(h.calls.find(call => call.url.endsWith('/actions')).body.parameters.target_id, 'message/source');
   assert.equal(h.calls.find(call => call.url.endsWith('/actions')).body.device_command, 'read');
   assert.equal(h.results()[0].outcome, 'completed');
-  h.deny(); await h.executor.receive([command('denied', 'phone.message.read', { attention_id: 'attention/message' })], snapshot);
+  h.deny(); await h.executor.receive([command('denied', 'phone.message.read', { message_id: 'message/source' })], snapshot);
   assert.equal(h.results()[1].outcome, 'refused'); assert.equal(h.results()[1].error_code, 'scope-denied');
-  await h.executor.receive([command('missing', 'phone.message.read', { attention_id: 'attention/missing' })], snapshot);
-  assert.equal(h.results()[2].error_code, 'attention-unavailable');
+});
+
+test('ordinary Home read retains attention fencing and acted bookkeeping without command admission', async () => {
+  const h = setup();
+  await markMessageRead(h.client, h.attention[0], h.acted, () => 'action/home-read');
+  const action = h.calls.find(call => call.url.endsWith('/actions')).body;
+  assert.equal(h.acted.has('attention/unrelated'), true);
+  assert.deepEqual(action.fence, { snapshot_id: snapshot.id, subject_revisions: { 'attention/unrelated': '7' } });
+  assert.equal(action.parameters.target_id, 'message/unrelated');
+  assert.equal(Object.hasOwn(action, 'device_command'), false);
 });
 
 test('daemon time drops expired and terminal rows despite phone clock skew; offline refuses without a handler', async () => {
   const h = setup();
   await h.executor.receive([{ ...command('expired'), expires_at: snapshot.created_at }, { ...command('terminal'), state: 'completed' }], snapshot);
   assert.equal(h.calls.length, 0);
-  h.offline(); await h.executor.receive([command('offline', 'phone.message.read', { attention_id: 'attention/message' })], snapshot);
+  h.offline(); await h.executor.receive([command('offline', 'phone.message.read', { message_id: 'message/source' })], snapshot);
   assert.equal(h.results()[0].outcome, 'not-foreground'); assert.equal(h.acted.size, 0);
   h.gate.update('background'); await h.executor.receive([command('background')], snapshot); assert.equal(h.results().length, 1);
   h.executor.close(); await h.executor.receive([command('closed')], snapshot); assert.equal(h.results().length, 1);
@@ -104,14 +112,14 @@ test('daemon time drops expired and terminal rows despite phone clock skew; offl
 
 test('a lost result retries the result POST, never the write', async () => {
   const h = setup(); h.loseReport();
-  await h.executor.receive([command('read', 'phone.message.read', { attention_id: 'attention/message' })], snapshot);
+  await h.executor.receive([command('read', 'phone.message.read', { message_id: 'message/source' })], snapshot);
   assert.equal(h.results().length, 2); assert.equal(h.calls.filter(call => call.url.endsWith('/actions')).length, 1);
   assert.deepEqual(h.results()[0], h.results()[1]);
 });
 
 test('a delayed fresh snapshot cannot authorize a write: the daemon refuses expired commands', async () => {
   const h = setup(); h.expire(); h.staleSnapshot();
-  await h.executor.receive([command('late-read', 'phone.message.read', { attention_id: 'attention/message' })], snapshot);
+  await h.executor.receive([command('late-read', 'phone.message.read', { message_id: 'message/source' })], snapshot);
   assert.equal(h.calls.find(call => call.url.endsWith('/actions')).body.device_command, 'late-read');
   assert.deepEqual(h.results().map(row => row.outcome), ['expired']);
 });
@@ -125,7 +133,7 @@ test('delayed navigation frames are stopped by fresh daemon snapshots', async ()
 
 test('background/foreground cycles permanently cancel awaited writes, queued commands and result retries', async () => {
   const h = setup(); h.cycleAt('fence');
-  await h.executor.receive([command('old-read', 'phone.message.read', { attention_id: 'attention/message' }), command('old-nav', 'phone.navigate', { screen: 'Conversation', params: { target: 'agent/worker' } })], snapshot);
+  await h.executor.receive([command('old-read', 'phone.message.read', { message_id: 'message/source' }), command('old-nav', 'phone.navigate', { screen: 'Conversation', params: { target: 'agent/worker' } })], snapshot);
   assert.equal(h.gate.active, true); assert.equal(h.calls.some(call => call.url.endsWith('/actions')), false);
   assert.equal(state.routes.at(-1).name, 'NowRoot'); assert.equal(h.results().length, 0);
   const r = setup(); r.cycleAt('report'); r.loseReport();

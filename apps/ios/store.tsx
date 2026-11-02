@@ -478,7 +478,7 @@ function useAppStore(proof?: FabricProfile) {
       session_actor: caps?.session_actor, windows: { attention: data.attention.length, missions: data.missions.length, agents: data.agents.length },
     }),
     navigate: navigatePhone,
-    markRead: (id, check, deviceCommand) => readPhoneMessage(id, data.attention, item => markRead(item, true, check, deviceCommand)),
+    markRead: (id, check, deviceCommand) => client ? runAction(() => readPhoneMessage(client, id, actionId, check, deviceCommand), [], () => false, true) : Promise.resolve(false),
   };
   const commandBindings = useRef(bindings); commandBindings.current = bindings;
   // One collections socket per paired gateway and credential keeps attention, missions, and agents

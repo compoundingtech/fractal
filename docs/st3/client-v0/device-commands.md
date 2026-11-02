@@ -137,9 +137,13 @@ wins. At or after the deadline, the daemon derives `not-foreground` when there i
 collections stream for the addressed `session_actor`, or `expired` otherwise. Phone clocks and
 client timestamps do not extend that deadline. A late report cannot replace the terminal decision;
 repeated reports cannot overwrite an already accepted outcome. Before navigation the app checks
-a fresh daemon capabilities snapshot; message writes instead carry the command id to the daemon's
-atomic admission/write boundary, so even a delayed capabilities response cannot authorize a late write.
-Backgrounding permanently cancels accepted commands and result retries across foreground sessions.
+a fresh daemon capabilities snapshot. Commanded message reads pass `args.message_id` directly
+to the existing `message.read` action as `target_id`, with a fresh snapshot fence, empty subject
+revisions, and `device_command` set to the command id. They do not look up a Home attention card;
+ordinary Home reads retain their attention revision fence and acted bookkeeping.
+The daemon's atomic admission/write boundary means even a delayed capabilities response cannot
+authorize a late write. Backgrounding permanently cancels accepted commands and result retries
+across foreground sessions.
 
 Commands live only in memory on the phone pairing's issuing member. They are never claims,
 replicated records, persistent receipts, event replay, or restart recovery. Terminal outcomes remain
