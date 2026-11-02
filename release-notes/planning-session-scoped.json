@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Planning-session projection rebuilds only the affected session rather than every planning session",
+  "replay": {"status": "none", "detail": "Canonical session, candidate, preview and quarantine state is preserved without replaying unrelated sessions. A warm in-memory fixture with 30,000 planning claims measured a median 3,712.430 ms for the whole-planning rebuild versus 0.779 ms for one three-claim session; scoped SQL work stayed at 21 statements across 100, 1,000 and 10,000 sessions. This is fixture evidence, not a production latency claim."},
+  "schema": {"status": "none", "detail": "No storage or schema changes; the affected subject is read through its existing claim index."},
+  "rules": {"status": "none", "detail": "Planning claims retain canonical ordering and per-claim quarantine behavior. Unknown-kind and malformed-operation guards are unchanged."},
+  "compatibility": {"status": "none", "detail": "No wire, claim or client format changes."},
+  "downtime": {"status": "none", "detail": "No restart-time work."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Rollback restores whole-planning-history rebuilds without changing stored claims."}
+}
