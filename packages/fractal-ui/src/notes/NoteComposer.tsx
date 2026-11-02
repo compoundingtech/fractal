@@ -9,7 +9,18 @@ import { AgentMarker } from './AgentMarker'
 
 /** Server limit for note text (CR06), in UTF-8 bytes. */
 export const noteTextLimitBytes = 1024
+/** The visible byte counter appears from this share of the limit; below it the limit is assistive text only. */
+const counterThreshold = 0.8
 const encoder = new TextEncoder()
+
+/** A note on a session subject ends with that incarnation: it never transfers to the agent's next session. */
+export const sessionNoteReach = "Notes reach this session's agent until the session ends."
+export const isSessionTarget = (target: string): boolean => target.startsWith('session/')
+const reachCopy = (target: string | undefined): string =>
+  target === undefined ? 'Notes reach the agent as context.'
+    : target.startsWith('mission/') ? 'Notes reach agents currently working on this mission.'
+      : isSessionTarget(target) ? sessionNoteReach
+        : 'Notes reach the agent as context.'
 
 export interface NoteComposerProps {
   /** Adds the note. A rejection keeps the text and shows an error with the rejection's message; resolution clears the draft. */
@@ -20,29 +31,45 @@ export interface NoteComposerProps {
   /** Controlled draft text; the host retains it per target. */
   readonly draft?: string | undefined
   readonly onDraftChange?: ((text: string) => void) | undefined
+  /** The target ref. It selects the reach copy (agent, mission or session) and is never displayed raw. */
   readonly target?: string | undefined
+  /** The target's display name (the agent title, or "this session"), used in visible text instead of the ref. */
+  readonly targetLabel?: string | undefined
+  /** Shows "Target: <label>". Hosts whose pane already names the target turn it off. */
+  readonly showTarget?: boolean | undefined
+  /** `card`: the standalone composer surface. `bare`: no border, fill or padding, inside a surface that supplies them. */
+  readonly surface?: 'card' | 'bare' | undefined
+  /** Reports a create in flight, so a host overlay can refuse dismissal until it settles. */
+  readonly onPendingChange?: ((pending: boolean) => void) | undefined
   /** Closing never discards the draft; the host retains controlled drafts per target. */
   readonly onClose?: (() => void) | undefined
 }
 
 /** Plain-text note input. Every note reaches the target's agents, so there is no audience choice. */
-export function NoteComposer({ onSubmit, disabledReason, autoFocus = false, draft, onDraftChange, target, onClose }: NoteComposerProps) {
+export function NoteComposer({ onSubmit, disabledReason, autoFocus = false, draft, onDraftChange, target, targetLabel, showTarget = true, surface: chromeSurface = 'card', onPendingChange, onClose }: NoteComposerProps) {
   const [localDraft, setLocalDraft] = React.useState('')
   const text = draft ?? localDraft
   const updateDraft = (next: string) => { setLocalDraft(next); onDraftChange?.(next) }
-  const [pending, setPending] = React.useState(false)
+  const [pending, setPendingState] = React.useState(false)
+  const setPending = (next: boolean) => { setPendingState(next); onPendingChange?.(next) }
   const [failure, setFailure] = React.useState<{ readonly detail: string | undefined } | undefined>(undefined)
   const [feedback, setFeedback] = React.useState('')
+  // The text a Discard removed, until the next edit or submit; Undo puts it back.
+  const [discarded, setDiscarded] = React.useState<string | undefined>(undefined)
   const inputRef = React.useRef<HTMLTextAreaElement>(null)
   const ids = { help: React.useId(), limit: React.useId(), reason: React.useId(), reach: React.useId(), target: React.useId() }
   const bytes = encoder.encode(text).length
   const overLimit = bytes > noteTextLimitBytes
+  const showCounter = bytes >= noteTextLimitBytes * counterThreshold
   const canSubmit = disabledReason === undefined && !pending && text.trim().length > 0 && !overLimit
+  const bare = chromeSurface === 'bare'
+  const targetLine = showTarget && targetLabel !== undefined
 
   const submit = async () => {
     if (!canSubmit) return
     setPending(true)
     setFailure(undefined)
+    setDiscarded(undefined)
     setFeedback('Adding note…')
     try {
       await onSubmit(text)
@@ -56,6 +83,20 @@ export function NoteComposer({ onSubmit, disabledReason, autoFocus = false, draf
     setPending(false)
     updateDraft('')
     setFeedback('Note added.')
+  }
+  const discard = () => {
+    setDiscarded(text)
+    updateDraft('')
+    setFailure(undefined)
+    setFeedback('Draft discarded.')
+    inputRef.current?.focus()
+  }
+  const undoDiscard = () => {
+    if (discarded === undefined) return
+    updateDraft(discarded)
+    setDiscarded(undefined)
+    setFeedback('Draft restored.')
+    inputRef.current?.focus()
   }
 
   const onKeyDown = (event: React.KeyboardEvent) => {
@@ -71,17 +112,18 @@ export function NoteComposer({ onSubmit, disabledReason, autoFocus = false, draf
     }
   }
 
-  const describedBy = [ids.help, ids.reach, ids.limit, target === undefined ? undefined : ids.target, disabledReason === undefined ? undefined : ids.reason].filter(Boolean).join(' ')
+  const describedBy = [ids.help, ids.reach, ids.limit, targetLine ? ids.target : undefined, disabledReason === undefined ? undefined : ids.reason].filter(Boolean).join(' ')
   return <form
     data-testid="note-composer"
+    data-surface={chromeSurface}
     aria-busy={pending || undefined}
     onKeyDown={onKeyDown}
     onSubmit={event => { event.preventDefault(); void submit() }}
-    {...stylex.props(styles.root)}
+    {...stylex.props(styles.root, bare ? styles.bare : styles.card, !bare && overLimit && styles.cardInvalid)}
   >
     <TextField
       value={text}
-      onChange={updateDraft}
+      onChange={next => { setDiscarded(undefined); updateDraft(next) }}
       isReadOnly={pending || disabledReason !== undefined}
       isInvalid={overLimit}
       autoFocus={autoFocus}
@@ -89,45 +131,52 @@ export function NoteComposer({ onSubmit, disabledReason, autoFocus = false, draf
       {...stylex.props(styles.field)}
     >
       <VisuallyHidden><Label>Note</Label></VisuallyHidden>
-      <TextArea ref={inputRef} rows={1} placeholder="Add a note…" data-testid="note-composer-input" onKeyDown={onFieldKeyDown} {...stylex.props(styles.input)} />
+      <TextArea ref={inputRef} rows={1} placeholder="Add a note…" data-testid="note-composer-input" onKeyDown={onFieldKeyDown} {...stylex.props(styles.input, bare && styles.inputBare, bare && overLimit && styles.inputInvalid)} />
     </TextField>
     <div {...stylex.props(styles.footer)}>
       <span id={ids.help} data-testid="note-composer-help" {...stylex.props(styles.help)}>
         <kbd {...stylex.props(styles.kbd)}>Enter</kbd> adds · <kbd {...stylex.props(styles.kbd)}>Shift+Enter</kbd> new line
       </span>
       <span {...stylex.props(styles.grow)} />
+      {/* Discard is quiet and only offered for a draft; Undo in the status line restores it. */}
+      {text.length > 0 && !pending && <Button type="button" variant="ghost" size="md" data-testid="note-composer-discard" onPress={discard}>Discard draft</Button>}
       <Button type="submit" variant="outline" size="md" isDisabled={!canSubmit} data-testid="note-composer-submit">
         {pending ? 'Adding…' : failure !== undefined ? 'Retry' : 'Add note'}
       </Button>
-      <Button type="button" variant="outline" size="md" data-testid="note-composer-discard" isDisabled={pending || text.length === 0} onPress={() => {
-        updateDraft(''); setFailure(undefined); setFeedback('Draft discarded.')
-      }}>Discard draft</Button>
     </div>
-    <p role="status" aria-live="polite" aria-atomic="true" data-testid="note-composer-status" {...stylex.props(styles.meta)}>{feedback}</p>
+    {/* The live region stays mounted; it takes no layout space while it has nothing to say. */}
+    <div {...stylex.props(styles.statusLine, feedback === '' && discarded === undefined && styles.visuallyHidden)}>
+      <p role="status" aria-live="polite" aria-atomic="true" data-testid="note-composer-status" {...stylex.props(styles.meta)}>{feedback}</p>
+      {discarded !== undefined && <Button type="button" variant="ghost" size="sm" data-testid="note-composer-undo" onPress={undoDiscard}>Undo</Button>}
+    </div>
     {/* Every note is agent context: state who it reaches, never that it was delivered. */}
     <p id={ids.reach} data-testid="note-composer-reach" {...stylex.props(styles.meta, styles.reach)}>
       <AgentMarker />
-      {target?.startsWith('mission/') ? 'Notes reach agents currently working on this mission.' : 'Notes reach the agent as context.'} People with access can read them too.
+      {reachCopy(target)} People with access can read them too.
     </p>
-    {target !== undefined && <p id={ids.target} {...stylex.props(styles.meta)}>Target: {target}.</p>}
-    <p id={ids.limit} aria-live="polite" data-testid="note-composer-limit" {...stylex.props(styles.meta, overLimit && styles.error)}>
-      {overLimit ? `Too long by ${bytes - noteTextLimitBytes} bytes; notes hold ${noteTextLimitBytes} bytes.` : `${bytes} of ${noteTextLimitBytes} bytes`}
+    {targetLine && <p id={ids.target} data-testid="note-composer-target" {...stylex.props(styles.meta)}>Target: {targetLabel}.</p>}
+    <p id={ids.limit} aria-live="polite" data-testid="note-composer-limit" {...stylex.props(styles.meta, overLimit && styles.error, !showCounter && styles.visuallyHidden)}>
+      {overLimit ? `Too long by ${bytes - noteTextLimitBytes} bytes; notes hold ${noteTextLimitBytes} bytes.`
+        : showCounter ? `${bytes} of ${noteTextLimitBytes} bytes` : `Notes hold up to ${noteTextLimitBytes} bytes.`}
     </p>
     {disabledReason !== undefined && <p id={ids.reason} data-testid="note-composer-disabled-reason" {...stylex.props(styles.meta)}>{disabledReason}</p>}
     {failure !== undefined && <p role="alert" data-testid="note-composer-error" {...stylex.props(styles.meta, styles.error)}>
-      Couldn't add the note. Your text and target are kept. Check your connection and Retry.
-      {failure.detail !== undefined && <> <span data-testid="note-composer-error-detail">{failure.detail}</span></>}
+      {/* A stated cause replaces the generic connection advice rather than repeating it. */}
+      Couldn't add the note. Your text is kept.
+      {failure.detail === undefined ? ' Check your connection and Retry.' : <> <span data-testid="note-composer-error-detail">{failure.detail}</span></>}
     </p>}
   </form>
 }
 
 const styles = stylex.create({
-  root: {
-    display: 'flex', flexDirection: 'column', gap: density.composerGap, minWidth: 0, boxSizing: 'border-box', padding: density.composerPad,
-    backgroundColor: surface.glassFill, color: text.fg, fontFamily: t.fontSans,
-    borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.glassBorder, borderRadius: chrome.composerRadius,
-    ':focus-within': { borderColor: border.focusBorder },
+  root: { display: 'flex', flexDirection: 'column', minWidth: 0, boxSizing: 'border-box', color: text.fg, fontFamily: t.fontSans },
+  card: {
+    gap: density.composerGap, padding: density.composerPad, backgroundColor: surface.glassFill,
+    borderWidth: g.hairline, borderStyle: 'solid', borderColor: { default: border.glassBorder, ':focus-within': border.focusBorder }, borderRadius: chrome.composerRadius,
   },
+  // Over the limit the field edge carries the invalid state; the text itself stays readable.
+  cardInvalid: { borderColor: { default: status.dangerFg, ':focus-within': status.dangerFg } },
+  bare: { gap: s.sm },
   field: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   input: {
     display: 'block', width: '100%', boxSizing: 'border-box', minHeight: g.compactEditorMin, maxHeight: g.editorMax, fieldSizing: 'content',
@@ -135,13 +184,20 @@ const styles = stylex.create({
     fontFamily: t.fontSans, fontSize: density.inputSize, lineHeight: t.uiLeading, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
     '::placeholder': { color: text.fgMuted },
     ':focus-visible': { outlineStyle: 'none' },
-    ':is([data-invalid])': { color: status.dangerFg },
   },
+  // Inside a popover or disclosure the field draws its own edge, nested inside the host's radius.
+  inputBare: {
+    borderWidth: g.hairline, borderStyle: 'solid', borderColor: { default: border.borderStrong, ':focus': border.focusBorder },
+    borderRadius: r.sm, backgroundColor: surface.controlFill,
+  },
+  inputInvalid: { borderColor: { default: status.dangerFg, ':focus': status.dangerFg } },
   footer: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.sm, minWidth: 0 },
+  statusLine: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.sm, minWidth: 0 },
   reach: { display: 'flex', alignItems: 'center', gap: s.xs },
   help: { minWidth: 0, fontSize: t.denseSize, lineHeight: t.metaLeading, color: text.fgMuted },
   kbd: { fontFamily: t.fontMono, fontSize: t.denseSize, paddingInline: s.xs2, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.keyboard },
   grow: { flexGrow: 1 },
   meta: { margin: s.zero, fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fgMuted, overflowWrap: 'anywhere' },
   error: { color: status.dangerFg },
+  visuallyHidden: { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap' },
 })
