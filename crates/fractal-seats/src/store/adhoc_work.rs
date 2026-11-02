@@ -221,4 +221,90 @@ mod tests {
         assert_eq!(final_work.assigned_to, final_work.claimant);
         assert_eq!(source.mission_runs().unwrap().len(), 1);
     }
+
+    /// A handoff note that is a stream item is acknowledged as a graph note is, but its read is
+    /// this member's record in the messages shard: no lifecycle claim reaches the graph, and the
+    /// acknowledgment cites the receipt that names the read.
+    #[test]
+    fn a_stream_handoff_note_is_read_in_the_shard_when_acknowledged() {
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+        let intent = crate::graph::parse_internal_intent("version 2\nagent \"example/alder\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/birch\" { workspace \"/tmp\"; command \"true\" }", "alder").unwrap();
+        store.apply_internal(&intent, "fixture-seats").unwrap();
+        let start = WorkStartRequest {
+            actor: "agent/example/alder".into(),
+            title: "Inspect a stream fixture".into(),
+            idempotency_key: "start-stream-fixture".into(),
+        };
+        let work = store.start_work(&start).unwrap();
+        store.work_action(&work.subject, "claim", &request(&start.actor, "claim-alder")).unwrap();
+        let to = "agent/example/birch";
+        store
+            .handoff_work(&work.subject, &WorkHandoffRequest {
+                actor: start.actor.clone(),
+                incarnation: Some(format!("{}-one", start.actor)),
+                to: to.into(),
+                note: "Inspect the stream fixture next".into(),
+                evidence: Vec::new(),
+                idempotency_key: "handoff-stream".into(),
+            })
+            .unwrap();
+        // A handoff writes its note to the graph today; point the release at a stream item.
+        let note = "message/00000000000000c1";
+        // Other mail to the recipient, which is not the handoff's note.
+        let other = "message/00000000000000c2";
+        for subject in [note, other] {
+            shard
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: "message.sent".into(),
+                    actor: Some(start.actor.clone()),
+                    fields: serde_json::from_value(json!({
+                        "from": start.actor, "to": to, "content": "Inspect the stream fixture next", "status": "sent"
+                    }))
+                    .unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+        store
+            .connection
+            .write()
+            .execute(
+                "UPDATE claims SET body=json_set(body,'$.fields.handoff_message',?2) WHERE subject=?1 AND kind='work.released'",
+                params![work.subject, note],
+            )
+            .unwrap();
+        // Acknowledging with other mail is refused and leaves that mail unread.
+        let wrong = WorkAcknowledgeRequest { actor: to.into(), message: other.into() };
+        assert_eq!(store.acknowledge_work(&work.subject, &wrong).unwrap_err().code, "stale-handoff");
+        assert!(crate::store::messages_shard::mailbox_reads::lifecycle_step(&store, other, "message.read").unwrap().is_none());
+        let acknowledge = WorkAcknowledgeRequest { actor: to.into(), message: note.into() };
+        store.acknowledge_work(&work.subject, &acknowledge).unwrap();
+        assert_eq!(store.message(note).unwrap().unwrap().status, "read");
+        assert_eq!(
+            crate::store::messages_shard::mailbox_reads::lifecycle_step(&store, note, "message.read")
+                .unwrap()
+                .map(|(actor, _)| actor),
+            Some(to.to_owned())
+        );
+        assert!(store.claims_for(note, None).unwrap().is_empty(), "the read reached the graph");
+        let receipt = crate::store::messages_shard::lifecycle_receipt(
+            "alder", note, "message.read", Some(to), &BTreeMap::from([("status".to_owned(), json!("read"))]),
+        );
+        let progress = store
+            .claims_for(&work.subject, Some("work.progress"))
+            .unwrap()
+            .into_iter()
+            .find(|claim| claim.body["fields"]["handoff_acknowledged"] == note)
+            .unwrap();
+        assert_eq!(progress.body["evidence"], json!([receipt.id]));
+        // A repeat finds the acknowledgment; the acknowledged recipient then claims the work.
+        store.acknowledge_work(&work.subject, &acknowledge).unwrap();
+        store.work_action(&work.subject, "claim", &request(to, "claim-birch")).unwrap();
+        assert!(store.claims_for(note, None).unwrap().is_empty());
+    }
 }

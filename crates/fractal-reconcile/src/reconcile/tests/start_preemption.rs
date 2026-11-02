@@ -1963,10 +1963,16 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
     fn new() -> Self {
         use std::os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _};
         fractal_runtime::initialize_isolation(&BTreeMap::new());
-        // The tree's pty from this test's PATH (the dev shell's), not the login shell's: on NixOS a
-        // login shell rebuilds PATH, so under an isolated HOME (scripts/ci-local) it has no pty.
-        let real_pty =
-            fractal_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
+        // Resolve helpers from this test's PATH (the dev shell's), not the login shell's: on NixOS
+        // a login shell rebuilds PATH, so an isolated HOME (scripts/ci-local) loses these tools.
+        let environment = std::env::vars().collect();
+        let real_pty = fractal_runtime::resolve_executable("pty", &environment).unwrap();
+        let python3 = fractal_runtime::resolve_executable("python3", &environment)
+            .expect("native late PTY publication test requires python3 on the test process PATH");
+        let python3 = python3
+            .to_str()
+            .expect("python3 executable path must be UTF-8")
+            .replace('\'', "'\\''");
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -1981,15 +1987,15 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
             .open(&gate_path)
             .unwrap();
         let ready = tokio::net::UnixListener::bind(pty.with_extension("event")).unwrap();
-        std::fs::write(&pty, r#"#!/bin/sh
+        std::fs::write(&pty, format!(r#"#!/bin/sh
 (
   IFS= read -r permitted < "$0.gate" || exit 1
   "$(cat "$0.real")" "$@"
   outcome=$?
-  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1]); s.sendall(bytes([int(sys.argv[2])]))' "$0.event" "$outcome"
+  '{python3}' -c 'import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1]); s.sendall(bytes([int(sys.argv[2])]))' "$0.event" "$outcome"
 ) </dev/null >"$0.output" 2>&1 &
 exit 1
-"#).unwrap();
+"#)).unwrap();
         std::fs::set_permissions(&pty, std::fs::Permissions::from_mode(0o700)).unwrap();
         let state = root.path().join("state");
         std::fs::create_dir(&state).unwrap();

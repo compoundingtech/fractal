@@ -375,6 +375,7 @@ jobs:
           python3 scripts/install-macos-test
           python3 scripts/release_notes_test.py
           python3 scripts/release-fractal-edge-test
+          python3 scripts/release-publish-embed-test
           python3 scripts/release-fractal-manifest-test
           python3 scripts/compat-baseline-release-test
 
@@ -447,20 +448,15 @@ jobs:
       GH_REPO: ${{ github.repository }}
       SOURCE_SHA: ${{ github.sha }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: release-web-embed
           path: dist
       - name: Publish once under a source-addressed release, never the rolling edge tag
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum --check ./*.sha256
-          # No --clobber or edit of an existing release: even reruns cannot replace a pin.
-          gh release create "embed-$SOURCE_SHA" --target "$SOURCE_SHA" --draft --prerelease --latest=false \
-            --title "Fractal web embed $SOURCE_SHA" --notes "Offline embed, four posters and provenance for source $SOURCE_SHA. Verify the archive against its SHA-256 sidecar." \
-            ./*.tar.gz ./*.sha256
-          gh release edit "embed-$SOURCE_SHA" --draft=false
+        run: scripts/release-publish-embed --source "$SOURCE_SHA" --dist dist
       - name: Report job cache coverage
         if: always()
         shell: bash

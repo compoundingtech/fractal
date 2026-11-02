@@ -3259,3 +3259,71 @@ fn forged_body_text_never_classifies_an_ordinary_send() {
         .unwrap();
     assert_eq!(body.matches(EXTERNAL_ASSISTANT_WARNING).count(), 1);
 }
+
+#[test]
+fn durable_tag_readers_choose_one_family_before_decoding() {
+    let mut message = msg("1-abcdef.md", "person/avery", Some("tags"));
+    for family in ["st3", "fractal"] {
+        message.tags = vec![
+            format!("{family}-message:message/one"),
+            format!("{family}-to:agent/one"),
+            format!("{family}-sha256:{}", "a".repeat(64)),
+        ];
+        assert_eq!(fractal_message_reference(&message), Some("message/one"));
+        assert_eq!(fractal_tag(&message, FRACTAL_TO_TAG), Some("agent/one"));
+        assert_eq!(
+            fractal_tag(&message, FRACTAL_SHA256_TAG),
+            Some("a".repeat(64).as_str())
+        );
+        message.tags.push("fractal-message:message/new".into());
+        message.tags.push("st3-message:invalid".into());
+        assert_eq!(
+            fractal_message_reference(&message),
+            if family == "st3" {
+                Some("message/one")
+            } else {
+                None
+            }
+        );
+    }
+    message.tags = vec![
+        "other-message:message/one".into(),
+        "other-to:agent/one".into(),
+    ];
+    assert_eq!(fractal_message_reference(&message), None);
+    assert_eq!(fractal_tag(&message, FRACTAL_TO_TAG), None);
+    message.tags = vec![
+        "fractal-to:agent/new".into(),
+        "st3-to:".into(),
+        "fractal-sha256:valid".into(),
+        "st3-sha256:invalid".into(),
+    ];
+    assert_eq!(fractal_tag(&message, FRACTAL_TO_TAG), Some(""));
+    assert_eq!(fractal_tag(&message, FRACTAL_SHA256_TAG), Some("invalid"));
+}
+
+#[test]
+fn attachment_reader_accepts_renamed_tags_without_combining_families() {
+    let notice = AttachmentNotice {
+        path: Some("/tmp/photo".into()),
+        media_type: "image/png".into(),
+        name: None,
+        size: 1,
+        unavailable: None,
+    };
+    let old = notice.to_tag();
+    let new = old.replacen("st3-attachment:", "fractal-attachment:", 1);
+    assert_eq!(AttachmentNotice::from_tag(&old), Some(notice.clone()));
+    assert_eq!(AttachmentNotice::from_tag(&new), Some(notice));
+    assert_eq!(AttachmentNotice::from_tag("other-attachment:invalid"), None);
+    let mut message = msg("1-abcdef.md", "person/avery", None);
+    message.tags = vec![
+        "fractal-message:message/one".into(),
+        new.replace("photo", "other"),
+        new,
+    ];
+    let text = render_without_catalog(&message);
+    assert!(text.contains("/tmp/photo") && text.contains("/tmp/other"));
+    message.tags.push("st3-attachment:invalid".into());
+    assert!(!render_without_catalog(&message).contains("/tmp/photo"));
+}

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "An unchanged harness.observed report (a re-stamp) stays in the node's local observation log once every other member hears its seats from its seat_freshness pushes; until then one replicates every five minutes instead of every minute",
+  "replay": {
+    "status": "changed",
+    "detail": "Fewer harness.observed claims are written. A report whose fields other than observed_at_ms, observed_since_ms and status_transition match the latest replicated one stays local while this node's meta key fleet_hears_seats is 1, unless readers would otherwise fold the seat to something newer than it (work activity after a resting report). The seat freshness pusher sets the key at each round, which a commit wakes: 1 when every other current member, or configured peer, advertises seat_freshness in its own daemon.started and this node's last push reached it, and this node is not a dial-out member; a member no push can reach (no direct route, such as a dial-out member, or a worker without the route) keeps it 0; a node outside a fleet sets it to 1. While it is 0 or unset, an unchanged report replicates when the replicated one is at least five minutes old, for working and legacy posters alike. Transitions and field changes replicate as before. Old claims are untouched."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change: fleet_hears_seats is a node-local meta key, which never replicates."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Contract C3 of the claims-store breakup (approved). Remote seat freshness comes from the seat's host: its own cards read its local log, and other members read its seat_freshness pushes. An older member, which reads report ages, keeps every host it can see on the five-minute fallback, inside its 661-second down rule; its cards read a resting remote seat as stale after 90 seconds, as they already do for resting native seats. The host's wake acknowledgement reads its local log, so a working re-stamp after a wake still counts. No claim kind, field, wire or CLI shape changes. Two follow-ups to the seat freshness push: a pushed time later than the receiver's clock plus 60 seconds is taken as that, so a host whose clock runs ahead cannot keep a seat looking fresh; and a bound harness calling the daemon's /v1/internal/seat-freshness is refused, as every internal route now refuses seat callers (#4433); a test pins it for this route."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart beyond the normal upgrade; no migration or backfill."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No data recovery is needed. Reverting replicates an unchanged report once a minute again while the seat works; the local log holds every report meanwhile."
+  }
+}

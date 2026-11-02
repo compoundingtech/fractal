@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A claim sealed outside a verdict pass, such as by a checkpoint capture on a single node with no fleet, is judged by the paced signature job within moments instead of waiting for the next daemon restart",
+  "replay": {"status": "none", "detail": "No claim, projection or replay changes. Verdicts are computed as before; they are computed sooner."},
+  "schema": {"status": "none", "detail": "No database change."},
+  "rules": {"status": "none", "detail": "No claim rule changes."},
+  "compatibility": {"status": "none", "detail": "No API or wire change. Before this, on a single node with no fleet, `fractal doctor` could show a claim as unsigned (for example `2 verified, 1 unsigned, 11 not yet sealed`) for as long as the daemon ran, because a checkpoint, a replication status read or a pairing or rename proof sealed claims without judging them and nothing woke the signature job. Fleet members saw the same, briefly, until their next exchange."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No operator action is required. A daemon restart judged such claims before and still does."},
+  "recovery": {"status": "none", "detail": "Rolling back is safe: such claims wait for the next verdict pass again."}
+}

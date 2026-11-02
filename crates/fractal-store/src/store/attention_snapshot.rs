@@ -245,31 +245,31 @@ impl Store {
                 // request in the seat's conversation.
                 detail: if answerable && harness["driver"] == "codex" {
                     format!(
-                        "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.",
+                        "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered.",
                         codex_approval_words(prompt)
                     )
                 } else if harness["driver"] == "codex" && prompt == "waitingOnApproval" {
-                    "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.".into()
+                    "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable && subagent_prompt(&harness) {
                     format!(
-                        "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (Ctrl+] in Fractal TUI), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
+                        "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
                         prompt.trim_start_matches(fractal_drivers::claude_prompts::SUBAGENT_PREFIX)
                     )
                 } else if answerable && plan_approval(&harness) {
-                    "Claude asks you to approve its plan; the plan is the pending ExitPlanMode call in the seat's conversation. Approve it here to let Claude proceed, deny it to have Claude keep planning, or answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.".into()
+                    "Claude asks you to approve its plan; the plan is the pending ExitPlanMode call in the seat's conversation. Approve it here to let Claude proceed, deny it to have Claude keep planning, or answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable && ask == "question" {
-                    "Claude asks you a question; its questions and their options are the pending AskUserQuestion call in the seat's conversation. Answer it here, or in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.".into()
+                    "Claude asks you a question; its questions and their options are the pending AskUserQuestion call in the seat's conversation. Answer it here, or in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable {
                     format!(
-                        "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                        "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                     )
                 } else if answerable_kind(&harness) {
                     format!(
-                        "Claude asks to use {prompt}. It has waited longer than st can answer it from here: answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                        "Claude asks to use {prompt}. It has waited longer than st can answer it from here: answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                     )
                 } else {
                     format!(
-                        "{prompt}\n\nAnswer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                        "{prompt}\n\nAnswer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                     )
                 },
                 request: None,
@@ -313,25 +313,14 @@ impl Store {
         Ok(items)
     }
 
-    /// The fleet's fault agent: the first live agent, by subject, whose declaration carries
-    /// `handles-faults`. It takes each fault that no step assignee or agent requester owns.
+    /// The fleet's fault agent: the one live agent whose declaration carries `handles-faults`.
+    /// It takes each fault that no step assignee or agent requester owns. Publication refuses a
+    /// second holder; when two members each accepted one, neither is the fault agent until one
+    /// is stopped or drops the flag.
     pub fn fleet_fault_agent(&self) -> Result<Option<String>> {
         let connection = self.readers.get();
-        let mut query = connection.prepare(
-            "SELECT subject FROM desired WHERE kind='agent' AND EXISTS (
-                SELECT 1 FROM json_each(desired.body, '$.children')
-                WHERE json_extract(value, '$.name')='handles-faults'
-            ) ORDER BY subject",
-        )?;
-        let agents = query
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for agent in agents {
-            if person_work::declaration_live(&connection, &agent)? {
-                return Ok(Some(agent));
-            }
-        }
-        Ok(None)
+        let mut holders = fault_agent_holders(&connection)?;
+        Ok(if holders.len() == 1 { holders.pop() } else { None })
     }
 
     /// The agent that owns `fault`: the agent it names, as a broken gate names the agent that
@@ -711,7 +700,7 @@ impl Store {
         detail.push(' ');
         detail.push_str(&remedy);
         detail.push_str(
-            " This item closes when the loop runs again or its run is revised or cancelled.",
+            " This item closes when the loop runs again or its run is revised or cancelled; once the run has ended, a person or the fleet's fault agent dismisses it with `st missions dismiss-fault RUN --reason \"...\"`.",
         );
         let (title, reviewer, severity) = match &loop_spec.exhaustion_attention {
             Some(attention) => (
@@ -1621,6 +1610,76 @@ pub fn person_attention_item(
     }))
 }
 
+/// The live agents whose declaration carries `handles-faults`, by subject.
+pub fn fault_agent_holders(connection: &Connection) -> Result<Vec<String>> {
+    let mut query = connection.prepare(
+        "SELECT subject FROM desired WHERE kind='agent' AND EXISTS (
+            SELECT 1 FROM json_each(desired.body, '$.children')
+            WHERE json_extract(value, '$.name')='handles-faults'
+        ) ORDER BY subject",
+    )?;
+    let agents = query
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut holders = Vec::new();
+    for agent in agents {
+        if person_work::declaration_live(connection, &agent)? {
+            holders.push(agent);
+        }
+    }
+    Ok(holders)
+}
+
+/// Whether `desired` declares a running agent that handles faults.
+fn declares_fault_agent(desired: &crate::model::DesiredSubject) -> bool {
+    let children = desired.desired["children"].as_array().map(Vec::as_slice).unwrap_or_default();
+    desired.kind == "agent"
+        && !matches!(children, [only] if only["name"] == "stop")
+        && children.iter().any(|child| child["name"] == "handles-faults")
+}
+
+/// Refuses a publication that would leave two live agents declaring `handles-faults`. The fault
+/// agent owns every fault no one else owns and may dismiss faults on ended runs, so the flag
+/// moves only by stopping its holder or dropping it there, in this publication or an earlier one.
+/// A publication that declares no holder is never refused, whatever the graph holds.
+pub fn refuse_second_fault_agent(
+    connection: &Connection,
+    intent: &crate::model::NormalizedIntent,
+) -> Result<(), St3Error> {
+    let declared = intent
+        .subjects
+        .values()
+        .filter(|desired| declares_fault_agent(desired))
+        .map(|desired| desired.subject.clone())
+        .collect::<Vec<_>>();
+    match declared.as_slice() {
+        [] => return Ok(()),
+        [_] => {}
+        _ => {
+            return Err(St3Error::new(
+                "fault-agent-taken",
+                format!("{} each declare `handles-faults`; only one live agent may", declared.join(", ")),
+            ));
+        }
+    }
+    let holders = fault_agent_holders(connection)
+        .map_err(internal)?
+        .into_iter()
+        .filter(|holder| !intent.subjects.contains_key(holder))
+        .collect::<Vec<_>>();
+    if holders.is_empty() {
+        return Ok(());
+    }
+    Err(St3Error::new(
+        "fault-agent-taken",
+        format!(
+            "{} already handles faults; stop it or drop its `handles-faults` before {} declares it",
+            holders.join(", "),
+            declared[0]
+        ),
+    ))
+}
+
 /// `subject` when it names an agent: only an agent has a conversation an item can belong to.
 pub fn agent(subject: &str) -> Option<String> {
     subject.starts_with("agent/").then(|| subject.to_owned())
@@ -1769,7 +1828,7 @@ impl Store {
             Some(reason) => (
                 Vec::new(),
                 format!(
-                    "{headline}: st did not finish pressing your answer into the dialog ({reason}), so it may now sit on a different option. Answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone."
+                    "{headline}: st did not finish pressing your answer into the dialog ({reason}), so it may now sit on a different option. Answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone."
                 ),
             ),
             None => (
@@ -1778,7 +1837,7 @@ impl Store {
                     .map(|(answer, _)| (*answer).to_owned())
                     .collect(),
                 format!(
-                    "{ask} here, or in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                    "{ask} here, or in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                 ),
             ),
         };
@@ -2134,7 +2193,7 @@ fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, Str
 /// The newest observation of `seat` that began a turn or ended its session: its store position,
 /// state and when that state began. Observations of the seat at rest, which repeat as it is
 /// refreshed, lie after it and are passed over.
-fn last_turn_or_end(connection: &Connection, seat: &str) -> Result<Option<(i64, String, Option<u64>)>> {
+pub(super) fn last_turn_or_end(connection: &Connection, seat: &str) -> Result<Option<(i64, String, Option<u64>)>> {
     connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-hded7b14f0a67 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "{} LIMIT 1",

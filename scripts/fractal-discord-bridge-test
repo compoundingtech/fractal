@@ -463,6 +463,36 @@ class BridgeScenarios(unittest.TestCase):
 
 
 class TransportScenarios(unittest.TestCase):
+    def test_environment_identity_prefers_fractal_with_legacy_fallback_and_empty_masking(self):
+        cases = [
+            ({}, None),
+            ({'FRACTAL_AGENT': AGENT}, AGENT),
+            ({'ST_AGENT': AGENT}, AGENT),
+            ({'FRACTAL_AGENT': AGENT, 'ST_AGENT': AGENT}, AGENT),
+            ({'FRACTAL_AGENT': '', 'ST_AGENT': 'private-legacy'}, ''),
+        ]
+        for environment, expected in cases:
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True):
+                self.assertEqual(bridge.St(Path('/unused')).actor, expected)
+
+    def test_environment_identity_conflicts_refuse_without_disclosing_values(self):
+        for legacy in ('private-legacy', ''):
+            with self.subTest(legacy=legacy), patch.dict(os.environ, {
+                    'FRACTAL_AGENT': 'private-preferred', 'ST_AGENT': legacy}, clear=True):
+                with self.assertRaises(bridge.Stop) as error:
+                    bridge.St(Path('/unused'))
+                self.assertEqual(str(error.exception),
+                                 'Conflicting identity environment variables: FRACTAL_AGENT and ST_AGENT')
+                self.assertNotIn('private-preferred', str(error.exception))
+                self.assertNotIn('private-legacy', str(error.exception))
+
+    def test_explicit_actor_still_overrides_environment_even_when_aliases_conflict(self):
+        with patch.dict(os.environ, {'FRACTAL_AGENT': 'private-preferred',
+                                     'ST_AGENT': 'private-legacy'}, clear=True):
+            self.assertEqual(bridge.St(Path('/unused'), actor=AGENT).actor, AGENT)
+        with patch.dict(os.environ, {'FRACTAL_AGENT': AGENT}, clear=True):
+            self.assertEqual(bridge.St(Path('/unused'), actor='').actor, AGENT)
+
     def test_resolve_accepts_preferred_and_legacy_message_options(self):
         for option in ('--fractal-message', '--st-message'):
             with self.subTest(option=option), tempfile.TemporaryDirectory() as folder:
@@ -522,6 +552,7 @@ class TransportScenarios(unittest.TestCase):
         client = bridge.Discord(TOKEN)
         error = urllib.error.HTTPError('https://discord.com/' + TOKEN, 429, TOKEN,
                                        {'Retry-After': '45'}, io.BytesIO(b'{"retry_after":60}'))
+        self.addCleanup(error.close)
         with patch.object(client.opener, 'open', side_effect=error) as opened, patch.object(bridge.time, 'monotonic', return_value=100):
             with self.assertRaises(bridge.Later) as caught:
                 client.request('POST', '/channels/303/messages', {})
@@ -535,6 +566,8 @@ class TransportScenarios(unittest.TestCase):
         client = bridge.Discord(TOKEN)
         for failure, kind in [(TimeoutError(TOKEN), bridge.Uncertain),
                               (urllib.error.HTTPError('https://discord.com/' + TOKEN, 401, TOKEN, {}, io.BytesIO(TOKEN.encode())), bridge.Stop)]:
+            if isinstance(failure, urllib.error.HTTPError):
+                self.addCleanup(failure.close)
             with patch.object(client.opener, 'open', side_effect=failure) as opened:
                 with self.assertRaises(kind) as caught:
                     client.request('POST', '/channels/303/messages', {})

@@ -11,12 +11,14 @@ import {
   plainFlakeSetupSteps,
 } from '../../repos/effect-utils/genie/external.ts'
 import {
+  type FleetBuildContext,
+  workspaceRunners,
+  buildFractalWebJobs,
   afterPickRunner,
   buildEnv,
   commonSetupSteps,
   fullHistoryCheckoutSteps,
   megarepoApplyStep,
-  fractalWebJobs,
   fractalWebNoteEnv,
   testArchiveProducer,
   genieSetupSteps,
@@ -33,15 +35,10 @@ import {
   evidenceStepSteps,
   nixEvidenceSteps,
   linuxStageRunner,
-  linuxStageRunsOn,
-  pickRunnerJob,
   pickRunnerJobId,
-  primaryTestRunsOn,
-  testBuildRunsOn,
   pnpmStoreEnv,
   readOnlyBinaryCaches,
   supportingStageRunsOn,
-  secondaryStageRunsOn,
   extraMergeTestRunsOn,
   workspacePreparationSteps,
   testArchiveConsumerSetup,
@@ -86,7 +83,7 @@ const rustTestJunitUpload = (name: string) => [
 
 // One Linux gate stage: its own runner (ci1 or Namespace, see pickRunnerJob) and caches, the common
 // setup, then scripts/ci-linux.
-const linuxStageJob = ({
+const baseLinuxStageJob = ({
   name,
   stage,
   setup,
@@ -377,15 +374,19 @@ const presignNoticeJob = {
   ],
 }
 
-export default githubWorkflow(scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(auditCaches({
+export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'event' }) => {
+  const queue = context.topology === 'merge-group'
+  const mergeOnly = queue ? 'true' : "github.event_name == 'merge_group'"
+  const { pickRunnerJob, supportingStageRunsOn, primaryTestRunsOn, secondaryStageRunsOn, testBuildRunsOn } = workspaceRunners(context)
+  const linuxStageJob = (args: Parameters<typeof baseLinuxStageJob>[0]) =>
+    baseLinuxStageJob({ ...args, runsOn: args.runsOn ?? supportingStageRunsOn })
+  return scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(auditCaches({
   name: 'Workspace CI',
   on: {
     pull_request: { types: readyPullRequestTypes },
     // GitHub's merge queue runs the required checks on each queued entry; without this trigger the
     // queue never receives them and merges freeze.
     merge_group: {},
-    // The queue's successful checks belong to the exact commit that lands on main. Main upkeep
-    // preserves perf-cost and fills missing default-branch caches without repeating this gate.
     workflow_dispatch: {},
   },
   permissions: { contents: 'read', actions: 'read' },
@@ -442,15 +443,15 @@ export default githubWorkflow(scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(au
         {
           name: 'Require a fresh fragment on the effective PR or queue merge',
           env: {
-            IMPACT_BASE_SHA: '${{ github.event.merge_group.base_sha }}',
+            IMPACT_BASE_SHA: queue ? '${{ github.event.before }}' : '${{ github.event.merge_group.base_sha }}',
             IMPACT_PR_NUMBER: '${{ github.event.pull_request.number }}',
-            IMPACT_QUEUE_REF: '${{ github.event.merge_group.head_ref }}',
+            ...(queue ? {} : { IMPACT_QUEUE_REF: '${{ github.event.merge_group.head_ref }}' }),
           },
           run: `if [ -n "$IMPACT_PR_NUMBER" ]; then
   impact_pr_base=$(git rev-parse "$GITHUB_SHA^1")
   python3 scripts/check-release-impact --base "$impact_pr_base" --source "$GITHUB_SHA" --pr-number "$IMPACT_PR_NUMBER"
 elif [ -n "$IMPACT_BASE_SHA" ]; then
-  python3 scripts/check-release-impact --base "$IMPACT_BASE_SHA" --source "$GITHUB_SHA" --queue-ref "$IMPACT_QUEUE_REF"
+  python3 scripts/check-release-impact --base "$IMPACT_BASE_SHA" --source "$GITHUB_SHA"${queue ? '' : ' --queue-ref "$IMPACT_QUEUE_REF"'}
 else
   echo "Manual dispatch has no PR/queue delta; classification safety tests passed."
 fi`,
@@ -528,7 +529,7 @@ fi`,
       env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
       steps: skipIfCovered('typescript-client', [
         // A pull request needs its history: the signing guard lists the commits between the base and the head.
-        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, {}, "github.event_name == 'pull_request'"),
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, {}, "github.event_name == 'pull_request'").slice(0, queue ? 1 : undefined),
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         megarepoApplyStep,
         // Node 24, as in the workspace shell; schema tests use its native TypeScript loading.
@@ -561,7 +562,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     ...Object.fromEntries(['genie-freshness', 'typescript-client'].map((check) => [`nix-evidence-${check}`, {
       name: `nix-evidence-${check}`,
       needs: [pickRunnerJobId],
-      if: "${{ !cancelled() && github.event_name == 'merge_group' }}",
+      if: `\${{ !cancelled() && ${mergeOnly} }}`,
       'runs-on': supportingStageRunsOn,
       'timeout-minutes': 20,
       'continue-on-error': true,
@@ -592,7 +593,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         runsOn: primaryTestRunsOn,
         // CI_RUN_ID keeps the messaging-fault evidence under target/messaging-faults and a failed
         // boot canary's evidence under target/boot-canaries.
-        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: "${{ github.event_name == 'merge_group' && 'hash:1/4' || 'hash:1/2' }}", CI_TEST_THREADS: '8' },
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: queue ? 'hash:1/4' : "${{ github.event_name == 'merge_group' && 'hash:1/4' || 'hash:1/2' }}", CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
         before: [nixDevelopStep({ name: 'Prove shards form the complete selected inventory', command: ['python3', 'scripts/ci-test-partitions'] })],
       }),
@@ -607,7 +608,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         stage: 'tests',
         runsOn: secondaryStageRunsOn,
         setup: testArchiveConsumerSetup,
-        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: "${{ github.event_name == 'merge_group' && 'hash:2/4' || 'hash:2/2' }}", CI_TEST_THREADS: '8' },
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: queue ? 'hash:2/4' : "${{ github.event_name == 'merge_group' && 'hash:2/4' || 'hash:2/2' }}", CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
       }),
       needs: [pickRunnerJobId, 'linux-test-build'],
@@ -623,7 +624,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
       }),
       needs: [pickRunnerJobId, 'linux-test-build'],
-      if: "${{ !cancelled() && github.event_name == 'merge_group' }}",
+      if: `\${{ !cancelled() && ${mergeOnly} }}`,
     },
     'linux-tests-shard-4': {
       ...linuxStageJob({
@@ -635,7 +636,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
       }),
       needs: [pickRunnerJobId, 'linux-test-build'],
-      if: "${{ !cancelled() && github.event_name == 'merge_group' }}",
+      if: `\${{ !cancelled() && ${mergeOnly} }}`,
     },
     'linux-clippy': linuxStageJob({
       name: 'linux-clippy',
@@ -676,7 +677,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         {
           name: 'Require every Linux stage to pass',
           // The stages only: pick-runner is skipped whenever ci1 is off.
-          env: { GATE_SKIP: '${{ needs.evidence-gate-linux-gate.outputs.skip }}', RESULTS: aggregateStages.map((id) => `\${{ needs.${id}.result }}`).join(' '), EVENT: '${{ github.event_name }}', MERGE_RESULTS: '${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}' },
+          env: { GATE_SKIP: '${{ needs.evidence-gate-linux-gate.outputs.skip }}', RESULTS: aggregateStages.map((id) => `\${{ needs.${id}.result }}`).join(' '), EVENT: queue ? 'merge_group' : '${{ github.event_name }}', MERGE_RESULTS: '${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}' },
           run: `set -eu
 set -- $RESULTS
 [ "$#" = ${aggregateStages.length} ] || { echo "incomplete base-stage results"; exit 1; }
@@ -856,6 +857,7 @@ python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "
         EVIDENCE_PUSH_TOKEN: '${{ github.token }}',
         NEEDS_JSON: '${{ toJSON(needs) }}',
         BASE_SHA: '${{ github.event.merge_group.base_sha || github.sha }}',
+        ...(queue ? { CI_TEST_TOPOLOGY: 'merge-group' } : {}),
       },
       steps: [
         // The tested commit with its whole history: a note's parent is that commit, and the server refuses a push from a shallow repository.
@@ -929,6 +931,11 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
     // `fractal-web` is a required check (.github/repo-settings.json): it must report on every PR
     // and merge-group run, so the gate job always runs and fails closed.
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
-    ...fractalWebJobs,
+    ...buildFractalWebJobs(context),
   }),
-}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-fleet-compat": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."})))))
+}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-fleet-compat": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."}))))
+}
+
+export const fleetWorkflow = buildFleetWorkflow()
+
+export default githubWorkflow(fleetWorkflow)

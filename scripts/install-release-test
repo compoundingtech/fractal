@@ -11,6 +11,27 @@ mkdir -p "$HOME"
 # These fixtures test regular-file installation; native macOS app transactions
 # are covered separately by install-macos-test.
 mkdir -p "$work/platform-bin"
+# uname is mocked in both directions below. Keep identity reads faithful to
+# each requested stat dialect without depending on the real host's dialect.
+export INSTALL_REAL_STAT
+INSTALL_REAL_STAT=$(command -v stat)
+cat > "$work/platform-stat" <<'PY_STAT'
+#!/usr/bin/env python3
+import os
+import sys
+
+arguments = sys.argv[1:]
+if len(arguments) == 3 and arguments[:2] == ['-f', '%d:%i']:
+    path = arguments[2]
+elif len(arguments) == 4 and arguments[:3] == ['-c', '%d:%i', '--']:
+    path = arguments[3]
+else:
+    os.execv(os.environ['INSTALL_REAL_STAT'], [os.environ['INSTALL_REAL_STAT'], *arguments])
+metadata = os.lstat(path)
+print(f'{metadata.st_dev}:{metadata.st_ino}')
+PY_STAT
+chmod +x "$work/platform-stat"
+cp "$work/platform-stat" "$work/platform-bin/stat"
 printf '#!/bin/sh\necho Linux\n' > "$work/platform-bin/uname"
 chmod +x "$work/platform-bin/uname"
 export PATH="$work/platform-bin:$PATH"
@@ -21,22 +42,26 @@ mkdir -p "$work/package/share/fractal-web/assets"
 printf 'new-web\n' > "$work/package/share/fractal-web/index.html"
 printf 'new-script\n' > "$work/package/share/fractal-web/assets/main.js"
 cp "${INSTALL_RELEASE_TEST_SCRIPT:-$repo/scripts/install-release}" "$work/package/install.sh"
-for binary in st3 pty; do
+for binary in fractal pty; do
   printf '#!/bin/sh\necho new-%s\n' "$binary" > "$work/package/bin/$binary"
   chmod +x "$work/package/bin/$binary"
-  printf 'old\n' > "$work/installed/$binary"
+  printf 'old\n' > "$work/installed/${binary/fractal/st3}"
 done
+ln -s fractal "$work/package/bin/st"
+ln -s fractal "$work/package/bin/st3"
 ln -s /missing/old-st "$work/installed/st"
 ln -s /missing/old-ui "$work/installed/stui"
 # Nix outputs carry read-only modes; mutable installations must not inherit them.
 chmod -R a-w "$work/package/share/fractal-web"
 install_fixture --bin-dir "$work/installed" > "$work/upgrade.out"
-grep -q 'Upgrading Fractal unknown → new-st3 in ' "$work/upgrade.out"
-grep -q 'Installed CLI: unknown → new-st3' "$work/upgrade.out"
-test "$(readlink "$work/installed/st")" = st3
-test "$("$work/installed/st")" = new-st3
-test "$(readlink "$work/installed/fractal")" = st3
-for binary in st3 pty; do
+grep -q 'Upgrading Fractal unknown → new-fractal in ' "$work/upgrade.out"
+grep -q 'Installed CLI: unknown → new-fractal' "$work/upgrade.out"
+for name in st st3; do
+  test "$(readlink "$work/installed/$name")" = fractal
+  test "$("$work/installed/$name")" = new-fractal
+done
+test ! -L "$work/installed/fractal"
+for binary in fractal pty; do
   test "$("$work/installed/$binary")" = "new-$binary"
 done
 test ! -e "$work/installed/stui"
@@ -53,7 +78,7 @@ PY_WEB_MODES
 chmod -R u+w "$work/package/share/fractal-web"
 # Fresh installs do not claim to upgrade or restart a daemon.
 install_fixture --bin-dir "$work/fresh-notice/bin" > "$work/fresh.out" 2> "$work/fresh.err"
-grep -q 'Installed st3' "$work/fresh.out"
+grep -q 'Installed fractal' "$work/fresh.out"
 ! grep -q 'Upgrading' "$work/fresh.out"
 if [[ -s $work/fresh.err ]]; then cat "$work/fresh.err" >&2; exit 1; fi
 # Read-only service inspection reports a running daemon without doctor or restart.
@@ -68,9 +93,9 @@ esac
 RUNNING
 chmod +x "$work/running/bin/st3"
 install_fixture --bin-dir "$work/running/bin" > "$work/running.out" 2> "$work/running.err"
-grep -q 'Upgrading Fractal fractal v0.3.21 (old-build) → new-st3' "$work/running.out"
+grep -q 'Upgrading Fractal fractal v0.3.21 (old-build) → new-fractal' "$work/running.out"
 grep -q 'A daemon is running; it keeps its current build until you restart it:' "$work/running.err"
-grep -Fq "$work/running/bin/st service restart" "$work/running.err"
+grep -Fq "$work/running/bin/fractal service restart" "$work/running.err"
 grep -q 'docs/guides/upgrading' "$work/running.err"
 # Package-manager-owned links, including dangling Home Manager links, are never replaced.
 for target in /nix/store/missing-fractal/bin/st3 /nix/var/nix/profiles/per-user/alice/bin/st3 "$HOME/.nix-profile/bin/st3"; do
@@ -128,7 +153,7 @@ done
 for relative in profiles/per-user/alice/bin profiles/home-manager/bin unmanaged/.nix-profile/bin; do
   bin="$work/non-nix/$relative"
   install_fixture --bin-dir "$bin" > "$work/non-nix.out" 2> "$work/non-nix.err"
-  test "$("$bin/st3")" = new-st3
+  test "$("$bin/st3")" = new-fractal
   test ! -s "$work/non-nix.err"
 done
 # Upgrading a prior read-only installation must also clean up its replaced tree.
@@ -139,14 +164,14 @@ test ! -e "$work/installed/.smalltalk-install.lock"
 # Missing assets fail before replacing either commands or the installed web tree.
 mv "$work/package/share/fractal-web/index.html" "$work/package/share/fractal-web/index.saved"
 if install_fixture --bin-dir "$work/installed"; then exit 1; fi
-test "$("$work/installed/st")" = new-st3
+test "$("$work/installed/st")" = new-fractal
 test "$(cat "$work/share/fractal-web/index.html")" = new-web
 mv "$work/package/share/fractal-web/index.saved" "$work/package/share/fractal-web/index.html"
 # Missing payload and directory collisions must fail before replacing installed files.
 rm "$work/package/bin/pty"
 if install_fixture --bin-dir "$work/installed"; then exit 1; fi
-test "$("$work/installed/st")" = new-st3
-cp "$work/package/bin/st3" "$work/package/bin/pty"
+test "$("$work/installed/st")" = new-fractal
+cp "$work/package/bin/fractal" "$work/package/bin/pty"
 mkdir -p "$work/blocked/st"
 if install_fixture --bin-dir "$work/blocked"; then exit 1; fi
 test ! -e "$work/blocked/st3"
@@ -156,31 +181,57 @@ for kind in file link dangling directory; do
   mkdir -p "$bin"
   case $kind in
     file) printf foreign > "$bin/fractal" ;;
-    link) ln -s "$work/package/bin/st3" "$bin/fractal" ;;
+    link) ln -s "$work/package/bin/fractal" "$bin/fractal" ;;
     dangling) ln -s /missing/fractal "$bin/fractal" ;;
     directory) mkdir "$bin/fractal" ;;
   esac
-  install_fixture --bin-dir "$bin" --quiet > "$work/collision.out" 2> "$work/collision.err"
+  if install_fixture --bin-dir "$bin" --quiet > "$work/collision.out" 2> "$work/collision.err"; then exit 1; fi
+  if install_fixture --instance coexist --bin-dir "$bin" --quiet > "$work/collision.out" 2> "$work/collision.err"; then exit 1; fi
   test ! -s "$work/collision.out"
-  test "$("$bin/st")" = new-st3
-  grep -q 'leaving fractal unchanged:.*use st' "$work/collision.err"
+  test ! -e "$bin/st"
+  test ! -e "$bin/st3"
+  grep -q 'foreign fractal command' "$work/collision.err"
   case $kind in
     file) test "$(cat "$bin/fractal")" = foreign ;;
-    link) test "$(readlink "$bin/fractal")" = "$work/package/bin/st3" ;;
+    link) test "$(readlink "$bin/fractal")" = "$work/package/bin/fractal" ;;
     dangling) test "$(readlink "$bin/fractal")" = /missing/fractal ;;
     directory) test -d "$bin/fractal"; test -z "$(ls -A "$bin/fractal")" ;;
   esac
 done
-ln -sfn "$work/installed/st3" "$work/installed/fractal"
+rm "$work/installed/fractal"
+ln -sfn "$work/package/bin/fractal" "$work/installed/st3"
+ln -s st3 "$work/installed/fractal"
 install_fixture --bin-dir "$work/installed" --quiet
-test "$(readlink "$work/installed/fractal")" = st3
+test ! -L "$work/installed/fractal"
+test "$(readlink "$work/installed/st3")" = fractal
 mkdir -p "$work/foreign-path"
-cp "$work/package/bin/st3" "$work/foreign-path/fractal"
-PATH="$work/foreign-path:$PATH" install_fixture --bin-dir "$work/path-collision" --quiet 2> "$work/path.err"
+cp "$work/package/bin/fractal" "$work/foreign-path/fractal"
+if PATH="$work/foreign-path:$PATH" install_fixture --bin-dir "$work/path-collision" --quiet 2> "$work/path.err"; then exit 1; fi
 test ! -e "$work/path-collision/fractal"
 test ! -L "$work/path-collision/fractal"
-test "$("$work/path-collision/st")" = new-st3
-grep -q 'PATH contains a foreign command' "$work/path.err"
+test ! -e "$work/path-collision/st"
+grep -q 'PATH contains a foreign fractal command' "$work/path.err"
+# Explicit instances coexist with an inherited default physical installation.
+install_fixture --bin-dir "$work/default-login" --quiet
+python3 - "$work/default-login" "$work/default-entries.json" <<'PY'
+import json, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+Path(sys.argv[2]).write_text(json.dumps({
+    p.name: [p.lstat().st_dev, p.lstat().st_ino, os.readlink(p) if p.is_symlink() else p.read_bytes().hex()]
+    for p in root.iterdir()}))
+PY
+PATH="$work/default-login:$PATH" install_fixture --instance coexist --bin-dir "$work/instance-login" --quiet
+test -f "$work/instance-login/fractal"
+test ! -L "$work/instance-login/fractal"
+python3 - "$work/default-login" "$work/default-entries.json" <<'PY'
+import json, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+assert json.loads(Path(sys.argv[2]).read_text()) == {
+    p.name: [p.lstat().st_dev, p.lstat().st_ino, os.readlink(p) if p.is_symlink() else p.read_bytes().hex()]
+    for p in root.iterdir()}
+PY
 # A macOS helper receipt is a notice: quiet installs suppress it, errors survive.
 # This fixture checks the caller; real app transactions are tested separately.
 printf '#!/bin/sh\necho Darwin\n' > "$work/platform-bin/uname"
@@ -193,6 +244,42 @@ if os.environ.get('INSTALL_HELPER_FAIL'):
     raise SystemExit(1)
 print('app receipt')
 PY
+# Direct Darwin archives must refuse foreign commands before either probe.
+# Each executable writes a marker for ANY invocation, including --version.
+for kind in file link one-alias; do
+  bin="$work/mac-collision-$kind"
+  mkdir -p "$bin"
+  export INSTALL_PROBE_MARKER="$work/mac-probed-$kind"
+  probe="$work/mac-foreign-$kind"
+  printf '#!/bin/sh\n: > "$INSTALL_PROBE_MARKER"\necho foreign\n' > "$probe"
+  chmod +x "$probe"
+  cp -p "$probe" "$probe.saved"
+  if [[ $kind == link ]]; then
+    ln -s "$probe" "$bin/fractal"
+  else
+    cp -p "$probe" "$bin/fractal"
+    ln "$bin/fractal" "$work/mac-original-$kind"
+    if [[ $kind == one-alias ]]; then ln -s fractal "$bin/st"; fi
+  fi
+  original_identity=$(stat -f '%d:%i' "$bin/fractal")
+  if install_fixture --bin-dir "$bin" --quiet > "$work/mac-collision.out" 2> "$work/mac-collision.err"; then exit 1; fi
+  grep -q 'refusing to replace foreign fractal command' "$work/mac-collision.err"
+  test ! -s "$work/mac-collision.out"
+  test ! -e "$INSTALL_PROBE_MARKER"
+  test ! -e "$bin/pty"
+  test ! -e "$bin/st3"
+  test "$(stat -f '%d:%i' "$bin/fractal")" = "$original_identity"
+  cmp "$probe" "$probe.saved"
+  if [[ $kind == link ]]; then
+    test "$(readlink "$bin/fractal")" = "$probe"
+  else
+    test "$bin/fractal" -ef "$work/mac-original-$kind"
+    cmp "$bin/fractal" "$probe"
+  fi
+done
+unset INSTALL_PROBE_MARKER
+# The physical command with BOTH reverse aliases below is owned (also the
+# Home Manager layout on Darwin); the real helper's later refusal is unchanged.
 FRACTAL_INSTANCE= ST_INSTANCE=masked-old install_fixture --bin-dir "$work/installed" --quiet > "$work/quiet.out" 2> "$work/quiet.err"
 test ! -s "$work/quiet.out"
 test ! -s "$work/quiet.err"
@@ -201,12 +288,45 @@ grep -q 'app receipt' "$work/notices.out"
 if INSTALL_HELPER_FAIL=1 install_fixture --bin-dir "$work/installed" --quiet > "$work/failure.out" 2> "$work/failure.err"; then exit 1; fi
 test ! -s "$work/failure.out"
 grep -q 'helper failure' "$work/failure.err"
+# Owned signed-app and retained legacy command links still reach the helper
+# and report the old CLI version. A custom tilde app path is expanded exactly
+# as by the helper; canonical link target spelling remains literal.
+for form in app custom legacy absolute-legacy; do
+  bin="$work/mac-owned-$form"
+  app="${FRACTAL_MACOS_INSTALL_HOME}/Applications/SmallTalk.app"
+  configured_app=$app
+  if [[ $form == custom ]]; then
+    app="$HOME/Custom Applications/Fractal.app"
+    configured_app='~/Custom Applications/Fractal.app'
+  fi
+  mkdir -p "$bin" "$app/Contents/MacOS"
+  printf '#!/bin/sh\necho old-owned\n' > "$app/Contents/MacOS/fractal"
+  chmod +x "$app/Contents/MacOS/fractal"
+  case $form in
+    app | custom)
+      ln -s "$app/Contents/MacOS/fractal" "$bin/fractal"
+      ln -s fractal "$bin/st3" ;;
+    legacy | absolute-legacy)
+      ln -s "$app/Contents/MacOS/fractal" "$bin/st3"
+      target=st3
+      if [[ $form == absolute-legacy ]]; then target="$bin/st3"; fi
+      ln -s "$target" "$bin/fractal" ;;
+  esac
+  ln -s fractal "$bin/st"
+  FRACTAL_MACOS_APP_PATH="$configured_app" install_fixture --bin-dir "$bin" > "$work/mac-owned.out"
+  grep -q 'Upgrading Fractal old-owned → new-fractal' "$work/mac-owned.out"
+  grep -q 'app receipt' "$work/mac-owned.out"
+  test "$("$bin/fractal" --version)" = old-owned
+done
 printf '#!/bin/sh\necho Linux\n' > "$work/platform-bin/uname"
-# Fail one rename after st3 was replaced, then allow real rollback renames.
+# Fail one rename after fractal was replaced, then allow real rollback renames.
 real_mv=$(command -v mv)
 cat > "$work/platform-bin/mv" <<'SH'
 #!/usr/bin/env bash
 set -eu
+for argument in "$@"; do
+  if [[ -n ${INSTALL_RESTORE_FAIL_NAME:-} && $argument == */restore/"$INSTALL_RESTORE_FAIL_NAME" ]]; then exit 1; fi
+done
 if [[ ${!#} == "$INSTALL_FAIL_DEST" && ! -e $INSTALL_FAIL_MARKER ]]; then
   : > "$INSTALL_FAIL_MARKER"
   if [[ ${INSTALL_FAIL_MODE:-error} == signal ]]; then
@@ -222,7 +342,7 @@ import sys
 app = Path(sys.argv[1])
 app.rename(str(app) + '.previous-owner')
 (app / 'Contents/MacOS').mkdir(parents=True)
-(app / 'Contents/MacOS/st3').write_text('newer app')
+(app / 'Contents/MacOS/fractal').write_text('newer app')
 Path(sys.argv[2]).write_text('newer app and launchd fixture')
 PY
   fi
@@ -250,10 +370,92 @@ test "$(readlink "$work/prior/st")" = /previous/st3
 test ! -e "$work/prior/.smalltalk-install.lock"
 python3 -c 'import os,sys; assert sorted(os.listdir(sys.argv[1])) == ["pty", "st", "st3", "stui"]' "$work/prior"
 test "$(cat "$work/share/fractal-web/index.html")" = previous-web
+# A later canonical-to-canonical upgrade restores the exact executable inode.
+mkdir "$work/physical-prior"
+printf '#!/bin/sh\necho previous-fractal\n' > "$work/physical-prior/fractal"
+chmod 0700 "$work/physical-prior/fractal"
+ln -s fractal "$work/physical-prior/st"
+ln -s fractal "$work/physical-prior/st3"
+ln "$work/physical-prior/fractal" "$work/original-fractal-inode"
+rm "$INSTALL_FAIL_MARKER"
+export INSTALL_FAIL_DEST="$work/physical-prior/st3"
+if install_fixture --bin-dir "$work/physical-prior" --quiet; then exit 1; fi
+test "$work/physical-prior/fractal" -ef "$work/original-fractal-inode"
+test "$("$work/physical-prior/fractal")" = previous-fractal
+test "$(readlink "$work/physical-prior/st")" = fractal
+test "$(readlink "$work/physical-prior/st3")" = fractal
+test ! -e "$work/physical-prior/pty"
+test ! -e "$work/physical-prior/.smalltalk-install.lock"
 rm "$INSTALL_FAIL_MARKER"
 export INSTALL_FAIL_DEST="$work/fresh/pty"
 if install_fixture --bin-dir "$work/fresh" --quiet; then exit 1; fi
 test -z "$(ls -A "$work/fresh")"
+# First-move failure must leave every original object, including dangling links.
+for kind in regular relative dangling; do
+  destination="$work/unchanged-$kind"
+  mkdir "$destination"
+  cp "$work/physical-prior/fractal" "$destination/fractal"
+  ln -s fractal "$destination/st"
+  ln -s fractal "$destination/st3"
+  case $kind in
+    regular) printf 'retired original\n' > "$destination/stui" ;;
+    relative) ln -s fractal "$destination/stui" ;;
+    dangling) ln -s missing-retired "$destination/stui" ;;
+  esac
+  python3 - "$destination" "$work/before-$kind.json" <<'PY'
+import json, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+Path(sys.argv[2]).write_text(json.dumps({
+    p.name: [p.lstat().st_dev, p.lstat().st_ino, os.readlink(p) if p.is_symlink() else p.read_bytes().hex()]
+    for p in root.iterdir()}))
+PY
+  export INSTALL_FAIL_DEST="$destination/fractal" INSTALL_FAIL_MARKER="$work/unchanged-failure-$kind"
+  if install_fixture --bin-dir "$destination" --quiet; then exit 1; fi
+  python3 - "$destination" "$work/before-$kind.json" <<'PY'
+import json, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+assert json.loads(Path(sys.argv[2]).read_text()) == {
+    p.name: [p.lstat().st_dev, p.lstat().st_ino, os.readlink(p) if p.is_symlink() else p.read_bytes().hex()]
+    for p in root.iterdir()}
+PY
+done
+# Uncertain stat identity and persistent real restore failures retain recovery.
+for fault in stat-error stat-empty restore; do
+  destination="$work/recovery-$fault"
+  mkdir "$destination"
+  printf '#!/bin/sh\necho original-fractal\n' > "$destination/fractal"
+  chmod +x "$destination/fractal"
+  ln -s fractal "$destination/st"
+  ln -s fractal "$destination/st3"
+  ln "$destination/fractal" "$work/recovery-original-$fault"
+  export INSTALL_FAIL_DEST="$destination/st3" INSTALL_FAIL_MARKER="$work/failure-$fault"
+  if [[ $fault == restore ]]; then
+    export INSTALL_RESTORE_FAIL_NAME=fractal
+  else
+    # Fail the untouched alias restore regardless of native same-inode mv semantics.
+    export INSTALL_RESTORE_FAIL_NAME=st3
+    printf '#!/bin/sh\n%s\n' "$([[ $fault == stat-error ]] && echo 'exit 1' || echo 'exit 0')" > "$work/platform-bin/stat"
+    chmod +x "$work/platform-bin/stat"
+  fi
+  if install_fixture --bin-dir "$destination" --quiet 2> "$work/recovery-$fault.err"; then exit 1; fi
+  grep -q 'rollback failed' "$work/recovery-$fault.err"
+  test -d "$destination/.smalltalk-install.lock"
+  previous=("$destination"/.smalltalk-install.*/previous/fractal)
+  test "${#previous[@]}" = 1
+  test "${previous[0]}" -ef "$work/recovery-original-$fault"
+  if [[ $fault == restore ]]; then
+    test ! "$destination/fractal" -ef "$work/recovery-original-$fault"
+  else
+    test "$destination/fractal" -ef "$work/recovery-original-$fault"
+    test "$("$destination/fractal")" = original-fractal
+  fi
+  unset INSTALL_RESTORE_FAIL_NAME
+  cp "$work/platform-stat" "$work/platform-bin/stat"
+done
+# Restore the existing signal fixture's one-shot fault configuration.
+export INSTALL_FAIL_DEST="$work/fresh/pty" INSTALL_FAIL_MARKER="$work/failed-once"
 # An existing transaction lock is never removed by a second installer.
 mkdir -p "$work/locked/.smalltalk-install.lock"
 printf 'unchanged' > "$work/locked/st3"
@@ -293,7 +495,12 @@ else:
     state.write_text('new app and launchd fixture')
     app = Path(a.app)
     (app / 'Contents/MacOS').mkdir(parents=True, exist_ok=True)
-    (app / 'Contents/MacOS/st3').write_text('our app')
+    (app / 'Contents/MacOS/fractal').write_text('our app')
+    destination = Path(a.bin_dir)
+    for name, target in [('fractal', str(app / 'Contents/MacOS/fractal')), ('st', 'fractal'), ('st3', 'fractal')]:
+        link = destination / name
+        link.unlink(missing_ok=True)
+        link.symlink_to(target)
 print('app receipt')
 PY
 export INSTALL_APP_FIXTURE="$work/app-and-launchd"
@@ -315,7 +522,7 @@ import sys
 app, state, marker = map(Path, sys.argv[1:])
 app.rename(str(app) + '.previous-owner')
 (app / 'Contents/MacOS').mkdir(parents=True)
-(app / 'Contents/MacOS/st3').write_text('foreign app during ownership read')
+(app / 'Contents/MacOS/fractal').write_text('foreign app during ownership read')
 state.write_text('foreign app and launchd during ownership read')
 marker.touch()
 PYRACE
@@ -346,14 +553,14 @@ for mode in owner-read error signal foreign; do
   test ! -s "$work/mac-$mode.out"
   if [[ $mode == foreign ]]; then
     test "$(cat "$INSTALL_APP_FIXTURE")" = 'newer app and launchd fixture'
-    test "$(cat "$INSTALL_FOREIGN_APP/Contents/MacOS/st3")" = 'newer app'
+    test "$(cat "$INSTALL_FOREIGN_APP/Contents/MacOS/fractal")" = 'newer app'
   elif [[ -f $INSTALL_RACE_MARKER ]]; then
     # Negative control with the old caller must fail here: restore overwrote it.
     test "$(cat "$INSTALL_APP_FIXTURE")" = 'foreign app and launchd during ownership read'
-    test "$(cat "$INSTALL_FOREIGN_APP/Contents/MacOS/st3")" = 'foreign app during ownership read'
+    test "$(cat "$INSTALL_FOREIGN_APP/Contents/MacOS/fractal")" = 'foreign app during ownership read'
   else
     test "$(cat "$INSTALL_APP_FIXTURE")" = 'new app and launchd fixture'
-    test "$(cat "$INSTALL_FOREIGN_APP/Contents/MacOS/st3")" = 'our app'
+    test "$(cat "$INSTALL_FOREIGN_APP/Contents/MacOS/fractal")" = 'our app'
   fi
   test -d "$work/mac-$mode/.smalltalk-install.lock"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -384,6 +591,8 @@ test ! -e "${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME-}}/Applications/
 rm "$work/platform-bin/cat"
 printf '#!/bin/sh\necho Linux\n' > "$work/platform-bin/uname"
 rm "$work/platform-bin/mv"
+rm "$work/platform-bin/stat"
+unset INSTALL_REAL_STAT
 unset INSTALL_REAL_MV INSTALL_FAIL_MARKER INSTALL_FAIL_DEST INSTALL_APP_FIXTURE INSTALL_FOREIGN_APP
 echo 'Release installer tests passed'
 

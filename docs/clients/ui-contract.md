@@ -142,19 +142,27 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
 
 Terminal workspace tabs derive presentation identity from their existing pane keys,
 like the web strip's `data-tab-kind` (never from the displayed or custom title).
-`A`, `M`, and `I` identify agent, mission, and Inbox/alert panes. Agent tabs show
-reported activity (`>` working/compacting, `-` idle, `x` down/stopped/retired,
-`◆` needs a person or a login, `!` fault, `~` starting/unknown). `◆N` is the number of
-open alerts in that subject's attention window, excluding informational updates and
-recently closed items; zero is omitted, and an unavailable window shows `◆?`.
-A separate `?` means live attention reports an open question prompt. Native question
-kind or an exact question-tool call identity establishes its type, independently of
-available client-answer actions (whose submission window can expire). Cached calls
-without an open live prompt never establish that a question is still pending.
+Agent tabs have one activity glyph immediately before the title: `●` working/compacting,
+`○` idle or awaiting a person or login, `×` down/stopped/retired, `!` fault, and `~`
+starting/unknown. Other tabs have no activity prefix; kind letters are not shown.
+One mauve attention suffix follows the title: `?` when an open item is a live question,
+otherwise `◆` when alerts or the subject's needs-person projection need attention.
+The suffix carries the open-alert count only above one (`?2`, `◆3`); zero and one
+have no digit, and a loading attention window has no count or placeholder.
+Counts exclude informational updates and recently closed items.
+Native question kind or an exact question-tool call identity establishes its type,
+independently of available client-answer actions (whose submission window can expire).
+Cached calls without an open live prompt never establish that a question is still pending.
 Mission tabs include current question prompts of agents assigned to that mission;
-Inbox includes all current question prompts. Counts disappear before
-type/activity/question identity when space is tight. Subject membership indexes are
-rebuilt on observation updates, not per tab per frame; none of this chrome is persisted.
+Inbox includes all current question prompts. Titles retain a 26-cell budget.
+Counts disappear first when space is tight, then the suffix; activity stays on the left.
+Subject membership indexes are rebuilt on observation updates, not per tab per frame.
+
+Each split has an independent, non-persisted tab-strip view. Wheel right/down over its
+strip moves the view one whole tab right; wheel left/up moves it left, without changing
+the active tab. The view clamps at the final full tab. Changing the active tab reveals
+it again if needed. Clickable `‹N` / `N›` markers count hidden tabs and activate the nearest
+hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace data.
 
 
 ### Now: what needs you
@@ -237,8 +245,49 @@ An agent with a live terminal can be opened in place from its conversation: the 
 with its colours and styles (never polled), follows the terminal's size, and says so when the
 terminal restarts. With the `terminal.input` capability the person can send a line and the keys
 Enter, Tab, Esc, Up, Down, and a confirmed Ctrl-C; every input takes a fresh terminal fence and
-refuses a changed runtime incarnation. Leaving the view detaches. Terminal UI: Ctrl+] on an agent's conversation attaches its terminal
-and Ctrl+\ returns; iOS: a Terminal button on the agent screen.
+refuses a changed runtime incarnation. Leaving the view detaches. In Fractal TUI, Ctrl+A opens
+the agent actions from its conversation, then t (Terminal) opens its terminal. Enter attaches
+an already detached terminal pane; it does not open a terminal from the conversation.
+Ctrl+\ then c returns to the conversation; iOS: a Terminal button on the agent screen.
+
+The terminal UI remembers the last 50 content destinations per device alongside its workspace.
+Opening content or changing a tab or space adds a stop; moving focus between already-visible
+splits does not. Back/forward restores the destination in its original space, split and tab,
+skipping removed destinations. Ctrl+[ and Ctrl+] navigate only with negotiated enhanced
+keyboard input; Escape is never interpreted as back. On legacy input, unambiguous Ctrl+5
+(0x1D) goes forward. Ctrl+\ then [ or ] works in either keyboard mode, including over an
+attached program. Direct navigation chords reach attached programs unchanged.
+This is a guidance correction, not a new Attach control or a keyboard binding change.
+The earlier binding cutover still applies: Ctrl+] no longer attaches terminals. Older daemons
+may still send attention text advertising Ctrl+] or an Attach control until they upgrade;
+use Ctrl+A then t from the conversation, or Enter on an already detached terminal pane.
+
+Ctrl+L opens the next outstanding Inbox item in the focused split, replacing only that
+split's tab and adding the replaced content to place history. Agent-blocking questions
+come first, then decisions, failures, and other items; each class is oldest first.
+Closed and snoozed items are excluded. The flash gives `n/m · reason`; after the last item,
+`all clear` is a boundary, and the next command wraps. Enhanced Ctrl+Shift+L or Ctrl+\ then l
+goes backward. An attached program receives Ctrl+L unchanged; use the leader there.
+While attention is loading, triage flashes `loading attention…`; an unsuccessful fetch
+flashes `attention unavailable`. Neither state means `all clear` or advances the pass.
+
+The recent-place switcher uses that same history across all spaces, de-duplicated by content.
+Rows show the content title, live state/attention marks and the space name. On every terminal type, Ctrl+^
+(legacy Ctrl+6, 0x1E) opens the popup when detached, with the previous place selected.
+Ctrl+\ then r opens it even over an attached program. Up/Down selects a destination;
+Enter opens it in its recorded location, Escape cancels, and typing filters. Ctrl+^ then Enter
+flips between the last two places. Enhanced Ctrl+Tab cycles forward and Ctrl+Shift+Tab backward.
+Once this terminal has actually reported a Control modifier release, releasing Control commits
+that cycling selection; until then Ctrl+Tab uses the explicit Enter/Escape popup.
+Ctrl+^ and Ctrl+Tab both reach attached programs unchanged. Tabs retain [ ], Ctrl+PageUp
+and Ctrl+PageDown.
+While the popup is open, the first line of pasted text filters its rows and mouse input never
+reaches the underlying terminal. Typing or pasting switches hold cycling to explicit Enter/Escape
+commit. Live state/attention labels refresh while the popup is open.
+The child loses input focus until the popup closes. The selected
+destination remains visible even at the minimum supported viewport.
+
+
 
 ### Starting a mission
 
@@ -584,7 +633,7 @@ agents.
 | | Derivation | Differs from this contract |
 |---|---|---|
 | Terminal UI | Reads `tier`, `kind`, `agent`, `raised_by` and `waiting` (`crates/fractal-tui/src/ui/adapt.rs` `attention()`); a row without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows Fractal's text as an unplaced card where its `alert` flag puts it, with no answer of its own; a message or a fault stays off Now. A launch card shows `launch` (`launch_preview()`), and a prompt's band shows `prompt`'s calls and offers allow only where `allow` says so (`prompt_calls()`, `alerts.rs`); an older Fractal that serves neither gets a card that says so, answered in the terminal. | Also withholds allow when the band cannot show the whole call in its four lines, as a client that cannot show the whole input offers deny only. |
-| Phone | Reads `tier`, `kind` and `waiting` (`clients/typescript/fractal-views/homeView.ts` `homeKind`, `homeRows`; a feedback gate shows as a review); an item without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows as unplaced where its `alert` flag puts it, never dropped; a message or a fault stays off Home. A prompt's calls and answers are `prompt`'s (`servedPrompt`, `servedAnswers`, `apps/ios/screens/Alerts.tsx`), and an older Fractal that serves none gets a card answered in the terminal | Shows launch variants and diagnostics, with no step preview. |
+| Phone | Reads `tier`, `kind` and `waiting` (`clients/typescript/fractal-views/homeView.ts` `homeKind`, `homeRows`; a feedback gate shows as a review); an item without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows as unplaced where its `alert` flag puts it, never dropped; a message or a fault stays off Now. A prompt's calls and answers are `prompt`'s (`servedPrompt`, `servedAnswers`, `apps/ios/screens/Alerts.tsx`), and an older Fractal that serves none gets a card answered in the terminal | Shows launch variants and diagnostics, with no step preview. |
 | Fractal | `projections.ts` `attentionRefs`; its alerts read a prompt's calls from the conversation (`src/conversation/alerts/AgentAlerts.tsx`, with `homeView.ts` `pendingCalls`, `offeredAnswers`) | Moves to `prompt` with `servedPrompt` and `servedAnswers`; then `pendingCalls` and `offeredAnswers` are deleted. |
 
 Settled: `custom.*` kinds are Today requests, as in the terminal UI. Allow depends on
@@ -701,7 +750,7 @@ Same capabilities, native idioms:
 | Drag to select and copy | Native text selection on messages |
 | Composer grows to eight lines | Growing text input above the keyboard |
 | Loading / empty / failed | The same three states, never an empty list while loading |
-| `Ctrl+]` on an agent: its terminal | Terminal button on the agent screen; keys as buttons |
+| Ctrl+A then t (Terminal) from the agent conversation; Enter on a detached terminal pane | Terminal button on the agent screen; keys as buttons |
 | New mission control | A New mission button opening a composer sheet |
 
 iOS demo screenshots use `apps/ios/demoGateway.mjs`: invented data, nothing real.

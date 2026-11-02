@@ -158,7 +158,7 @@ export function promptForm(harness: PromptHarness, answers: readonly string[], p
   if (mark < 0) mark = options.findIndex(option => !option.refuses);
   if (mark < 0) mark = null;
   const elsewhere = harness === 'claude' && (kind === 'permission' || kind === 'plan')
-    ? "Claude's other choices are in its terminal (Ctrl+])."
-    : harness === 'codex' && kind === 'permission' ? "Codex's other choices are in its terminal (Ctrl+])." : null;
+    ? "Claude's other choices are in its terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane)."
+    : harness === 'codex' && kind === 'permission' ? "Codex's other choices are in its terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane)." : null;
   return { kind, question: questionLine(harness, kind, prompt, call), options, mark, elsewhere };
 }

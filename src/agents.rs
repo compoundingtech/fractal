@@ -806,6 +806,7 @@ mod tests {
                 support: driver_diagnostic::Support::Supported,
                 observed_at: 100,
                 evidence_age_ms: 25,
+                attempt: None,
             });
         let wire: serde_json::Value = serde_json::from_str(&to_json(&[diagnosed], false)).unwrap();
         assert_eq!(

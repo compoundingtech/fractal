@@ -23,6 +23,9 @@ mod output_model;
 #[cfg(test)]
 #[path = "harness_events_output_controls.rs"]
 mod output_controls;
+#[cfg(test)]
+#[path = "harness_events_churn_tests.rs"]
+mod churn_tests;
 
 pub const WAKE_PIPE: &str = ".st-harness-events-wake";
 pub const DATABASE: &str = "st-harness-events.sqlite";
@@ -96,6 +99,15 @@ fn connect(agent_dir: &Path) -> Result<Connection> {
     CONNECTION_OPENS.with(|opens| opens.set(opens.get() + 1));
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch("PRAGMA synchronous=FULL;")?;
+    // Short-lived producers must not checkpoint history on every report. Once
+    // the WAL reaches the default 1000-page budget, allow SQLite's normal last-
+    // close checkpoint: zero-connection gaps discard SHM backfill/restart state,
+    // so automatic checkpoints alone cannot recycle this retained WAL.
+    let page_size: u64 = connection.pragma_query_value(None, "page_size", |row| row.get(0))?;
+    let checkpoint_bytes = 32 + 1000 * (page_size + 24);
+    let defer_checkpoint = agent_dir.join(format!("{DATABASE}-wal")).metadata()
+        .map_or(true, |metadata| metadata.len() < checkpoint_bytes);
+    connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, defer_checkpoint)?;
     Ok(connection)
 }
 
@@ -440,6 +452,13 @@ pub fn write_snapshot(agent_dir: &Path, kind: &str, body: &[u8]) -> Result<()> {
         inventory_bytes = serde_json::to_vec(&value)?;
         inventory_bytes.as_slice()
     } else { body };
+    let unchanged: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM snapshots WHERE kind=?1 AND body=?2)",
+        params![kind, body], |row| row.get(0),
+    )?;
+    if unchanged {
+        return Ok(());
+    }
     tx.execute(
         /* sqlite-large-value: allow-for-now lv-hcba2dce1061b owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO snapshots VALUES (?1,?2)
         ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
@@ -710,6 +729,15 @@ fn append_timeline_operations(
         )?;
         append_event(tx, "harness-timeline", &serde_json::to_value(operation)?)?;
     }
+    // Keep bounded physical slack, but expose the original window to readers. This
+    // amortizes deletion of old pages instead of dirtying them on every append.
+    let (rows, bytes): (u64, u64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(CAST(body AS BLOB))),0) FROM timeline",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if rows <= 4352 && bytes <= 2228224 {
+        return Ok(());
+    }
     tx.execute(/* sqlite-large-value: allow-for-now lv-hcf367178b2a9 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM timeline WHERE id NOT IN (SELECT id FROM timeline ORDER BY id DESC LIMIT 4096)", [])?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-hbc223dd1ddcc owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM timeline WHERE id IN (
         SELECT id FROM (SELECT id, SUM(length(CAST(body AS BLOB))) OVER (ORDER BY id DESC) AS retained FROM timeline)
@@ -723,7 +751,10 @@ pub(crate) fn read_timeline(agent_dir: &Path) -> Result<Option<Record>> {
         return Ok(None);
     };
     let mut stmt =
-        connection.prepare("SELECT body FROM timeline WHERE incarnation=?1 ORDER BY id")?;
+        connection.prepare("SELECT body FROM (
+            SELECT id, incarnation, body, SUM(length(CAST(body AS BLOB))) OVER (ORDER BY id DESC) AS retained
+            FROM (SELECT id, incarnation, body FROM timeline ORDER BY id DESC LIMIT 4096)
+        ) WHERE retained<=2097152 AND incarnation=?1 ORDER BY id")?;
     let operations = stmt
         .query_map([&incarnation], |r| r.get::<_, String>(0))?
         .map(|row| Ok(serde_json::from_str(&row?)?))

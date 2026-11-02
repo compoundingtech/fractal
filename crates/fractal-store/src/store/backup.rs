@@ -306,6 +306,7 @@ impl Store {
                     );
                     store_envelope_signature_tx(
                         &transaction,
+                        None,
                         fleet,
                         &envelope.writer,
                         envelope.sequence,
@@ -371,6 +372,7 @@ impl Store {
             );
             store_envelope_signature_tx(
                 &transaction,
+                None,
                 fleet,
                 &signature.writer,
                 signature.sequence,
@@ -555,7 +557,7 @@ mod tests {
 
     fn diagnostic(store: &Store, reason: &str) {
         store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: format!("daemon/{}", store.origin()),
                 kind: "daemon.diagnostic".into(),
                 actor: None,

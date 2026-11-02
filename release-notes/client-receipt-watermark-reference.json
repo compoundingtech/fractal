@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Describe legacy response receipts by the current persisted cleanup watermark instead of a future deployment schedule.",
+  "replay": {"status": "none", "detail": "Metadata wording only; no claim or projection replay."},
+  "schema": {"status": "none", "detail": "No JSON shape, stored schema, receipt or watermark changes."},
+  "rules": {"status": "none", "detail": "No retention, checkpoint or cleanup implementation changes."},
+  "compatibility": {"status": "none", "detail": "The manifest now describes the existing rowid watermark condition; no runtime, wire or client behavior changes."},
+  "downtime": {"status": "none", "detail": "No runtime operation."},
+  "manual": {"status": "none", "detail": "No required manual step."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}

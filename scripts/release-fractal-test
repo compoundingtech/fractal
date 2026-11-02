@@ -8,6 +8,13 @@ import subprocess
 import tempfile
 
 repo = Path(__file__).resolve().parent.parent
+# Packaging must consume the actual Cargo artifact, not copy a legacy name.
+packager = (repo / 'scripts/release-fractal').read_text()
+assert 'binaries=(fractal)' in packager
+assert 'ln -s fractal "$work/$package/bin/st"' in packager
+assert 'ln -s fractal "$work/$package/bin/st3"' in packager
+assert 'ln -s st3 "$work/$package/bin/fractal"' not in packager
+
 
 
 def run(*args, cwd):

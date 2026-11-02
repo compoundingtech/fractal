@@ -73,7 +73,7 @@ pub const APPEND: &[AppendProjector] = &[
     },
     AppendProjector {
         name: "resources",
-        takes: Takes::Kinds(&["resource.observed"]),
+        takes: Takes::Kinds(&["resource.observed", fractal_schema::github_plugin::ITEM_STATE]),
         project: |transaction, claim| resources::refresh(transaction, &claim.subject),
     },
     AppendProjector {

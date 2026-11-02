@@ -160,6 +160,11 @@ unset LD_PRELOAD
 # TMPDIR, which are removed at exit, and the account's builds share one server (127.0.0.1:4226): every compile through it then failed
 # ("sccache: error: Failed to create temp dir") until it was stopped. The kept build directory (CARGO_TARGET_DIR) is the local cache.
 unset RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER
+# A build host's cargo config can still name an sccache wrapper (CARGO_HOME is kept), and its compiles go to the host's own server.
+# A seat lane names a server of its own (SCCACHE_SERVER_UDS, and a lane may name a cache directory): when it was not running yet, the
+# first compile here started it with this run's HOME and TMPDIR, and every later build in the lane failed as above (2026-11-01). The
+# stages leave both, so they reach the host's server as before.
+unset SCCACHE_SERVER_UDS SCCACHE_DIR
 # The workspace crates build without debug info, as CI builds them (buildEnv in .github/workflows/workspace-ci.ts): a dev box never
 # builds more than CI does. Cargo.toml's dev and test profiles keep debug = 1 for a plain `cargo build` or `cargo test`.
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0

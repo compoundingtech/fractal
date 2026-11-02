@@ -520,6 +520,18 @@ impl Runtime for FractalRuntime {
         reapply_local_work_lease_renewals_tx(transaction)
     }
 
+    fn rebuild_deferred(&self, transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
+        resources::flush_deferred_preparation(transaction, budget)
+    }
+
+    fn deferred_pending(&self, connection: &Connection) -> Result<bool> {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred)",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
         // Replication admission/import, repair and pruning can dirty preparation
         // without running APPEND (or can do so after its last claim projector).
@@ -557,6 +569,29 @@ impl Runtime for FractalRuntime {
         self.published_runtimes.forget();
         self.published_views.invalidate();
         self.wake_read_roster();
+    }
+
+    fn claims_trimmed(&self) {
+        // A trim's run goes on: every list refolds, keeping its generation, so a fold under way
+        // still publishes and readers keep their rows.
+        // Forgetting them here, after every chunk, restarted the roster's fold of seconds
+        // before it could publish, all through the run. The trim forgets the views once when
+        // the run stops, which also drops what the caches hold of the claims it deleted.
+        self.presented_agents.refold();
+        self.published_missions.refold();
+        self.published_work.refold();
+        self.published_runtimes.refold();
+        // Glasses and arrangements read again only the people whose rows changed, so they reread
+        // everyone, keeping their generation. The attention list refolds from nothing on its own
+        // clock (30 s), and the summary's shared counts recompute when the roster publishes and
+        // every period; forgetting either would only drop a fold under way.
+        self.glass_list.refold();
+        self.arrangement_list.refold();
+        self.published_views.invalidate();
+        self.wake_read_roster();
+        if let Some(wake) = self.attention_list.refresher.get() {
+            wake.notify_one();
+        }
     }
 
     fn projection_advanced(&self, caught_up: bool) {

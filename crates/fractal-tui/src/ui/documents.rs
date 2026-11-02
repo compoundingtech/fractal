@@ -78,6 +78,8 @@ type Rendered = Rc<(Vec<Line<'static>>, Vec<text::DrawnLink>)>;
 #[derive(Default)]
 pub(crate) struct Documents {
     views: HashMap<String, DocumentView>,
+    /// Definitive missing-document observations, even when a previously read page stays cached.
+    missing: HashSet<String>,
     lists: HashMap<String, DocumentList>,
     references: HashMap<String, Result<DocumentReferences, String>>,
     /// Reads sent and not answered yet, by `get:`, `list:` or `refs:` and the subject.
@@ -100,6 +102,10 @@ fn list_key(prefix: Option<&str>) -> String {
 }
 
 impl Documents {
+    pub(super) fn known_missing(&self, reference: &str) -> bool {
+        self.missing.contains(reference)
+    }
+
     /// The reads the shown panes need that are not sent yet. `background` panes are read without
     /// being on screen (the list behind Ctrl+K's rows). `subjects` are the missions and steps on
     /// screen whose documents are listed with them.
@@ -163,6 +169,11 @@ impl Documents {
     pub(crate) fn got(&mut self, reference: &str, outcome: Result<DocumentContent, Unavailable>) {
         let key = format!("get:{reference}");
         self.reading.remove(&key);
+        if matches!(&outcome, Err(Unavailable::NotFound)) {
+            self.missing.insert(reference.to_owned());
+        } else {
+            self.missing.remove(reference);
+        }
         let view = match outcome {
             Ok(content) => DocumentView::from_content(reference, &content),
             Err(why) => {

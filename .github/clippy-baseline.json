@@ -50,8 +50,7 @@
     },
     "fractal-missions": {
       "clippy::cloned_ref_to_slice_refs": 1,
-      "clippy::collapsible_if": 3,
-      "clippy::needless_borrow": 1
+      "clippy::collapsible_if": 3
     },
     "fractal-reconcile": {
       "clippy::collapsible_if": 3,

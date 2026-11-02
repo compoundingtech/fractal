@@ -177,8 +177,9 @@ Managed Claude runs with `DISABLE_AUTOUPDATER=1`; pi and omp already disable the
 startup update checks. When a recognized update menu still appears, the daemon
 records a `harness.diagnostic` with code `provider-update-available`, status
 `available`, provider, incarnation, and the observed notice. Its evidence points
-to the retained startup-prompt diagnostic. It remains after the prompt is resolved
-and can be read through the seat's trace. Operations owns provider upgrades.
+to the retained startup-prompt diagnostic. It is an observability code: it stays in
+the local observation log of the seat's host, after the prompt is resolved, and
+goes to OpenTelemetry when a collector is configured. Operations owns provider upgrades.
 
 Skipping a Codex update requires the complete recognized menu,
 a fresh screen and the same incarnation. Failed input, changed screens and a menu

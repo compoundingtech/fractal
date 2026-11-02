@@ -3831,7 +3831,7 @@ mod tests {
             crate::native_resume::pi_family_argv("omp", argv, &managed, id, Some(&transcript))
                 .unwrap_err()
                 .code,
-            "transcript-header-mismatch"
+            "transcript-missing"
         );
     }
 

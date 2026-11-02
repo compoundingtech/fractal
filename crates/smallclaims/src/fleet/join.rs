@@ -19,8 +19,8 @@ use super::file::{FleetFile, FleetMode};
 use super::handshake::{JoinRequest, JoinResponse, Joiner, SealedJoin, WriterHead, verify_response};
 use super::keys::MemberKey;
 use super::transport::{
-    Fabric, Route, bindable_tailnet_addresses, local_addresses, parse_route, resolve_tool,
-    tailscale_addresses,
+    Fabric, Route, bindable_tailnet_addresses, local_addresses, parse_route, resolve_fabric_adapter,
+    resolve_tool, tailscale_addresses,
 };
 use crate::error::Error;
 use crate::store::{AdmittedStore, Runtime, Store, valid_fleet_node_name};
@@ -528,15 +528,11 @@ impl PairingHelper {
     fn launch(command: &str, executable: Option<&Path>) -> Result<Self> {
         use std::process::Stdio;
         use tokio::io::AsyncBufReadExt as _;
-        let executable = executable.map(Path::to_path_buf)
-            .or_else(|| std::env::var_os("ST_FABRIC_ADAPTER").map(PathBuf::from))
-            .or_else(|| {
-                std::env::current_exe().ok()
-                    .and_then(|exe| exe.parent().map(|parent| parent.join("st-fabric-adapter")))
-                    .filter(|path| path.is_file())
-            })
-            .or_else(|| resolve_tool(None, "st-fabric-adapter"))
-            .context("st-fabric-adapter is unavailable; install it alongside st or set ST_FABRIC_ADAPTER")?;
+        let executable = match executable {
+            Some(path) => Some(path.to_path_buf()),
+            None => resolve_fabric_adapter()?,
+        }
+        .context("st-fabric-adapter is unavailable; install it alongside st or set ST_FABRIC_ADAPTER")?;
         let mut child = tokio::process::Command::new(executable)
             .arg(command)
             .stdin(Stdio::piped())
@@ -759,7 +755,8 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
                 && sealed.sponsor_endpoints.iter().any(|endpoint|
                     endpoint["transport"] == "fabric"
                         && endpoint["node"] == pairing.gateway
-                        && endpoint["protocol"] == format!("st3/fleet/{}", code.fleet_id)),
+                        && endpoint["protocol"].as_str().is_some_and(|protocol|
+                            super::transport::is_fleet_fabric_protocol(protocol, &sealed.fleet_id))),
             "the authenticated sponsor answer does not bind the pairing gateway"
         );
         let saved = PairingRecovery {
@@ -1068,6 +1065,11 @@ mod tests {
 
     #[tokio::test]
     async fn pairing_join_writes_configuration_only_after_helper_confirmation() {
+        pairing_join_with_protocol_prefix("st3/fleet/").await;
+        pairing_join_with_protocol_prefix("fractal/fleet/").await;
+    }
+
+    async fn pairing_join_with_protocol_prefix(prefix: &str) {
         let root = tempfile::tempdir().unwrap();
         let sponsor_dir = root.path().join("sponsor");
         let settings = MemberSettings {
@@ -1084,7 +1086,7 @@ mod tests {
         let node_id = "b".repeat(64);
         let endpoints = vec![serde_json::json!({
             "transport": "fabric", "node": gateway,
-            "protocol": format!("st3/fleet/{}", founded.fleet_id)
+            "protocol": format!("{prefix}{}", founded.fleet_id)
         })];
         store.publish_fleet_endpoints("listening", &endpoints, "test").unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

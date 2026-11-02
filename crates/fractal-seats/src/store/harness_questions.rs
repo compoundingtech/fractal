@@ -29,6 +29,8 @@ fn json_fields(value: Value) -> BTreeMap<String, Value> {
 pub trait HarnessQuestionsStore {
     /// The question `subject`, including its indefinitely retained resolution when it ended.
     fn harness_question(&self, subject: &str, at: u128) -> Result<Option<HarnessQuestion>>;
+    /// Whether an owner-authored compact receipt reserves this actor/key for other parameters.
+    fn harness_question_receipt_conflicts(&self, actor_key: &str, request_digest: &str) -> Result<bool>;
     /// The question `subject` as long as st holds its claims.
     fn harness_question_held(&self, subject: &str) -> Result<Option<HarnessQuestion>, St3Error>;
     /// Record what the harness shows of a question. The same content again changes nothing, so
@@ -61,6 +63,29 @@ impl HarnessQuestionsStore for Store {
 
     fn harness_question(&self, subject: &str, at: u128) -> Result<Option<HarnessQuestion>> {
         question_at(&self.readers.get(), subject, Some(at))
+    }
+
+    fn harness_question_receipt_conflicts(&self, actor_key: &str, request_digest: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims INDEXED BY claims_harness_receipt_actor_key_index
+             WHERE kind='harness-question.resolved' AND actor IS NULL
+               AND json_extract(body, '$.fields.receipt.actor_key')=?1 AND origin=?2",
+        )?;
+        let subjects = statement.query_map(rusqlite::params![actor_key, self.origin()], |row| row.get::<_, String>(0))?;
+        for subject in subjects {
+            // The index is only a candidate lookup. Preserve the canonical first resolution,
+            // observation presence and provenance checks used by question reads and replay.
+            if let Some(question) = question_at(&connection, &subject?, None)?
+                && let Some(resolution) = question.resolution
+                && resolution.origin == self.origin() && resolution.actor.is_none()
+                && let Some(receipt) = resolution.receipt
+                && receipt.actor_key == actor_key && receipt.request_digest != request_digest
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn harness_question_held(&self, subject: &str) -> Result<Option<HarnessQuestion>, St3Error> {
@@ -282,6 +307,32 @@ mod tests {
             store.observe_harness_question(&observation()).unwrap_err().code,
             "harness-question-resolved"
         );
+    }
+
+    #[test]
+    fn receipt_lookup_seeks_the_actor_key_and_preserves_owner_provenance() {
+        let owner = Store::open_memory("alder").unwrap();
+        let question = owner.observe_harness_question(&observation()).unwrap();
+        let receipt = Receipt {
+            actor_key: actor_key("person/alex", "same-key"),
+            request_digest: "b".repeat(64),
+            action_id: "action/receipt-lookup".into(),
+        };
+        owner.resolve_harness_question(
+            &question.id, Status::Answered, &question.revision, &answer(1), Some(&receipt),
+        ).unwrap();
+        assert!(!owner.harness_question_receipt_conflicts(&receipt.actor_key, &receipt.request_digest).unwrap());
+        assert!(owner.harness_question_receipt_conflicts(&receipt.actor_key, &"c".repeat(64)).unwrap());
+        for key in [actor_key("person/ada", "same-key"), actor_key("person/alex", "other-key")] {
+            assert!(!owner.harness_question_receipt_conflicts(&key, &"c".repeat(64)).unwrap());
+        }
+        let peer = Store::open_memory("birch").unwrap();
+        fractal_store::store::tests_shared::receive_and_project(
+            &peer, "alder",
+            &fractal_store::store::tests_shared::exchange_from(&owner, &ReplicationInventory::default()),
+        );
+        assert!(peer.harness_question(&question.id, u128::MAX).unwrap().unwrap().resolution.is_some());
+        assert!(!peer.harness_question_receipt_conflicts(&receipt.actor_key, &"c".repeat(64)).unwrap());
     }
 
     #[test]

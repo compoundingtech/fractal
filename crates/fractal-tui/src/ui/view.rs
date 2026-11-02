@@ -117,6 +117,9 @@ pub struct World {
     /// from an earlier read.
     #[serde(skip)]
     pub slo_stale: Option<String>,
+    /// Where the exported observation history is read, when the member is configured with one.
+    #[serde(skip)]
+    pub slo_otel_url: Option<String>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
     #[serde(skip)]
@@ -179,6 +182,9 @@ pub struct Attention {
     /// Who is waiting, e.g. "Atlas Builder on harbor".
     pub waiting: Option<String>,
     pub age: String,
+    /// Exact opening time for chronological navigation, absent on an invalid server timestamp.
+    #[serde(skip)]
+    pub requested_at: Option<chrono::DateTime<chrono::FixedOffset>>,
     /// When an ask resolves by itself and what then applies, e.g. `answer within 3h, or “Hold”
     /// applies`. None on an item with no deadline.
     pub deadline: Option<String>,

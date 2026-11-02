@@ -160,3 +160,38 @@ the exact `NEVER_TRIMS` set is empty. The remote characterization used
 That run observed every seed trim; its sole failed assertion was v9's obsolete
 expectation that seed 3 never trims. The per-seed equality remains enforced.
 
+`claims-v11.json` captures the registry that adds the GitHub plugin's two compact kinds,
+`vcs.item.state` on `resource` subjects and `github.event` on the new `github-event` family
+(docs/st3/plugins.md). Versions 1 through 10 stay frozen. Generate v11 from the merged
+registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v11.json`;
+do not hand-edit or overwrite v10. The generator names `github-event` subjects explicitly;
+each draw takes a fresh event key, since `github.event` is written once per subject. The
+simulation selects v11 and records its filename in audit summaries.
+
+With v11 all 17 fixed seeds converge and trim (17/17 coverage), so the never-trim set stays
+empty. Characterization used
+`cargo test -p fractal --locked --test integration convergence:: -- --nocapture --test-threads=4`
+(26 passed, 189.5 s).
+
+Under corpus v11 a wide audit of seeds 1–300 failed 15 seeds in `resource_observations`
+(#4426). A rebuild of the resource projection, which a replay or a checkpoint proof runs, kept
+only subjects with a `resource.observed` claim. So an item that only `vcs.item.state` claims
+describe lost its row on whichever node rebuilt. With the rebuild fixed, all 300 seeds converge.
+The 15 seeds are now fixed regression seeds: 27, 74, 106, 121, 130, 133, 179, 209, 241, 246,
+277, 281, 291, 293 and 294. Each of them trims, so the never-trim set stays empty. The audit
+used
+`CONVERGENCE_START=1 CONVERGENCE_RUNS=300 CONVERGENCE_WORKERS=4 cargo nextest run -p fractal -E 'test(=convergence::fixed_sweep)' --run-ignored only`
+(1363 s); the 14 seeds of 1–300 that did not trim are not fixed seeds.
+
+`claims-v12.json` captures the registry that adds `fault.dismissed` (a person's or the fleet
+fault agent's dismissal of a fault whose run has ended), and the current `daemon.diagnostic`
+fields. Versions 1 through 11 stay frozen. Generate v12 from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v12.json`;
+do not hand-edit or overwrite v11. The simulation selects v12 and records its filename in audit
+summaries.
+
+With v12 every fixed seed converges. The new kind shifts the draws, so seeds 2, 34 and 106 no
+longer reach a checkpoint trim; they are the exact never-trim set, and every other fixed seed
+trims. Characterization used
+`cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.
