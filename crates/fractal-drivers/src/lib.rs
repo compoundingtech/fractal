@@ -57,7 +57,6 @@ pub mod eval_spec;
 pub mod event;
 pub mod exec_backend;
 pub mod expand;
-pub mod flapping;
 /// Private on purpose: every consumer is a sibling module in this crate, and the one site that
 /// deliberately keeps its own `flock` is documented in the module itself.
 mod flock;
@@ -99,7 +98,6 @@ pub mod reconcile;
 pub mod reexec;
 
 pub mod residency;
-pub mod residency_host;
 pub mod resource_observe;
 pub mod resource_profile;
 pub mod resource_profile_supervisor;
@@ -131,13 +129,8 @@ pub use agent_spec::spec::{
 pub use catalog_lock::CatalogLock;
 pub use exec_backend::ExecBackend;
 pub use expand::{expand_env, expand_vars};
-pub use flapping::FlappingCap;
 pub use host_lock::HostLock;
 pub use reconcile::{
     Launch, PtyPresentation, ReconcilePlan, Session, TaskLaunch, TaskTarget, Teardown, reconcile,
 };
-pub use run::{
-    PtyCli, Runner, SystemRunner, UpReport, detect_host, down, down_specs, exec_state_dir, execute,
-    up_loop, up_loop_specs, up_loop_with_residency, up_once, up_once_selected,
-    up_once_selected_specs, up_once_specs, up_once_with_residency,
-};
+pub use run::detect_host;
