@@ -9484,13 +9484,17 @@ fn roster_folds_outside_a_request_and_a_snapshot_read_faults_through_scheduling_
         let cut = store.index().unwrap();
         // Test folds call these directly, with no request budget and no pinned snapshot. A
         // pause past the 25 ms work allowance spends no query work: the card keeps its fault.
-        for name in ["cold", "cached", "exact"] {
+        for name in ["selected", "cold", "cached", "exact", "page", "chunk"] {
+            store.forget_current_views();
             Store::stall_next_card_fault_read_for_test(std::time::Duration::from_millis(60));
             let started = std::time::Instant::now();
             let cards = match name {
+                "selected" => client_agent_resources_selected(store, history, cut, None),
                 "cold" => client_agent_resources_uncached(store, history, cut),
                 "cached" => client_agent_resources_cached(store, history, cut),
-                _ => client_exact_agent_resources(store, history, cut, subject),
+                "exact" => client_exact_agent_resources(store, history, cut, subject),
+                _ => client_agent_cards_selected(store, history, cut,
+                    &BTreeSet::from([subject.to_owned()]), name == "chunk"),
             }.unwrap();
             assert!(started.elapsed() >= std::time::Duration::from_millis(60), "the {name} fold must read the stalled faults");
             let card = cards.iter().find(|card| card["id"] == subject).unwrap();
@@ -13934,6 +13938,92 @@ fn doctor_checks_after_the_total_is_spent_say_they_did_not_run() {
     });
     assert_eq!(ran.get(), 2, "a check after the total is spent does not run");
     assert_eq!((skipped[0].status.as_str(), skipped[0].message.as_str()), ("timeout", "not run: doctor's checks used all their time"));
+}
+
+#[test]
+fn doctor_checks_run_together_in_report_order_and_a_slow_one_costs_only_its_own_time() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let clock = DoctorClock::new(Duration::from_secs(5), Duration::from_millis(300));
+    let pass = |name: &str| DoctorCheck { name: name.into(), status: "pass".into(), message: String::new() };
+    let (running, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let mut checks = DoctorChecks::default();
+    checks.push(pass("first"));
+    for name in ["slow", "a", "b", "c", "d", "e"] {
+        let (running, peak) = (&running, &peak);
+        checks.check(name, move || {
+            peak.fetch_max(running.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(if name == "slow" { 600 } else { 150 }));
+            running.fetch_sub(1, Ordering::SeqCst);
+            Ok(vec![pass(name)])
+        });
+    }
+    // A check that can take the writer runs with nothing beside it, and keeps its place.
+    let alone_saw = AtomicUsize::new(usize::MAX);
+    {
+        let (running, alone_saw) = (&running, &alone_saw);
+        checks.check_alone("alone", move || {
+            alone_saw.store(running.load(Ordering::SeqCst), Ordering::SeqCst);
+            Ok(vec![pass("alone")])
+        });
+    }
+    checks.push(pass("last"));
+    let started = Instant::now();
+    let report = checks.run(&clock, &state.store.readers, 3);
+    let elapsed = started.elapsed();
+    let shown = report.iter().map(|check| (check.name.as_str(), check.status.as_str())).collect::<Vec<_>>();
+    assert_eq!(shown, [("first", "pass"), ("slow", "timeout"), ("a", "pass"), ("b", "pass"), ("c", "pass"),
+        ("d", "pass"), ("e", "pass"), ("alone", "pass"), ("last", "pass")]);
+    assert_eq!(alone_saw.load(Ordering::SeqCst), 0, "a check ran beside the one that runs alone");
+    let peak = peak.load(Ordering::SeqCst);
+    assert!((2..=3).contains(&peak), "{peak} checks ran at once");
+    // One after another they take 1.35 s. The peak above is the proof that they ran together.
+    assert!(elapsed < Duration::from_millis(1_350), "{elapsed:?}");
+}
+
+#[test]
+fn a_request_read_still_gets_a_reader_while_doctor_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let limit = 6;
+    let state = smallclaims::sqlite::with_read_limit_for_test(limit, || state(root.path()));
+    let workers = doctor_workers(limit);
+    assert_eq!((workers, doctor_workers(1), doctor_workers(32)), (2, 1, 4));
+    let clock = DoctorClock::new(Duration::from_secs(10), Duration::from_secs(10));
+    let release = std::sync::atomic::AtomicBool::new(false);
+    let (started, running) = std::sync::mpsc::channel();
+    let mut checks = DoctorChecks::default();
+    for name in ["one", "two", "three", "four"] {
+        let (release, started) = (&release, started.clone());
+        let store = &state.store;
+        checks.check(name, move || {
+            store.index().map_err(ApiError::internal)?;
+            started.send(()).unwrap();
+            while !release.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(vec![DoctorCheck { name: name.into(), status: "pass".into(), message: String::new() }])
+        });
+    }
+    std::thread::scope(|scope| {
+        let doctor = scope.spawn(|| checks.run(&clock, &state.store.readers, workers));
+        for _ in 0..workers {
+            running.recv_timeout(Duration::from_secs(5)).expect("doctor's checks did not start together");
+        }
+        // Doctor holds one reader past its caller's own: the rest of the limit is the requests'.
+        let mut admitted = Vec::new();
+        while let Some(permit) = state.store.readers.try_admit_read() {
+            admitted.push(permit);
+        }
+        assert_eq!(admitted.len(), limit - (workers - 1));
+        let permit = admitted.pop().unwrap();
+        let index = state.store.readers.request_read_with_permit(permit, || state.store.index()).unwrap().unwrap();
+        assert_eq!(index, state.store.index().unwrap());
+        drop(admitted);
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        let report = doctor.join().unwrap();
+        assert_eq!(report.iter().filter(|check| check.status == "pass").count(), 4);
+    });
 }
 
 #[tokio::test]
