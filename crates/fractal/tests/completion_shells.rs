@@ -57,12 +57,13 @@ async fn daemon(root: &Path) -> (PathBuf, tokio::task::JoinHandle<()>) {
 }
 
 fn st3() -> PathBuf {
-    test_bin!("fractal").to_path_buf()
+    test_bin!("fractal-unstamped").to_path_buf()
 }
 
 /// An operator environment: no seat identity, config and state under `root`, daemon at `socket`.
 fn environment(command: &mut Command, root: &Path, socket: &Path) {
     command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        .env_remove("FRACTAL_SUPPRESS_DEPRECATION")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
         .env_remove("COMPLETE")
@@ -155,6 +156,23 @@ fn run_shell(root: &Path, socket: &Path, shell: &Path, args: &[&str]) -> String 
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn alias_completion_callbacks_are_silent_without_warning_suppression() {
+    use std::os::unix::process::CommandExt;
+    let root = tempfile::tempdir().unwrap();
+    for name in ["st", "st3"] {
+        let mut command = Command::new(st3());
+        environment(&mut command, root.path(), &root.path().join("absent.sock"));
+        let output = command.arg0(name)
+            .env("COMPLETE", "fish")
+            .args(["--", name, "--he"])
+            .output().unwrap();
+        assert!(output.status.success(), "{name}: {output:?}");
+        assert!(output.stderr.is_empty(), "{name}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("--help"), "{name}: {output:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

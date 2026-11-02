@@ -4119,6 +4119,7 @@ async fn retention_quick_legacy_missing_receipt_is_explicitly_reconstructed() {
 fn retention_event_query(after: u64, owner: Option<&str>, limit: usize) -> EventQuery {
     EventQuery {
         after,
+        messages_after: None,
         subject: None,
         owner_run: owner.map(str::to_owned),
         wait: Some(false),
@@ -4778,6 +4779,7 @@ async fn an_event_wait_ignores_a_wake_without_a_matching_event() {
             State(waiter_state),
             Query(EventQuery {
                 after: 0,
+                messages_after: None,
                 subject: None,
                 owner_run: None,
                 wait: Some(true),
@@ -4817,6 +4819,95 @@ async fn an_event_wait_ignores_a_wake_without_a_matching_event() {
         .unwrap();
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0].kind, "custom.test.recorded");
+}
+
+/// A member that holds the messages stream says how far it has come, and a client that reads the
+/// stream beside the graph gets its message events in `stream_items`; one that does not ask gets
+/// the graph's page exactly as before. A stream item arriving wakes a waiter that asked for them.
+#[tokio::test]
+async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+    let health_of = |state: &AppState| {
+        let state = state.clone();
+        async move { health(State(state)).await.unwrap().0 }
+    };
+    assert!(health_of(&state).await.get("messages_store_index").is_none(), "no shard, no stream index");
+    crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    assert_eq!(health_of(&state).await["messages_store_index"], 0);
+    let query = |messages_after: Option<u64>, wait: bool| EventQuery {
+        after: state.store.index().unwrap(),
+        messages_after,
+        subject: None,
+        owner_run: None,
+        wait: Some(wait),
+        timeout_ms: Some(5_000),
+        limit: None,
+    };
+    let waiter_state = state.clone();
+    let waiting = query(Some(0), true);
+    let waiter = tokio::spawn(async move { events_page(State(waiter_state), Query(waiting)).await.unwrap().0 });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!waiter.is_finished());
+
+    let appended = replication::test_shard_append(
+        State(state.clone()),
+        Json(ClaimInput {
+            subject: "message/00000000000000b1".into(),
+            kind: "message.sent".into(),
+            actor: Some("agent/birch".into()),
+            fields: serde_json::from_value(json!({
+                "from": "agent/birch", "to": "agent/cedar", "content": "on the stream", "status": "sent"
+            }))
+            .unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let woke = tokio::time::timeout(Duration::from_secs(2), waiter)
+        .await
+        .expect("a stream item did not wake the waiter")
+        .unwrap();
+    let woke = serde_json::to_value(&woke).unwrap();
+    assert_eq!(woke["items"], json!([]), "the graph has no new event");
+    assert_eq!(woke["stream_items"][0]["subject"], "message/00000000000000b1");
+    assert_eq!(woke["stream_items"][0]["store_index"], appended.store_index);
+    assert_eq!(woke["messages_next_after"], appended.store_index);
+    assert_eq!(health_of(&state).await["messages_store_index"], appended.store_index);
+
+    let old = serde_json::to_value(&events_page(State(state.clone()), Query(query(None, false))).await.unwrap().0).unwrap();
+    assert!(old.get("stream_items").is_none() && old.get("messages_next_after").is_none());
+    let read = query(Some(appended.store_index), false);
+    let caught_up = serde_json::to_value(&events_page(State(state.clone()), Query(read)).await.unwrap().0).unwrap();
+    assert_eq!(caught_up["stream_items"], json!([]));
+    // The stream item's place in this member's graph order is recorded as it arrives.
+    assert_eq!(
+        crate::store::messages_shard::stream_reads::arrival(&state.store, "message/00000000000000b1").unwrap(),
+        Some(state.store.index().unwrap())
+    );
+}
+
+/// Items the shard admitted stay admitted when this member cannot record where they arrived:
+/// the waiters still wake, and the receive that brought them does not fail, so a peer never
+/// retries an exchange over a local recording.
+#[tokio::test]
+async fn a_stream_arrival_that_cannot_be_recorded_still_wakes_event_waiters() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+    let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    shard.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h26f127af3754 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE stream_arrivals").unwrap();
+    assert!(crate::store::messages_shard::stream_reads::record_arrivals(&state.store).is_err());
+    let mut events = state.event_notify.subscribe();
+    let before = *events.borrow_and_update();
+    replication::stream_admitted(&state).await;
+    assert!(events.has_changed().unwrap(), "a failed recording skipped the wake");
+    assert_eq!(*events.borrow(), before + 1);
 }
 
 #[test]
@@ -13901,4 +13992,31 @@ mission "ended-restart" state="ready" {
     assert_eq!(refused["code"], "restart-run-ended", "{refused}");
     let message = refused["message"].as_str().unwrap();
     assert!(message.contains(&run.subject) && message.contains("(cancelled)"), "{message}");
+}
+
+#[tokio::test]
+async fn a_restart_that_ignores_a_lanes_fit_needs_a_reason_and_records_who_asked() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example/operations\" { workspace \"/tmp\"; command \"true\"; capacity cores=2 memory=\"4G\" }";
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    state.store.apply(&intent, &planned.subject_tokens, "ignore-fit-seat").unwrap();
+    let (status, refused) = json_request(router(state.clone()), "/v1/agents/restart", json!({
+        "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "no-reason", "ignore_fit": true
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "restart-ignore-fit-reason", "{refused}");
+    let (status, claim) = json_request(router(state.clone()), "/v1/agents/restart", json!({
+        "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "with-reason",
+        "ignore_fit": true, "reason": "  the measurement is stale  "
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert_eq!(claim["actor"], "person/avery");
+    assert_eq!(claim["body"]["fields"]["ignore_fit"], true);
+    assert_eq!(claim["body"]["fields"]["reason"], "the measurement is stale");
+    let (_, plain) = json_request(router(state), "/v1/agents/restart", json!({
+        "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "plain"
+    })).await;
+    assert!(plain["body"]["fields"].get("ignore_fit").is_none(), "{plain}");
 }

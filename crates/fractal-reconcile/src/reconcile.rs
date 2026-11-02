@@ -63,6 +63,7 @@ pub mod start_spacing;
 pub mod start_jobs;
 pub mod seat_admission;
 mod seat_admission_queue;
+mod step_lanes;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
@@ -597,6 +598,19 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane, and a seat
     /// without one has nothing to end.
     fn end_lane(&self, _runtime_id: &str) {}
+    /// Sets a live seat's lane to `capacity`, for the steps it holds (docs/st3/seat-lanes.md).
+    /// False when the seat has no lane here to change.
+    fn resize_lane(&self, _runtime_id: &str, _capacity: fractal_runtime::Capacity) -> Result<bool> {
+        Ok(false)
+    }
+    /// What a seat's lane holds that cannot be reclaimed, or `None` without a lane to read.
+    fn lane_held_memory(&self, _runtime_id: &str) -> Option<u64> {
+        None
+    }
+    /// The lane a seat's slice is set to now, or `None` without a lane to read.
+    fn live_lane(&self, _runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+        None
+    }
 }
 
 pub struct NativeRuntime {
@@ -967,6 +981,18 @@ impl RuntimeControl for NativeRuntime {
 
     fn end_lane(&self, runtime_id: &str) {
         fractal_runtime::end_lane(runtime_id);
+    }
+
+    fn resize_lane(&self, runtime_id: &str, capacity: fractal_runtime::Capacity) -> Result<bool> {
+        fractal_runtime::resize_lane(capacity, runtime_id)
+    }
+
+    fn lane_held_memory(&self, runtime_id: &str) -> Option<u64> {
+        fractal_runtime::lane_held_memory(runtime_id)
+    }
+
+    fn live_lane(&self, runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+        fractal_runtime::live_lane(runtime_id)
     }
 }
 
@@ -1647,8 +1673,22 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Whether this host caps a seat that declares `capacity` in its lane (`lanes` in the
     /// install config). Applies to launches after this call.
-    pub fn with_lanes(self, enforced: bool) -> Self {
+    pub fn with_lanes(mut self, enforced: bool) -> Self {
         fractal_runtime::set_lanes_enforced(enforced);
+        self.seat_admission.lanes = enforced
+            .then(fractal_runtime::host::size)
+            .flatten()
+            .map(|size| seat_admission::LaneHost {
+                room: fractal_runtime::host::for_lanes(size),
+                outside: fractal_runtime::host::unlaned_seat_memory,
+            });
+        self
+    }
+
+    /// Admission by fit against a host of the test's choosing, without the process-wide switch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_lane_host(mut self, lanes: Option<seat_admission::LaneHost>) -> Self {
+        self.seat_admission.lanes = lanes;
         self
     }
 
@@ -5849,6 +5889,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         // forgetting it would replay attempt 1 and notify this reconciler forever.
         let messages = self.store.work_wake_messages_for_reconcile(agent)?;
         let work = self.store.work_for_reconcile(agent)?;
+        if let Some(member) = member {
+            self.hold_step_lanes(agent, incarnation, member, &work)?;
+        }
         let harness = self.store.current_harness(agent)?;
         // When this host last heard the seat: an unchanged working re-stamp stays in its local log.
         let heard_at = match &harness {
@@ -10901,6 +10944,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .blocked_reason
                             .as_deref()
                             .is_some_and(|reason| reason.starts_with("step baseline `"));
+                    // Waiting for room for the lane the step raises its seat to: tried again until
+                    // it fits.
+                    let lane_blocked = view.status == "blocked"
+                        && view.blocked_reason.as_deref().is_some_and(|reason| reason.starts_with("step lane "));
                     // A blocked step that names no blocker, holds no claim and waits on no ask
                     // is a lost reason, for example a revision that carried it without one.
                     // Nothing else will move it, so recompute it like a pending step.
@@ -10925,6 +10972,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if view.status == "pending"
                         || assignment_blocked
                         || baseline_blocked
+                        || lane_blocked
                         || ready_missing_agent
                     {
                         if view
@@ -11014,6 +11062,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     "no eligible agent is present in the desired graph: {eligible}"
                                 )),
                             )?;
+                            return Ok(changed);
+                        }
+                        // A step that raises its seat's lane is delivered only once the raised lane
+                        // fits this host (docs/st3/seat-lanes.md).
+                        if let Some(reason) = self.step_lane_wait(step.spec.capacity, view.assigned_to.as_deref())? {
+                            changed |= self.store.set_step_state(&view.subject, "blocked", Some(&reason))?;
                             return Ok(changed);
                         }
                         // Save readiness before diagnostic writes. A diagnostic failure must not
@@ -17373,6 +17427,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     Err(error) => {
+                        let error = if let Some(checkpoint) = error.downcast_ref::<crate::resource::BudgetContinuation>() {
+                            match github_plugin.set_cursor(&observer_subject, &spec.resource, checkpoint.0.as_deref()) {
+                                Ok(()) => {
+                                    let next = checkpoint.0.clone();
+                                    kept_cursor = Some(next.clone());
+                                    completed_cursor = Some(next);
+                                    error
+                                }
+                                Err(persistence) => error.context(format!("could not keep GitHub poll continuation: {persistence:#}")),
+                            }
+                        } else {
+                            error
+                        };
                         let refusal_deadline = error.downcast_ref::<ProviderRateLimit>()
                             .map(|limit| limit.retry_at_unix_ms)
                             .or_else(|| error.downcast_ref::<LocalObserverBudget>()
@@ -18846,6 +18913,8 @@ fn mirror_observation(
     cursor: Option<&str>,
     recorded: &[crate::model::RecordedItem],
 ) {
+    let completed = crate::resource::completed_poll_cursor(polled_from);
+    let polled_from = completed.as_deref();
     let items = recorded
         .iter()
         .filter_map(|recorded| {
@@ -18913,6 +18982,8 @@ fn mirrored_prior(
     facts: &Value,
     polled_from: Option<&str>,
 ) -> Option<crate::model::MirroredPrior> {
+    let completed = crate::resource::completed_poll_cursor(polled_from);
+    let polled_from = completed.as_deref();
     let read = || -> Result<Option<crate::model::MirroredPrior>> {
         // Only a mirror that followed every look up to the one this look starts from knows at
         // least what the graph does.
@@ -20603,6 +20674,8 @@ pub mod tests {
     mod schedule_standby_parent;
     pub mod mission_eval_reuse;
     mod mission_capacity_tests;
+    mod lane_admission_tests;
+    mod step_lane_tests;
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;
@@ -21039,6 +21112,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         keys_before_error: Mutex<Option<usize>>,
         leftovers: Mutex<Vec<(String, bool)>>,
         lanes_ended: Mutex<Vec<String>>,
+        pub lanes_resized: Mutex<Vec<(String, fractal_runtime::Capacity)>>,
+        pub lane_held: Mutex<Option<u64>>,
+        pub lane_live: Mutex<Option<fractal_runtime::Capacity>>,
     }
 
     #[test]
@@ -21361,6 +21437,16 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
         fn end_lane(&self, runtime_id: &str) {
             self.lanes_ended.lock().unwrap().push(runtime_id.into());
+        }
+        fn resize_lane(&self, runtime_id: &str, capacity: fractal_runtime::Capacity) -> Result<bool> {
+            self.lanes_resized.lock().unwrap().push((runtime_id.into(), capacity));
+            Ok(true)
+        }
+        fn lane_held_memory(&self, _runtime_id: &str) -> Option<u64> {
+            *self.lane_held.lock().unwrap()
+        }
+        fn live_lane(&self, _runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+            *self.lane_live.lock().unwrap()
         }
     }
 
@@ -41547,7 +41633,11 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         // keyed event, and neither writes a snapshot.
         let snapshots = count("resource.observed");
         let states = count("vcs.item.state");
+        // A suspended poll keeps the completed mirror position inside its private cursor.
+        let checkpoint = serde_json::json!({"poll_started_ms": 1, "cursor": "c3"}).to_string();
+        plugin.set_cursor("observer/repo", "resource/repo", Some(&checkpoint)).unwrap();
         poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4").await;
+        assert!(plugin.filled("resource/repo").unwrap(), "a resumed poll keeps mirror continuity");
         assert_eq!(count("resource.observed"), snapshots, "a compact-only change writes no snapshot");
         assert_eq!(count("vcs.item.state"), states + 1);
         assert_eq!(store.latest_actual_value(item).unwrap().unwrap()["facts"]["state"], "closed");

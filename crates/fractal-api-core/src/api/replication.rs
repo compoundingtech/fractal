@@ -534,6 +534,28 @@ pub async fn shard_replication_export(
     .await
 }
 
+/// After the messages shard admitted items: note where in this member's graph order they arrived,
+/// for the timeline, and wake every event waiter, such as `conversations wait`, that reads the
+/// stream beside the graph. The items are admitted already, so a recording that fails is logged
+/// and the waiters still wake: the next conversation read records what it finds unrecorded, and
+/// the peer does not retry an exchange this member holds.
+pub(crate) async fn stream_admitted(state: &AppState) {
+    let graph = state.store.clone();
+    let recorded = blocking_store(move || {
+        crate::store::messages_shard::stream_reads::record_arrivals(&graph).map(|_| ())
+    })
+    .await;
+    if let Err(error) = recorded {
+        eprintln!(
+            "st3: messages stream: recording where admitted items arrived failed; the next conversation read records them: {}",
+            error.message
+        );
+    }
+    state
+        .event_notify
+        .send_modify(|generation| *generation = generation.saturating_add(1));
+}
+
 /// Receive a peer's shard exchange, then admit and project what it brought. A shard carries
 /// no transport observations or sync notices: those describe the graph's exchanges.
 pub async fn shard_replication_receive(
@@ -566,9 +588,7 @@ pub async fn shard_replication_receive(
     })
     .await?;
     if response.changed {
-        state
-            .event_notify
-            .send_modify(|generation| *generation = generation.saturating_add(1));
+        stream_admitted(&state).await;
     }
     Ok(Json(response))
 }
@@ -602,9 +622,7 @@ pub async fn shard_replication_wake(
     })
     .await?;
     if changed {
-        state
-            .event_notify
-            .send_modify(|generation| *generation = generation.saturating_add(1));
+        stream_admitted(&state).await;
     }
     Ok(Json(json!({ "changed": changed })))
 }
@@ -619,6 +637,7 @@ pub async fn test_shard_append(
     let claim = blocking_action(move || store.append_claim(&input)).await?;
     // The dialers wake on the graph's replication file, as they do for a graph write.
     let _ = std::fs::write(state.state_dir.join("replication.wake"), b"messages-shard\n");
+    stream_admitted(&state).await;
     Ok(Json(claim))
 }
 
