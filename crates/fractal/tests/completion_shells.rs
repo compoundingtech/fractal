@@ -57,7 +57,7 @@ async fn daemon(root: &Path) -> (PathBuf, tokio::task::JoinHandle<()>) {
 }
 
 fn st3() -> PathBuf {
-    test_bin!("fractal").to_path_buf()
+    test_bin!("fractal-unstamped").to_path_buf()
 }
 
 /// An operator environment: no seat identity, config and state under `root`, daemon at `socket`.
