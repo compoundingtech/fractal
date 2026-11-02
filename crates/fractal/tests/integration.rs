@@ -101,6 +101,7 @@ mod operation_audit_perf;
 mod operational_state_contract;
 mod otel_export;
 mod owned_sets;
+mod pinned_pty;
 mod placement_handoff;
 mod private_notes;
 mod private_notes_restart;

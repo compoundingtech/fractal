@@ -68,7 +68,8 @@ class CiLocal(unittest.TestCase):
                'GH_TOKEN': 'secret', 'GITHUB_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x', 'EVIDENCE_PUSH_TOKEN': 'secret',
                'SEKRETS_PROFILE': 'p', 'XDG_STATE_HOME': str(self.home / '.local/state'),
                'ST2_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite', 'FRACTAL_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite',
-               'ST3_OTELITE_BIN': '/nix/store/../escape/bin/otelite', 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), **extra}
+               'ST3_OTELITE_BIN': '/nix/store/../escape/bin/otelite', 'FRACTAL_PINNED_PTY_BIN': '/nix/store/x-pty/bin/pty',
+               'CI_LOCAL_TMP_ROOT': str(self.tmp_root), **extra}
         self.last_env = env
         done = subprocess.run(['bash', f'scripts/{entry}', *stages], cwd=self.work, env=env, capture_output=True, text=True,
                               preexec_fn=lambda: os.umask(self.umask))
@@ -157,6 +158,8 @@ class CiLocal(unittest.TestCase):
                 self.assertNotIn(name, env)
             # The dev shell's collector for the OTLP export tests stays, as in CI; the same name pointing anywhere else does not.
             self.assertEqual((env.get('ST2_OTELITE_BIN'), env.get('FRACTAL_OTELITE_BIN')), ('/nix/store/x-otelite/bin/otelite',) * 2)
+            # So does the pinned pty: without it pinned_pty.rs would test whatever pty comes first on the host's PATH.
+            self.assertEqual(env.get('FRACTAL_PINNED_PTY_BIN'), '/nix/store/x-pty/bin/pty')
             # Kept: the dependency cache, the build admission's runtime directory, and the saved dev shell environment.
             # CARGO_REAL is the dev shell's cargo: not the shim first on PATH, not the cargo in the account's home.
             self.assertEqual((env['CARGO_HOME'], env['RUSTUP_HOME'], env['CARGO_REAL'], env['XDG_RUNTIME_DIR']),
