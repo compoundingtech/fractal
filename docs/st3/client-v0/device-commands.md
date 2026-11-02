@@ -1,8 +1,9 @@
 # Foreground phone commands
 
 A device command is one typed, expiring request to a paired phone's foreground instance.
-It is not a durable action, background job, push notification, or replay queue. This contract
-adds the daemon/client boundary; a phone must implement the handlers before it can execute commands.
+It is not a durable action, background job, push notification, or replay queue. The iOS app
+probes the capability, follows commands on its existing foreground socket, and runs its real
+navigation and mark-read handlers. Results retry independently; handlers never replay on reconnect.
 
 ## Commands and responses
 
@@ -118,7 +119,9 @@ The daemon clock alone adjudicates expiry. A phone result admitted strictly befo
 wins. At or after the deadline, the daemon derives `not-foreground` when there is no open
 collections stream for the addressed `session_actor`, or `expired` otherwise. Phone clocks and
 client timestamps do not extend that deadline. A late report cannot replace the terminal decision;
-repeated reports cannot overwrite an already accepted outcome.
+repeated reports cannot overwrite an already accepted outcome. The app estimates remaining
+lifetime from the frame's daemon snapshot time and monotonic elapsed time, not its wall clock.
+Backgrounding cancels pending execution/report retries.
 
 Commands live only in memory on the phone pairing's issuing member. They are never claims,
 replicated records, persistent receipts, event replay, or restart recovery. Terminal outcomes remain

@@ -39,6 +39,10 @@ import { DiagnosticsConnection } from './DiagnosticsConnection';
 import { recordDiagnosticCapabilities } from './diagnostics';
 import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
+import { PhoneCommands, phoneCommandsGranted, type PhoneBindings } from './phoneCommands';
+import { markMessageRead } from './messageRead';
+import { navigatePhone } from './phoneNavigation';
+import { navigationRef } from './navigation';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -467,6 +471,20 @@ function useAppStore(proof?: FabricProfile) {
     return watchSync(async () => (await client.attentionList({ limit: 1 })).value.sync ?? null, (value, stale) => { setSync(value); setSyncStale(stale); });
   }, [client, status]);
 
+  const bindings: PhoneBindings = {
+    foreground: () => foreground.current.active,
+    online: () => status === 'online',
+    inspect: () => ({
+      route: navigationRef.getCurrentRoute()?.name ?? null,
+      tab: navigationRef.getRootState()?.routes[navigationRef.getRootState()?.index ?? 0]?.name ?? null,
+      connection: { status, route: routeLabel(routeRef.current) }, foreground: foreground.current.active,
+      session_actor: caps?.session_actor, windows: { attention: data.attention.length, missions: data.missions.length, agents: data.agents.length },
+    }),
+    navigate: navigatePhone,
+    markRead: async id => { const item = data.attention.find(row => row.id === id && row.actions.includes('message.read')); return item ? markRead(item, true) : false; },
+  };
+  const commandBindings = useRef(bindings); commandBindings.current = bindings;
+  useEffect(() => { feed?.setCommandsGranted(capsClient.current === client && phoneCommandsGranted(caps)); }, [feed, caps, client]);
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
   // current. It closes in the background and opens fresh, snapshots first, in the foreground.
   useEffect(() => {
@@ -475,9 +493,11 @@ function useAppStore(proof?: FabricProfile) {
     let active = true;
     let connection = 0;
     const current = () => active && generation === cacheGeneration.current;
+    const commands = new PhoneCommands(client, () => commandBindings.current);
     attentionLive.current = false;
     if (!proofRef.current && timers.current.connect === null) timers.current.connect = observations.begin('ios-connect');
     const opened = new Feed(client, {
+      onCommands: (rows, at, received) => { if (current()) void commands.receive(rows, at, received); },
       onWindow: (name, rows, hasMore, at, received) => {
         if (!current()) return;
         if (at?.id) lastSnapshot.current = at.id;
@@ -536,7 +556,7 @@ function useAppStore(proof?: FabricProfile) {
     // Paired: connecting from here on, even while the app waits to be active before it dials.
     setStatus(previous => previous === 'setup' ? 'connecting' : previous);
     setFeed(opened);
-    return () => { active = false; opened.close(); setFeed(held => held === opened ? null : held); };
+    return () => { active = false; commands.close(); opened.close(); setFeed(held => held === opened ? null : held); };
   }, [client, credential, loadCapabilities, observations, carrier]);
   // No client yet: either nothing is paired, fabric is opening, or neither route can be used.
   useEffect(() => {
@@ -666,10 +686,14 @@ function useAppStore(proof?: FabricProfile) {
    * Run an action, trying again (with a fresh fence each time) while Fractal refused it only because it
    * raced a busy store, as `retryable` says.
    */
-  async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = [], retryable: (error: unknown) => boolean = notApplied): Promise<boolean> {
+  async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = [], retryable: (error: unknown) => boolean = notApplied, reportFailure = false): Promise<boolean> {
     if (status !== 'online' || (proof && !proof.ready)) { setError('Still connecting; try again in a moment.'); return false; }
     setBusy(true);
-    try { await retryTransient(8, action, retryable); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
+    try { await retryTransient(8, action, retryable); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); if (reportFailure) throw e; return false; } finally { setBusy(false); }
+  }
+  async function markRead(item: Attention, reportFailure = false): Promise<boolean> {
+    if (!client) return false;
+    return runAction(() => markMessageRead(client, item, acted.current, actionId), [], () => false, reportFailure);
   }
 
   /**
@@ -942,11 +966,7 @@ function useAppStore(proof?: FabricProfile) {
       setData(previous => ({ ...previous, attention: previous.attention.filter(item => item.id !== id) }));
     },
     /** Mark a message read from Home: it leaves the person's attention. */
-    async markRead(item: Attention) {
-      if (!client) return false;
-      acted.current.add(item.id);
-      return runAction(async () => { const id = actionId(); return client.messageRead({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: item.source_id } }); });
-    },
+    markRead,
     /**
      * Answer a native prompt from its alert with one of the answers it offers: a question's
      * `answer` sends `sent`, its choices (see `questionAnswer`). Only the prompt still waiting is

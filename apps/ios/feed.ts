@@ -4,6 +4,7 @@ import { InventoryFeed, type InventoryHandlers } from './inventoryFeed';
 import type { SidebarArrangement } from './sidebarEdits';
 import type { HeartbeatSocketFactory } from './collectionSocket';
 import type { ConversationHeader, HeaderField } from '@fractal/views';
+import type { DeviceCommand } from '../../clients/typescript/fractal-client';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type Foreground, type TerminalFollowHandlers } from './terminalControls';
 
 // The app holds three windows on one collections socket. It needs no work window: missions carry
@@ -26,6 +27,7 @@ export type FeedHandlers = {
   onConnection: (state: 'connecting' | 'live' | 'reconnecting', issue?: string) => void;
   /** The server refused a window; the others keep going. */
   onWindowError?: (name: FeedWindow, message: string) => void;
+  onCommands?: (commands: DeviceCommand[], snapshot: Snapshot, received: number) => void;
   /** A window left on purpose (`setMissions(false)`): what was held for it is out of date. */
   onWindowStopped?: (name: FeedWindow) => void;
   /** Development measurement hook; never carries transcript content or a target. */
@@ -116,6 +118,7 @@ export class Feed {
   private conversation: { target: string; handlers: ConversationHandlers; failures: number; timer?: ReturnType<typeof setTimeout> } | undefined;
   private glasses: { handlers: GlassesHandlers; window?: CollectionWindow } | undefined;
   private arrangements: { person: string; handlers: ArrangementsHandlers; window?: CollectionWindow } | undefined;
+  private commands: { granted: boolean; window?: CollectionWindow } = { granted: false };
   /** Windows (and the glasses) Fractal stopped sending: how often they failed, and the timer to ask again. */
   private retries: Partial<Record<FeedWindow | typeof GLASSES | typeof ARRANGEMENTS, { failures: number; timer?: ReturnType<typeof setTimeout> }>> = {};
   // A reason Fractal gave for a window it cannot serve yet, said only once it has lasted a moment: a write
@@ -248,6 +251,12 @@ export class Feed {
   }
 
   setInventoryGranted(granted: boolean): void { this.inventory.setGranted(granted); }
+  setCommandsGranted(granted: boolean): void {
+    if (this.commands.granted === granted) return;
+    this.commands = { granted };
+    if (granted) this.stream?.subscribe('commands', 'commands', 8);
+    else this.stream?.unsubscribe('commands');
+  }
   watchInventory<K extends InventoryName>(name: K, handlers: InventoryHandlers<K>, hours?: 24 | 168 | 720): () => void {
     return this.inventory.watch(name, handlers, hours);
   }
@@ -280,6 +289,7 @@ export class Feed {
   private async connect(): Promise<void> {
     this.suspend();
     this.inventory.setGranted(false);
+    this.commands = { granted: false };
     const current = this.attempt;
     const stale = () => this.closed || current !== this.attempt;
     this.handlers.onConnection(this.failures ? 'reconnecting' : 'connecting');
@@ -366,6 +376,14 @@ export class Feed {
     if (this.inventory.frame(frame)) return;
     const id = 'id' in frame ? frame.id : undefined;
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') return;
+    if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === 'commands') {
+      if (!this.commands.granted || frame.collection !== 'commands') return;
+      const next = applyWindow(this.commands.window, frame);
+      if (!next) { this.commands.window = undefined; this.stream?.subscribe('commands', 'commands', 8); return; }
+      this.commands.window = next;
+      this.handlers.onCommands?.(next.items.filter((item): item is DeviceCommand => item.kind === 'device-command'), next.snapshot, received);
+      return;
+    }
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === ARRANGEMENTS) {
       const follow = this.arrangements;
       if (!follow) return;
