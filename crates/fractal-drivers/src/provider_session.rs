@@ -33,6 +33,12 @@ pub fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }
 
+/// Stop the provider as a stop signal would: its wrapper ends the child, records the end and
+/// returns. A driver that can no longer serve its provider asks for this.
+pub fn request_stop() {
+    STOP.store(true, Ordering::SeqCst);
+}
+
 /// Set by a driver that is about to re-execute itself into a replaced st binary. Every wrapper
 /// loop that sees it returns [`Detached`] with what the next image needs to adopt its provider,
 /// and leaves the provider, its terminal, and its observed record exactly as they are.
