@@ -23,3 +23,8 @@ tempfile = "3"
 [[bin]]
 name = "fractal-fabric-adapter"
 path = "src/main.rs"
+
+# Keep the existing Nix package buildable until its package-name cutover.
+[[bin]]
+name = "st-fabric-adapter"
+path = "src/main.rs"

@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Publish the Fabric adapter as fractal-fabric-adapter with an old-name package and executable bridge",
+  "summary": "Add the fractal-fabric-adapter Cargo binary while preserving the existing Nix adapter package",
   "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
   "schema": {"status": "none", "detail": "No schema or stored-state changes."},
   "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
-  "compatibility": {"status": "changed", "detail": "The primary Nix output and Cargo binary are fractal-fabric-adapter. For one release, packages.st-fabric-adapter refers to the same package and bin/st-fabric-adapter is a relative symlink to bin/fractal-fabric-adapter. Discovery accepts both names, preferring the new name within each searched directory."},
+  "compatibility": {"status": "changed", "detail": "Cargo accepts both fractal-fabric-adapter and st-fabric-adapter binary targets from the same implementation. The existing Nix package still builds and ships st-fabric-adapter. Discovery accepts both names, preferring the new name within each searched directory."},
   "downtime": {"status": "none", "detail": "No service, host or runtime changes."},
-  "manual": {"status": "none", "detail": "Existing Nix consumers can keep using the old package attribute and binary path during the bridge. Cargo users select --bin fractal-fabric-adapter."},
+  "manual": {"status": "none", "detail": "Cargo users can select --bin fractal-fabric-adapter; existing Nix consumers keep their package attribute and executable path."},
   "recovery": {"status": "none", "detail": "Identity, adapter journals and state paths are unchanged."}
 }

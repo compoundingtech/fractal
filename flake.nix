@@ -739,23 +739,19 @@
           };
         };
 
-        fractalFabricAdapter = pkgs.rustPlatform.buildRustPackage {
-          pname = "fractal-fabric-adapter";
+        stFabricAdapter = pkgs.rustPlatform.buildRustPackage {
+          pname = "st-fabric-adapter";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "fractal-fabric-adapter" "--bin" "fractal-fabric-adapter" ];
+          cargoBuildFlags = [ "-p" "fractal-fabric-adapter" "--bin" "st-fabric-adapter" ];
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
-          # One-release bridge for pinned consumers of the old package and binary.
-          postInstall = ''
-            ln -s fractal-fabric-adapter "$out/bin/st-fabric-adapter"
-          '';
           meta = {
             description = "External Fractal fleet to Fabric runtime-peers adapter";
             homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
-            mainProgram = "fractal-fabric-adapter";
+            mainProgram = "st-fabric-adapter";
           };
         };
 
@@ -1108,8 +1104,7 @@
         packages.fractal-web = fractalWeb;
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
-        packages.fractal-fabric-adapter = fractalFabricAdapter;
-        packages.st-fabric-adapter = fractalFabricAdapter;
+        packages.st-fabric-adapter = stFabricAdapter;
         # Isolated bootstrap/live proofs use the exact pairing API revision.
         packages.fabric-pairing = fabric.packages.${system}.default;
         packages.st3-migrate = st3;
