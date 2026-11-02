@@ -2,6 +2,7 @@
 // terminal edges against a recorder standing in for the Rust channel. This catches both runtime
 // defects a type-only gate cannot see and wire-contract regressions between the two languages.
 import assert from "node:assert";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1301,6 +1302,137 @@ assert.strictEqual(durable.compaction.count, 1, "the count is getEntries() filte
 // Unlike pi, omp still answers inside its own compact handler, so a real reading rides the edge.
 assert.strictEqual(durable.reading.usedTokens, 22500, "omp does not null its reading at the edge");
 
+// O1a is daemon-only and opt-in; legacy human-blocked state remains independent.
+if (process.argv[2]?.includes("st-omp-channel")) {
+  const questionFrames = () => readFrames().filter(frame =>
+    frame.type === "question.open" || frame.type === "question.closed");
+  await handlers.get("tool_execution_start")({ toolName: "ask", toolCallId: "off-valid-ask",
+    args: { questions: [{ id: "valid", question: "Disabled observation", options: [] }] } }, bareCtx);
+  await handlers.get("tool_result")({ toolCallId: "off-valid-ask" }, bareCtx);
+  assert.deepStrictEqual(questionFrames(), [], "default-off emits no question frames");
+  assert.strictEqual(globalThis.__stOmpChannel.questions, undefined, "default-off allocates no question state");
+  delete globalThis.__stOmpChannel;
+  process.env.ST_OMP_CHANNEL_BIN = recorder;
+  process.env.ST_OMP_CHANNEL_IDENTITY = "smoke.worker";
+  process.env.ST_OMP_CHANNEL_RUNTIME_ID = "smoke.worker";
+  process.env.ST_OMP_CHANNEL_SESSION = "smoke-session";
+  process.env.ST_OMP_CHANNEL_SEQ = "1";
+  process.env.ST_OMP_WEB_ANSWERS = "1";
+  const askHandlers = new Map();
+  mod.default({ ...pi, on: (name, handler) => askHandlers.set(name, handler) });
+  assert.strictEqual(process.env.ST_OMP_WEB_ANSWERS, undefined, "flag is stashed before environment cleanup");
+  assert.ok(globalThis.__stOmpChannel.webAnswers);
+  const invoke = (name, event, ctx = bareCtx) => askHandlers.get(name)(event, ctx);
+  const question = (id = "private-question-id") => ({
+    id, question: "PRIVATE-QUESTION-CANARY", options: [
+      { label: "PRIVATE-LABEL-CANARY", description: "PRIVATE-DESCRIPTION-CANARY" },
+    ],
+  });
+  const call = (toolCallId, questions = [question()]) => ({
+    toolName: "ask", toolCallId, args: { questions },
+  });
+  const digest = value => `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+  await invoke("session_start", {});
+  const rawId = "private-call-id-\u00e9";
+  await invoke("tool_call", { toolName: "ask", toolCallId: rawId,
+    input: { questions: [question("pre-execution")] } });
+  await pause(50);
+  assert.deepStrictEqual(questionFrames(), [], "pre-execution tool_call cannot freeze an open");
+  await invoke("tool_execution_start", call(rawId, [
+    question("native-id-not-q0"),
+    { ...question("native-id-not-q1"), multi: true, options: [] },
+  ]));
+  await pause(50);
+  const opened = questionFrames().at(-1);
+  assert.deepStrictEqual(opened, {
+    type: "question.open", native_id: digest(rawId), session: "session-smoke",
+    questions: [
+      { id: "q0", options: 1, multi: false, required: true },
+      { id: "q1", options: 0, multi: true, required: false },
+    ],
+  });
+  await invoke("tool_execution_start", call(rawId));
+  await invoke("tool_result", { toolCallId: "unobserved", isError: true });
+  await pause(50);
+  assert.strictEqual(questionFrames().length, 1, "duplicate call and unrelated result emit nothing");
+  await invoke("tool_result", {
+    toolCallId: rawId, details: { customInput: "PRIVATE-ANSWER-CANARY", note: "PRIVATE-NOTE-CANARY" },
+  });
+  await invoke("tool_execution_end", { toolCallId: rawId, result: { details: { timedOut: true } } });
+  await pause(50);
+  assert.deepStrictEqual(questionFrames().at(-1), {
+    type: "question.closed", native_id: digest(rawId), session: "session-smoke", status: "answered_elsewhere",
+  });
+  assert.strictEqual(questionFrames().length, 2, "execution-end does not duplicate or change a close");
+  for (const [id, result, status] of [
+    ["timeout-single", { details: { timedOut: true } }, "expired"],
+    ["timeout-multi", { result: { details: { results: [{ timedOut: false }, { timedOut: true }] } } }, "expired"],
+    ["native-cancel", { isError: true, details: { timedOut: true } }, "cancelled"],
+    ["nested-error", { result: { isError: true } }, "cancelled"],
+    ["chat", { details: { chatRedirect: true, questions: ["PRIVATE-CHAT-CANARY"] } }, "answered_elsewhere"],
+  ]) {
+    await invoke("tool_execution_start", call(id));
+    await invoke("tool_result", { toolCallId: id, ...result });
+    await pause(50);
+    assert.strictEqual(questionFrames().at(-1).status, status, id);
+  }
+  const beforeInvalid = questionFrames().length;
+  let invalidIndex = 0;
+  for (const invalid of [
+    [], Array.from({ length: 17 }, (_, index) => question(`id${index}`)),
+    [{ ...question(), options: Array.from({ length: 65 }, () => ({ label: "option" })) }],
+    [{ ...question(), options: ["not-native-option-shape"] }],
+    [{ ...question(), multi: "true" }], [{ question: "missing-id", options: [] }],
+    [question("duplicate"), question("duplicate")],
+  ]) await invoke("tool_execution_start", call(`invalid-${invalidIndex++}`, invalid));
+  await pause(50);
+  assert.strictEqual(questionFrames().length, beforeInvalid, "malformed/out-of-bound descriptors are withheld");
+  await invoke("tool_execution_start", call("maximum", Array.from({ length: 16 }, (_, index) => ({
+    ...question(`id${index}`),
+    options: Array.from({ length: 64 }, (_, option) => ({ label: `option${option}` })),
+  }))));
+  await pause(50);
+  assert.strictEqual(questionFrames().at(-1).questions[15].id, "q15");
+  assert.strictEqual(questionFrames().at(-1).questions[15].options, 64);
+  const retained = questionFrames();
+  const reconnectStart = readFrames().length;
+  process.kill(globalThis.__stOmpChannel.child.pid, "SIGKILL");
+  await pause(1200);
+  assert.deepStrictEqual(questionFrames().slice(retained.length), retained, "reconnect replays identical opens and closes");
+  const replay = readFrames().slice(reconnectStart);
+  assert.ok(replay.findIndex(frame => frame.type === "ready") <
+    replay.findIndex(frame => frame.type === "question.open"), "ready handshake precedes replay");
+  const beforeReplacement = questionFrames().length;
+  // New extension instance, same native session: preserve the process stash.
+  mod.default({ ...pi, on: (name, handler) => askHandlers.set(name, handler) });
+  await invoke("session_start", {});
+  await pause(50);
+  assert.deepStrictEqual(questionFrames().slice(beforeReplacement), retained, "channel replacement preserves observations");
+  const nextCtx = { ...bareCtx, sessionManager: { getSessionId: () => "next-session" } };
+  const beforeSwitch = questionFrames().length;
+  await invoke("session_switch", {}, nextCtx);
+  await invoke("tool_result", { toolCallId: "maximum", isError: true }, nextCtx);
+  await pause(50);
+  assert.strictEqual(questionFrames().length, beforeSwitch, "native switch clears without synthesizing closes");
+  for (let index = 0; index < 257; index++) {
+    await invoke("tool_execution_start", call(`bounded-${index}`), nextCtx);
+  }
+  await invoke("tool_result", { toolCallId: "bounded-0", isError: true }, nextCtx);
+  await pause(100);
+  const bounded = questionFrames().slice(beforeSwitch);
+  assert.strictEqual(bounded.filter(frame => frame.type === "question.open").length, 256);
+  assert.strictEqual(bounded.at(-1).status, "cancelled", "saturation still records existing closes");
+  assert.strictEqual(globalThis.__stOmpChannel.questions.size, 256, "closed entries retained without persistence acknowledgement");
+  const encoded = JSON.stringify(questionFrames());
+  for (const privateValue of [rawId, "private-question-id", "PRIVATE-QUESTION-CANARY",
+    "PRIVATE-LABEL-CANARY", "PRIVATE-DESCRIPTION-CANARY", "PRIVATE-ANSWER-CANARY",
+    "PRIVATE-NOTE-CANARY", "PRIVATE-CHAT-CANARY"]) {
+    assert.ok(!encoded.includes(privateValue), "question wire contains no native ids or text");
+  }
+  await invoke("session_shutdown", {}, nextCtx);
+  // Earlier reconnect tests deliberately kill recorders, so their EOF counter cannot fence here.
+  await pause(100);
+}
 fs.rmSync(dir, { recursive: true, force: true });
 console.log("omp extension smoke: ok");
 process.exit(0);
