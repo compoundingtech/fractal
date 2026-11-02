@@ -125,8 +125,8 @@ pub struct TrimWal {
     pub check: std::time::Duration,
 }
 
-/// 65,536 frames is 256 MiB of 4 KiB pages: about 25 s of a large member's trim. On a 57 GB
-/// store each restart held the writer at most about 100 ms.
+/// 65,536 frames is 256 MiB of 4 KiB pages: about 25 s of a large member's trim. Under a daemon
+/// on a 57 GB store, a restart held the writer at most 187 ms.
 pub const TRIM_WAL: TrimWal = TrimWal {
     frames: 65_536,
     busy: std::time::Duration::from_millis(200),
