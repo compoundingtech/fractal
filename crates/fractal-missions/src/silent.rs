@@ -1,7 +1,6 @@
 //! Store-backed refresh of held context, above the store-independent delivery rules.
 pub use fractal_delivery::silent::*;
 use crate::model::MessageView;
-use crate::SubjectNotesStore;
 
 /// Notes are a live view, not a snapshot of the notes present when mail was queued.
 /// Keep one digest per recipient so multiple revisions cannot repeat the same live block.

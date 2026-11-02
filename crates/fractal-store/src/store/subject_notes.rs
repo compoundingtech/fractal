@@ -1,7 +1,6 @@
 //! Authored subject context. Claims remain authoritative; notes never grant authority.
 use super::*;
 use smallclaims::store::canonical;
-use fractal_schema::subject_notes::KIND;
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, Serialize)]
 pub struct SubjectNote {
