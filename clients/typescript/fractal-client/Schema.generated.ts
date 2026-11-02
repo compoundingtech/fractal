@@ -5302,10 +5302,11 @@ export const SubjectNoteCreate = /*#__PURE__*/ (() => Schema.Struct({
 export type SubjectNoteCreate = typeof SubjectNoteCreate.Type
 export type SubjectNoteCreateEncoded = typeof SubjectNoteCreate.Encoded
 
+/** Patch fields preserve omission (unchanged), null (clear), and a supplied value. */
 export const SubjectNoteUpdate = /*#__PURE__*/ (() => Schema.Struct({
-  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
-  "text": Schema.OptionFromOptionalNullOr(Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024)), NULL_NONE)
-}).annotate({ identifier: "SubjectNoteUpdate" }))()
+  "expires_at": Schema.optionalKey(Schema.OptionFromNullOr(Timestamp)),
+  "text": Schema.optionalKey(Schema.OptionFromNullOr(Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024))))
+}).annotate({ identifier: "SubjectNoteUpdate", description: "Patch fields preserve omission (unchanged), null (clear), and a supplied value." }))()
 export type SubjectNoteUpdate = typeof SubjectNoteUpdate.Type
 export type SubjectNoteUpdateEncoded = typeof SubjectNoteUpdate.Encoded
 
