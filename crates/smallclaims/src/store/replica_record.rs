@@ -18,6 +18,7 @@ pub(super) fn recover_publication_pending_collision(connection: &Connection) -> 
     )?;
     if !done {
         transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-ha6bec6a3d57f owner=smallclaims::store::replica_record TODO=chunk-or-reference-exact-wire-values */
             "UPDATE replica_envelopes SET receipt_state='pending'
              WHERE (writer, sequence, envelope_hash) IN (
                  SELECT writer, sequence, envelope_hash FROM replica_records
@@ -27,6 +28,7 @@ pub(super) fn recover_publication_pending_collision(connection: &Connection) -> 
             [],
         )?;
         transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h778f98704c51 owner=smallclaims::store::replica_record TODO=bound-or-reference-values-and-reclamation */
             "INSERT INTO meta(key,value) VALUES('publication_pending_collision_requeued','1')",
             [],
         )?;

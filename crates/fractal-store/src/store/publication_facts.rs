@@ -158,6 +158,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         // An outer UPSERT's ABORT policy overrides a trigger's OR IGNORE.
         // Upgrade persisted triggers once; prevent duplicates before inserting.
         connection.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-he8e3063ca144 owner=fractal_store::store::publication_facts TODO=bound-or-reference-values-and-reclamation */
             "DROP TRIGGER IF EXISTS publication_claim_insert;
              DROP TRIGGER IF EXISTS publication_claim_update;
              DROP TRIGGER IF EXISTS publication_batch_update;
@@ -173,6 +174,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h304a1348e3e8 owner=fractal_store::store::publication_facts TODO=trace-statement-and-value-representation */ REPAIR_SCHEMA)?;
     }
     connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h06917d601a85 owner=fractal_store::store::publication_facts TODO=bound-or-reference-values-and-reclamation */
         "INSERT OR IGNORE INTO meta(key,value) VALUES(?1,'1')",
         [TRIGGER_MARKER],
     )?;

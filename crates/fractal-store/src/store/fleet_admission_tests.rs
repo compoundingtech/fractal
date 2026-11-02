@@ -344,6 +344,7 @@ fn unknown_runtime_admission_commits_publication_evidence_after_trigger_upgrade(
         if mode != "current-triggers" {
             // Reproduce a persisted pre-fix trigger, not just a fresh schema.
             receiver.connection.write().execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h42db1c14591a owner=fractal_store::store::fleet_admission_tests TODO=chunk-or-reference-exact-wire-values */
                 "DELETE FROM meta WHERE key='publication_pending_conflict_safe_v1';
                  DROP TRIGGER publication_record_update;
                  CREATE TRIGGER publication_record_update
@@ -356,18 +357,21 @@ fn unknown_runtime_admission_commits_publication_evidence_after_trigger_upgrade(
             if mode == "recovery" {
                 let connection = receiver.connection.write();
                 connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-h24b79d8a2c93 owner=fractal_store::store::fleet_admission_tests TODO=chunk-or-reference-exact-wire-values */
                     "UPDATE replica_envelopes SET receipt_state='degraded'
                      WHERE (writer,sequence,envelope_hash) IN
                        (SELECT writer,sequence,envelope_hash FROM replica_records WHERE claim_id=?1)",
                     [&claim.id],
                 ).unwrap();
                 connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-h68322eee5951 owner=fractal_store::store::fleet_admission_tests TODO=chunk-or-reference-exact-wire-values */
                     "UPDATE replica_records SET state='invalid',error_code='internal',
                        error_message='UNIQUE constraint failed: local_publication_pending.claim_id'
                      WHERE claim_id=?1",
                     [&claim.id],
                 ).unwrap();
                 connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-h0c4a6c9a0a71 owner=fractal_store::store::fleet_admission_tests TODO=bound-or-reference-values-and-reclamation */
                     "DELETE FROM meta WHERE key='publication_pending_collision_requeued'", [],
                 ).unwrap();
             }
