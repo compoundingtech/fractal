@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds the client-writable note subject family and SubjectEncodedAuthor policy, bounded nullable text, target references, open audience, optional session and UTC expiry. Generated clients and the notes collection expose the shared note model. Agent and mission collection rows have no note fields."
+    "detail": "Adds the client-writable note subject family and SubjectEncodedAuthor policy, bounded nullable text, target references, open audience, optional session and UTC expiry. Generated clients and the notes collection expose the shared note model, including resource snapshot and change frames. Agent and mission collection rows have no note fields."
   },
   "rules": {
     "status": "changed",
