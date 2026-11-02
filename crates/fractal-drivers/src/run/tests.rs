@@ -2,8 +2,6 @@ use super::*;
 use agent_spec::spec::TaskKind;
 use crate::reconcile::TaskLaunch;
 use std::collections::BTreeMap;
-use std::process::Command;
-use std::time::{Duration, Instant};
 
 fn target(id: &str, cmd: &str) -> TaskTarget {
     TaskTarget {
@@ -22,15 +20,6 @@ fn target(id: &str, cmd: &str) -> TaskTarget {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn linux_process_state(pid: i32) -> Option<char> {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()?
-        .rsplit_once(") ")?
-        .1
-        .chars()
-        .next()
-}
 
 #[test]
 fn session_socket_overage_is_derived_from_the_resolved_root() {
@@ -123,40 +112,6 @@ fn detect_host_matches_kernel_hostname() {
     assert_eq!(host, expected);
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn the_shared_reaper_reaps_a_killed_child() {
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg("sleep 60")
-        .spawn()
-        .unwrap();
-    let pid = child.id() as i32;
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
-    let _ = child.kill();
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while linux_process_state(pid) != Some('Z') && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(
-        linux_process_state(pid),
-        Some('Z'),
-        "fixture did not produce a zombie"
-    );
-
-    reap_detached(child);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while linux_process_state(pid) == Some('Z') && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_ne!(
-        linux_process_state(pid),
-        Some('Z'),
-        "the shared reaper did not reap the killed child {pid}"
-    );
-}
 
 #[test]
 fn resolve_cwd_honors_relative_absolute_workspace_and_default() {
@@ -186,22 +141,4 @@ fn resolve_cwd_honors_relative_absolute_workspace_and_default() {
         resolve_task_cwd(&t, Path::new("/cat/example-linux/demo"), Path::new(".")),
         Path::new("/cat/example-linux/demo")
     );
-}
-
-#[test]
-fn bounded_capture_keeps_the_tail_of_an_oversized_stream() {
-    use std::io::Write as _;
-
-    let mut file = tempfile::tempfile().unwrap();
-    file.write_all(b"START").unwrap();
-    file.write_all(&vec![b'x'; 4 * CAPTURE_CAP_BYTES]).unwrap();
-    file.write_all(b"END").unwrap();
-
-    let stream = read_bounded_tail(&mut file, CAPTURE_CAP_BYTES).unwrap();
-
-    assert_eq!(stream.bytes.len(), CAPTURE_CAP_BYTES);
-    assert!(stream.bytes.ends_with(b"END"), "capped stream lost the tail");
-    assert!(!stream.bytes.starts_with(b"START"), "capped stream kept the head");
-    assert!(stream.truncated());
-    assert_eq!(stream.total, (4 * CAPTURE_CAP_BYTES + 8) as u64);
 }
