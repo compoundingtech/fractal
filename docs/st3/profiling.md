@@ -477,7 +477,14 @@ synthetic fixture measurements, not measurements of a deployed daemon or transpo
 
 Conversation collection followers (`follow_conversation`) and standalone conversation sockets
 (`conversation_stream_socket`) use the existing conversation page/change reader. Mailbox reads
-already name `task mailbox-snapshot` and `task mailbox-update`. Attention's collection clock
+already name `task mailbox-snapshot` and `task mailbox-update`. The rest of a mailbox stream's
+store work after the upgrade names what it checks: `task mailbox-fence` (the binding's fence, on
+each dirty pass and each report without a peer), `task mailbox-report` (admitting a report),
+`task mailbox-replay` (a replay proof), `task mailbox-primary` (a Claude primary's generation),
+`task mailbox-rollout`, `task mailbox-attachment`, `task mailbox-own-post` and `task mailbox-loss`.
+The background maintenance loops that run after commits name theirs
+`maintenance.client_message_selectors`, `maintenance.completion_health`,
+`maintenance.response_expiry_deadline` and `maintenance.response_expiry_clock`. Attention's collection clock
 handles grace and expiry without a claim; HTTP Home/now reads retain their route labels.
 Terminal sockets (`terminal_stream_socket`) follow the shared latest-screen source and periodically
 recheck their live fence; the existing fence span is `terminal/live-fence`. These are source
