@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The app replay browser e2e waits for the conversation pane's module with a listener and bounds the wait only after the agent click. A slow host can no longer make the early waitForResponse reject with no handler and kill the whole run",
+  "replay": {"status": "none", "detail": "Test-script change only; no claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "No runtime, client, wire or harness change; only apps/fractal-web/scripts/replay-e2e.mjs."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}

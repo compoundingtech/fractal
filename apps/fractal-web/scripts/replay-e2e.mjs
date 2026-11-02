@@ -182,8 +182,17 @@ try {
     assert(elapsed <= offset, `Replay clock already passed requested offset ${offset}: ${elapsed}`)
     await page.clock.runFor(offset - elapsed)
   }
-  const paneResponse = page.waitForResponse(response =>
-    new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'))
+  // The pane's module can load at any point after navigation, so a listener collects its response
+  // from here. A listener has no timer: the wait is bounded only where the click needs the module, so
+  // a slow host cannot reject it before anything awaits it.
+  const paneResponse = new Promise(resolve => {
+    const onResponse = response => {
+      if (!new URL(response.url()).pathname.endsWith('/ConversationPane.tsx')) return
+      page.off('response', onResponse)
+      resolve(response)
+    }
+    page.on('response', onResponse)
+  })
   await page.goto(`${origin}/?scenario=${scenario}&open=missions:detail`)
   await roster.waitFor({ state: 'visible' })
   const replayStartedAt = await page.evaluate(() => Date.now())
@@ -203,7 +212,14 @@ try {
   await agent.click()
   assert(new URL(page.url()).pathname.startsWith('/w/agent/'), 'agent selection must navigate in-app')
   assert.equal(new URL(page.url()).searchParams.get('scenario'), scenario)
-  await (await paneResponse).finished()
+  let paneDeadline
+  const paneLoaded = await Promise.race([
+    paneResponse,
+    new Promise((_, reject) => {
+      paneDeadline = setTimeout(() => reject(new Error('ConversationPane.tsx did not load within 10 s of the agent click')), 10_000)
+    }),
+  ]).finally(() => clearTimeout(paneDeadline))
+  await paneLoaded.finished()
   const pane = page.getByTestId('conversation-history-host')
   const transcript = page.getByTestId('transcript-scroll')
   while (!await pane.isVisible() || !await transcript.getByTestId('transcript-empty').isVisible()) {
