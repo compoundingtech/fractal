@@ -394,6 +394,15 @@ impl Store {
         self.replica_generation.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Drop the cached replication snapshot, so the next one is built from nothing rather than
+    /// on from it.
+    pub fn forget_replication_snapshot(&self) {
+        if let Ok(mut snapshot) = crate::read_budget::lock_sync(&self.replication_snapshot) {
+            *snapshot = None;
+        }
+        self.replica_inventory_changed();
+    }
+
     /// Whether evidence may cite this claim: it is stored, or a checkpoint dropped it.
     pub fn evidence_exists(&self, id: &str) -> Result<bool> {
         claim_or_tombstone_exists(&self.readers.get(), id)

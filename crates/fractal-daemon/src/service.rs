@@ -1509,6 +1509,7 @@ mod tests {
         checkpoint: crate::config::CheckpointConfig::default(),
         trim: crate::config::TrimConfig::default(),
         limits: crate::config::LimitsConfig::default(),
+        logging: crate::config::LoggingConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),
         asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,
