@@ -1918,6 +1918,245 @@ fn base_replay_body_page_work_does_not_grow_with_selected_order_size() {
 }
 
 #[test]
+fn planning_replication_rebuilds_only_planning_and_matches_canonical_replay() {
+    let source = Store::open_memory("source").unwrap();
+    let target = Store::open_memory("target").unwrap();
+    let intent = simple("printf unrelated");
+    let preview = target
+        .mission(
+            &intent,
+            IntentInput {
+                kdl: "unrelated".into(),
+                source_name: None,
+            },
+        )
+        .unwrap();
+    target
+        .apply(&intent, &preview.subject_tokens, "unrelated")
+        .unwrap();
+    target.project_replication_backlog().unwrap();
+    let unrelated = target.selected_desired_token("exec/work").unwrap();
+    let events = [
+        (
+            "started",
+            json!({"mission":"mission/example", "request":"doc/request",
+            "workspace":"workspace", "requester":"person/operator", "planner":"agent/planner"}),
+            "planning",
+            0,
+            0,
+        ),
+        (
+            "candidate-submitted",
+            json!({"variant":"default", "candidate_revision":1,
+            "markdown":"doc/candidate", "kdl":"doc/definition", "mission_revision":"revision-one"}),
+            "review",
+            1,
+            0,
+        ),
+        (
+            "previewed",
+            json!({"variant":"default", "candidate_revision":1,
+            "preview_hash":"preview-one", "store_index":1, "graph":"graph", "diff":"diff", "mission":{}}),
+            "review",
+            1,
+            1,
+        ),
+        (
+            "question-requested",
+            json!({"decision_id":"choice", "revision":1,
+            "question":"Proceed?", "decision_type":"boolean", "options":[],
+            "requester":"person/operator", "planner":"agent/planner"}),
+            "review",
+            1,
+            1,
+        ),
+        (
+            "question-answered",
+            json!({"decision_id":"choice", "expected_revision":1,
+            "response":{"value":true}, "requester":"person/operator"}),
+            "review",
+            1,
+            1,
+        ),
+        (
+            "revision-requested",
+            json!({"variant":"default", "candidate_revision":1,
+            "feedback":"doc/feedback", "requester":"person/operator"}),
+            "revision-requested",
+            1,
+            0,
+        ),
+        (
+            "approved",
+            json!({"variant":"default", "candidate_revision":1,
+            "preview_hash":"preview-one", "preview_token":"token-one", "mission_revision":"revision-one",
+            "markdown":"doc/candidate", "kdl":"doc/definition", "requester":"person/operator"}),
+            "approved",
+            1,
+            0,
+        ),
+        (
+            "cancelled",
+            json!({"reason":"finished", "requester":"person/operator"}),
+            "cancelled",
+            1,
+            0,
+        ),
+    ];
+    let mut predecessors = Vec::new();
+    for (event, fields, status, candidates, previews) in events {
+        let mut connection = source.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let claim = append_claim_record_tx(
+            &transaction, "source", "planning-session/example", &format!("planning-session.{event}"),
+            Some("person/operator"),
+            &json!({"fields":fields, "_operation":{"id":format!("op/planning-{event}"), "request_digest":event}}),
+            &predecessors, None,
+        ).unwrap();
+        predecessors = vec![claim.id];
+        transaction.commit().unwrap();
+        drop(connection);
+        FULL_REPLAYS.with(|count| count.set(0));
+        let admission = receive_and_project(
+            &target,
+            "source",
+            &exchange_from(&source, &target.replication_inventory().unwrap()),
+        );
+        assert_eq!(admission.invalid, 0, "{event}");
+        assert_eq!(
+            FULL_REPLAYS.with(std::cell::Cell::get),
+            0,
+            "{event} forced a whole-store replay"
+        );
+        let connection = target.readers.get();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM planning_sessions WHERE id='example'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            status,
+            "{event}"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM planning_candidates WHERE session_id='example'",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            candidates,
+            "{event}"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM planning_previews WHERE session_id='example'",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            previews,
+            "{event}"
+        );
+        drop(connection);
+        assert_eq!(
+            target.selected_desired_token("exec/work").unwrap(),
+            unrelated,
+            "{event}"
+        );
+        let incremental = graph_digest_of(&target);
+        target.replay_replication_graph().unwrap();
+        assert_eq!(
+            graph_digest_of(&target),
+            incremental,
+            "{event} differs from canonical replay"
+        );
+    }
+    let mut complete = exchange_from(&source, &ReplicationInventory::default());
+    complete.envelopes.reverse();
+    let second = complete.envelopes.split_off(complete.envelopes.len() / 2);
+    let reordered = Store::open_memory("reordered").unwrap();
+    reordered.project_replication_backlog().unwrap();
+    FULL_REPLAYS.with(|count| count.set(0));
+    receive_and_project(&reordered, "source", &complete);
+    receive_and_project(
+        &reordered,
+        "source",
+        &ReplicationExchange {
+            envelopes: second,
+            ..complete
+        },
+    );
+    assert_eq!(
+        FULL_REPLAYS.with(std::cell::Cell::get),
+        0,
+        "reordered planning forced whole-store replay"
+    );
+    let incremental = graph_digest_of(&reordered);
+    reordered.replay_replication_graph().unwrap();
+    assert_eq!(graph_digest_of(&reordered), incremental);
+    assert_eq!(
+        reordered
+            .readers
+            .get()
+            .query_row(
+                "SELECT status FROM planning_sessions WHERE id='example'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "cancelled"
+    );
+}
+
+#[test]
+fn planning_replication_keeps_malformed_operation_and_unknown_kind_guards() {
+    for (kind, operation, expected) in [
+        (
+            "planning-session.cancelled",
+            json!({"id":"op/malformed"}),
+            "malformed-operation",
+        ),
+        (
+            "planning-session.future",
+            json!({"id":"op/unknown", "request_digest":"digest"}),
+            "non-incremental-kind",
+        ),
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        store.project_replication_backlog().unwrap();
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let claim = append_claim_record_tx(
+            &transaction,
+            "source",
+            "planning-session/example",
+            kind,
+            None,
+            &json!({"fields":{"reason":"finished"}, "_operation":operation}),
+            &[],
+            None,
+        )
+        .unwrap();
+        let result =
+            try_project_simple_replication_tx(&transaction, &store.origin, claim.store_index)
+                .unwrap();
+        match result {
+            IncrementalProjection::Replay(reason)
+            | IncrementalProjection::ReplayWithContext { reason, .. } => {
+                assert_eq!(reason, expected)
+            }
+            IncrementalProjection::Projected => panic!("{kind} bypassed {expected}"),
+        }
+        transaction.rollback().unwrap();
+    }
+}
+
+#[test]
 fn full_replay_logs_every_guard_and_incremental_error_once() {
     for reason in [
         "missing-health",
