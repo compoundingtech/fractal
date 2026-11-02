@@ -259,7 +259,7 @@ mod tests {
             questions:vec![Question { id:"q0".into(), options:2, multi:false, required:true }],
         }).unwrap();
         let session = ClientSession::for_tests_scoped("person/alex", "person/alex", &["terminal.control", "read.projections"]);
-        let request = ActionRequest { api_version:CLIENT_API_VERSION.into(), id:"action/tester".into(), action_type:"harness.answer".into(),
+        let request = ActionRequest { device_command: None, api_version:CLIENT_API_VERSION.into(), id:"action/tester".into(), action_type:"harness.answer".into(),
             idempotency_key:"tester-operator-key".into(), fence:Fence { snapshot_id:new_client_snapshot(&state).id,
                 subject_revisions:BTreeMap::from([(question.id.clone(), question.revision.clone())]),
                 runtime_incarnation:Some("q0".into()), ..Fence::default() },
@@ -426,13 +426,11 @@ mod tests {
         assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "already_resolved");
         assert_eq!(state.store.index().unwrap(), before);
         assert_eq!(sink.calls.load(Ordering::SeqCst), 0);
-        let generic = ActionRequest {
-            api_version: CLIENT_API_VERSION.into(), id: "action/alex".into(),
-            action_type: "arrangement.edit".into(), idempotency_key: request.idempotency_key,
-            fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Fence::default() },
-            parameters: json!({"subject":"arrangement/person/alex/019a0000-0000-7000-8000-000000000001",
-                "owner":"person/alex","operations":[{"op":"create","name":"Sidebar"}]}),
-        };
+        let generic = ActionRequest { device_command: None, api_version: CLIENT_API_VERSION.into(), id: "action/alex".into(),
+        action_type: "arrangement.edit".into(), idempotency_key: request.idempotency_key,
+        fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Fence::default() },
+        parameters: json!({"subject":"arrangement/person/alex/019a0000-0000-7000-8000-000000000001",
+            "owner":"person/alex","operations":[{"op":"create","name":"Sidebar"}]}), };
         assert_eq!(invoke(&state, &session, &generic).await.unwrap().0["status"], "completed");
     }
 
@@ -461,12 +459,10 @@ mod tests {
             let sink = Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false });
             state.harness_question_sink = Some(sink.clone());
             let arrangement = "arrangement/person/alex/019a0000-0000-7000-8000-000000000001";
-            let generic = ActionRequest {
-                api_version:CLIENT_API_VERSION.into(), id:"action/operator".into(),
-                action_type:"arrangement.edit".into(), idempotency_key:request.idempotency_key.clone(),
-                fence:Fence { snapshot_id:new_client_snapshot(&state).id, ..Fence::default() },
-                parameters:json!({"subject":arrangement,"owner":"person/alex","operations":[{"op":"create","name":"Sidebar"}]}),
-            };
+            let generic = ActionRequest { device_command: None, api_version:CLIENT_API_VERSION.into(), id:"action/operator".into(),
+            action_type:"arrangement.edit".into(), idempotency_key:request.idempotency_key.clone(),
+            fence:Fence { snapshot_id:new_client_snapshot(&state).id, ..Fence::default() },
+            parameters:json!({"subject":arrangement,"owner":"person/alex","operations":[{"op":"create","name":"Sidebar"}]}), };
             let (first, second) = if harness_first { (&request, &generic) } else { (&generic, &request) };
             let accepted = invoke(&state, &session, first).await.unwrap().0;
             let before = state.store.index().unwrap();
@@ -804,12 +800,10 @@ mod tests {
             let sink = Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false });
             state.harness_question_sink = Some(sink.clone());
             let arrangement = "arrangement/person/alex/019a0000-0000-7000-8000-000000000001";
-            let generic = ActionRequest {
-                api_version:CLIENT_API_VERSION.into(), id:"action/concurrent".into(),
-                action_type:"arrangement.edit".into(), idempotency_key:request.idempotency_key.clone(),
-                fence:Fence { snapshot_id:new_client_snapshot(&state).id, ..Fence::default() },
-                parameters:json!({"subject":arrangement,"owner":"person/alex","operations":[{"op":"create","name":"Sidebar"}]}),
-            };
+            let generic = ActionRequest { device_command: None, api_version:CLIENT_API_VERSION.into(), id:"action/concurrent".into(),
+            action_type:"arrangement.edit".into(), idempotency_key:request.idempotency_key.clone(),
+            fence:Fence { snapshot_id:new_client_snapshot(&state).id, ..Fence::default() },
+            parameters:json!({"subject":arrangement,"owner":"person/alex","operations":[{"op":"create","name":"Sidebar"}]}), };
             // Queue both families behind the shared gate before allowing either to mutate.
             let gate = action_gate(&state, &session, &request.idempotency_key);
             let guard = gate.lock_owned().await;

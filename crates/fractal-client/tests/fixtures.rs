@@ -889,6 +889,10 @@ fn timeline_models_tolerate_future_discriminators() {
 #[test]
 fn generated_action_union_and_machine_manifest_stay_in_lockstep() {
     let action: ActionRequest = decode("action.json");
+    let commanded: ActionRequest = decode("device-command-action.json");
+    assert_eq!(commanded.action_type(), &ActionType::MessageRead);
+    assert!(commanded.device_command.as_deref().unwrap().starts_with("device-command/"));
+    assert_eq!(serde_json::to_value(&commanded).unwrap()["device_command"], commanded.device_command.unwrap());
     let operations: serde_json::Value = serde_json::from_str(include_str!(
         "../../../docs/st3/client-v0/schemas/operations.json"
     ))

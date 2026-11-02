@@ -1,0 +1,9 @@
+{
+  "api_version": "st3.client.v0",
+  "id": "action/phone-message-read",
+  "type": "message.read",
+  "idempotency_key": "phone-message-read-command-1",
+  "device_command": "device-command/019a0000-0000-8000-8000-000000000001",
+  "fence": {"snapshot_id": "snapshot/host-a/1842/2fc9"},
+  "parameters": {"target_id": "message/example"}
+}

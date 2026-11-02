@@ -133,3 +133,72 @@ async fn phone_commands_expiry_and_not_foreground_wake_blocking_result_read() {
         drop(stream);
     }
 }
+
+#[tokio::test]
+async fn phone_command_message_read_admission_uses_daemon_state() {
+    for case in ["pending", "delivered", "expired", "verb", "message", "foreign", "terminal", "race"] {
+        let root = tempfile::tempdir().unwrap();
+        let state = tests::test_state_named(root.path(), &format!("command-admission-{case}"));
+        let phone = pair(&state, "device/target", "person/ada", &["read.projections", "control.messages"]);
+        let foreign = pair(&state, "device/other", "person/ada", &["read.projections", "control.messages"]);
+        let owner = ClientSession::local(Some("person/ada")).unwrap();
+        let sent = accept_message(&state, MessageSendRequest {
+            idempotency_key: "admission-message".into(), from: "person/ada".into(),
+            to: "person/ada".into(), content: "read me".into(), title: None,
+            in_reply_to: None, tags: vec![], attachments: vec![],
+        }, None, None).unwrap().0;
+        let card = client_attention_resources(&state.store, Some("person/ada"), false).unwrap()
+            .into_iter().find(|card| card["source_id"] == sent.subject).unwrap();
+        let mut request = request("device/target", if case == "verb" { "phone.inspect" } else { "phone.message.read" });
+        if case != "verb" { request.args = json!({"attention_id":card["id"]}); }
+        if case == "expired" { request.ttl_ms = Some(1); }
+        let command = client_commands::issue(&state, &owner, request).unwrap();
+        let id = command["id"].as_str().unwrap();
+        if case == "delivered" { client_commands::collection_items(&state, &phone).unwrap(); }
+        if case == "expired" {
+            let mut changes = client_commands::subscribe();
+            loop {
+                if client_commands::read(&state, &owner, id).unwrap()["state"] == "not-foreground" { break; }
+                changes.recv().await.unwrap();
+            }
+        }
+        if case == "terminal" {
+            client_commands::report(&state, &phone, serde_json::from_value(json!({
+                "command_id":id,"outcome":"completed"
+            })).unwrap()).unwrap();
+        }
+        let snapshot = new_client_snapshot(&state);
+        let action: ActionRequest = serde_json::from_value(json!({
+            "api_version":CLIENT_API_VERSION, "id":"action/command-admission",
+            "type":"message.read", "idempotency_key":"command-admission-read",
+            "device_command":id, "fence":{"snapshot_id":snapshot.id},
+            "parameters":{"target_id":if case == "message" { "message/other" } else { &sent.subject }}
+        })).unwrap();
+        let expiry = (case == "race").then(|| {
+            let (state, phone, id) = (state.clone(), phone.clone(), id.to_owned());
+            tokio::task::spawn_blocking(move || client_commands::report(&state, &phone,
+                serde_json::from_value(json!({"command_id":id,"outcome":"expired"})).unwrap()).unwrap())
+        });
+        let result = action_inner(State(state.clone()), Extension(snapshot),
+            Extension(if case == "foreign" { foreign } else { phone.clone() }), Json(action), None).await;
+        if let Some(expiry) = expiry { expiry.await.unwrap(); }
+        if matches!(case, "pending" | "delivered") || case == "race" && result.is_ok() {
+            assert!(result.is_ok(), "{case}: {result:?}");
+            assert_eq!(state.store.message(&sent.subject).unwrap().unwrap().status, "read");
+            let settled = client_commands::read(&state, &owner, id).unwrap();
+            assert_eq!(settled["state"], "completed");
+            for outcome in ["completed", "expired"] {
+                assert_eq!(client_commands::report(&state, &phone, serde_json::from_value(json!({
+                    "command_id":id,"outcome":outcome
+                })).unwrap()).unwrap(), settled);
+            }
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "forbidden", "{case}");
+            assert_eq!(error.details["reason"], match case {
+                "expired" => "expired", "foreign" => "foreign", "terminal" | "race" => "not-pending", _ => "mismatch",
+            });
+            assert_ne!(state.store.message(&sent.subject).unwrap().unwrap().status, "read");
+        }
+    }
+}

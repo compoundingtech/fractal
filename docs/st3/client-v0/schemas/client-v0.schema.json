@@ -3072,6 +3072,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["api_version", "id", "type", "idempotency_key", "fence", "parameters"],
+      "allOf": [{"if": {"required": ["device_command"]}, "then": {"properties": {"type": {"const": "message.read"}}}}],
       "properties": {
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "id": { "$ref": "#/$defs/Id" },
@@ -3140,6 +3141,7 @@
         },
         "idempotency_key": { "x-st-brand": "IdempotencyKey", "type": "string", "minLength": 16, "maxLength": 256 },
         "fence": { "$ref": "#/$defs/Fence" },
+        "device_command": {"type": "string", "pattern": "^device-command/.+", "description": "Optional daemon-authorized phone.message.read command; only valid on message.read."},
         "parameters": { "type": "object" }
       }
     },
@@ -4156,6 +4158,7 @@
         "fence_conflicts": { "type": "integer", "minimum": 0 }
       }
     },
+    "DeviceCommandAdmissionDetails": {"type": "object", "required": ["device_command", "reason"], "properties": {"device_command": {"type": "string"}, "reason": {"enum": ["expired", "not-pending", "mismatch", "foreign"]}}},
     "ErrorEnvelope": {
       "type": "object",
       "additionalProperties": false,
@@ -4170,7 +4173,7 @@
         "retryable": { "type": "boolean" },
         "retry_after_ms": { "x-st-codec": "duration-ms", "type": "integer", "minimum": 0 },
         "applied": { "type": "string", "enum": ["none", "unknown"] },
-        "details": { "type": "object", "additionalProperties": {}, "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
+        "details": { "type": "object", "additionalProperties": {}, "allOf": [{"if": {"required": ["device_command"]}, "then": {"$ref": "#/$defs/DeviceCommandAdmissionDetails"}}], "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
       }
     },
     "SubscribeTraceContext": {
