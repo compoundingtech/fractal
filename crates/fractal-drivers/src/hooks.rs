@@ -370,15 +370,6 @@ pub fn required_by_pi_agent(
             }))
 }
 
-pub(crate) fn launch_invokes_pi(
-    launch: &crate::reconcile::TaskLaunch,
-    catalog_root: &Path,
-) -> bool {
-    match launch {
-        crate::reconcile::TaskLaunch::Shell(command) => command_invokes_pi(command),
-        crate::reconcile::TaskLaunch::Argv(argv) => argv_invokes_pi(argv, catalog_root),
-    }
-}
 
 /// Whether this host has an omp agent whose next launch needs this hook set — same shape as pi:
 /// nothing omp renders references `$ST_HOOKS`, but the launch cannot proceed without
@@ -412,15 +403,6 @@ pub fn required_by_omp_agent(
             }))
 }
 
-pub(crate) fn launch_invokes_omp(
-    launch: &crate::reconcile::TaskLaunch,
-    catalog_root: &Path,
-) -> bool {
-    match launch {
-        crate::reconcile::TaskLaunch::Shell(command) => command_invokes_omp(command),
-        crate::reconcile::TaskLaunch::Argv(argv) => argv_invokes_omp(argv, catalog_root),
-    }
-}
 
 fn argv_invokes_omp(argv: &[String], catalog_root: &Path) -> bool {
     let Some(program) = argv.first() else {
@@ -484,15 +466,6 @@ fn command_invokes_pi(command: &str) -> bool {
         .is_some_and(|name| name == "pi")
 }
 
-pub(crate) fn launch_invokes_codex(
-    launch: &crate::reconcile::TaskLaunch,
-    catalog_root: &Path,
-) -> bool {
-    match launch {
-        crate::reconcile::TaskLaunch::Shell(command) => command_invokes_codex(command),
-        crate::reconcile::TaskLaunch::Argv(argv) => argv_invokes_codex(argv, catalog_root),
-    }
-}
 
 fn argv_invokes_codex(argv: &[String], catalog_root: &Path) -> bool {
     argv_invokes_codex_with(argv, |program| {

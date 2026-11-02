@@ -32,7 +32,7 @@ if '--seed' in argv:
     # --seed COMMIT: the per-crate rust-tests notes of that commit's tree, a row for the run and one per crate that did not sign.
     seed = argv[argv.index('--seed') + 1]
     with open(os.environ['STUB_LOG'], 'a') as log:
-        log.write(json.dumps({'seed': seed, 'head': head, 'checks': checks}) + '\\n')
+        log.write(json.dumps({'seed': seed, 'head': head, 'checks': checks, 'pool_rank': os.environ.get('ST_TEST_POOL_RANK')}) + '\\n')
     stop = os.environ.get('STUB_SEED_STOP')
     if stop:
         # Load rises during the run, before or after nextest started: the watcher stops it.
@@ -353,6 +353,10 @@ class QueueSigner(unittest.TestCase):
         done = subprocess.run([sys.executable, '-I', str(SIGNER), 'report'], capture_output=True, text=True, env=self.env())
         report = json.loads(done.stdout)
         self.assertEqual((report['seeds'], report['seed_outcomes']), (3, {'covered': 1, 'failed': 1, 'seeded': 1}))
+
+    def test_a_seed_runs_last_in_the_pool(self):
+        self.run_signer('seed')
+        self.assertEqual([run['pool_rank'] for run in self.runs()], ['last'])  # a seat's run waiting for a pool tree goes first
 
     def calm(self):
         self.pressure.write_text('some avg10=1 avg60=1.00 avg300=1 total=1\n')
