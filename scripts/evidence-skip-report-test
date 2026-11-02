@@ -151,6 +151,26 @@ class SkipReport(unittest.TestCase):
         self.assertIn('| linux-gate | 0 | 1 | 1 | 1 |', text)
         self.assertIn('#101 `agent/a`, seat agent/seat-one: linux-gate (1 run(s))', text)
 
+    def test_an_unsigned_run_of_a_check_whose_skip_is_off_is_shadow_unsigned_and_not_listed(self):
+        policy = {'checks': {'linux-gate': {'enforce': True}, 'linux-fleet-compat': {'enforce': False}}}
+
+        def runner(command, **kwargs):
+            if command[:1] == ['git'] and 'show' in command:
+                shown = command[-1]
+                data = policy if shown.endswith('evidence-skip-policy.json') else LANES
+                return subprocess.CompletedProcess(command, 0, json.dumps(data).encode(), b'')
+            return git_runner(command, **kwargs)
+        gh = FakeGitHub()
+        gh.run(1, 101, 'agent/a', {'linux-gate': line('linux-gate'), 'linux-fleet-compat': line('linux-fleet-compat', reason='wrong_check'),
+                                   'typescript-client': line('typescript-client')}, ['crates/x/src/lib.rs'])
+        result = report.report(gh, ROOT, runner, NOW - datetime.timedelta(hours=24), NOW, {'bot'}, [])
+        self.assertEqual(result['checks']['linux-fleet-compat']['shadow_unsigned'], 1)
+        self.assertEqual(result['checks']['linux-fleet-compat']['not_signed'], 0)
+        self.assertEqual(result['checks']['linux-gate']['not_signed'], 1, 'an enforced check pushed unsigned stays not_signed')
+        self.assertEqual(result['checks']['typescript-client']['not_signed'], 1, 'a check the policy does not name stays not_signed')
+        self.assertEqual([(e['pr'], e['checks']) for e in result['not_signed']], [(101, ['linux-gate', 'typescript-client'])])
+        self.assertIn('| linux-fleet-compat | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |', report.markdown(result))
+
     def test_unreadable_github_exits_two(self):
         def broken(command, **kwargs):
             return subprocess.CompletedProcess(command, 1, b'', b'HTTP 502')
