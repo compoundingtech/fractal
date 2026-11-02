@@ -14,7 +14,7 @@ import { SidebarTree, SidebarTreeDisclosure, type SidebarTreeItem } from './Side
 import type { Key } from 'react-aria-components'
 import { missionHues } from './SidebarMissionLine'
 import { statuses, type SidebarAgentRow as Row, type SidebarMissionContext } from './model'
-import { sidebarRowAccessibleName } from './SidebarAgentRow'
+import { sidebarRowAccessibleName } from './rowPresentation.tsx'
 import { geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
 import { ThemePortal } from '../taste/ThemePortal'
