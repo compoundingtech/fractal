@@ -12,8 +12,9 @@ export const gatewayNoteActions = ({ client, actor }: {
     try {
       decodeUnknownSync(SubjectNoteResult)((await write()).value)
     } catch (cause) {
-      if (cause instanceof ClientError) throw new Error(`The note was not saved: ${cause.response.message}`)
-      throw new Error('The note could not be confirmed. Your draft is unchanged; check your connection before trying again.')
+      // The composer leads with what happened to the text; these sentences say only why.
+      if (cause instanceof ClientError) throw new Error(`The gateway refused this change: ${cause.response.message}`)
+      throw new Error('The change could not be confirmed; the connection may have dropped. Check your connection before trying again.')
     }
   }
   return {
