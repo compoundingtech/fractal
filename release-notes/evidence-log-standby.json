@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The evidence log pins a standby key, log/dev3, beside hetz2's, and a log host publishes only a head that continues the published one (a fast-forward, leased on the head it fetched). A second publisher whose chain is older refuses loudly and overwrites nothing.",
+  "replay": {
+    "status": "none",
+    "detail": "No record, signature or verifier rule changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "One more line in .st/evidence-log-key; the log's commits and tree are unchanged. A refused publish adds publish_refused to the pull's JSON summary."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Heads signed by log/dev3 verify as log heads. Publishing was a forced push and is now a fast-forward with a lease: a pull or gc whose head does not continue the remote's head exits 1 and publishes nothing."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "hetz2's chain continues the published head, so its publishes are unchanged. Its wrapper reads scripts/evidence-log from origin/main on every pull, so it gets the guard with no install."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Switching to dev3: stop hetz2's timer for good (or confirm the host is gone), seed dev3's copy from origin's refs/evidence-log/main, then set EVIDENCE_LOG_FLAGS=--publish and enable its timer (docs/st3/gate-evidence.md)."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert: remove the log/dev3 line and restore the forced push. A host refused by the guard recovers by seeding its copy from the remote."
+  }
+}
