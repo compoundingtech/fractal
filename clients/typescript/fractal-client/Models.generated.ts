@@ -2444,7 +2444,6 @@ export type Note = ResourceHeader & {
   created_at: Timestamp;
   expires_at?: (Timestamp | null);
   kind: "note";
-  session?: string | null;
   target: string;
   text: string;
 };
@@ -3243,7 +3242,6 @@ export type SubjectNote = {
   expires_at?: (Timestamp | null);
   id: string;
   revision: string;
-  session?: string | null;
   target: string;
   text: string;
   updated_at: Timestamp;
@@ -3251,7 +3249,6 @@ export type SubjectNote = {
 
 export type SubjectNoteCreate = {
   expires_at?: (Timestamp | null);
-  session?: string | null;
   target: string;
   text: string;
 };
@@ -3263,7 +3260,6 @@ export type SubjectNoteResult = {
 
 export type SubjectNoteUpdate = {
   expires_at?: (Timestamp | null);
-  session?: string | null;
   text?: string | null;
 };
 

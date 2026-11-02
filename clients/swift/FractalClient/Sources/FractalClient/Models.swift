@@ -38,11 +38,10 @@ public enum NoteAudience: Codable, Sendable, Equatable {
 public struct SubjectNote: Codable, Sendable, Equatable, Identifiable {
     public let id, target, author, text: String
     public let audience: NoteAudience
-    public let session: String?
     public let createdAt, updatedAt: String
     public let expiresAt: String?
     public let revision: String
-    enum CodingKeys: String, CodingKey { case id, target, author, text, audience, session, revision, createdAt = "created_at", updatedAt = "updated_at", expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey { case id, target, author, text, audience, revision, createdAt = "created_at", updatedAt = "updated_at", expiresAt = "expires_at" }
 }
 public struct SubjectNotes: Codable, Sendable, Equatable {
     public let notes: [SubjectNote]
@@ -59,11 +58,11 @@ public struct SubjectNoteResult: Codable, Sendable, Equatable {
 }
 public struct SubjectNoteCreate: Codable, Sendable {
     public let target, text: String
-    public let session, expiresAt: String?
-    public init(target: String, text: String, session: String? = nil, expiresAt: String? = nil) {
-        self.target = target; self.text = text; self.session = session; self.expiresAt = expiresAt
+    public let expiresAt: String?
+    public init(target: String, text: String, expiresAt: String? = nil) {
+        self.target = target; self.text = text; self.expiresAt = expiresAt
     }
-    enum CodingKeys: String, CodingKey { case target, text, session, expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey { case target, text, expiresAt = "expires_at" }
 }
 /// Nil patch fields preserve values; clear explicitly sends JSON null.
 public enum NotePatch: Codable, Sendable, Equatable {
@@ -78,15 +77,14 @@ public enum NotePatch: Codable, Sendable, Equatable {
     }
 }
 public struct SubjectNoteUpdate: Codable, Sendable {
-    public let text, session, expiresAt: NotePatch?
-    public init(text: NotePatch? = nil, session: NotePatch? = nil, expiresAt: NotePatch? = nil) {
-        self.text = text; self.session = session; self.expiresAt = expiresAt
+    public let text, expiresAt: NotePatch?
+    public init(text: NotePatch? = nil, expiresAt: NotePatch? = nil) {
+        self.text = text; self.expiresAt = expiresAt
     }
-    enum CodingKeys: String, CodingKey { case text, session, expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey { case text, expiresAt = "expires_at" }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         text = container.contains(.text) ? try container.decode(NotePatch.self, forKey: .text) : nil
-        session = container.contains(.session) ? try container.decode(NotePatch.self, forKey: .session) : nil
         expiresAt = container.contains(.expiresAt) ? try container.decode(NotePatch.self, forKey: .expiresAt) : nil
     }
 }
@@ -94,9 +92,9 @@ public struct NoteResource: Codable, Sendable, Identifiable {
     public let id, kind, revision, updatedAt: String
     public let target, author, text: String
     public let audience: NoteAudience
-    public let session, expiresAt: String?
+    public let expiresAt: String?
     public let createdAt: String
-    enum CodingKeys: String, CodingKey { case id, kind, revision, target, author, text, audience, session, updatedAt = "updated_at", createdAt = "created_at", expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey { case id, kind, revision, target, author, text, audience, updatedAt = "updated_at", createdAt = "created_at", expiresAt = "expires_at" }
 }
 
 public struct Envelope<Value: Codable & Sendable>: Codable, Sendable {

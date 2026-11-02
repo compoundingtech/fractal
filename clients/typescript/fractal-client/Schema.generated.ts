@@ -3181,7 +3181,6 @@ export const Note = /*#__PURE__*/ (() => Schema.Struct({
   "kind": Schema.Literal("note"),
   "operational": optionalKey(Operational),
   "revision": Revision,
-  "session": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "target": Schema.String,
   "text": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024)),
   "updated_at": Timestamp
@@ -4830,7 +4829,6 @@ export const SubjectNote = /*#__PURE__*/ (() => Schema.Struct({
   "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   "id": Schema.String.check(Schema.isPattern(new RegExp("^note/", "u"))),
   "revision": Schema.String,
-  "session": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "target": Schema.String,
   /** Nonblank; at most 1024 UTF-8 bytes. */
   "text": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024)).annotate({ description: "Nonblank; at most 1024 UTF-8 bytes." }),
@@ -5298,7 +5296,6 @@ export type ScgReadAuthorizationEncoded = typeof ScgReadAuthorization.Encoded
 
 export const SubjectNoteCreate = /*#__PURE__*/ (() => Schema.Struct({
   "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
-  "session": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "target": Schema.String,
   "text": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024))
 }).annotate({ identifier: "SubjectNoteCreate" }))()
@@ -5307,7 +5304,6 @@ export type SubjectNoteCreateEncoded = typeof SubjectNoteCreate.Encoded
 
 export const SubjectNoteUpdate = /*#__PURE__*/ (() => Schema.Struct({
   "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
-  "session": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "text": Schema.OptionFromOptionalNullOr(Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024)), NULL_NONE)
 }).annotate({ identifier: "SubjectNoteUpdate" }))()
 export type SubjectNoteUpdate = typeof SubjectNoteUpdate.Type

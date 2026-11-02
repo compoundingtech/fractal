@@ -65,8 +65,6 @@ pub struct SubjectNote {
     pub author: String,
     pub text: String,
     pub audience: NoteAudience,
-    #[serde(default)]
-    pub session: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
@@ -87,8 +85,6 @@ pub struct SubjectNoteCreate {
     pub target: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
 }
 /// Outer None preserves the existing value; Some(None) clears or archives it.
@@ -100,12 +96,6 @@ pub struct SubjectNoteUpdate {
         skip_serializing_if = "Option::is_none"
     )]
     pub text: Option<Option<String>>,
-    #[serde(
-        default,
-        deserialize_with = "note_patch_field",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub session: Option<Option<String>>,
     #[serde(
         default,
         deserialize_with = "note_patch_field",
@@ -126,8 +116,6 @@ pub struct Note {
     pub author: String,
     pub text: String,
     pub audience: NoteAudience,
-    #[serde(default)]
-    pub session: Option<String>,
     pub created_at: String,
     #[serde(default)]
     pub expires_at: Option<String>,
@@ -142,7 +130,6 @@ impl From<Note> for SubjectNote {
             author: note.author,
             text: note.text,
             audience: note.audience,
-            session: note.session,
             created_at: note.created_at,
             expires_at: note.expires_at,
         }
