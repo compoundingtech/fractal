@@ -196,7 +196,8 @@ mod tests {
         }
         for audience in ["self", "agent", "future-level"] {
             let (status, rejected) = call(&state, "PUT", &path, "person/example", json!({"audience":audience})).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+            assert_eq!(rejected["code"], "validation-failed");
         }
         let (status, updated) = call(&state, "PUT", &path, "person/example", json!({"text":"Updated context"})).await;
         assert_eq!(status, StatusCode::OK, "{updated}");
