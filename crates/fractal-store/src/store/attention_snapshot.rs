@@ -1498,6 +1498,9 @@ impl Store {
             return Ok(None);
         };
         let fields = &diagnostic.body["fields"];
+        // The step's effective state expires its lease by the clock and reads asks on other
+        // subjects: a wake fault is read again at every snapshot. There are few of them.
+        smallclaims::touched::note_read(|| UNKEYED_READ.into());
         if diagnostic.accepted_at_unix_ms > as_of {
             smallclaims::touched::note_due(diagnostic.accepted_at_unix_ms);
         }

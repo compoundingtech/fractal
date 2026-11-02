@@ -154,10 +154,10 @@ fn fault_snapshot_removes_one_history_select_and_standalone_gate_still_folds() {
     FAULT_CACHE_PARITY.with(|parity| parity.set(true));
     assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
     assert!(shared_work.statements > 0, "the SQL control must measure real work");
-    // The history is folded once, and the failure comes from the fault cache. With one failure
-    // the change feed's reads cost what the cache saves; that the cost stays flat however many
-    // failures there are is pinned by the dead-failure test below.
-    assert!(shared_work.statements <= old_work.statements, "{} <= {}", shared_work.statements, old_work.statements);
+    // The history is folded once and the failure's claim is not read again: the fault cache
+    // answers it. With one failure that saving pays exactly for the change feed's reads; that
+    // the cost stays flat however many failures there are is pinned by the dead-failure test.
+    assert_eq!(shared_work.statements, old_work.statements);
 
     let (_, failures) = store.operational_attention_items_with_failures(None, as_of).unwrap();
     // Warm both gate paths before their separate scoped comparison as well.
@@ -795,8 +795,11 @@ fn an_unchanged_snapshot_reads_no_dead_failure_again_however_many_there_are() {
         assert!(first >= count, "the first snapshot reads every failure");
         // Warm the readers, then count a snapshot with nothing new.
         cached_snapshot_cost(&store, as_of + 1_000);
+        // A reading of every fault whenever raised neither uses the cache nor replaces it.
+        store.fault_snapshot(u128::MAX).unwrap();
         let (statements, reads) = cached_snapshot_cost(&store, as_of + 2_000);
-        assert_eq!(reads, 0, "no failure is read again when nothing it read changed");
+        // The fixture's exhausted wake rests on the clock, so it alone is read every snapshot.
+        assert_eq!(reads, 1, "no other failure is read again when nothing it read changed");
         costs.push(statements);
     }
     assert_eq!(costs[0], costs[1], "a snapshot's statements do not grow with dead failures: {costs:?}");
@@ -810,7 +813,7 @@ fn a_change_to_one_run_reads_only_its_failures_again() {
     fail_run(&store, &run, 3, "touched");
     let as_of = now_ms();
     let faults = store.fault_snapshot(as_of).unwrap().len();
-    assert_eq!(cached_snapshot_cost(&store, as_of + 1_000).1, 0);
+    assert_eq!(cached_snapshot_cost(&store, as_of + 1_000).1, 1, "only the wake, read every snapshot");
     store.set_mission_run_state(&run.id, "cancelled", "terminal", Some("ended")).unwrap();
     let (_, reads) = cached_snapshot_cost(&store, now_ms().max(as_of + 2_000));
     assert_eq!(reads, 4, "the run's three failures and the wake on its step, not the agent's other twelve");
@@ -826,7 +829,8 @@ fn the_cache_rebuilds_every_five_minutes_then_every_half_hour_after_a_quiet_day(
     let start = now_ms();
     let reads = |at: u128| cached_snapshot_cost(&store, at).1;
     assert!(reads(start) >= 4);
-    assert_eq!(reads(start + MINUTE), 0);
+    // The fixture's exhausted wake is read every snapshot; a full rebuild reads all seventeen.
+    assert_eq!(reads(start + MINUTE), 1);
     assert!(reads(start + 5 * MINUTE) >= 4, "a full rebuild five minutes on");
     assert_eq!(store.fault_cache_rebuild_every(start + 5 * MINUTE), Some(5 * MINUTE));
     // A day of rebuilds that all match: rebuilds come every half hour.
@@ -838,12 +842,12 @@ fn the_cache_rebuilds_every_five_minutes_then_every_half_hour_after_a_quiet_day(
         }
     }
     assert_eq!(store.fault_cache_rebuild_every(at), Some(30 * MINUTE));
-    assert_eq!(reads(rebuilt + 25 * MINUTE), 0, "no rebuild within half an hour after a quiet day");
+    assert_eq!(reads(rebuilt + 25 * MINUTE), 1, "no rebuild within half an hour after a quiet day");
     // A change the feed cannot see: only a rebuild finds it, as a correction.
     store.connection.write().execute(
         "UPDATE mission_runs SET status='cancelled', phase='terminal' WHERE id=?1", [&run.id],
     ).unwrap();
-    assert_eq!(reads(rebuilt + 29 * MINUTE), 0, "the cache still answers from before the change");
+    assert_eq!(reads(rebuilt + 29 * MINUTE), 1, "the cache still answers from before the change");
     let at = rebuilt + 30 * MINUTE;
     assert!(reads(at) >= 4, "the half-hour rebuild reads every failure again");
     let corrections = smallclaims::performance::snapshot()["incremental_corrections"]

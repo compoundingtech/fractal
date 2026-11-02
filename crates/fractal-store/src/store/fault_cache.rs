@@ -56,8 +56,11 @@ impl Store {
         let failures = self.operational_failures()?;
         let kept = self.extension::<FaultCache>();
         let mut kept = kept.0.lock().unwrap_or_else(PoisonError::into_inner);
-        // An earlier time than the cache's answers gets its own reading and leaves the cache.
-        if kept.as_ref().is_some_and(|cache| as_of < cache.as_of) {
+        // A reading for every fault whenever raised (`u128::MAX`, as the client API asks), or for
+        // an earlier time than the cache's answers, gets its own reading and leaves the cache.
+        // Two callers whose times cross while one holds the lock cost the later one a full
+        // reading; callers read at `now`, so that needs them within one snapshot of each other.
+        if as_of == u128::MAX || kept.as_ref().is_some_and(|cache| as_of < cache.as_of) {
             return self.read_failure_faults(&failures, as_of);
         }
         let fresh = kept.is_none();
