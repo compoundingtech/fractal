@@ -1769,6 +1769,57 @@ class StTest(unittest.TestCase):
         git(self.work, 'checkout', '-q', '-B', 'feature')
         self.commit('b.txt', 'two')
 
+    def sign_as(self, signer):
+        """Make this host sign as `signer` from now on, with a key of its own that main's .st/evidence-keys must already trust."""
+        key = Path(self.tmp.name) / ('key' if signer == 'host/box-1' else signer.replace('/', '-'))  # setUp's key is host/box-1's
+        config = self.home / '.config/st/evidence-sign.json'
+        settings = json.loads(config.read_text())
+        settings.update(signer=signer, ssh_key=str(key))
+        config.write_text(json.dumps(settings))
+
+    def test_a_note_another_level_signed_does_not_cover_a_tree_that_edits_a_protected_file_so_the_host_signs_it(self):
+        # main: the real gate, and a second trusted signer at the fleet level (CI's), which the policy takes for demo
+        fleet = Path(self.tmp.name) / 'fleet-ci'
+        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'fleet/ci', '-f', str(fleet)], check=True)
+        git(self.work, 'checkout', '-q', 'main')
+        shutil.copy(ROOT / 'scripts/ci-evidence-gate', self.work / 'scripts/ci-evidence-gate')
+        pub = fleet.with_suffix('.pub').read_text().split()
+        with open(self.work / '.st/evidence-keys', 'a') as keys:
+            keys.write(f'fleet/ci namespaces="git" {pub[0]} {pub[1]}\n')
+        policy = json.loads(json.dumps(POLICY))
+        policy['checks']['demo']['trust_levels'] = ['host', 'fleet']
+        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'main: the gate, and a fleet signer')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', '-B', 'feature')
+        self.commit('.st/evidence-log-key', 'log/standby namespaces="git" ssh-ed25519 AAAA\n')  # protected: the gate never skips it on a fleet note
+        protected_head = git(self.work, 'rev-parse', 'HEAD')
+        self.sign_as('fleet/ci')  # CI signed this tree's inputs first (as any other pull request's run does)
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.assertEqual([s['predicate']['signer'] for s in self.statements()], ['fleet/ci'])
+        self.sign_as('host/box-1')
+        code, out, err = self.run_st_test('--status')
+        self.assertEqual(code, 3, out + err)
+        self.assertIn('only a fleet note covers it', out)
+        self.assertIn('.st/evidence-log-key', out)
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'demo +passed')  # it ran on this host: not taken for already signed
+        self.assertCountEqual([s['predicate']['signer'] for s in self.statements()], ['fleet/ci', 'host/box-1'])
+        self.assertRegex(self.run_st_test('--check', 'demo')[1], r'demo +already signed')  # the host's note covers it now
+        self.assertEqual(self.run_st_test('--status')[0], 0)
+        # A tree that edits no protected file takes the fleet note as before.
+        git(self.work, 'checkout', '-q', '-b', 'plain', 'main')
+        self.commit('b.txt', 'two')
+        self.assertNotEqual(git(self.work, 'rev-parse', 'HEAD'), protected_head)
+        self.sign_as('fleet/ci')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.sign_as('host/box-1')
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'demo +already signed')
+
     def test_when_protected_files_moved_on_main_status_asks_about_the_merge_and_a_run_merges_main_into_the_branch(self):
         self.branch_from_a_base_with_the_gate()
         head = git(self.work, 'rev-parse', 'HEAD')

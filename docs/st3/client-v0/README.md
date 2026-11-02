@@ -1181,7 +1181,15 @@ header's does, so a client pairs the two by identity; content from an older daem
 HTTP opens at the newest bounded chronological window; its page cursor walks backward (a keyset
 cursor for a native transcript, a frozen projection for a stored timeline). Conversation changes
 and WebSocket follow frames use the same chronology. The conversation cursor independently
-tracks graph-store position, local-observation position, and native-source high-water sequence.
+tracks graph-store position, local-observation position, messages-stream position, and
+native-source high-water sequence. A cursor without the stream position (from an earlier build)
+has read none of the stream. A stream item's message and content entries take sequences
+`g*4+2` and `g*4+3`, where `g` is the graph index it arrived at on this member, so they sort
+after the graph claim they arrived behind; a graph message keeps `index*4` and `index*4+1`.
+Items that arrived at the same `g` share those sequences, so each shows a distinct millisecond: its
+accepted time, or one past the item recorded before it at that `g`. A message and its content
+entry then sort next to each other, which a client that pairs a message with the content entry
+after it relies on.
 Its native mark is the source's newest native sequence, not just the latest display window's, so
 graph-only windows cannot rewind it: when the 200-entry window is truncated, the gateway reads
 the newest native entries by sequence beside it (at most one window more). A change omitted by
@@ -1416,7 +1424,14 @@ The server deadline envelope adds the clamped requested wait (10 ms through 30 s
 its ordinary 15-second read budget only when paged wait mode is enabled. Each bounded store
 query retains the ordinary query budget; waiting and pacing do not extend its SQL work budget.
 Trace follow
-uses this continuation and registers its wake before reading the frontier. The legacy
+uses this continuation and registers its wake before reading the frontier.
+A member that holds the messages stream reports how far it has come as `messages_store_index`
+in `GET /v1/health`; the field is absent without the stream. A page read that also sends
+`messages_after` gets the stream's message events after it in `stream_items`, with
+`messages_next_after`, `messages_has_more` and `messages_frontier`; their `store_index` is the
+stream's own. An owner-filtered page has no stream items, and a read without `messages_after`
+gets the graph's page unchanged. A stream item arriving wakes a waiting page read, so
+`st conversations wait` ends on a stream reply. The legacy
 `GET /v1/events` keeps its array shape, returns at most 200 rows, and reports continuation in
 `X-ST-Next-After`, `X-ST-Has-More`, and `X-ST-Frontier`; owner filters and subject filters
 during migration require the page endpoint. CLI condition, restart, and harness waits use pages.
@@ -1764,7 +1779,7 @@ The shared `checks.st3` suite includes the adapter's Rust tests.
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
 
 ```sh
-nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal --features fractal/test-support --bin st-chatgpt --bin fractal --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
+nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal -p fractal-cli --features fractal/test-support --bin st-chatgpt --bin fractal --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
 ```
 
 The script starts the repository API harness with its own persistent store, paired gateway,

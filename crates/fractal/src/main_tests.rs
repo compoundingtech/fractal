@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn alias_deprecation_uses_argv0_basename_and_exact_suppression() {
+    use std::ffi::OsStr;
+    for (path, expected) in [
+        ("st", Some("st")), ("/usr/local/bin/st", Some("st")),
+        ("st3", Some("st3")), ("./bin/st3", Some("st3")),
+        ("fractal", None), ("/bin/fractal", None),
+        ("git", None), ("gh", None), ("st3-helper", None), ("", None),
+    ] {
+        let argv0 = Some(OsStr::new(path));
+        assert_eq!(deprecated_binary_name(argv0, None), expected, "{path}");
+        assert_eq!(deprecated_binary_name(argv0, Some(OsStr::new("1"))), None, "{path}");
+        for value in ["", "0", "true", "01"] {
+            assert_eq!(deprecated_binary_name(argv0, Some(OsStr::new(value))), expected, "{path}: {value}");
+        }
+    }
+    assert_eq!(deprecated_binary_name(None, None), None);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(deprecated_binary_name(Some(OsStr::from_bytes(b"/bin/\xffst")), None), None);
+    }
+}
+
+#[test]
 fn demo_environment_excludes_both_tui_configuration_spellings() {
     for suffix in ["PERSON", "ENDPOINT", "DOWNLOADS"] {
         for prefix in ["ST3", "FRACTAL"] {

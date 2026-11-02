@@ -285,6 +285,126 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     }).count(), 0);
 }
 
+/// A local cut that deletes in many chunks leaves the roster's generation alone until its run
+/// stops, so a fold under way publishes. Forgetting the views after every chunk restarted the
+/// roster's fold before it could publish, all through a run.
+#[test]
+fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let all = observer_ids(&store);
+    // A capped day stops at TrimDeferred, and the next day's run reaches the final mark.
+    store.trim_locally_at_most(15);
+    for (day, outcome) in [(0, "deferred"), (1, "trimmed")] {
+        let context = context(scratch.path(), day);
+        let before = answers(&store, context.now_unix_ms);
+        let deleted = all.difference(&observer_ids(&store)).count();
+        let generation = store.fractal.presented_agents.generation();
+        let sequence = claims_sequence(&store);
+        let actions = kinds(&step(&store, &context));
+        assert_eq!(actions.first(), Some(&outcome), "day {day}: {actions:?}");
+        let chunks = all.difference(&observer_ids(&store)).count() - deleted;
+        let forgets = store.fractal.presented_agents.generation() - generation;
+        assert!(chunks > 4, "day {day}: the run deletes in many chunks ({chunks})");
+        // Once when a cut's tombstones are recorded and once when its run stops: the second
+        // day finishes the first cut, then records the next one and stops at the cap.
+        assert!(forgets <= 3, "day {day}: {forgets} forgets for {chunks} chunks");
+        // A stopped run still forgets what the views hold of the claims it deleted, and the
+        // final mark still expires every cursor taken before it.
+        assert!(forgets >= 1, "day {day}: the run's stop forgets the views");
+        assert_eq!(claims_sequence(&store) > sequence, outcome == "trimmed", "day {day}: cursors expire at the final mark");
+        assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}: the readers answer the same");
+    }
+}
+
+/// The agents roster publishes while a local cut deletes in many chunks: a fold begun after
+/// one chunk publishes after the next. Forgetting the views after every chunk failed it with
+/// "the agents source reset while materializing its publication", all through the run.
+#[test]
+fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
+    use super::agents_publication::{AgentsStatusWatermark, PresentedAgents};
+    use super::published_list::Publication;
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let fractal = Arc::clone(&store.fractal);
+    fractal.presented_agents.start();
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let hook_published = Arc::clone(&published);
+    let mut building = None;
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        // A fold begun after one chunk ends after the next, as a fold of seconds does.
+        if let Some(build) = building.take() {
+            let row = serde_json::json!({ "id": format!("agent/example-{chunk}") });
+            let done = fractal.presented_agents.publish_identified(build, |identity| Publication {
+                cut: 1,
+                published_at_unix_ms: 1,
+                valid_until_unix_ms: None,
+                rows: PresentedAgents::new(
+                    uuid::Uuid::nil(), identity, AgentsStatusWatermark { store_index: 1, local_frontier: 1 }, 1,
+                    vec![row], vec![format!("agent/example-{chunk}")],
+                ),
+            });
+            hook_published.lock().unwrap().push(done.is_some());
+        }
+        building = fractal.presented_agents.begin_materialization();
+    }));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let published = published.lock().unwrap();
+    assert!(published.len() > 4, "the cut deletes in many chunks ({})", published.len());
+    assert!(published.iter().all(|done| *done), "the agents source reset while materializing its publication: {published:?}");
+}
+
+/// A local cut's run lets the views refold once the interval is due, keeping the roster's
+/// generation; within the interval it leaves them serving.
+#[test]
+fn a_local_cut_refolds_the_views_within_its_run_once_the_interval_is_due() {
+    for (interval, refolds) in [(std::time::Duration::ZERO, true), (smallclaims::store::checkpoint_trim::TRIM_VIEW_REFOLD_INTERVAL, false)] {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = local_member("alder");
+        store.set_trim_pause(std::time::Duration::ZERO);
+        store.set_trim_chunk_envelopes(1);
+        store.set_trim_view_refold_interval(interval);
+        for n in 0..30 {
+            apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+        }
+        let fractal = Arc::clone(&store.fractal);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hook_seen = Arc::clone(&seen);
+        let mut generation = None;
+        *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+            let now = fractal.presented_agents.generation();
+            let refolded = fractal.glass_list.refold.swap(false, std::sync::atomic::Ordering::AcqRel);
+            hook_seen.lock().unwrap().push((refolded, *generation.get_or_insert(now) == now));
+        }));
+        assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+        store.trim_chunk_hook.lock().unwrap().take();
+        let seen = seen.lock().unwrap();
+        assert!(seen.len() > 4, "{interval:?}: the cut deletes in many chunks ({})", seen.len());
+        assert_eq!(seen.iter().any(|(refolded, _)| *refolded), refolds, "{interval:?}: {seen:?}");
+        assert!(seen.iter().all(|(_, kept)| *kept), "{interval:?}: a refold keeps the roster's generation: {seen:?}");
+    }
+}
+
+/// The claims sequence a page cursor carries, which the final mark of a trim moves on.
+fn claims_sequence(store: &Store) -> i64 {
+    store
+        .readers
+        .get()
+        .query_row("SELECT seq FROM sqlite_sequence WHERE name='claims'", [], |row| row.get(0))
+        .unwrap()
+}
+
 /// How many claims this member retired, and whether every one of `deleted` is among them.
 fn retired_exactly(store: &Store, deleted: &BTreeSet<String>) -> bool {
     let connection = store.readers.get();
