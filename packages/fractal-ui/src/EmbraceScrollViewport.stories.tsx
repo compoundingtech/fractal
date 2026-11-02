@@ -6,7 +6,7 @@ import { Button } from 'react-aria-components'
 import { EmbraceScrollViewport } from './assistant-ui/EmbraceScrollViewport'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { interactionVars as interaction, surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
+import { interactionVars as interaction, surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t, geometryVars as g, motionNumbers } from './assistant-ui/composition-tokens.stylex'
 
 function ScrollStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   const [count, setCount] = React.useState(40)
@@ -50,9 +50,29 @@ export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => 
   await frame()
   // ResizeObserver schedules compensation on the next frame; two frames alone race that work.
   await waitFor(() => expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1))
-  await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
-  // The return eases over the standard motion duration (200ms), or lands at once under reduced motion.
-  await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1), { timeout: 400 })
+  // The return eases over the standard motion duration (200ms) from its first frame, or lands at once
+  // under reduced motion. The frames come from a clock the story controls, so a loaded host cannot
+  // stretch the 200ms and the story checks the duration itself: half way is on the way, 200ms is the end.
+  const realFrame = window.requestAnimationFrame
+  const queued: FrameRequestCallback[] = []
+  window.requestAnimationFrame = callback => -queued.push(callback)
+  try {
+    await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
+    const run = (time: number) => queued.splice(0).forEach(callback => callback(time))
+    const left = () => viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      run(1000)
+      await expect(left(), 'reduced motion returns at once').toBeLessThanOrEqual(1)
+    } else {
+      run(1000)
+      run(1000 + motionNumbers.standard / 2)
+      await expect(left(), 'half way through the ease the lane has not landed').toBeGreaterThan(1)
+      run(1000 + motionNumbers.standard)
+      await expect(left(), 'the ease lands at its duration').toBeLessThanOrEqual(1)
+    }
+  } finally {
+    window.requestAnimationFrame = realFrame
+  }
   await expect(canvas.queryByRole('button', { name: 'New messages ↓' })).toBeNull()
 } }
 export const FollowingAndAnchoredLight: Story = { ...FollowingAndAnchored, args: { scheme: 'light' } }
