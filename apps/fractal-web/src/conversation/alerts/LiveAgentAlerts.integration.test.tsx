@@ -88,6 +88,8 @@ it('groups simultaneous native questions without creating duplicate navigation l
 
 it('keeps selections and tab markers for prototype-shaped native question ids', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // React Aria escapes radio-group names when checking tab focus; jsdom omits CSS.escape.
+  if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, char => `\\${char}`) })
   data.attention = []
   const container = document.createElement('div')
   document.body.append(container)
