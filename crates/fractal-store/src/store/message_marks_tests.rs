@@ -176,7 +176,8 @@ fn a_repeated_mark_answers_its_first_receipt_and_an_unknown_message_is_refused()
 /// Once marks are on, the claim append path records a seat placed on this member delivering,
 /// reading and closing graph mail as marks, and its staging still as a claim (RECORDS_STAGED: a
 /// release that reads marks but no stagings must not offer the mail again after a rollback). A
-/// seat placed on another host, a person, and anything before the switch write claims. Each mark
+/// seat placed on another host, a person, a delivery probe's mail, and anything before the switch
+/// write claims. Each mark
 /// moves the mark-event position mailbox wakes and changes read.
 #[test]
 fn a_hosted_seat_marks_delivery_read_and_close_once_marks_are_on_and_stages_as_a_claim() {
@@ -216,6 +217,13 @@ fn a_hosted_seat_marks_delivery_read_and_close_once_marks_are_on_and_stages_as_a
     assert_eq!(store.append_claim(&lifecycle("message/hosted", "message.closed", RECIPIENT)).unwrap().id, closed);
     assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 3);
 
+    // A delivery probe proves its read by the replicated claim, so its mail keeps claims.
+    store.append_claim(&sent("message/probe", RECIPIENT, &["delivery-probe"])).unwrap();
+    for kind in ["message.staged", "message.delivered", "message.read", "message.closed"] {
+        let receipt = store.append_claim(&lifecycle("message/probe", kind, RECIPIENT)).unwrap().id;
+        assert!(!receipt.starts_with("offset-receipt/"), "probe {kind}: {receipt}");
+    }
+    assert_eq!(kinds("message/probe"), every);
     for (subject, to) in [("message/elsewhere", elsewhere), ("message/person", "person/avery")] {
         for receipt in lifecycle_of(subject, to) {
             assert!(!receipt.starts_with("offset-receipt/"), "{subject}: {receipt}");

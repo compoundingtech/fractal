@@ -409,8 +409,17 @@ mod tests {
                 idempotency_key: None,
             })
             .unwrap();
-        let (_, deps, _) = store.mailbox_wake_batch(next).unwrap();
+        let (next, deps, _) = store.mailbox_wake_batch(next).unwrap();
         assert!(deps.contains(&Dependency::Subject("agent/quartz".into())));
+        // A seat's mark wakes its mailbox and the message, as its lifecycle claim does.
+        fractal_store::store::message_marks::record(&store, "message/declared", "message.read", "agent/quartz").unwrap();
+        let (after, deps, full) = store.mailbox_wake_batch(next).unwrap();
+        assert_eq!(after.3, next.3 + 1);
+        assert!(!full);
+        assert!(deps.contains(&Dependency::Subject("message/declared".into())));
+        assert!(deps.contains(&Dependency::Recipient("agent/quartz".into())));
+        let (_, deps, _) = store.mailbox_wake_batch(after).unwrap();
+        assert!(deps.is_empty(), "{deps:?}");
     }
 
     #[test]

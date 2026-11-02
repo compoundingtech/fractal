@@ -278,7 +278,9 @@ pub fn is_receipt(id: &str) -> bool {
 /// instead of a lifecycle claim: marks are on ([`super::marks_switch`]), and the consumer is a seat
 /// this member's own declarations place on itself, so the seat's host, which other members ask
 /// about it, holds every mark of it. A person, a seat on another host and a seat this member does
-/// not declare keep lifecycle claims, which replicate, and readers count both.
+/// not declare keep lifecycle claims, which replicate, and readers count both. So does a delivery
+/// probe's mail (tagged `delivery-probe`): the probe's sender and every member's doctor prove its
+/// read by the recipient's replicated read claim (docs/st3/delivery-probes.md).
 pub fn local_consumer(connection: &Connection, origin: &str, message: &str, consumer: &str) -> Result<bool> {
     if !super::marks_switch::marks_switched_tx(connection)? || !consumer.starts_with("agent/") {
         return Ok(false);
@@ -290,7 +292,16 @@ pub fn local_consumer(connection: &Connection, origin: &str, message: &str, cons
         .prepare_cached("SELECT json_extract(member,'$.host') FROM desired WHERE subject=?1")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h967901d802cf owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [consumer], |row| row.get(0))
         .optional()?;
-    Ok(graph_message && host.flatten().as_deref() == Some(origin))
+    if !graph_message || host.flatten().as_deref() != Some(origin) {
+        return Ok(false);
+    }
+    let probe: bool = connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index, json_each(claims.body,'$.fields.tags') tag
+             WHERE claims.subject=?1 AND claims.kind='message.sent' AND tag.value='delivery-probe')",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h8f64d250e864 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
+    Ok(!probe)
 }
 
 /// The furthest-along mark of `message`, as its status ("staged", "delivered", "read" or "closed").
@@ -304,7 +315,7 @@ pub fn status(connection: &Connection, message: &str) -> Result<Option<&'static 
     }
     let staged: bool = connection
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM local_message_staged WHERE message=?1)")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h8f64d250e864 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h3962b6920e6b owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
     Ok(staged.then_some("staged"))
 }
 
@@ -342,7 +353,7 @@ pub fn host_marks(
         let connection = store.readers.get();
         let held: bool = connection
             .prepare_cached("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)")?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h3962b6920e6b owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
+            .query_row(/* sqlite-large-value: allow-for-now lv-h80d0240fd28e owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
         if held {
             let marks = connection
                 .prepare_cached(
