@@ -1,6 +1,6 @@
 //! The parked set's on-disk projection, and the operator's unpark request channel.
 //!
-//! [`FlappingCap`](crate::flapping::FlappingCap) is the source of truth for which tasks are parked,
+//! The catalog supervisor's restart budget is the source of truth for which tasks are parked,
 //! and it lives in the supervisor's memory. Everything else — `st2 tasks` above all — is a separate,
 //! read-only process, which is why a parked task used to show `desired: running`, not running, and
 //! `error: null`: the fault existed, but only inside a process nobody was reading. This module is how
