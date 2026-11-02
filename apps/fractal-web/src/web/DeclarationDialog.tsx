@@ -8,7 +8,7 @@ import type { DeclarationPanelProps } from '../../../../packages/fractal-ui/src/
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource } from '../data/react.tsx'
 import { agentDeclarationState, declarationSubject, missionDeclarationState } from '../declarations/model.ts'
-const loadDeclarationDialog = deferredLoader(() => import('../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx').then(module => ({
+const loadDeclarationDialog = deferredLoader<{ readonly subject: string }>(() => import('../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx').then(module => ({
   default: ({ subject }: { readonly subject: string }) => <Aria.Dialog data-testid="declaration-dialog" {...stylex.props(styles.dialog)}>
     {({ close }) => <DeclarationContents subject={subject} Panel={module.DeclarationPanel} close={<Aria.Button aria-label="Close declaration" onPress={close} {...stylex.props(styles.button)}>Close</Aria.Button>} />}
   </Aria.Dialog>,

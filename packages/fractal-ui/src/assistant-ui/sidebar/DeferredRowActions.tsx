@@ -10,9 +10,9 @@ import type { SidebarClock } from './SidebarTime'
 import { useTouchLayout } from './useTouchLayout'
 
 // Only overlay contents cross this boundary; their real triggers never suspend or remount.
-const loadAgentRowMenu = deferredLoader(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentRowMenu })))
-const loadAgentReportedDetails = deferredLoader(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentReportedDetails })))
-const loadHoverCard = deferredLoader(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentHoverCard })))
+const loadAgentRowMenu = deferredLoader<AgentRowActionsProps>(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentRowMenu })))
+const loadAgentReportedDetails = deferredLoader<AgentRowActionsProps>(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentReportedDetails })))
+const loadHoverCard = deferredLoader<{ readonly row: Row; readonly reportedStatusOnly?: boolean } & SidebarClock>(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentHoverCard })))
 export function AgentHoverCard(props: { readonly row: Row; readonly reportedStatusOnly?: boolean } & SidebarClock) {
   return <DeferredSurfaceBoundary load={loadHoverCard} surfaceProps={props} fallback={<span role="alert">This agent hover card could not load.</span>} />
 }
