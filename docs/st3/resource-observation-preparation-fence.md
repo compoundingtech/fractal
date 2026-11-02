@@ -237,9 +237,9 @@ pairs `GraphStore::open` with a file-backed reader pool. `Store::open_memory`
 also uses a file-backed WAL store, with its scratch lifetime owned by the
 connections. Both it and `Store::open_shared_memory` are available only under
 `cfg(test)` or the `test-support` feature. The compile gate prevents production
-callers from depending on fixture constructors. Existing fixtures such as
-`tests/log_diet.rs::Daemon::start` keep their calls and now exercise the normal
-WAL path. Intentional shared-memory preparation controls use
+callers from depending on fixture constructors. Existing callers, including the
+replica in `tests/log_diet.rs::run_workload`, keep their `open_memory` calls and
+now exercise the normal WAL path. Intentional shared-memory preparation controls use
 `open_shared_memory`; their mode guard and canonical writer assertions remain.
 
 The new shared-memory check short-circuits before `readers.get`, before the seed
