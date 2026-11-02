@@ -5820,7 +5820,7 @@ pub struct PhoneInspectArgs {}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PhoneMessageReadArgs {
-    pub attention_id: String,
+    pub message_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
