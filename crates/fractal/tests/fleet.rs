@@ -4633,7 +4633,7 @@ async fn an_invitation_only_fabric_could_carry_fails_before_it_exists() {
         assert!(!output.status.success(), "{delivery:?} succeeded");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("Fabric invitations need st-fabric-adapter installed"),
+            stderr.contains("Fabric invitations need fractal-fabric-adapter installed"),
             "{delivery:?}: {stderr}"
         );
         assert!(output.stdout.is_empty(), "{delivery:?} printed a code");
