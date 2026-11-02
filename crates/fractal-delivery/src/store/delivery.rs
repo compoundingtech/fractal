@@ -74,8 +74,12 @@ struct KeptWorkWakes {
 struct KeptWorkWake {
     subject: String,
     created_index: u64,
-    view: Option<((u64, Option<String>, i64), MessageView)>,
+    view: Option<(WakeVersion, MessageView)>,
 }
+
+/// A message's version as a kept view was read at: its latest claim index, its latest desired
+/// revision, and the kinds of mark recorded for it.
+type WakeVersion = (u64, Option<String>, i64);
 
 #[cfg(test)]
 thread_local! {
