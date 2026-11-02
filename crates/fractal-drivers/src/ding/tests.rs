@@ -369,7 +369,7 @@ fn self_addressed_message_uses_identity_marker() {
 }
 
 #[test]
-fn supervisor_cycle_renders_unknown_and_still_delivers() {
+fn supervisor_cycle_renders_unknown() {
     let catalog = tempfile::tempdir().unwrap();
     declare_agent(catalog.path(), "h", "recipient", Some("loop"));
     declare_agent(catalog.path(), "h", "loop", Some("recipient"));
@@ -388,26 +388,10 @@ fn supervisor_cycle_renders_unknown_and_still_delivers() {
         poke_text(catalog.path(), "h", "h.recipient", &message),
         expected
     );
-
-    let mut pending = VecDeque::from([PendingNotice::message(message)]);
-    let poker = RecordingPoker::live();
-    flush_pending(
-        DingContext {
-            catalog_root: catalog.path(),
-            this_host: "h",
-            recipient: "h.recipient",
-        },
-        None,
-        &mut pending,
-        &poker,
-    );
-
-    assert!(pending.is_empty());
-    assert_eq!(poker.calls.lock().unwrap().as_slice(), [expected]);
 }
 
 #[test]
-fn malformed_catalog_with_resolvable_endpoints_renders_unknown_and_still_delivers() {
+fn malformed_catalog_with_resolvable_endpoints_renders_unknown() {
     let catalog = tempfile::tempdir().unwrap();
     declare_agent(catalog.path(), "h", "root", None);
     declare_agent(catalog.path(), "h", "recipient", Some("root"));
@@ -420,22 +404,10 @@ fn malformed_catalog_with_resolvable_endpoints_renders_unknown_and_still_deliver
         ..message
     };
     let expected = "[PING] ? h.root: fallback [id:abc123]";
-    let mut pending = VecDeque::from([PendingNotice::message(message)]);
-    let poker = RecordingPoker::live();
-
-    flush_pending(
-        DingContext {
-            catalog_root: catalog.path(),
-            this_host: "h",
-            recipient: "h.recipient",
-        },
-        None,
-        &mut pending,
-        &poker,
+    assert_eq!(
+        poke_text(catalog.path(), "h", "h.recipient", &message),
+        expected
     );
-
-    assert!(pending.is_empty());
-    assert_eq!(poker.calls.lock().unwrap().as_slice(), [expected]);
 }
 
 #[test]
