@@ -14897,15 +14897,21 @@ subscription "watch/source" {
         let checks = operation_checks(&state).unwrap().unwrap();
         let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
         assert_eq!(projection.status, "fail");
-        assert_eq!(projection.message, format!("operation projection drift: {}", drift.join(", ")));
+        assert!(projection.message.starts_with(&format!("operation projection drift: {}; found by the audit that finished 0 min ago", drift.join(", "))), "{}", projection.message);
 
         assert!(state.store.repair_operation_projection_drift_from_audit(&drift).unwrap());
         let projection_status = || {
             doctor_report(&state).unwrap().0.checks.into_iter()
                 .find(|check| check.name == "operation-projection").unwrap().status
         };
+        // Doctor reports the last audit and never audits inline: it still shows the drift the
+        // startup audit found until the next audit runs.
+        assert_eq!(projection_status(), "fail");
+        assert!(state.store.operation_projection_drift().unwrap().is_empty());
         assert_eq!(projection_status(), "pass");
         corrupt();
+        assert_eq!(projection_status(), "pass");
+        assert_eq!(state.store.operation_projection_drift().unwrap().len(), 1);
         assert_eq!(projection_status(), "fail");
         refresh_operation_report(&state, key, None);
         let checks = operation_checks(&state).unwrap().unwrap();

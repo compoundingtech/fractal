@@ -168,7 +168,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     (
         "GET /v1/internal/fleet/admission-residue",
-        "the scan doctor's fleet-admission check runs inside GET /v1/doctor, which is measured; st fleet wait reads it once as it ends",
+        "the scan the daemon runs at startup and hourly, off the request path, for doctor's fleet-admission check, in pages that each take their own read snapshot; st fleet wait reads it once as it ends",
     ),
     (
         "GET /v1/fleet/admission-residue",

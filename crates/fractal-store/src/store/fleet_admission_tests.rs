@@ -740,6 +740,10 @@ fn a_removed_incarnation_is_fenced_everywhere_that_has_the_removal_even_through_
         "{residue:?}"
     );
     assert!(a.fleet_admission_residue().unwrap().is_empty());
+    // The daemon counts it in pages, each its own read snapshot; any page size counts the same.
+    for page in [1, 2, 3] {
+        assert_eq!(c.fleet_admission_residue_paged(page).unwrap(), residue, "page {page}");
+    }
 }
 
 #[test]

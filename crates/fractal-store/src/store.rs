@@ -2206,6 +2206,42 @@ pub struct Store {
     /// The store index up to which person answers were checked for overriding a deadline's
     /// default; in memory, so a restart checks them again and the notice's key keeps it once.
     pub person_answers_checked: std::sync::atomic::AtomicU64,
+    /// The last operation audit and fleet admission residue this process finished, which doctor
+    /// reports instead of reading the whole store inline; in memory, so a restart has neither
+    /// until its startup audits finish.
+    pub last_operation_audit: Mutex<Option<OperationAuditRecord>>,
+    /// The residue count is kept with the `fleet_generation` its membership was read at.
+    pub last_fleet_residue: Mutex<Option<(i64, FleetResidueRecord)>>,
+}
+
+/// How often the daemon audits the operation projection against the claim log and counts the
+/// fleet admission residue. Doctor calls a result older than two periods stale.
+pub const OPERATION_AUDIT_PERIOD: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// One finished background audit: when it finished, how long it took and what it found.
+#[derive(Clone, Debug)]
+pub struct AuditRecord<T> {
+    pub finished_at_unix_ms: u128,
+    pub took: std::time::Duration,
+    pub result: std::result::Result<T, String>,
+}
+
+/// The operation keys whose projection drifted from the claim log.
+pub type OperationAuditRecord = AuditRecord<Vec<String>>;
+/// Envelopes admitted before this node knew their writer's key or end.
+pub type FleetResidueRecord = AuditRecord<Vec<FleetAdmissionResidue>>;
+
+impl<T: Clone> AuditRecord<T> {
+    fn finished(started: std::time::Instant, result: &Result<T>) -> Self {
+        Self {
+            finished_at_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            took: started.elapsed(),
+            result: result.as_ref().map(Clone::clone).map_err(|error| format!("{error:#}")),
+        }
+    }
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2591,7 +2627,8 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2612,7 +2649,8 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2625,7 +2663,8 @@ impl Store {
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -2727,8 +2766,46 @@ impl Store {
         Ok((count, conflicts))
     }
 
+    /// Audit the operation projection against the claim log, and keep the result for doctor.
     pub fn operation_projection_drift(&self) -> Result<Vec<String>> {
-        self.operation_audit(&mut |_| {})
+        let started = std::time::Instant::now();
+        let drift = self.operation_audit(&mut |_| {});
+        *self.last_operation_audit.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(AuditRecord::finished(started, &drift));
+        drift
+    }
+
+    /// The last operation audit this process finished, if any.
+    pub fn last_operation_audit(&self) -> Option<OperationAuditRecord> {
+        self.last_operation_audit.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// Count the fleet admission residue, and keep the result for doctor with the membership
+    /// generation it was counted at. Residue grows only when membership changes, since every
+    /// later admission is judged by the membership in force, so a count stays exact until the
+    /// generation moves.
+    pub fn audit_fleet_admission_residue(&self) -> Result<Vec<FleetAdmissionResidue>> {
+        let generation = smallclaims::store::FleetAuthority::fleet_generation(&self.graph)?;
+        let started = std::time::Instant::now();
+        let residue = self.graph.fleet_admission_residue();
+        *self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((generation, AuditRecord::finished(started, &residue)));
+        residue
+    }
+
+    /// The last fleet admission residue count, if one was made at the current membership
+    /// generation: when membership moved since, this counts again now.
+    pub fn current_fleet_residue(&self) -> Result<Option<FleetResidueRecord>> {
+        let generation = smallclaims::store::FleetAuthority::fleet_generation(&self.graph)?;
+        let last = self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        Ok(match last {
+            None => None,
+            Some((counted_at, record)) if counted_at == generation => Some(record),
+            Some(_) => {
+                let _ = self.audit_fleet_admission_residue();
+                self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner).clone().map(|(_, record)| record)
+            }
+        })
     }
 
     pub fn rebuild_claim_projections(&self) -> Result<()> {

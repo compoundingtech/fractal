@@ -1964,11 +1964,98 @@ async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
 #[test]
 fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     let store = Store::open_memory("amber").unwrap();
+    let send = |id: &str, from: &str, recipient: &str, tags: &[&str]| {
+        store
+            .append_claim(&ClaimInput {
+                subject: format!("message/{id}"),
+                kind: "message.sent".into(),
+                actor: Some(from.into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!(from)),
+                    ("to".into(), json!(recipient)),
+                    ("status".into(), json!("sent")),
+                    ("content".into(), json!("probe")),
+                    ("tags".into(), json!(tags)),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(id.into()),
+            })
+            .unwrap();
+    };
     for (id, recipient) in [
         ("current", "agent/example/current"),
         ("retired", "agent/example/retired"),
         ("person", "person/eval"),
     ] {
+        send(id, "person/operator", recipient, &[]);
+    }
+    let current = BTreeSet::from(["agent/example/current"]);
+    assert_eq!(unread_current_seat_counts(&store, &current, client_now_ms()).unwrap(), (0, 0));
+    let later = || client_now_ms() + 20_000;
+    assert_eq!(unread_current_seat_counts(&store, &current, later()).unwrap(), (1, 0));
+    assert_eq!(
+        store.messages(None, false).unwrap().len(),
+        3,
+        "inspection does not erase historical messages"
+    );
+
+    // A read or closed record, as a claim or only as a local mark, makes a message read. A
+    // delivered mark is a native handoff the recipient has not read yet, and held mail waits for
+    // its seat's next turn.
+    for id in ["read-by-mark", "closed-by-mark", "read-by-claim", "accepted"] {
+        send(id, "person/operator", "agent/example/current", &[]);
+    }
+    send("held", "agent/example/sender", "agent/example/current", &[crate::silent::SILENT_TAG]);
+    crate::store::message_marks::record(&store, "message/read-by-mark", "message.read", "agent/example/current").unwrap();
+    crate::store::message_marks::record(&store, "message/closed-by-mark", "message.closed", "agent/example/current").unwrap();
+    crate::store::message_marks::record(&store, "message/accepted", "message.delivered", "agent/example/current").unwrap();
+    for status in ["delivered", "read"] {
+        store
+            .append_claim(&ClaimInput {
+                subject: "message/read-by-claim".into(),
+                kind: format!("message.{status}"),
+                actor: Some("agent/example/current".into()),
+                fields: BTreeMap::from([("status".into(), json!(status))]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("read-by-claim-{status}")),
+            })
+            .unwrap();
+    }
+    // current and accepted are late; one of them was accepted.
+    assert_eq!(unread_current_seat_counts(&store, &current, later()).unwrap(), (2, 1));
+    // The same set the full message views give: unread, not held, to a current seat.
+    let views = store
+        .operational_messages(None, false)
+        .unwrap()
+        .into_iter()
+        .filter(|message| {
+            current.contains(crate::store::normalize_message_party(&message.to).as_str())
+                && !matches!(message.status.as_str(), "read" | "closed")
+                && !crate::silent::waits_for_turn(message)
+        })
+        .map(|message| message.subject)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(views, BTreeSet::from(["message/accepted".into(), "message/current".into()]));
+}
+
+/// The overdue count reads the unread mail, not the history: thousands of read messages cost it
+/// no more than none.
+#[test]
+fn doctor_overdue_mail_count_does_not_grow_with_read_history() {
+    let store = Store::open_memory("amber").unwrap();
+    let steps = |store: &Store| {
+        let connection = store.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h6d012e85d16c owner=fractal_api_core::api::tests TODO=trace-statement-and-value-representation */ crate::store::unread_mail::OVERDUE_BY_RECIPIENT).unwrap();
+        let rows = statement
+            .query_map([i64::MAX], |row| row.get::<_, i64>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .sum::<i64>();
+        (rows, statement.get_status(rusqlite::StatementStatus::VmStep))
+    };
+    let send = |id: String| {
         store
             .append_claim(&ClaimInput {
                 subject: format!("message/{id}"),
@@ -1976,32 +2063,30 @@ fn doctor_unread_counts_exclude_historical_recipients_and_people() {
                 actor: Some("person/operator".into()),
                 fields: BTreeMap::from([
                     ("from".into(), json!("person/operator")),
-                    ("to".into(), json!(recipient)),
+                    ("to".into(), json!("agent/example/current")),
                     ("status".into(), json!("sent")),
                     ("content".into(), json!("probe")),
                 ]),
                 evidence: vec![],
                 expected_subject: None,
-                idempotency_key: Some(id.into()),
+                idempotency_key: Some(id),
             })
             .unwrap();
+    };
+    for n in 0..5 {
+        send(format!("unread-{n}"));
     }
-    let current = BTreeSet::from(["agent/example/current"]);
-    let messages = store.operational_messages(None, false).unwrap();
-    assert_eq!(
-        unread_current_seat_counts(&store, &current, &messages, client_now_ms()).unwrap(),
-        (0, 0)
-    );
-    assert_eq!(
-        unread_current_seat_counts(&store, &current, &messages, client_now_ms() + 20_000)
-            .unwrap(),
-        (1, 0)
-    );
-    assert_eq!(
-        store.messages(None, false).unwrap().len(),
-        3,
-        "inspection does not erase historical messages"
-    );
+    let (rows, few) = steps(&store);
+    assert_eq!(rows, 5);
+    for n in 0..2_000 {
+        send(format!("read-{n}"));
+        crate::store::message_marks::record(&store, &format!("message/read-{n}"), "message.read", "agent/example/current").unwrap();
+    }
+    // Flush the queued subjects the way a writer's count does, so the history is indexed.
+    store.unread_mail_count_before(u128::MAX).unwrap();
+    let (rows, many) = steps(&store);
+    assert_eq!(rows, 5);
+    assert!(many < few * 2 + 200, "{few} VM steps with no history, {many} with 2,000 read messages");
 }
 
 /// The per-PR contract for the messaging-faults `handoff_failed` case: once the recipient's
@@ -13888,6 +13973,100 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
 
 
 #[test]
+fn fleet_admission_reports_live_holds_and_the_daemons_last_residue_count() {
+    use crate::store::{FleetResidueRecord, OPERATION_AUDIT_PERIOD};
+    let now = 10 * OPERATION_AUDIT_PERIOD.as_millis();
+    let counted = |age_ms: u128, result: Result<Vec<smallclaims::store::FleetAdmissionResidue>, String>| {
+        Some(FleetResidueRecord { finished_at_unix_ms: now - age_ms, took: Duration::from_millis(4_200), result })
+    };
+    let check = |unsigned, residue| {
+        let check = fleet_admission_check(unsigned, 2, residue, now);
+        assert_eq!(check.name, "fleet-admission");
+        (check.status, check.message)
+    };
+    let (status, message) = check(0, counted(60_000, Ok(Vec::new())));
+    assert_eq!((status.as_str(), message.as_str()), ("pass", "0 envelopes wait for their writer's signature; 2 are fenced"));
+    // What waits for a signature is live, whatever the count's age.
+    assert_eq!(check(3, counted(60_000, Ok(Vec::new()))).0, "warn");
+    // Residue says how old its count is and why that is accurate.
+    let residue = vec![smallclaims::store::FleetAdmissionResidue {
+        writer: "node-b".into(),
+        reason: "admitted-unsigned".into(),
+        envelopes: 858,
+    }];
+    let (status, message) = check(0, counted(25 * 60_000, Ok(residue)));
+    assert_eq!(status, "warn");
+    assert_eq!(message, "0 envelopes wait for their writer's signature; 2 are fenced; 858 envelopes from node-b were admitted unsigned; those were counted 25 min ago (4.2 s); admitted envelopes are never readmitted, so an hour-old count is accurate");
+    // A stale count warns with its age and the same reason.
+    let (status, message) = check(0, counted(2 * OPERATION_AUDIT_PERIOD.as_millis() + 60_000, Ok(Vec::new())));
+    assert_eq!(status, "warn");
+    assert!(message.contains("counted 121 min ago (4.2 s), longer ago than the 60 min the daemon counts them every; admitted envelopes are never readmitted, so an hour-old count is accurate"), "{message}");
+    // Before the first count, and when it failed.
+    let (status, message) = check(0, None);
+    assert_eq!(status, "warn");
+    assert!(message.contains("has not finished since the daemon started; it runs at startup and then every 60 min"), "{message}");
+    let (status, message) = check(0, counted(0, Err("database disk image is malformed".into())));
+    assert_eq!(status, "fail");
+    assert!(message.contains("failed: database disk image is malformed; counted 0 min ago"), "{message}");
+}
+
+#[test]
+fn doctor_reports_the_last_operation_audit_and_never_audits_inline() {
+    use crate::store::{OperationAuditRecord, OPERATION_AUDIT_PERIOD};
+    let now = 10 * OPERATION_AUDIT_PERIOD.as_millis();
+    let audit = |age_ms: u128, drift: Result<Vec<String>, String>| Some(OperationAuditRecord {
+        finished_at_unix_ms: now - age_ms,
+        took: Duration::from_millis(13_900),
+        result: drift,
+    });
+    let check = |audit| {
+        let check = operation_projection_check(audit, now);
+        assert_eq!(check.name, "operation-projection");
+        (check.status, check.message)
+    };
+    let (status, message) = check(None);
+    assert_eq!(status, "warn");
+    assert!(message.starts_with("no operation audit has finished since the daemon started"), "{message}");
+    let (status, message) = check(audit(5 * 60_000, Ok(Vec::new())));
+    assert_eq!(status, "pass");
+    assert_eq!(message, "the operation projection matched the claim log at the audit that finished 5 min ago (13.9 s)");
+    // Two periods old is still current; past that it is stale.
+    let two = 2 * OPERATION_AUDIT_PERIOD.as_millis();
+    assert_eq!(check(audit(two, Ok(Vec::new()))).0, "pass");
+    let (status, message) = check(audit(two + 60_000, Ok(Vec::new())));
+    assert_eq!(status, "warn");
+    assert!(message.ends_with("but audits run every 60 min"), "{message}");
+    // Drift and a failed audit fail whatever their age.
+    let (status, message) = check(audit(two + 60_000, Ok(vec!["op/a".into(), "op/b".into()])));
+    assert_eq!(status, "fail");
+    assert!(message.starts_with("operation projection drift: op/a, op/b; found by the audit that finished 121 min ago"), "{message}");
+    let (status, message) = check(audit(0, Err("database disk image is malformed".into())));
+    assert_eq!(status, "fail");
+    assert!(message.starts_with("the last operation audit failed: database disk image is malformed"), "{message}");
+
+    // A store whose projection drifted, with no audit yet: doctor warns rather than reading
+    // every operation to find the drift.
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.append_client_claim(&ClaimInput {
+        subject: "resource/doctor-audit".into(),
+        kind: "resource.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([("kind".into(), json!("custom.test.doctor-audit"))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("doctor-audit-operation".into()),
+    }).unwrap();
+    state.store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h03a0c43d19d5 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict'", []).unwrap();
+    let projection = |state: &AppState| doctor_report(state).unwrap().0.checks.into_iter()
+        .find(|check| check.name == "operation-projection").unwrap().status;
+    assert_eq!(projection(&state), "warn");
+    assert!(state.store.last_operation_audit().is_none());
+    assert_eq!(state.store.operation_projection_drift().unwrap().len(), 1);
+    assert_eq!(projection(&state), "fail");
+}
+
+#[test]
 fn a_doctor_check_past_its_deadline_reports_timeout_and_the_next_check_still_runs() {
     let clock = DoctorClock::new(Duration::from_secs(5), Duration::from_millis(100));
     let pass = |name: &str| DoctorCheck { name: name.into(), status: "pass".into(), message: String::new() };
@@ -13918,12 +14097,14 @@ fn a_doctor_check_past_its_deadline_reports_timeout_and_the_next_check_still_run
 
 #[test]
 fn doctor_checks_after_the_total_is_spent_say_they_did_not_run() {
-    let clock = DoctorClock::new(Duration::from_millis(150), Duration::from_millis(100));
+    // The second check starts 600 ms in, well inside the total even on a loaded host, and
+    // ends past it.
+    let clock = DoctorClock::new(Duration::from_millis(1000), Duration::from_millis(100));
     let ran = std::cell::Cell::new(0);
     for _ in 0..2 {
         clock.checks("slow-check", || {
             ran.set(ran.get() + 1);
-            std::thread::sleep(Duration::from_millis(110));
+            std::thread::sleep(Duration::from_millis(600));
             Ok(Vec::new())
         });
     }

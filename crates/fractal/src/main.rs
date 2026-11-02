@@ -6955,6 +6955,61 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
     }
 }
 
+/// Audit the operation projection on a blocking thread. The audit reads in pages of at most
+/// 128 rows, each in its own short read snapshot, so it never holds one snapshot for its whole
+/// run and never delays a WAL restart for long. The store keeps the result for doctor.
+async fn audit_operations(store: &Arc<Store>) -> anyhow::Result<Vec<String>> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("operations.audit", || {
+        store.operation_projection_drift()
+    }))
+    .await
+    .unwrap_or_else(|error| Err(anyhow::anyhow!("the operation audit stopped: {error}")))
+}
+
+/// Count the envelopes this node admitted before it knew their writer's key or end, on a blocking
+/// thread, in pages that each take their own short read snapshot. The store keeps the count for
+/// doctor; a failure is kept there too, and doctor reports it.
+async fn count_fleet_residue(store: &Arc<Store>) {
+    let store = store.clone();
+    let _ = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("fleet.admission_residue", || {
+        store.audit_fleet_admission_residue()
+    }))
+    .await;
+}
+
+/// Repair what an audit found, and say whether anything changed.
+async fn repair_operation_drift(store: &Arc<Store>, audit: anyhow::Result<Vec<String>>) -> bool {
+    let drift = match audit {
+        Ok(drift) if drift.is_empty() => return false,
+        Ok(drift) => drift,
+        Err(error) => {
+            stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
+            return false;
+        }
+    };
+    let store = store.clone();
+    match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("operations.repair_drift", || {
+        store.repair_operation_projection_drift_from_audit(&drift)
+    }))
+    .await
+    {
+        Ok(Ok(true)) => {
+            stderr_message("st3", format_args!("rebuilt an operation projection that drifted"));
+            true
+        }
+        Ok(Ok(false)) => false,
+        Ok(Err(error)) => {
+            stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
+            false
+        }
+        Err(error) => {
+            stderr_message("st3", format_args!("operation projection check stopped: {error}"));
+            false
+        }
+    }
+}
+
 async fn run_up(args: UpArgs) -> Result<()> {
     let worker_observer = fractal_daemon::api::worker_observer(args.replication_worker_pid)?;
     let started_at = Instant::now();
@@ -7361,32 +7416,36 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .await;
         }
     }));
-    // The first diagnostic report and delayed repair share one operation audit. Later reports
-    // audit current state independently; no request waits for this startup report.
+    // Doctor reports the envelopes admitted before this node knew better from this count, made
+    // at once and then every period; a membership change in between makes doctor count again.
+    {
+        let store = store.clone();
+        tokio::spawn(fractal_daemon::task_cpu::account("fleet.admission_residue", async move {
+            loop {
+                count_fleet_residue(&store).await;
+                tokio::time::sleep(fractal_daemon::store::OPERATION_AUDIT_PERIOD).await;
+            }
+        }));
+    }
+    // The first diagnostic report and delayed repair share one operation audit. After it the
+    // daemon audits again every period, and after any repair, so doctor reports a recent audit
+    // instead of reading every operation itself. No request waits for an audit.
     if let Some(audit) = fractal_daemon::api::start_operation_report(&state) {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("operations.repair_drift", async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            let drift = match audit.await {
-                Ok(Ok(drift)) => drift,
-                Ok(Err(error)) => {
-                    stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
-                    return;
-                }
-                Err(error) => {
-                    stderr_message("st3", format_args!("operation projection check stopped: {error}"));
-                    return;
-                }
+            let mut audit = match audit.await {
+                Ok(audit) => audit,
+                Err(error) => Err(anyhow::anyhow!("the startup audit stopped: {error}")),
             };
-            match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("operations.repair_drift", || {
-                store.repair_operation_projection_drift_from_audit(&drift)
-            }))
-            .await
-            {
-                Ok(Ok(true)) => stderr_message("st3", format_args!("rebuilt an operation projection that drifted")),
-                Ok(Ok(false)) => {}
-                Ok(Err(error)) => stderr_message("st3", format_args!("operation projection check failed: {error:#}")),
-                Err(error) => stderr_message("st3", format_args!("operation projection check stopped: {error}")),
+            loop {
+                if repair_operation_drift(&store, audit).await {
+                    // Audit once more at once, so doctor reports what the repair left; anything
+                    // still drifted waits for the next period's repair.
+                    let _ = audit_operations(&store).await;
+                }
+                tokio::time::sleep(fractal_daemon::store::OPERATION_AUDIT_PERIOD).await;
+                audit = audit_operations(&store).await;
             }
         }));
     }
