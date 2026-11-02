@@ -392,11 +392,15 @@ SDKs after these updates; schema JSON alone does not generate those models.
   **Add note** (V1), and unmodified lowercase `n` opens the quick-add popover
   on the selected row (V2). V1 and V2 are kept together, not alternatives.
   Both use one shared `NoteComposer`, the same target-bound draft and note
-  write actions; shortcut handling excludes editable fields, IME composition,
-  menus and dialogs and restores focus on close. `packages/fractal-ui`
-  provides presentational `NoteList`, `NoteBadge` and `NoteComposer`
-  components taking the generated `SubjectNote` type; `apps/fractal-web`
-  wires both entry points to the client. The kit imports no app code.
+  write actions. At rest the detail view's Notes is one line (a disclosure and
+  a quiet **Add note** that expands the composer in place); each sidebar row's
+  actions menu also offers **Add note…**. Shortcut handling excludes editable
+  fields, typeahead collections (the sidebar tree), IME composition, menus and
+  dialogs, can be turned off per user, and restores focus on close.
+  `packages/fractal-ui` provides presentational `NoteList`, `NoteBadge`,
+  `NoteComposer` and `NoteQuickAdd` components taking the generated
+  `SubjectNote` type; `apps/fractal-web` wires both entry points to the
+  client. The kit imports no app code.
 
 Every composer (stui, Fractal TUI and Fractal web) accepts plain text only,
 up to 1024 UTF-8 bytes, without an audience control or tag picker. Every

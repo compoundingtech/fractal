@@ -77,9 +77,9 @@ Width examples: `--light440`, `--light1440`, `--dark1440`.
 
 | Aspect | Behavior |
 |---|---|
-| Entry | Enabled, unmodified lowercase `n` opens a popover anchored to the selected row; pointer entry is also available. A labelled control disables the single-letter shortcut. Uppercase Shift+N does not open it. |
-| Focus | Opening focuses the textarea; closing returns focus to its trigger. The shared app editable-field guard excludes inputs, textareas, selects, contenteditable and role=textbox fields; open menus/dialogs and IME composition also block the shortcut. |
-| Escape | Closes without sending and retains exact text, audience and fixed target per target. Reopening restores the draft. Only **Discard draft** clears it before success. |
+| Entry | Enabled, unmodified lowercase `n` opens a popover anchored to the selected row's actions trigger (the agent pane when the sidebar hides the row). Every row's actions menu has **Add note…**, showing the **N** shortcut on the selected row; it opens the same popover. The popover's **N opens note composer** checkbox turns the single-letter shortcut and its hints off and is stored per user. Uppercase Shift+N and key repeat do not open it. |
+| Focus | Opening focuses the textarea; closing returns focus to the element focused before opening, or to the row's actions trigger when the entry was its menu item. The shared app guard excludes inputs, textareas, selects, contenteditable and role=textbox fields, typeahead collections (the sidebar tree, where `n` moves to the next row starting with N), open menus/dialogs and IME composition. |
+| Escape | Closes without sending and retains exact text per target. Reopening restores the draft. Only **Discard draft** clears it before success, and **Undo** restores a discarded draft. While a create is in flight, Escape and outside presses do not close the popover. |
 | After add | Success resets the draft and updates the row badge. Failure keeps draft and target with an announced actionable error and **Retry**. This variant does not show a full note list. |
 | Audience | Same labelled control and scope as V1. Aggregate badge sharing is independent of the separately labelled newest audience; no delivery acknowledgement is implied. Full newest text remains available without hover in the accessible name and focus tooltip. |
 | Weaknesses | Selection may differ from focus; the shortcut acts on selection. The popover obscures nearby content. Retrieval beyond the newest preview still needs the full notes surface. |
