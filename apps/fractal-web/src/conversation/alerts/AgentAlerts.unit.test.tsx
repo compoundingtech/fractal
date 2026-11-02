@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { ClientError, type FractalClient } from '@fractal/client'
 import type * as Native from '@fractal/client/schema'
+import { Option } from 'effect'
 
 // Node rendering exercises the real composition, not the CSS compiler.
 vi.mock('@stylexjs/stylex', () => ({
@@ -46,7 +47,7 @@ const call = (call_id: string, tool: string, input: unknown, input_complete = tr
   ({ call_id, tool, input: JSON.stringify(input), input_complete })
 
 const render = (alerts: readonly Native.Attention[], calls: Native.AttentionPromptCall[], allow = true) =>
-  renderToStaticMarkup(<AgentAlerts alerts={alerts.map(alert => ({ ...alert, presentation: { prompt: { calls, allow, answers: [] } } }) as unknown as Native.Attention)} onAnswer={async () => ({ _tag: 'Sent' })} />)
+  renderToStaticMarkup(<AgentAlerts alerts={alerts.map(alert => ({ ...alert, presentation: { prompt: { calls: Option.some(calls), allow, answers: [] } } }) as unknown as Native.Attention)} onAnswer={async () => ({ _tag: 'Sent' })} />)
 
 describe('AgentAlerts', () => {
   it('shows only the open prompt alerts of this conversation', () => {

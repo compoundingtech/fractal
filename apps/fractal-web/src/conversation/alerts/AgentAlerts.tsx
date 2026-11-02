@@ -1,6 +1,7 @@
 import type * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
+import { Option } from 'effect'
 
 import {
   alertConversations,
@@ -125,7 +126,8 @@ const PromptAlert = ({
   readonly onAnswer?: Answer
 }): React.ReactNode => {
   const prompt = promptAnswers(alert)
-  const served = servedPrompt(alert)
+  const card = alert.presentation?.prompt
+  const served = servedPrompt({ presentation: card === undefined ? undefined : { prompt: { ...card, calls: Option.getOrNull(card.calls) } } })
   const shown = prompt === null || served.calls === null ? [] : promptCalls(prompt, served.calls)
   const [chosen, setChosen] = React.useState<number[][]>([])
   const [status, setStatus] = React.useState<string>()

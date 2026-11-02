@@ -9,6 +9,7 @@ vi.mock('@stylexjs/stylex', () => import('../../testStylex.ts'))
 vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn() }))
 
 import { AgentAlerts } from './AgentAlerts.tsx'
+import { Option } from 'effect'
 
 const seat = 'agent/example/atlas'
 
@@ -63,7 +64,7 @@ describe('AgentAlerts, pressed', () => {
       return { _tag: 'Sent' } as const
     }
     const show = (alert: Native.Attention, calls: Native.AttentionPromptCall[]) =>
-      act(async () => root.render(<AgentAlerts alerts={[{ ...alert, presentation: { prompt: { calls, allow: true, answers: [] } } } as unknown as Native.Attention]} onAnswer={onAnswer} />))
+      act(async () => root.render(<AgentAlerts alerts={[{ ...alert, presentation: { prompt: { calls: Option.some(calls), allow: true, answers: [] } } } as unknown as Native.Attention]} onAnswer={onAnswer} />))
 
     await show(prompting('episode-1', ['answer', 'deny'], 'q1'), [asking('q1', ['Red', 'Blue'])])
     expect(button('Send')!.disabled).toBe(true)
@@ -87,7 +88,7 @@ describe('AgentAlerts, pressed', () => {
   it('allows the one waiting call it shows, by pressing Allow', async () => {
     const answered: string[] = []
     const alert = { ...prompting('episode-3', ['allow', 'deny'], 'c1'), detail: 'Claude asks to use Bash',
-      presentation: { prompt: { calls: [{ call_id: 'c1', tool: 'Bash', input: '{"command":"make"}', input_complete: true }], allow: true, answers: ['allow', 'deny'] } } } as unknown as Native.Attention
+      presentation: { prompt: { calls: Option.some([{ call_id: 'c1', tool: 'Bash', input: '{"command":"make"}', input_complete: true }]), allow: true, answers: ['allow', 'deny'] } } } as unknown as Native.Attention
     await act(async () => root.render(
       <AgentAlerts alerts={[alert]}
         onAnswer={async (_alert, answer, sent) => { answered.push(`${answer}:${sent}`); return { _tag: 'Sent' } }} />,

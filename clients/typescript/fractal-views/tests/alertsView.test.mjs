@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { alertConversations, alertsHeading, alertsIn, answerLabel, homeRows, isAlert, openAlerts, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer, servedAnswers, servedPrompt } from '@fractal/views/homeView';
+import { alertConversations, alertsHeading, alertsIn, answerLabel, homeRows, isAlert, openAlerts, pendingQuestions, promptAlertKey, promptAnswers, questionAnswer, servedAnswers, servedPrompt } from '@fractal/views/homeView';
 
 // What Fractal presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
 // derives nothing, so these rows carry it as Fractal serves them.

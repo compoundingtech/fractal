@@ -1,4 +1,4 @@
-import type { Attention, AttentionPrompt } from '@fractal/client';
+import type { Attention, AttentionPrompt, AttentionPromptCall } from '@fractal/client';
 import { ago } from './time.ts';
 
 // Home, drawn the way the Fractal terminal UI draws it (crates/fractal-tui/src/ui/screens.rs home_list, adapt.rs
@@ -280,7 +280,8 @@ function parsedInput(args: unknown): unknown {
  * call it asks about; or why st serves none (it cannot read the conversation, or it is older).
  */
 export type ServedPrompt = { calls: PendingCall[]; allow: boolean } | { calls: null; allow: false; why: string };
-export function servedPrompt(item: { readonly presentation?: { readonly prompt?: AttentionPrompt } | null }): ServedPrompt {
+export type ServedPromptInput = Pick<AttentionPrompt, 'allow' | 'unknown_reason'> & { readonly calls: readonly AttentionPromptCall[] | null };
+export function servedPrompt(item: { readonly presentation?: { readonly prompt?: ServedPromptInput } | null }): ServedPrompt {
   const prompt = item.presentation?.prompt;
   if (!prompt) return { calls: null, allow: false, why: "This host's st is older and does not say which call the prompt asks about." };
   if (!prompt.calls) return { calls: null, allow: false, why: prompt.unknown_reason ?? "st cannot read the agent's conversation." };
