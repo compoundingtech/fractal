@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Removes workspace-internal catalog Runner/PtyCli/SystemRunner, supervisor reports and loops, restart budget and catalog residency owner. No current CLI, daemon or native harness calls them. Existing host/state/process helper paths and catalog working-directory/socket calculations remain with identical implementations."
+    "detail": "Removes workspace-internal catalog Runner/PtyCli/SystemRunner, supervisor reports and loops, restart budget and catalog residency owner. No current CLI, daemon or native harness calls them. Existing host/state/process helper paths and catalog working-directory/socket calculations remain with identical implementations. The supervisor-only declaration/generation watcher and its launch/resource sampling adapters are removed; native delivery watches and their mutation filtering remain unchanged."
   },
   "downtime": {
     "status": "none",
