@@ -11,6 +11,10 @@ fn work_handoff_parses_existing_and_withdraw_forms() {
         assert!(Cli::try_parse_from(prefix.into_iter().chain(args.clone())).is_ok());
         assert!(cli_command().try_get_matches_from(
             ["fractal", "--endpoint", "/tmp/fixture.sock", "--daemon-wait", "0", "--json", "work", "handoff"]
+                .into_iter().chain(args.clone())
+        ).is_ok());
+        assert!(cli_command().try_get_matches_from(
+            ["fractal", "work", "handoff", "--json", "--endpoint", "/tmp/fixture.sock", "--daemon-wait", "0"]
                 .into_iter().chain(args)
         ).is_ok());
     }

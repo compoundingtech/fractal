@@ -573,6 +573,12 @@ async fn requester_withdraws_exact_person_handoff_and_retries_after_reclaim() {
     assert_eq!(returned["body"]["fields"]["handoff_message"], daemon.note("person/reviewer"));
     daemon.ok(&["work", "claim", step, "--as", ALDER, "--incarnation", "alder-one"]).await;
     assert_eq!(daemon.ok(&withdraw).await["id"], returned["id"]);
+    daemon.ok(&["work", "handoff", step, "--as", ALDER, "--incarnation", "alder-one",
+        "--to", "person/reviewer", "--note", "Next: review the replacement"]).await;
+    assert_eq!(daemon.ok(&withdraw).await["id"], returned["id"]);
+    let mut exact_retry = withdraw.to_vec();
+    exact_retry.extend(["--message", returned["body"]["fields"]["handoff_message"].as_str().unwrap()]);
+    assert_eq!(daemon.ok(&exact_retry).await["id"], returned["id"]);
     daemon.stop().await;
 }
 

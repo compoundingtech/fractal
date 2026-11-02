@@ -88,22 +88,32 @@ pub(super) async fn run_work(
                 reject_foreign_agent_actor(&actor)?;
                 let subject = if subject.starts_with("step-run/") { subject } else { format!("step-run/{subject}") };
                 let mut before = String::new();
-                let handoff = loop {
+                let mut latest = None;
+                let fields = loop {
                     let page: ClaimsPage = client.get(&format!(
                         "/v1/claims?subject={}&order=desc&limit=500{before}", urlencoding::encode(&subject)
                     )).await?;
-                    if let Some(claim) = page.claims.into_iter().find(|claim|
-                        claim.kind == "work.released" && claim.body["fields"]["handoff_message"].is_string()
-                    ) {
-                        break claim;
+                    for claim in page.claims {
+                        let fields = claim.body["fields"].clone();
+                        if claim.kind == "work.handoff-returned" && idempotency_key.as_deref().is_some_and(
+                            |key| fields["return_request"]["idempotency_key"].as_str() == Some(key)
+                        ) {
+                            latest = Some(fields["return_request"].clone());
+                            break;
+                        }
+                        if latest.is_none() && claim.kind == "work.released" && fields["handoff_message"].is_string() {
+                            latest = Some(serde_json::json!({"message": fields["handoff_message"], "attempt": fields["attempt"]}));
+                        }
                     }
-                    let cursor = page.next_cursor.context("this step has no handoff note")?;
-                    before = format!("&before_index={cursor}");
+                    if latest.as_ref().is_some_and(|fields| fields["idempotency_key"].is_string())
+                        || (idempotency_key.is_none() && latest.is_some()) || page.next_cursor.is_none() {
+                        break latest.context("this step has no handoff note")?;
+                    }
+                    before = format!("&before_index={}", page.next_cursor.unwrap());
                 };
-                let fields = &handoff.body["fields"];
                 let request = fractal_daemon::store::adhoc_work::HandoffReturnRequest {
                     actor, reason,
-                    message: message.unwrap_or_else(|| fields["handoff_message"].as_str().unwrap().to_owned()),
+                    message: message.unwrap_or_else(|| fields["message"].as_str().unwrap().to_owned()),
                     attempt: serde_json::from_value(fields["attempt"].clone())?,
                     disposition: fractal_daemon::store::adhoc_work::HandoffDisposition::Withdrawn,
                     idempotency_key: idempotency_key.unwrap_or_else(|| format!("work-handoff-return:{}", uuid::Uuid::now_v7())),
