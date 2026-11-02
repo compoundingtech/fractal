@@ -1132,7 +1132,7 @@ impl Store {
             {
                 continue;
             }
-            let Some(claim) = self.claim_by_id(&failure.request)? else {
+            let Some(claim) = person_work::claim_in_cut(&connection, &failure.request, || self.claim_by_id(&failure.request))? else {
                 continue;
             };
             if claim.body["fields"]["condition"] != GATE_BROKEN_CONDITION {
@@ -1227,7 +1227,7 @@ impl Store {
             {
                 continue;
             }
-            let Some(claim) = self.claim_by_id(&failure.request)? else {
+            let Some(claim) = person_work::claim_in_cut(&connection, &failure.request, || self.claim_by_id(&failure.request))? else {
                 continue;
             };
             let source = &claim.subject;
@@ -1287,7 +1287,7 @@ impl Store {
                     continue;
                 };
                 let extension =
-                    step_timeout_extension_at(&connection, source, step.attempt, as_of)?;
+                    person_work::step_timeout_extension_in_cut(&connection, source, step.attempt, as_of)?;
                 if !matches!(step.status.as_str(), "claimed" | "working" | "ready")
                     || claim.body["fields"]["episode"].as_str()
                         != Some(step_timeout_episode(source, step.attempt, extension).as_str())

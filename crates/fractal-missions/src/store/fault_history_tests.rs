@@ -151,7 +151,9 @@ fn fault_snapshot_removes_one_history_select_and_standalone_gate_still_folds() {
     let shared_work = shared_scope.finish();
     assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
     assert!(shared_work.statements > 0, "the SQL control must measure real work");
-    assert_eq!(old_work.statements, shared_work.statements + 1);
+    // One history select, and the failure's claim, which the operational and broken-gate
+    // readers both need, read once in the snapshot's cut.
+    assert_eq!(old_work.statements, shared_work.statements + 2);
 
     let (_, failures) = store.operational_attention_items_with_failures(None, as_of).unwrap();
     // Warm both gate paths before their separate scoped comparison as well.
@@ -702,4 +704,50 @@ mission "snapshot-work" state="ready" {
     append_snapshot_wake(&store, &ready, "replacement-generation");
     assert!(assert_reference_snapshot_parity(&store, now_ms())
         .iter().any(|fault| fault.item.title == "exhausted wake replacement-generation"));
+}
+
+#[test]
+fn a_fault_snapshot_reads_a_run_its_failures_share_once() {
+    let (store, run, _step) = exhausted_snapshot_fixture();
+    // The statements one snapshot runs, with the reference reading every failure's run again.
+    let statements = |as_of: u128| {
+        reference_fault_snapshot(&store, as_of).unwrap();
+        store.fault_snapshot(as_of).unwrap();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let expected = reference_fault_snapshot(&store, as_of).unwrap();
+        let reference = scope.finish().statements;
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let actual = store.fault_snapshot(as_of).unwrap();
+        let memoized = scope.finish().statements;
+        assert_eq!(serde_json::to_value(&actual).unwrap(), serde_json::to_value(expected).unwrap());
+        (reference, memoized, actual.len())
+    };
+    let mut added = 0;
+    let mut add = |count: usize| {
+        for _ in 0..count {
+            let episode = format!("shared-run-{added}");
+            append_snapshot_fixture_claim(
+                &store, &run.subject, "operational.failure",
+                json!({
+                    "episode": episode, "condition": "observed", "reviewer": "agent/node.ops",
+                    "title": episode, "reason": "a failure of the shared run", "severity": "error",
+                    "targets": [run.subject.clone()],
+                }),
+                &episode,
+            );
+            added += 1;
+        }
+    };
+    add(2);
+    let (reference_few, memoized_few, faults_few) = statements(now_ms());
+    add(8);
+    let (reference_many, memoized_many, faults_many) = statements(now_ms());
+    assert_eq!(faults_many, faults_few + 8, "each failure of the live run is a fault");
+    let (reference_each, memoized_each) = ((reference_many - reference_few) / 8, (memoized_many - memoized_few) / 8);
+    println!("statements per added failure: reference={reference_each}, memoized={memoized_each}");
+    // A failure costs its own claim and episode reads; its run's liveness is read once.
+    // A ratchet on the reads per failure: a change here is a change in what each failure
+    // reads, not lost parity, which the comparison above checks.
+    assert_eq!(reference_each, 6, "the reference walks the run for each failure, twice");
+    assert_eq!(memoized_each, 2, "only the failure's own reads; its run is read once per snapshot");
 }
