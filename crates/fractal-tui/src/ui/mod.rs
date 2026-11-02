@@ -24,6 +24,7 @@ pub mod doc;
 mod documents;
 pub mod checklist;
 mod edit;
+mod frame_budget;
 mod glass;
 mod hover;
 mod hyperlinks;
