@@ -413,6 +413,46 @@ def gate_commit(base):
     return result
 
 
+IMPACT_CHECK = 'upgrade-impact'
+RELEASE_IMPACT = ('check-release-impact', 'release_notes.py')  # upgrade-impact's command and the module it imports, beside it
+
+
+def release_impact(base):
+    """Why the upgrade-impact check CI runs on a pull request (scripts/check-release-impact: the PR needs a fresh release-notes/NAME.json)
+    fails for this branch, '' when it passes, or None when it was not asked. It is asked of what CI asks it of: the merge of the head
+    with the base, the base as first parent, by that merge's own copy of the check. A run asks it before any wait, so a missing note
+    stops the run in seconds here rather than ejecting the pull request from the merge queue (#4669, 2026-11-02). It is not asked when
+    there is nothing to ask: no branch commit of its own, no clean merge (CI cannot make one either), or no check in the merge (an older
+    base). Not for --seed, which names its tree."""
+    if TARGET:
+        return None
+    head = head_commit()
+    base_commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
+    if not base_commit or git('merge-base', '--is-ancestor', head, base_commit, check=False).returncode == 0:
+        return None
+    merged = git('merge-tree', '--write-tree', '--no-messages', base_commit, head, check=False)
+    if merged.returncode != 0:
+        return None
+    env = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid', 'GIT_COMMITTER_NAME': 'st-test',
+           'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
+    commit = text(git('commit-tree', merged.stdout.decode().split()[0], '-p', base_commit, '-p', head, '-m',
+                      f'merge of {head[:12]} into {base}', env=env))
+    with tempfile.TemporaryDirectory(prefix='st-test-impact-') as scratch:
+        for name in RELEASE_IMPACT:
+            shown = git('show', f'{commit}:scripts/{name}', check=False)
+            if shown.returncode != 0:
+                return None
+            (Path(scratch) / name).write_bytes(shown.stdout)
+        # -E -s, not -I: the check imports release_notes from its own directory, which -I leaves off sys.path.
+        done = subprocess.run([sys.executable, '-E', '-s', str(Path(scratch) / RELEASE_IMPACT[0]), '--repo', text(git('rev-parse', '--show-toplevel')),
+                               '--base', base_commit, '--source', commit], capture_output=True)
+    if done.returncode == 0:
+        return ''
+    said = done.stderr.decode(errors='replace').strip().splitlines() or [f'exit {done.returncode}']
+    return (f'the upgrade-impact check CI runs fails on the merge of this branch with {base} ({said[-1].replace(commit, "the merge")[:400]}); '
+            'the merge queue would eject it: add the note and commit it first')
+
+
 CHECKS = ()  # the checks this run signs (main sets it): the gate decides per check whether main's protected changes are that check's
 
 
@@ -2700,12 +2740,18 @@ def run_main(argv, cleanup):
             if not args.check:
                 # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
                 rows += [(name, True, 'CI runs it', 'no local command') for name in policy_checks(args.base) if name not in LOCAL]
+                impact = release_impact(args.base)  # CI runs it on every pull request, outside the skip policy: asked here as a run asks it
+                if impact is not None:
+                    rows.append((IMPACT_CHECK, not impact, 'NO RELEASE NOTE' if impact else 'checked', impact or 'the merge with the base has its release note'))
         for name, is_covered, label, why in rows:
             print(f'  {name:<24} {label:<22} {why}')
         return 0 if all(row[1] for row in rows) else 3
     status = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
     if status:
         raise Failure('the checkout has uncommitted changes to tracked files; commit them first, the note is for the committed tree')
+    impact = release_impact(args.base)  # before any wait: CI fails the pull request on it, and the merge queue ejects it
+    if impact:
+        raise Failure(impact)
     preflight(checks if not (args.push and not args.out and not TARGET) else all_checks, merges=bool(args.push) and not TARGET)  # before any wait
     limit = load_limit()
     if limit:
