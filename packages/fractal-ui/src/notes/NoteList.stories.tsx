@@ -72,7 +72,15 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   // Attribution, session scope, expiry.
   await expect(within(rowOf(retireNote.id)).getByTestId('note-author')).toHaveTextContent('You')
   await expect(within(rowOf(agentNote.id)).getByTestId('note-author')).toHaveTextContent(target)
-  await expect(within(rowOf(retireNote.id)).getByTestId('note-session')).toHaveTextContent('This session')
+  const sessionChip = within(rowOf(retireNote.id)).getByTestId('note-session')
+  await expect(sessionChip).toHaveTextContent('This session')
+  await expect(sessionChip).toHaveAccessibleName("This session. Notes reach this session's agent until the session ends.")
+  // The chip explains itself on keyboard focus through the kit Tooltip.
+  await userEvent.keyboard('{Shift}')
+  sessionChip.focus()
+  await expect(await canvas.findByRole('tooltip', undefined, { timeout: 5000 })).toHaveTextContent("Notes reach this session's agent until the session ends.")
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull(), { timeout: 5000 })
   await expect(within(rowOf(diffNote.id)).getByTestId('note-expires')).toHaveTextContent(/^Expires in /)
   await expect(within(rowOf(longNote.id)).getByTestId('note-text').textContent).toBe(longNote.text)
 
@@ -87,12 +95,17 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(within(rowOf(longNote.id)).getByTestId('note-archive-error-detail')).toHaveTextContent('synthetic archive refusal')
   await expect(within(rowOf(longNote.id)).getByRole('button', { name: 'Archive' })).toBeEnabled()
 
-  // An accepted archive keeps the row, disabled, until the host publishes; focus stays in the list.
-  await userEvent.click(within(rowOf(diffNote.id)).getByRole('button', { name: 'Archive' }))
+  // An accepted archive keeps the row, disabled, until the host publishes; focus stays in the list,
+  // with a visible ring after a keyboard archive.
+  within(rowOf(diffNote.id)).getByRole('button', { name: 'Archive' }).focus()
+  await userEvent.keyboard('{Enter}')
   await waitFor(() => expect(rowOf(diffNote.id)).toHaveAttribute('data-archive-state', 'accepted'))
   await expect(within(rowOf(diffNote.id)).getByRole('button', { name: 'Archived' })).toBeDisabled()
   await expect(within(main).getByRole('status')).toHaveTextContent('Archive accepted. The note leaves the list when it updates.')
-  await expect(within(main).getByTestId('note-list')).toHaveFocus()
+  const list = within(main).getByTestId('note-list')
+  await expect(list).toHaveFocus()
+  await expect(list.matches(':focus-visible')).toBe(true)
+  await expect(getComputedStyle(list).outlineStyle).toBe('solid')
   await expect(main.querySelectorAll('[data-testid="note-row"]')).toHaveLength(5)
   await userEvent.click(canvas.getByTestId('deliver-update'))
   await waitFor(() => expect(main.querySelector(`[data-note-id="${diffNote.id}"]`)).toBeNull())

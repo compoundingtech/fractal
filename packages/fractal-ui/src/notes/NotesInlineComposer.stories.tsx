@@ -14,6 +14,8 @@ import { accentVars as accent, borderVars as border, geometryVars as g, radiusVa
 
 const targets = [target, plannerTarget] as const
 type Target = typeof targets[number]
+/** Display names: visible text names the agent, never its ref. */
+const labels: Readonly<Record<Target, string>> = { [target]: 'Reviewer', [plannerTarget]: 'Planner' }
 /** The planner refuses its first two creates, so failure, target switches and Retry stay reachable. */
 const plannerRefusals = 2
 
@@ -47,20 +49,20 @@ function InlineQuickComposerStory({ scheme, width, negativeControl }: NotesFrame
     // Negative control: the host never publishes the created note.
     if (!negativeControl) setNotes(current => ({ ...current, [to]: [publishedNote(text, to), ...current[to]] }))
     setDrafts(current => ({ ...current, [to]: '' }))
-    setAnnouncement(`Note added to ${to}.`)
+    setAnnouncement(`Note added to ${labels[to]}.`)
     closeOn(to)
   }
   return <NotesFrame scheme={scheme} width={width} title="Inline quick composer">
     <ul aria-label="Agents" {...stylex.props(styles.agents)}>
       {targets.map(ref => <li key={ref}>
         <AriaButton aria-pressed={ref === selected} data-testid={`inline-agent-${ref}`} onPress={() => { setFocusOnMount(false); setSelected(ref) }} {...stylex.props(styles.agent, ref === selected && styles.agentSelected)}>
-          {ref}{(drafts[ref] ?? '') !== '' && <span {...stylex.props(styles.draftCue)}> · draft</span>}
+          {labels[ref]}{(drafts[ref] ?? '') !== '' && <span {...stylex.props(styles.draftCue)}> · draft</span>}
         </AriaButton>
       </li>)}
     </ul>
-    <article aria-label={`Agent detail: ${selected}`} {...stylex.props(styles.pane)}>
+    <article aria-label={`Agent detail: ${labels[selected]}`} {...stylex.props(styles.pane)}>
       <header {...stylex.props(styles.header)}>
-        <span {...stylex.props(styles.name)}>{selected}</span>
+        <span {...stylex.props(styles.name)}>{labels[selected]}</span>
         <NoteBadge notes={notes[selected]} />
       </header>
       <section aria-label="Notes" {...stylex.props(frame.section)}>
@@ -70,6 +72,7 @@ function InlineQuickComposerStory({ scheme, width, negativeControl }: NotesFrame
           ? <NoteComposer
             key={selected}
             target={selected}
+            targetLabel={labels[selected]}
             draft={drafts[selected] ?? ''}
             onDraftChange={draft => setDrafts(current => ({ ...current, [selected]: draft }))}
             onSubmit={submitTo(selected)}
@@ -113,7 +116,7 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   // One click, the text, one confirm; the host status outlives the composer.
   await userEvent.click(addNote())
   await waitFor(() => expect(input()).toHaveFocus())
-  await expect(composer()).toHaveTextContent(`Target: ${target}.`)
+  await expect(composer()).toHaveTextContent(`Target: ${labels[target]}.`)
   await expect(canvas.getByTestId('note-composer-reach')).toHaveTextContent('Notes reach the agent as context.')
   await userEvent.keyboard('Hand off before the evening run{Enter}')
   await waitFor(() => expect(canvas.queryByTestId('note-composer')).toBeNull())
@@ -121,16 +124,18 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(rows).toHaveLength(3)
   await expect(within(rows[0]!).getByTestId('note-text')).toHaveTextContent('Hand off before the evening run')
   await expect(canvas.getByTestId('note-badge')).toHaveAttribute('data-note-count', '3')
-  await expect(canvas.getByTestId('inline-status')).toHaveTextContent(`Note added to ${target}.`)
+  await expect(canvas.getByTestId('inline-status')).toHaveTextContent(`Note added to ${labels[target]}.`)
   await waitFor(() => expect(addNote()).toHaveFocus())
 
-  // Multiline: Shift+Enter and pasted newlines survive. Tab leaves the field for Add note.
+  // Multiline: Shift+Enter and pasted newlines survive. Tab leaves the field for the draft's actions.
   await userEvent.keyboard('{Enter}')
   await waitFor(() => expect(input()).toHaveFocus())
   await userEvent.keyboard('Context:{Shift>}{Enter}{/Shift}')
   await userEvent.paste('first line\nsecond line')
   const multiline = 'Context:\nfirst line\nsecond line'
   await expect(input()).toHaveValue(multiline)
+  await userEvent.tab()
+  await waitFor(() => expect(canvas.getByTestId('note-composer-discard')).toHaveFocus())
   await userEvent.tab()
   await waitFor(() => expect(canvas.getByTestId('note-composer-submit')).toHaveFocus())
   await expectNoAudiencePresentation(composer())
@@ -150,18 +155,18 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await userEvent.click(addNote())
   await waitFor(() => expect(input()).toHaveFocus())
   await expect(input()).toHaveValue('')
-  await expect(composer()).toHaveTextContent(`Target: ${plannerTarget}.`)
+  await expect(composer()).toHaveTextContent(`Target: ${labels[plannerTarget]}.`)
   await userEvent.keyboard('Budget{Enter}')
-  await expect(await canvas.findByRole('alert')).toHaveTextContent("Couldn't add the note. Your text and target are kept.")
+  await expect(await canvas.findByRole('alert')).toHaveTextContent("Couldn't add the note. Your text is kept. synthetic create refusal")
   await expect(input()).toHaveValue('Budget')
 
   // Switching back and forth keeps each agent's open composer and draft on its own target.
   await userEvent.click(canvas.getByTestId(`inline-agent-${target}`))
   await expect(input()).toHaveValue(multiline)
-  await expect(composer()).toHaveTextContent(`Target: ${target}.`)
+  await expect(composer()).toHaveTextContent(`Target: ${labels[target]}.`)
   await userEvent.click(canvas.getByTestId(`inline-agent-${plannerTarget}`))
   await expect(input()).toHaveValue('Budget')
-  await expect(composer()).toHaveTextContent(`Target: ${plannerTarget}.`)
+  await expect(composer()).toHaveTextContent(`Target: ${labels[plannerTarget]}.`)
 
   // A second refusal offers Retry, which adds the note and returns focus to Add note.
   await userEvent.click(input())
@@ -171,7 +176,7 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await waitFor(() => expect(canvas.queryByTestId('note-composer')).toBeNull())
   await expect(within(canvas.getAllByTestId('note-row')[0]!).getByTestId('note-text')).toHaveTextContent('Budget')
   await expect(canvas.getByTestId('note-badge')).toHaveAttribute('data-note-count', '2')
-  await expect(canvas.getByTestId('inline-status')).toHaveTextContent(`Note added to ${plannerTarget}.`)
+  await expect(canvas.getByTestId('inline-status')).toHaveTextContent(`Note added to ${labels[plannerTarget]}.`)
   await waitFor(() => expect(addNote()).toHaveFocus())
 
   // The reviewer's multiline draft is still there and adds with its newlines.

@@ -8,7 +8,8 @@ import { greenFindings } from '../assistant-ui/composition/no-green-assertion'
 
 function NoteBadgeStory({ scheme, width, negativeControl }: NotesFrameArgs) {
   // Negative control: the host drops the newest note from the five-note case and the stored-`agent`
-  // note from the mixed case, so the newest-preview and count assertions must fail.
+  // note from the mixed case, and renders the summary badge interactive, so the newest-preview, count
+  // and single-focus-stop assertions must fail.
   const many = negativeControl ? allNotes.filter(note => note !== retireNote) : allNotes
   const mixed = negativeControl ? [retireNote] : [diffNote, retireNote]
   return <NotesFrame scheme={scheme} width={width} title="Note badge">
@@ -24,6 +25,11 @@ function NoteBadgeStory({ scheme, width, negativeControl }: NotesFrameArgs) {
       <h2 {...stylex.props(styles.heading)}>{label}</h2>
       <div {...stylex.props(styles.row)}><NoteBadge notes={notes} /></div>
     </section>)}
+    <section aria-label="Inside a disclosure summary" data-badge-case="static" {...stylex.props(styles.section)}>
+      <h2 {...stylex.props(styles.heading)}>Inside a disclosure summary</h2>
+      {/* The summary is the one focus stop; the badge is its label content. */}
+      <details><summary data-testid="static-host">Notes <NoteBadge notes={[diffNote, retireNote]} interactive={negativeControl === true} /></summary></details>
+    </section>
   </NotesFrame>
 }
 
@@ -32,7 +38,7 @@ const meta = {
   title: 'Fractal/Plugins/Notes/Note badge', component: NoteBadgeStory,
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'No scenario slice models subject notes; synthetic notes decoded through the generated SubjectNote schema pin newest-first preview, counts and the no-audience contract.' }, layout: 'fullscreen' },
   args: notesFrameArgs,
-  argTypes: notesFrameArgTypes('Drop the newest note from the five-note case and the stored-agent note from the mixed case: the newest-preview and count assertions must fail.'),
+  argTypes: notesFrameArgTypes('Drop the newest note from the five-note case and the stored-agent note from the mixed case, and make the summary badge interactive: the newest-preview, count and single-focus-stop assertions must fail.'),
 } satisfies Meta<typeof NoteBadgeStory>
 export default meta
 type Story = StoryObj<typeof meta>
@@ -67,11 +73,20 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
 
   for (const badge of canvasElement.querySelectorAll('[data-testid="note-badge"]')) {
     await expect(badge.querySelector('[data-note-agent-marker]')).toBeNull()
-    await expect(badge.getAttribute('aria-label')).not.toMatch(deliveryClaim)
+    await expect(badge.getAttribute('aria-label') ?? badge.textContent ?? '').not.toMatch(deliveryClaim)
   }
   await expectNoAudiencePresentation(canvasElement)
 
   await expect(canvasElement.querySelector('[data-badge-case="empty"] [data-testid="note-badge"]')).toBeNull()
+
+  // Inside an interactive host the badge is content: no focus stop, no role, and it labels the host.
+  const staticHost = canvas.getByTestId('static-host')
+  const staticBadge = within(staticHost).getByTestId('note-badge')
+  await expect(staticBadge).not.toHaveAttribute('tabindex')
+  await expect(staticBadge).not.toHaveAttribute('role')
+  await expect(staticHost.querySelectorAll('[tabindex]')).toHaveLength(0)
+  await expect(staticBadge.querySelector('[aria-hidden="true"]')).not.toBeNull()
+  await expect(staticBadge).toHaveTextContent(`2 notes. Newest: ${retireNote.text}`)
 
   // The preview is one truncated line; the tooltip carries the full newest text. Focus opens the
   // kit Tooltip (hover support is unchanged kit-wide behavior and not asserted here).
