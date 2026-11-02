@@ -56,6 +56,18 @@ class CiLocalWeb(unittest.TestCase):
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
 
+    def test_its_scratch_is_removed_unless_kept_and_a_kept_one_is_named_where_fractal_test_reads_it(self):
+        done, calls = self.run_web()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(Path(calls[0]['env']['HOME']).parent.exists())
+        kept = Path(self.home) / 'kept'
+        done, calls = self.run_web(CI_LOCAL_KEEP=str(kept))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        scratch = Path(calls[-1]['env']['HOME']).parent  # the log holds both runs' calls
+        self.assertTrue(scratch.is_dir())
+        self.assertEqual(kept.read_text(), f'{scratch}\n')
+        self.assertIn(f'kept this run\'s scratch {scratch}', done.stderr)
+
     def test_one_shard_covers_every_play_and_test_in_a_home_of_its_own(self):
         done, calls = self.run_web()
         self.assertEqual(done.returncode, 0, done.stderr)

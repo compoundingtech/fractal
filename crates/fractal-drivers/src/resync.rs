@@ -1048,7 +1048,7 @@ impl Worker {
     /// Re-register watches so every distinct parent directory of the current watch set is covered,
     /// dropping directories that left the set or were replaced (identity change). A replaced watch
     /// stays blind until the next pass rebuilds it — bounded by the reconcile interval, the same
-    /// tradeoff `CatalogDeclarationWatcher` accepts for declarations.
+    /// tradeoff used for shallow declaration subscriptions.
     ///
     /// Reports whether the registration set actually changed, because a backend is not obliged to
     /// leave its other subscriptions undisturbed while it does. `notify`'s macOS FSEvents backend

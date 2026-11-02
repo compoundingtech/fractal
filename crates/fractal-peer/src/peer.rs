@@ -46,6 +46,8 @@ use crate::store::{
 mod raw_lease;
 mod seat_freshness;
 pub use seat_freshness::*;
+mod seat_freshness_reads;
+pub use seat_freshness_reads::*;
 
 /// The peer listener's shared state, with this node's daemon as the store.
 type PeerState = smallclaims::sync::PeerState<MainBackend>;
@@ -2062,6 +2064,8 @@ pub fn fractal_routes(splice: RawSplice) -> Router<PeerState> {
         .route(RAW_TERMINAL_PATH, get(receive_raw_terminal).layer(axum::Extension(splice)))
         .route(SEAT_FRESHNESS_PATH,
             post(seat_freshness::receive_seat_freshness).layer(DefaultBodyLimit::max(MAX_SEAT_FRESHNESS_BYTES)))
+        .route(SEAT_FRESHNESS_READS_PATH,
+            post(seat_freshness_reads::receive_seat_freshness_read).layer(DefaultBodyLimit::max(MAX_READ_REQUEST_BYTES)))
 }
 
 /// Serve a conversation owner's peer listener for tests, and return the client relay of a
@@ -2223,6 +2227,19 @@ mod tests {
         assert_signed_peer_envelope_versions(SEAT_FRESHNESS_PATH).await;
     }
 
+    #[tokio::test]
+    async fn peer_envelope_versions_are_accepted_by_seat_freshness_reads() {
+        assert_signed_peer_envelope_versions(SEAT_FRESHNESS_READS_PATH).await;
+    }
+
+    fn answer_for(path: &str) -> serde_json::Value {
+        if path == SEAT_FRESHNESS_READS_PATH {
+            serde_json::json!({"messages": []})
+        } else {
+            serde_json::json!({"recorded": []})
+        }
+    }
+
     async fn assert_signed_peer_envelope_versions(path: &'static str) {
         use std::future::IntoFuture as _;
         let root = tempfile::tempdir().unwrap();
@@ -2237,7 +2254,7 @@ mod tests {
                 post(move |request: Bytes| async move {
                     let body = serde_json::to_vec(&serde_json::json!({
                         "api_version": version, "request_id": "test", "snapshot_host": "owner-node",
-                        "store_index": 0, "value": {"recorded": []}
+                        "store_index": 0, "value": answer_for(path)
                     }))
                     .unwrap();
                     let headers = FleetAuth::test("fleet-test", &[7; 32])
@@ -2284,6 +2301,11 @@ mod tests {
                     )
                     .await
                     .map(|ack| serde_json::to_value(ack.unwrap()).unwrap())
+            } else if path == SEAT_FRESHNESS_READS_PATH {
+                relay
+                    .read_message_marks("owner-node", &[], Duration::from_secs(5))
+                    .await
+                    .map(|answer| serde_json::to_value(answer.unwrap()).unwrap())
             } else {
                 relay.read("host/owner-node", &request).await
             };
@@ -2292,7 +2314,7 @@ mod tests {
             if version == "future.v9" {
                 assert!(result.is_err());
             } else {
-                assert_eq!(result.unwrap(), serde_json::json!({"recorded": []}));
+                assert_eq!(result.unwrap(), answer_for(path));
             }
         }
     }
