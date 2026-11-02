@@ -435,6 +435,14 @@ pub async fn post_message_claim(
     AxumPath(message_id): AxumPath<String>,
     Json(request): Json<MessageLifecycleRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
+    post_message_claim_with_device_command(State(state), AxumPath(message_id), Json(request), None).await
+}
+
+pub async fn post_message_claim_with_device_command(
+    State(state): State<AppState>, AxumPath(message_id): AxumPath<String>,
+    Json(request): Json<MessageLifecycleRequest>,
+    command: Option<(super::client_v0::ClientSession, String)>,
+) -> Result<Json<ClaimRecord>, ApiError> {
     let subject = message_subject(&message_id);
     let kind = match request.lifecycle.as_str() {
         "staged" => "message.staged",
@@ -449,7 +457,9 @@ pub async fn post_message_claim(
         }
     };
     let store = state.store.clone();
+    let admission = command.map(|(session, id)| (state.clone(), session, id, subject.clone()));
     let record = blocking_api(move || {
+        let write = || {
         // One message, not every message the store has ever held: a lifecycle post read and folded
         // the whole mailbox, a quarter second on a busy host's store, while holding up the next write.
         let message = store
@@ -558,6 +568,13 @@ pub async fn post_message_claim(
             })
             .map_err(ApiError::bad)?;
         Ok((record, appended, is_work_wake(&message.tags)))
+        };
+        match admission {
+            Some((state, session, id, target)) => super::client_commands::with_message_read(
+                &state, &session, &id, &target, write, |value| json!({"message_id":value.0.subject}),
+            ),
+            None => write(),
+        }
     })
     .await?;
     let (record, appended, work_wake) = record;

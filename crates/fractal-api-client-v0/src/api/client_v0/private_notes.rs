@@ -247,6 +247,7 @@ mod tests {
             let notes = read(&state, &session).await;
             let request = action(&notes, "notes-cross-action-key-0001", "Private shared-key context.\n");
             let send = ActionRequest {
+                device_command: None,
                 api_version: CLIENT_API_VERSION.into(),
                 id: "action/notes-cross-action-send".into(),
                 action_type: "message.send".into(),
@@ -300,6 +301,7 @@ mod tests {
         assert_eq!(invoke(&state, &session, request.clone()).await.unwrap_err().code, "private-notes-indeterminate");
         assert_eq!(std::fs::read_to_string(&carrier).unwrap(), "Private durable context.\n");
         let conflicting = ActionRequest {
+            device_command: None,
             api_version: CLIENT_API_VERSION.into(),
             id: "action/pending-notes-cross-action".into(),
             action_type: "message.send".into(),

@@ -391,6 +391,13 @@ public actor FractalClient {
         components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
         var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.httpMethod = method; request.httpBody = body; request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // DeviceCommandRequest.ttl_ms permits 60000 ms; allow the daemon's full deadline plus transport margin.
+        if method == "GET" && path.hasPrefix("v1/client/device-commands/")
+            && query.contains(where: { $0.name == "wait" && $0.value == "true" }) {
+            let deviceCommandMaximumTTL: TimeInterval = 60
+            let deviceCommandTransportMargin: TimeInterval = 5
+            request.timeoutInterval = deviceCommandMaximumTTL + deviceCommandTransportMargin
+        }
         if body != nil { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }; if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         if let idempotencyKey { request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key") }
         if let readAuthorization { request.setValue(readAuthorization.header, forHTTPHeaderField: "x-st3-scg-read-authorization") }

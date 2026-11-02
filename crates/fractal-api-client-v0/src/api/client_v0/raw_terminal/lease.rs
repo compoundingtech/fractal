@@ -421,6 +421,7 @@ mod tests {
         state.node = "other-member".into();
         let snapshot = new_client_snapshot(&state);
         let request = ActionRequest {
+            device_command: None,
             api_version: CLIENT_API_VERSION.into(),
             id: "action/issuer-only".into(),
             action_type: "pairing.revoke".into(),

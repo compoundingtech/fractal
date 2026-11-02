@@ -201,6 +201,56 @@ pub fn report(state: &AppState, session: &ClientSession, request: DeviceResultRe
     changed(&state.node);
     Ok(resource)
 }
+
+/// Serialize command admission and the real lifecycle write against expiry and result reporting.
+pub fn with_message_read<T>(
+    state: &AppState, session: &ClientSession, id: &str, target: &str,
+    write: impl FnOnce() -> Result<T, ApiError>,
+    result: impl FnOnce(&T) -> Value,
+) -> Result<T, ApiError> {
+    let session = revalidate_session(state, session)?;
+    let denied = |reason| ApiError {
+        status: StatusCode::FORBIDDEN, code: "forbidden".into(),
+        message: "device command does not authorize this message.read".into(),
+        details: Box::new(serde_json::Map::from_iter([("reason".into(), json!(reason)), ("device_command".into(), json!(id))])),
+    };
+    if !paired(&session) { return Err(denied("foreign")); }
+    let mut rows = ROWS.lock().map_err(|_| storage_error())?;
+    let row = rows.get_mut(&(state.node.clone(), id.to_owned())).ok_or_else(|| denied("mismatch"))?;
+    if !visible(row, &session) { return Err(denied("foreign")); }
+    if row.terminal() {
+        return Err(denied(if matches!(row.resource["state"].as_str(), Some("expired" | "not-foreground")) { "expired" } else { "not-pending" }));
+    }
+    if client_now_ms() >= row.expires {
+        row.expire(client_now_ms(), super::client_presence::has_open_stream(&state.node, &session.actor));
+        return Err(denied("expired"));
+    }
+    if row.resource["command_kind"] != "phone.message.read" { return Err(denied("mismatch")); }
+    let attention = super::client_attention_resources(&state.store, Some(&row.person), false)
+        .map_err(ApiError::internal)?;
+    if !attention.iter().any(|item| item["id"] == row.resource["args"]["attention_id"]
+        && item["source_id"] == target && item["actions"].as_array()
+            .is_some_and(|actions| actions.iter().any(|action| action == "message.read")))
+    { return Err(denied("mismatch")); }
+    // Projection/DB reads can wait; recheck the daemon deadline immediately before admission.
+    if client_now_ms() >= row.expires { return Err(denied("expired")); }
+    let written = write();
+    let now = client_now_ms();
+    match &written {
+        Ok(value) => {
+            row.resource["state"] = json!("completed");
+            row.resource["result"] = result(value);
+        }
+        Err(error) => {
+            row.resource["state"] = json!("failed");
+            row.resource["error_code"] = json!(error.code);
+        }
+    }
+    row.terminal_at = Some(now);
+    row.stamp(now);
+    changed(&state.node);
+    written
+}
 /// A paired phone sees only its own exact grant; other issuers see only their own rows.
 /// Reading a phone's window marks live rows delivered, never redelivering expired work.
 pub fn collection_items(state: &AppState, session: &ClientSession) -> Result<Vec<Value>, ApiError> {

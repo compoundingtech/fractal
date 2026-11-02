@@ -1138,6 +1138,7 @@ public struct Fence: Codable, Sendable {
 }
 public struct ActionRequest: Codable, Sendable {
     public let apiVersion: String; public let id: String; public let type: ActionType; public let idempotencyKey: String; public let fence: Fence; public let parameters: [String: JSONValue]
+    public var deviceCommand: String? = nil
     private init(id: String, type: ActionType, idempotencyKey: String, fence: Fence, parameters: [String: JSONValue]) { self.apiVersion = fractalClientAPIVersion; self.id = id; self.type = type; self.idempotencyKey = idempotencyKey; self.fence = fence; self.parameters = parameters }
     private init<Parameters: Encodable>(id: String, type: ActionType, idempotencyKey: String, fence: Fence, typedParameters: Parameters) throws {
         let encoded = try JSONEncoder().encode(typedParameters)
@@ -1203,7 +1204,7 @@ public struct ActionRequest: Codable, Sendable {
     public static func workRelease(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .workRelease, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workRenew(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .workRenew, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workRetry(id: String, idempotencyKey: String, fence: Fence, parameters: WorkRetryParameters) throws -> Self { try .init(id: id, type: .workRetry, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
-    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", id, type, idempotencyKey = "idempotency_key", fence, parameters }
+    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", id, type, idempotencyKey = "idempotency_key", fence, parameters, deviceCommand = "device_command" }
 }
 
 public struct PersonAskParameters: Codable, Sendable { public var personID, title, reason: String; public var stepID, newRun: String?; public var request: StructuredRequest?; public var deadlineMS: UInt64?; public var defaultAnswer: String?; public init(personID: String, title: String, reason: String, stepID: String? = nil, newRun: String? = nil, request: StructuredRequest? = nil, deadlineMS: UInt64? = nil, defaultAnswer: String? = nil) { self.personID = personID; self.title = title; self.reason = reason; self.stepID = stepID; self.newRun = newRun; self.request = request; self.deadlineMS = deadlineMS; self.defaultAnswer = defaultAnswer }; enum CodingKeys: String, CodingKey { case personID = "person_id", title, reason, stepID = "step_id", newRun = "new_run", request, deadlineMS = "deadline_ms", defaultAnswer = "default_answer" } }
