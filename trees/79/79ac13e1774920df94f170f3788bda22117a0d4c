@@ -4,3 +4,6 @@ record d26d460874f886a952af1c79dffe732f36929214 ci-script-tests 0 host/spindle 2
 record 427fa516a4b38d41f1415bc3c1d692e0c45cca66 linux-gate 0 host/spindle 2026-11-02T15:01:09Z
 record e90ceabb9018340308324c060db0fe5a9887effe linux-clippy 0 host/spindle 2026-11-02T15:03:44Z
 record a5a6e70a89bf1b6e3ccf07a52356760747e12fd5 linux-fleet-compat 0 host/spindle 2026-11-02T15:06:27Z
+record 4c65278f6867010c4365afc24ecd2d07b6968df2 rust-tests 0 host/spindle 2026-11-02T15:09:11Z
+record 76c15294a403ef3efdbcb848d15e0c8722b95773 rust-tests 0 host/spindle 2026-11-02T15:09:04Z
+record 9152e36f08a460229a95126fb06221a5882d4ccc rust-tests 0 host/spindle 2026-11-02T15:09:11Z
