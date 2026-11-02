@@ -6393,6 +6393,92 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
     assert_eq!(after.last().map(|(subject, _)| subject.clone()), Some(fourth));
 }
 
+/// A member of the previous release and one of this build, side by side: delivery and read state
+/// the release writes as lifecycle claims reaches the new member and reads the same there, and a
+/// mark the new member records stays its own: it writes no claim, the release never sees it, and
+/// replication between the two stays valid.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_a_member_recording_message_marks() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "7b6c5d4e-3f2a-4b1c-8d9e-0f1a2b3c4d5e";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old;
+    let mut n1 = Node::new(root.path(), "n1");
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+    let status_of = |node: &Node, subject: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/read/{subject}");
+        async move { client.get::<Value>(&path).await.ok().and_then(|view| view["status"].as_str().map(str::to_owned)) }
+    };
+    let mut subjects = Vec::new();
+    for key in ["claimed", "marked"] {
+        let receipt: Value = o
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("side-by-side-{key}"), "from": PERSON, "to": "agent/fleet-reader",
+                "content": format!("mail to be {key}"),
+            }))
+            .await
+            .unwrap();
+        subjects.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (claimed, marked) = (subjects[0].clone(), subjects[1].clone());
+    // The release delivers and reads one message by claims.
+    for lifecycle in ["delivered", "read"] {
+        let _: Value = o
+            .client()
+            .post(&format!("/v1/messages/{}/claims", claimed.trim_start_matches("message/")), &json!({
+                "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                "idempotency_key": format!("side-by-side-{lifecycle}"),
+            }))
+            .await
+            .unwrap();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    while status_of(&n1, &claimed).await.as_deref() != Some("read") || status_of(&n1, &marked).await.is_none() {
+        assert!(std::time::Instant::now() < deadline, "the release's mail and claims did not reach the new member");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // The new member records its marks for the other message.
+    for kind in ["message.delivered", "message.read"] {
+        let _: Value = n1
+            .client()
+            .post("/v1/internal/test/message-marks", &json!({"message": marked, "kind": kind, "consumer": "agent/fleet-reader"}))
+            .await
+            .unwrap();
+    }
+    assert_eq!(status_of(&n1, &marked).await.as_deref(), Some("read"));
+    // A later write on each member still replicates, and the marks never do.
+    o.note("o-after-marks").await;
+    n1.note("n1-after-marks").await;
+    let expected = BTreeSet::from(["custom/fleet-test/o-after-marks".to_owned(), "custom/fleet-test/n1-after-marks".to_owned()]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert_eq!(status_of(&o, &marked).await.as_deref(), Some("sent"), "a mark reached the release");
+    assert_eq!(status_of(&o, &claimed).await.as_deref(), Some("read"));
+    for node in [&o, &n1] {
+        assert!(
+            node.claims().await.iter().all(|claim| !(claim["subject"] == marked && claim["kind"] != "message.sent")),
+            "{}: a mark became a lifecycle claim", node.name
+        );
+    }
+}
+
 /// A seat's conversation and `conversations wait` across the previous release and this build, on
 /// one node upgraded in place and rolled back. The release's mail reads the same after the
 /// upgrade, a stream item joins the conversation behind the graph claim it arrived after, and a
