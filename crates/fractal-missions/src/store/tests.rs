@@ -6695,12 +6695,12 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     );
     assert!(!connection.is_autocommit());
     connection
-        .execute_batch("ROLLBACK")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hb47d29970c26 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK")
         .unwrap();
     drop(connection);
     // File-backed readers are read-only; schema mutation belongs to the writer.
     store.connection.write()
-        .execute_batch("DROP INDEX claims_incarnation_accepted_index")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h734b678e7a1c owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_incarnation_accepted_index")
         .unwrap();
     let connection = store.readers.get();
     assert!(agent_working_since_at(&connection, agent, "inc-1", ids[5].store_index).is_err());
@@ -6711,7 +6711,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     assert!(agent_working_since_at(&connection, agent, "inc-1", ids[5].store_index).is_err());
     assert!(!connection.is_autocommit());
     connection
-        .execute_batch("ROLLBACK")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hf4fcb241adf1 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK")
         .unwrap();
 }
 
