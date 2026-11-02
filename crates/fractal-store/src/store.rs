@@ -2212,6 +2212,8 @@ pub struct Store {
     pub last_operation_audit: Mutex<Option<OperationAuditRecord>>,
     /// The residue count is kept with the `fleet_generation` its membership was read at.
     pub last_fleet_residue: Mutex<Option<(i64, FleetResidueRecord)>>,
+    /// Wakes the daemon's residue count when doctor finds membership moved since the last one.
+    pub fleet_residue_wanted: tokio::sync::Notify,
 }
 
 /// How often the daemon audits the operation projection against the claim log and counts the
@@ -2628,7 +2630,7 @@ impl Store {
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
-            last_operation_audit: Default::default(), last_fleet_residue: Default::default() })
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2650,7 +2652,7 @@ impl Store {
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
-            last_operation_audit: Default::default(), last_fleet_residue: Default::default() })
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2664,7 +2666,7 @@ impl Store {
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
-            last_operation_audit: Default::default(), last_fleet_residue: Default::default() })
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -2793,19 +2795,31 @@ impl Store {
         residue
     }
 
-    /// The last fleet admission residue count, if one was made at the current membership
-    /// generation: when membership moved since, this counts again now.
-    pub fn current_fleet_residue(&self) -> Result<Option<FleetResidueRecord>> {
+    /// The last fleet admission residue count, and whether membership has moved since it was
+    /// made. When it has, this wakes the daemon to count again; nothing counts inline.
+    pub fn current_fleet_residue(&self) -> Result<Option<(FleetResidueRecord, bool)>> {
         let generation = smallclaims::store::FleetAuthority::fleet_generation(&self.graph)?;
         let last = self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        Ok(match last {
-            None => None,
-            Some((counted_at, record)) if counted_at == generation => Some(record),
-            Some(_) => {
-                let _ = self.audit_fleet_admission_residue();
-                self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner).clone().map(|(_, record)| record)
+        Ok(last.map(|(counted_at, record)| {
+            let moved = counted_at != generation;
+            if moved {
+                self.fleet_residue_wanted.notify_one();
             }
-        })
+            (record, moved)
+        }))
+    }
+
+    /// Keep a residue count that stopped before it could finish, so doctor reports it.
+    pub fn fleet_residue_stopped(&self, error: String) {
+        let record = AuditRecord {
+            finished_at_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            took: std::time::Duration::ZERO,
+            result: Err(error),
+        };
+        *self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner) = Some((-1, record));
     }
 
     pub fn rebuild_claim_projections(&self) -> Result<()> {

@@ -8232,12 +8232,13 @@ pub(crate) fn operation_projection_check(
 /// admitted before it knew better. Those are historical, since admission is never revisited, so
 /// the daemon counts them off the request path, at startup and then every
 /// [`crate::store::OPERATION_AUDIT_PERIOD`]: reading every validated envelope took 46 s cold
-/// on a 56 GB store. Only a membership change adds to them, and doctor counts again inline
-/// after one ([`crate::store::Store::current_fleet_residue`]).
+/// on a 56 GB store. Only a membership change adds to them, and after one doctor reports the
+/// old count as outdated and wakes the daemon to count again
+/// ([`crate::store::Store::current_fleet_residue`]).
 pub(crate) fn fleet_admission_check(
     unsigned: u64,
     fenced: u64,
-    residue: Option<crate::store::FleetResidueRecord>,
+    residue: Option<(crate::store::FleetResidueRecord, bool)>,
     now_ms: u128,
 ) -> DoctorCheck {
     let period = crate::store::OPERATION_AUDIT_PERIOD;
@@ -8254,8 +8255,14 @@ pub(crate) fn fleet_admission_check(
                 period.as_secs() / 60
             ));
         }
-        Some(record) => {
+        Some((record, moved)) => {
             let age_ms = now_ms.saturating_sub(record.finished_at_unix_ms);
+            if moved {
+                status = "warn";
+                notes.push(format!(
+                    "fleet membership changed since envelopes admitted before this node knew better were counted; the daemon is counting them again"
+                ));
+            }
             let when = format!("counted {} min ago ({:.1} s)", age_ms / 60_000, record.took.as_secs_f64());
             match record.result {
                 Err(error) => {

@@ -13977,7 +13977,7 @@ fn fleet_admission_reports_live_holds_and_the_daemons_last_residue_count() {
     use crate::store::{FleetResidueRecord, OPERATION_AUDIT_PERIOD};
     let now = 10 * OPERATION_AUDIT_PERIOD.as_millis();
     let counted = |age_ms: u128, result: Result<Vec<smallclaims::store::FleetAdmissionResidue>, String>| {
-        Some(FleetResidueRecord { finished_at_unix_ms: now - age_ms, took: Duration::from_millis(4_200), result })
+        Some((FleetResidueRecord { finished_at_unix_ms: now - age_ms, took: Duration::from_millis(4_200), result }, false))
     };
     let check = |unsigned, residue| {
         let check = fleet_admission_check(unsigned, 2, residue, now);
@@ -14001,6 +14001,12 @@ fn fleet_admission_reports_live_holds_and_the_daemons_last_residue_count() {
     let (status, message) = check(0, counted(2 * OPERATION_AUDIT_PERIOD.as_millis() + 60_000, Ok(Vec::new())));
     assert_eq!(status, "warn");
     assert!(message.contains("counted 121 min ago (4.2 s), longer ago than the 60 min the daemon counts them every; admitted envelopes are never readmitted, so an hour-old count is accurate"), "{message}");
+    // A count from before a membership change is outdated: the daemon counts again.
+    let mut moved = counted(60_000, Ok(Vec::new()));
+    moved.as_mut().unwrap().1 = true;
+    let (status, message) = check(0, moved);
+    assert_eq!(status, "warn");
+    assert!(message.contains("fleet membership changed since envelopes admitted before this node knew better were counted; the daemon is counting them again"), "{message}");
     // Before the first count, and when it failed.
     let (status, message) = check(0, None);
     assert_eq!(status, "warn");

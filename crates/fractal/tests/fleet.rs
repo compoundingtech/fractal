@@ -2887,14 +2887,23 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
     // Replication can advance between CLI calls and make coverage pending again. Assert
     // against the settled comparison that satisfied the wait, including its table diff.
     let diff = settled_diff.unwrap();
-    let doctor = c.st(&["--json", "doctor"]);
-    let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
-    let admission = doctor["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["name"] == "fleet-admission")
-        .unwrap();
+    // The membership change wakes the daemon to count the admission residue again; doctor
+    // reports the new count once it is made.
+    let mut admission = Value::Null;
+    wait_until("doctor reports the admissions from before the rejoin", 60, || {
+        let doctor = c.st(&["--json", "doctor"]);
+        let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+        admission = doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "fleet-admission")
+            .cloned()
+            .unwrap();
+        let counted = admission["message"].as_str().unwrap().contains("admitted beyond high water");
+        async move { counted }
+    })
+    .await;
     let waited = c.st(&["fleet", "wait", "--timeout", "5s"]);
     eprintln!(
         "rejoin receipt: {}",

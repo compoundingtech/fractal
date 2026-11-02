@@ -6971,11 +6971,14 @@ async fn audit_operations(store: &Arc<Store>) -> anyhow::Result<Vec<String>> {
 /// thread, in pages that each take their own short read snapshot. The store keeps the count for
 /// doctor; a failure is kept there too, and doctor reports it.
 async fn count_fleet_residue(store: &Arc<Store>) {
-    let store = store.clone();
-    let _ = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("fleet.admission_residue", || {
-        store.audit_fleet_admission_residue()
+    let counting = store.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("fleet.admission_residue", || {
+        counting.audit_fleet_admission_residue()
     }))
-    .await;
+    .await
+    {
+        store.fleet_residue_stopped(format!("the count stopped: {error}"));
+    }
 }
 
 /// Repair what an audit found, and say whether anything changed.
@@ -7417,13 +7420,20 @@ async fn run_up(args: UpArgs) -> Result<()> {
         }
     }));
     // Doctor reports the envelopes admitted before this node knew better from this count, made
-    // at once and then every period; a membership change in between makes doctor count again.
+    // at startup and then every period, and again when doctor finds membership moved since.
+    // The first count waits 30 s, so it does not run beside the startup operation audit, unless
+    // doctor asks for it sooner.
     {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("fleet.admission_residue", async move {
+            let mut wait = Duration::from_secs(30);
             loop {
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    () = store.fleet_residue_wanted.notified() => {}
+                }
                 count_fleet_residue(&store).await;
-                tokio::time::sleep(fractal_daemon::store::OPERATION_AUDIT_PERIOD).await;
+                wait = fractal_daemon::store::OPERATION_AUDIT_PERIOD;
             }
         }));
     }
