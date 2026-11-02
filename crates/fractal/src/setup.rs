@@ -760,10 +760,11 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
     // Keep managed installations (including the signed macOS app bundle) in place.
     if instance.is_none()
         && let Ok(environment) = fractal_daemon::environment::snapshot()
-        && ["fractal", "st"].into_iter().any(|name|
+        && let Some(installed) = ["fractal", "st"].into_iter().find_map(|name|
             fractal_runtime::resolve_executable(name, &environment)
-                .ok().is_some_and(|installed| same_file(&installed, executable)))
+                .ok().filter(|installed| same_file(installed, executable)))
     {
+        link_fractal_beside_legacy_aliases(&installed, executable);
         return Ok(executable.into());
     }
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
@@ -821,6 +822,28 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
     say!("Installed Fractal (fractal, pty and temporary st/st3 aliases) in {}", bin.display());
     Ok(target)
 }
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+/// An install laid out before the rename (st3, and st -> st3) has no fractal command, yet its aliases
+/// warn that they are going. Setup run from it keeps it in place, so give it fractal beside them: a
+/// link to the same image. A fractal that is already there, whatever it is, is never touched.
+fn link_fractal_beside_legacy_aliases(installed: &Path, executable: &Path) {
+    let Some(bin) = installed.parent() else { return };
+    if !same_file(&bin.join("st3"), executable) {
+        return;
+    }
+    let canonical = bin.join("fractal");
+    // symlink refuses an existing name, so nothing already at fractal can be replaced.
+    match symlink("st3", &canonical).and_then(|()| File::open(bin)?.sync_all()) {
+        Ok(()) => say!("Added the fractal command beside st and st3 in {}", bin.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => eprintln!(
+            "warning: could not add the fractal command at {}: {error}; st and st3 keep working until they are removed",
+            canonical.display()
+        ),
+    }
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 
 fn record_installed_binaries(bin: &Path) -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);

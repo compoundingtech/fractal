@@ -36,6 +36,8 @@ pub mod identities;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
+#[cfg(test)]
+mod observation_trim_tests;
 pub mod directive_notes;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
@@ -236,6 +238,9 @@ pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
 pub mod subagents;
 pub mod idle_mail;
+pub mod message_marks;
+#[cfg(test)]
+mod message_marks_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -2177,6 +2182,16 @@ impl LocalSeats {
     }
 }
 
+/// What one local-observation trim pass deleted, and the longest it held the store's writer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ObservationTrim {
+    pub deleted: usize,
+    pub longest_writer_hold: std::time::Duration,
+}
+
+/// Rows past retention one reader read of the trim examines.
+const TRIM_SCAN_PAGE: i64 = 5_000;
+
 pub struct Store {
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
@@ -2212,6 +2227,7 @@ pub const ACTUAL_CACHE_LIMIT: usize = 4096;
 pub struct MessageCacheEntry {
     latest_claim_index: u64,
     desired_claim_id: Option<String>,
+    latest_mark: i64,
     view: MessageView,
 }
 
@@ -4259,40 +4275,87 @@ impl Store {
         max_per_subject_kind: usize,
         chunk: usize,
     ) -> Result<usize> {
+        Ok(self.trim_local_observations_pass(older_than_unix_ms, max_per_subject_kind, chunk)?.deleted)
+    }
+
+    /// One trim pass, and the longest the store's writer was held for it.
+    pub fn trim_local_observations_pass(
+        &self,
+        older_than_unix_ms: u128,
+        max_per_subject_kind: usize,
+        chunk: usize,
+    ) -> Result<ObservationTrim> {
         self.flush_overdue_usage_rollups(now_ms())?;
         let chunk = chunk.max(1).min(i64::MAX as usize) as i64;
         let max_per_subject_kind = max_per_subject_kind.max(1).min(i64::MAX as usize) as i64;
+        let mut longest_writer_hold = std::time::Duration::ZERO;
         let mut deleted = 0;
         // A reading a usage slot still waits to replicate is never trimmed (below).
         // The newest observation of a subject and kind always stays. Rows past retention go
         // through the time index, and a row is "not the newest" when a later id exists for its
-        // subject and kind, one seek in `local_observations_subject_kind_index`. This used to
-        // rank every row of the table with a window function inside the writer's hold, every
-        // chunk of every pass, even when nothing was due.
+        // subject and kind, one seek in `local_observations_subject_kind_index`.
+        //
+        // The search runs on a reader, a page of the time index at a time, and the writer only
+        // deletes the ids it found, re-checking each. Searching inside the DELETE walked every
+        // row past retention that must stay, on every chunk of every pass, inside the writer's
+        // hold: 20 s on a 57 GB member right after a restart, while every seat reconnected (#4610).
+        // `local_latest_slots` has no index on `pending_local_id`, so its check is a list built
+        // once per statement, never a correlated scan per row (60 s over 26,000 rows on that member).
+        let mut after: (i64, i64) = (i64::MIN, i64::MIN);
         loop {
-            let connection = self.connection.write_background();
-            let removed = connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h315fe07938f4 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
-                    SELECT id FROM local_observations AS old
-                    WHERE observed_at_unix_ms < ?1
-                      AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
-                      AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
-                      AND NOT EXISTS (SELECT 1 FROM local_latest_slots WHERE pending_local_id=old.id)
-                      AND EXISTS (SELECT 1 FROM local_observations AS newer
-                                  WHERE newer.subject=old.subject AND newer.kind=old.kind
-                                    AND newer.id>old.id)
-                    ORDER BY observed_at_unix_ms
-                    LIMIT ?2
-                 )",
-                params![
-                    older_than_unix_ms.min(i64::MAX as u128) as i64,
-                    chunk
-                ],
-            )?;
-            drop(connection);
-            deleted += removed;
-            if (removed as i64) < chunk {
-                break;
+            let (due, scanned, last) = {
+                let connection = self.readers.get();
+                let mut statement = connection.prepare_cached(
+                    "SELECT id, observed_at_unix_ms,
+                            kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
+                            AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
+                            AND old.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
+                            AND EXISTS (SELECT 1 FROM local_observations AS newer
+                                        WHERE newer.subject=old.subject AND newer.kind=old.kind
+                                          AND newer.id>old.id)
+                     FROM local_observations AS old
+                     WHERE observed_at_unix_ms < ?1 AND (observed_at_unix_ms, id) > (?2, ?3)
+                     ORDER BY observed_at_unix_ms, id
+                     LIMIT ?4",
+                )?;
+                let rows = statement
+                    .query_map(
+                        params![older_than_unix_ms.min(i64::MAX as u128) as i64, after.0, after.1, TRIM_SCAN_PAGE],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?)),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let last = rows.last().map(|(id, at, _)| (*at, *id));
+                let due: Vec<i64> = rows.iter().filter(|(_, _, due)| *due).map(|(id, _, _)| *id).collect();
+                (due, rows.len() as i64, last)
+            };
+            #[cfg(test)]
+            if let Some(change) = observation_trim_tests::AFTER_SEARCH.with(|change| change.borrow_mut().take()) {
+                change(self);
+            }
+            for ids in due.chunks(chunk as usize) {
+                let connection = self.connection.write_background();
+                let started = std::time::Instant::now();
+                // Every condition again, under the writer: a row may have become a pending slot or
+                // start evidence since the search.
+                let removed = connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-h0b1b867066d2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations
+                     WHERE id IN (SELECT value FROM json_each(?1))
+                       AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
+                       AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
+                       AND local_observations.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
+                       AND EXISTS (SELECT 1 FROM local_observations AS newer
+                                   WHERE newer.subject=local_observations.subject
+                                     AND newer.kind=local_observations.kind
+                                     AND newer.id>local_observations.id)",
+                    [serde_json::to_string(ids)?],
+                )?;
+                drop(connection);
+                longest_writer_hold = longest_writer_hold.max(started.elapsed());
+                deleted += removed;
+            }
+            match last {
+                Some(last) if scanned == TRIM_SCAN_PAGE => after = last,
+                _ => break,
             }
         }
         // The cap: only a subject and kind with more rows than the cap has any. Find them on a
@@ -4312,6 +4375,7 @@ impl Store {
         for (subject, kind) in over_cap {
             loop {
                 let connection = self.connection.write_background();
+                let started = std::time::Instant::now();
                 // The newest id past the cap: rank `cap + 1` from the newest.
                 let boundary: Option<i64> = connection
                     .query_row(
@@ -4322,27 +4386,30 @@ impl Store {
                     )
                     .optional()?;
                 let Some(boundary) = boundary else {
+                    drop(connection);
+                    longest_writer_hold = longest_writer_hold.max(started.elapsed());
                     break;
                 };
                 let removed = connection.execute(
-                    /* sqlite-large-value: allow-for-now lv-ha3460e7a5f9d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                    /* sqlite-large-value: allow-for-now lv-haf85b2aa5c24 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                         SELECT id FROM local_observations
                         WHERE subject=?1 AND kind=?2 AND id<=?3
                           AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                           AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
-                          AND NOT EXISTS (SELECT 1 FROM local_latest_slots WHERE pending_local_id=local_observations.id)
+                          AND local_observations.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
                         ORDER BY id LIMIT ?4
                      )",
                     params![subject, kind, boundary, chunk],
                 )?;
                 drop(connection);
+                longest_writer_hold = longest_writer_hold.max(started.elapsed());
                 deleted += removed;
                 if (removed as i64) < chunk {
                     break;
                 }
             }
         }
-        Ok(deleted)
+        Ok(ObservationTrim { deleted, longest_writer_hold })
     }
 
     pub fn idempotent_claim(&self, key: &str) -> Result<Option<ClaimRecord>> {
@@ -10628,6 +10695,13 @@ fn validate_message_transition(
         "message.closed" => "closed",
         _ => unreachable!("the SQL query selects message lifecycle kinds"),
     });
+    // A local mark (message_marks.rs) is this member's record of the same lifecycle: the
+    // message stands wherever the further along of the two puts it.
+    let current = match (current, message_marks::status(transaction, &input.subject).map_err(internal)?) {
+        (Some(claimed), Some(marked)) if message_marks::rank(marked) > message_marks::rank(claimed) => Some(marked),
+        (None, Some(marked)) => Some(marked),
+        (current, _) => current,
+    };
     let current = if current.is_some() {
         current
     } else {
@@ -11192,7 +11266,18 @@ fn message_view_at_with_desired(
     through: Option<u64>,
     desired_row: impl FnOnce() -> Result<Option<DesiredRow>>,
 ) -> Result<MessageView> {
-    let actual = latest_actual_at(connection, subject, through)?.unwrap_or(Value::Null);
+    let mut actual = latest_actual_at(connection, subject, through)?.unwrap_or(Value::Null);
+    // A consumer's local mark (message_marks.rs) counts as its lifecycle claim would: the view
+    // reads whichever is further along. Marks are this member's current record, at any `through`.
+    if let Some(marked) = message_marks::status(connection, subject)? {
+        let claimed = actual.get("status").and_then(Value::as_str).unwrap_or("sent");
+        if message_marks::rank(marked) > message_marks::rank(claimed) {
+            if !actual.is_object() {
+                actual = json!({});
+            }
+            actual["status"] = json!(marked);
+        }
+    }
     // Deletion of the current projection retires the declaration. A retained
     // intent.desired claim is not permission to resurrect it in a fresh page.
     let desired = if through.is_some() && !connection.prepare_cached(
@@ -19499,16 +19584,24 @@ pub fn enrich_step_wake_at(
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h193b5e906715 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h98fccb80a458 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.body, claims.accepted_at_unix_ms,
                 EXISTS(SELECT 1 FROM claims consumed
                        WHERE consumed.subject=claims.subject
                          AND consumed.kind IN ('message.read','message.closed')
-                         AND consumed.accepted_at_unix_ms<=?1),
+                         AND consumed.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks consumed
+                       WHERE consumed.message=claims.subject
+                         AND consumed.kind IN ('message.read','message.closed')
+                         AND consumed.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
                 EXISTS(SELECT 1 FROM claims delivered
                        WHERE delivered.subject=claims.subject
                          AND delivered.kind='message.delivered'
-                         AND delivered.accepted_at_unix_ms<=?1),
+                         AND delivered.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks delivered
+                       WHERE delivered.message=claims.subject
+                         AND delivered.kind='message.delivered'
+                         AND delivered.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
                 EXISTS(SELECT 1 FROM claims staged
                        WHERE staged.subject=claims.subject
                          AND staged.kind='message.staged'
