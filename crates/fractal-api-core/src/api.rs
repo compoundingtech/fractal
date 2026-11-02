@@ -8152,11 +8152,15 @@ impl<'a> DoctorChecks<'a> {
             let checks = clock.checks(name, work);
             done.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[position] = Some(checks);
         };
+        // Workers enter the request's profile operation, so their SQL counts as doctor's.
+        let profile = crate::profile::current();
         std::thread::scope(|scope| {
             for _ in 0..extra {
                 let Some(permit) = readers.try_admit_read() else { break };
                 let total = clock.total.clone();
+                let profile = profile.clone();
                 scope.spawn(move || {
+                    let _entered = crate::profile::enter(profile.as_ref());
                     smallclaims::read_budget::with(Some(total), || {
                         // A refused loan leaves this worker's checks to the others.
                         let _ = readers.request_read_with_permit(permit, drain);
