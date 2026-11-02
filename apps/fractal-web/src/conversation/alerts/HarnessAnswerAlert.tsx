@@ -21,11 +21,12 @@ const styles = stylex.create({
   tabList: { display: 'flex', flexWrap: 'wrap', gap: s.xs2, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: c.border, paddingBottom: s.xs2 },
   tab: {
     display: 'inline-flex', alignItems: 'center', minHeight: g.controlSm, paddingInline: s.sm, borderRadius: r.control,
-    color: c.fgMuted, maxWidth: '16rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none',
+    color: c.fgMuted, maxWidth: '16rem', overflow: 'hidden', cursor: 'pointer', outline: 'none',
     ':hover': { color: c.fg },
     ':is([data-selected])': { backgroundColor: c.rowActive, color: c.fg },
     ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' },
   },
+  tabLabel: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   panel: { outline: 'none', ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   fieldset: { margin: 0, padding: 0, borderWidth: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: s.xs },
   legend: { padding: 0, marginBottom: s.xs, fontWeight: 600 },
@@ -143,8 +144,8 @@ export const HarnessAnswerAlert = ({
         <Aria.Tabs selectedKey={tab} onSelectionChange={(key) => setTab(String(key))}>
           <Aria.TabList aria-label="Questions" {...stylex.props(styles.tabList)}>
             {ask.questions.map((each) => (
-              <Aria.Tab key={each.id} id={each.id} {...stylex.props(styles.tab)}>
-                {each.title}{picked(each).length > 0 ? ' ✓' : ''}
+              <Aria.Tab key={each.id} id={each.id} aria-label={each.title} {...stylex.props(styles.tab)}>
+                <span {...stylex.props(styles.tabLabel)}>{each.title}{picked(each).length > 0 ? ' ✓' : ''}</span>
               </Aria.Tab>
             ))}
           </Aria.TabList>
