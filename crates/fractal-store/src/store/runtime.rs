@@ -571,6 +571,19 @@ impl Runtime for FractalRuntime {
         self.wake_read_roster();
     }
 
+    fn claims_trimmed(&self) {
+        // A trim's run goes on: the roster and the lists that fold from nothing refold, keeping
+        // their generation, so a fold under way still publishes and readers keep their rows.
+        // Forgetting them here, after every chunk, restarted the roster's fold of seconds
+        // before it could publish, all through the run. The trim forgets the views once when
+        // the run stops, which also drops what the caches hold of the claims it deleted.
+        self.presented_agents.refold();
+        self.published_missions.refold();
+        self.published_work.refold();
+        self.published_runtimes.refold();
+        self.wake_read_roster();
+    }
+
     fn projection_advanced(&self, caught_up: bool) {
         // Readers keep the roster they had while it refolds from nothing: keep it before the
         // caches it lives in are cleared.

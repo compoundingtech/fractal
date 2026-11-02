@@ -61,6 +61,48 @@ pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_mil
 // (including COMMIT), capped at five seconds per rest. In the uncapped regime this reserves
 // four times the acquired-loan work for other traffic. A slow statement can still exceed the
 // chunk budget; this pacing is not a hard statement or request-latency bound.
+/// How often a paced trim's run lets the views refold, while it goes on. They are forgotten
+/// once when the run stops.
+pub const TRIM_VIEW_REFOLD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What a trim's run owes the views: a refold at most every [`TRIM_VIEW_REFOLD_INTERVAL`] while
+/// it deletes, and one forget when it stops, however it stops.
+struct TrimViews<'a> {
+    store: &'a Store,
+    refolded: std::time::Instant,
+    pending: bool,
+}
+
+impl<'a> TrimViews<'a> {
+    fn new(store: &'a Store) -> Self {
+        Self { store, refolded: std::time::Instant::now(), pending: false }
+    }
+
+    /// A chunk deleted rows: replication reads the inventory again, and the views refold if
+    /// the last refold is an interval old.
+    fn deleted(&mut self) {
+        self.store.replica_inventory_changed();
+        self.pending = true;
+        if self.refolded.elapsed() >= TRIM_VIEW_REFOLD_INTERVAL {
+            self.store.runtime.claims_trimmed();
+            self.refolded = std::time::Instant::now();
+        }
+    }
+
+    /// The run stopped: forget the views once, if it deleted anything.
+    fn stopped(&mut self) {
+        if std::mem::take(&mut self.pending) {
+            self.store.replica_rows_changed();
+        }
+    }
+}
+
+impl Drop for TrimViews<'_> {
+    fn drop(&mut self) {
+        self.stopped();
+    }
+}
+
 pub(super) const TRIM_MIN_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// A trim chunk that holds the writer longer than this logs one line saying what it did.
@@ -1029,11 +1071,13 @@ impl Store {
         // capped.
         let day = self.trim_day.load(Ordering::Relaxed);
         let mut left = cursor.local.is_some().then(|| self.local_trim_left_today()).transpose()?;
+        let mut views = TrimViews::new(self);
         let delete = crate::profile::span("trim.delete");
         loop {
             if left == Some(0) {
                 // The cut stays `trimming`, and the next day's first step goes on from here. What
                 // its deletes deferred is rebuilt now, so a deferral outlasts no day's run.
+                views.stopped();
                 self.rebuild_deferred_paced()?;
                 actions.push(CheckpointAction::TrimDeferred {
                     checkpoint: checkpoint.to_owned(),
@@ -1127,10 +1171,11 @@ impl Store {
             let phase = if envelopes.is_empty() { "claims" } else { "envelopes" };
             log_if_slow_trim_chunk(phase, held, committing.elapsed(), envelopes.len(), claims.len(), body_bytes);
             drop(connection);
-            // A cursor-only chunk inspected already-absent rows. All chunks that actually
-            // delete keep the original invalidation; this does not coalesce mutations.
+            // A cursor-only chunk inspected already-absent rows. A chunk that deletes tells
+            // replication at once, and leaves the views serving until a refold is due: their
+            // folds from nothing take seconds, longer than a chunk and its pause.
             if !envelopes.is_empty() || !claims.is_empty() {
-                self.replica_rows_changed();
+                views.deleted();
             }
             deleted_envelopes += envelopes.len();
             deleted_claims += claims.len();
@@ -1158,7 +1203,9 @@ impl Store {
             )?;
             transaction.commit()?;
         }
-        self.replica_rows_changed();
+        // The final mark expired every cursor: the views are forgotten once, deleted or not.
+        views.pending = true;
+        views.stopped();
         self.rebuild_deferred_paced()?;
         actions.push(CheckpointAction::Trimmed {
             checkpoint: checkpoint.to_owned(),

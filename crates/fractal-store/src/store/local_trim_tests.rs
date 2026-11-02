@@ -285,6 +285,52 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     }).count(), 0);
 }
 
+/// A local cut that deletes in many chunks leaves the roster's generation alone until its run
+/// stops, so a fold under way publishes. Forgetting the views after every chunk restarted the
+/// roster's fold before it could publish, all through a run.
+#[test]
+fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let all = observer_ids(&store);
+    // A capped day stops at TrimDeferred, and the next day's run reaches the final mark.
+    store.trim_locally_at_most(15);
+    for (day, outcome) in [(0, "deferred"), (1, "trimmed")] {
+        let context = context(scratch.path(), day);
+        let before = answers(&store, context.now_unix_ms);
+        let deleted = all.difference(&observer_ids(&store)).count();
+        let generation = store.fractal.presented_agents.generation();
+        let sequence = claims_sequence(&store);
+        let actions = kinds(&step(&store, &context));
+        assert_eq!(actions.first(), Some(&outcome), "day {day}: {actions:?}");
+        let chunks = all.difference(&observer_ids(&store)).count() - deleted;
+        let forgets = store.fractal.presented_agents.generation() - generation;
+        assert!(chunks > 4, "day {day}: the run deletes in many chunks ({chunks})");
+        // Once when a cut's tombstones are recorded and once when its run stops: the second
+        // day finishes the first cut, then records the next one and stops at the cap.
+        assert!(forgets <= 3, "day {day}: {forgets} forgets for {chunks} chunks");
+        // A stopped run still forgets what the views hold of the claims it deleted, and the
+        // final mark still expires every cursor taken before it.
+        assert!(forgets >= 1, "day {day}: the run's stop forgets the views");
+        assert_eq!(claims_sequence(&store) > sequence, outcome == "trimmed", "day {day}: cursors expire at the final mark");
+        assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}: the readers answer the same");
+    }
+}
+
+/// The claims sequence a page cursor carries, which the final mark of a trim moves on.
+fn claims_sequence(store: &Store) -> i64 {
+    store
+        .readers
+        .get()
+        .query_row("SELECT seq FROM sqlite_sequence WHERE name='claims'", [], |row| row.get(0))
+        .unwrap()
+}
+
 /// How many claims this member retired, and whether every one of `deleted` is among them.
 fn retired_exactly(store: &Store, deleted: &BTreeSet<String>) -> bool {
     let connection = store.readers.get();
