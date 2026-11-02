@@ -10410,23 +10410,48 @@ fn migrate_work_extension_projections_tx(transaction: &Transaction<'_>) -> Resul
 }
 
 pub fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h5131cd171242 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews", [])?;
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf57e0335fc4e owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_candidates", [])?;
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-hc880524a7216 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_sessions", [])?;
+    rebuild_planning_subject_tx(transaction, None)
+}
+
+/// Rebuild only the affected session on receipt; full replay passes no subject.
+fn rebuild_planning_subject_tx(transaction: &Transaction<'_>, subject: Option<&str>) -> Result<()> {
+    let id = subject.and_then(|subject| subject.strip_prefix("planning-session/"));
+    if let Some(id) = id {
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hcf06439aadf0 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews WHERE session_id=?1", [id])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0604d904ed35 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_candidates WHERE session_id=?1", [id])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hde78ac1818e2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_sessions WHERE id=?1", [id])?;
+    } else if subject.is_none() {
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h5131cd171242 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hf57e0335fc4e owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_candidates", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hc880524a7216 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_sessions", [])?;
+    }
     let mut statement = transaction.prepare(
-        /* sqlite-large-value: allow-for-now lv-h736179f9e933 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id
-         FROM claims WHERE kind >= 'planning-session.' AND kind < 'planning-session/'
-         ORDER BY CANONICAL_ASC(claims)"),
+        /* sqlite-large-value: allow-for-now lv-hcd2b65040553 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(if subject.is_some() {
+            "SELECT id FROM claims INDEXED BY claims_subject_kind_index WHERE subject=?1
+             AND kind >= 'planning-session.' AND kind < 'planning-session/'
+             ORDER BY CANONICAL_ASC(claims)"
+        } else {
+            "SELECT id FROM claims WHERE kind >= 'planning-session.' AND kind < 'planning-session/'
+             AND ?1 IS NULL ORDER BY CANONICAL_ASC(claims)"
+        }),
     )?;
     let claim_ids = statement
-        .query_map([], |row| row.get::<_, String>(0))?
+        .query_map([subject], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     holds::rebuilt(claim_ids.len());
-    clear_quarantined_claims_tx(transaction, "projection:planning")?;
+    if subject.is_none() {
+        clear_quarantined_claims_tx(transaction, "projection:planning")?;
+    }
     for id in claim_ids {
         let claim = claim_by_id_tx(transaction, &id)?
             .context("a planning claim disappeared during replay")?;
+        if subject.is_some() {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hf900ad7e9a7d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate=?1",
+                [format!("projection:planning:{}", claim.id)],
+            )?;
+        }
         // A claim admission accepted but this projection cannot read, such as one from a faulty
         // or older producer, is quarantined alone instead of failing the whole graph.
         project_claim_isolated_tx(transaction, "projection:planning", &claim, || {
@@ -10539,7 +10564,7 @@ fn project_planning_claim_tx(transaction: &Transaction<'_>, claim: &ClaimRecord)
                 /* sqlite-large-value: allow-for-now lv-hf7696d32e277 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE planning_sessions SET status='revision-requested', updated_at_unix_ms=?2 WHERE id=?1",
                 params![id, accepted],
             )?;
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-hcf06439aadf0 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews WHERE session_id=?1", [id])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hd29260726759 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews WHERE session_id=?1", [id])?;
         }
         "planning-session.approved" => {
             transaction.execute(
@@ -16161,7 +16186,7 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
     for claim in &claims {
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hf900ad7e9a7d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate=?1",
+                /* sqlite-large-value: allow-for-now lv-he22427efa6dc owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate=?1",
                 [format!("projection:runs:{}", claim.id)],
             )
             .map_err(internal)?;
@@ -16371,7 +16396,7 @@ pub fn try_project_simple_replication_tx(
     // A claim that reaches a part of the graph out of the replay's order marks that part to be
     // rebuilt from its own claims; everything else extends the graph as it arrives.
     let mut dirty = BTreeSet::<Aggregate>::new();
-    let mut rebuild_planning = false;
+    let mut planning_subjects = BTreeSet::new();
     // A run tree needs rebuilding for this node's own claims only when another writer's claims
     // about the same tree arrived in the same range, since only then can the two be out of the
     // replay's order. A tree that holds this node's claims alone already has them: they were
@@ -16431,10 +16456,11 @@ pub fn try_project_simple_replication_tx(
         // nor that ordering. Validate its shape here and its digest/state in the registry
         // below; do not force a full-store replay based on the identity's prefix.
         if claim.kind.starts_with("planning-session.") {
-            rebuild_planning = true;
+            planning_subjects.insert(claim.subject.as_str());
         }
         if replay_projects_kind(&claim.kind)
             && !Store::simple_replication_kind(&claim.kind)
+            && !claim.kind.starts_with("planning-session.")
             && !matches!(
                 claim.kind.as_str(),
                 "intent.desired"
@@ -16871,8 +16897,8 @@ pub fn try_project_simple_replication_tx(
                 .with_detail("projection_subject", format!("mission-run/{root}"))
         })?;
     }
-    if rebuild_planning {
-        holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
+    for subject in planning_subjects {
+        holds::stage("rebuild-planning", || rebuild_planning_subject_tx(transaction, Some(subject)))
             .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?;
     }
     owned_sets::project_tx(transaction)

@@ -1006,6 +1006,84 @@ fn simple_replication_advances_events_without_full_replay() {
 }
 
 #[test]
+fn planning_incremental_matches_replay_without_replaying_other_sessions() {
+    fn snapshot(connection: &Connection) -> Vec<Vec<Vec<String>>> {
+        ["planning_sessions", "planning_candidates", "planning_previews"].into_iter().map(|table| {
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h7554f50b3042 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!("SELECT * FROM {table} ORDER BY 1,2,3")).unwrap();
+            let columns = statement.column_count();
+            let rows = statement.query_map([], |row| {
+                (0..columns).map(|column| row.get_ref(column).map(|value| format!("{value:?}")))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            }).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        }).collect()
+    }
+    let store = Store::open_memory("local").unwrap();
+    store.project_replication_backlog().unwrap();
+    FULL_REPLAYS.with(|count| count.set(0));
+    let started = json!({"mission":"mission/example", "request":"blob/request",
+        "workspace":"workspace/example", "requester":"agent/requester", "planner":"agent/planner"});
+    let claims = [
+        ("remote", "candidate-submitted", 101, json!({"candidate_revision":1,
+            "markdown":"blob/markdown", "kdl":"blob/kdl", "mission_revision":"revision-one"})),
+        ("local", "started", 100, started.clone()),
+        ("remote", "previewed", 102, json!({"candidate_revision":1, "preview_hash":"preview",
+            "store_index":1, "graph":"graph", "diff":"diff", "mission":{}})),
+        ("local", "revision-requested", 103, json!({})),
+        ("remote", "approved", 104, json!({"mission_revision":"revision-one"})),
+        ("local", "cancelled", 105, json!({})),
+    ];
+    // Keep another session present: an incremental update must not delete/rebuild it.
+    {
+        let mut connection = store.connection.lock().unwrap();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, "local", "planning-session/untouched",
+            "planning-session.started", None, &json!({"fields":started}), &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    store.project_replication_backlog().unwrap();
+    for (origin, kind, accepted, fields) in claims {
+        let mut connection = store.connection.lock().unwrap();
+        let tx = connection.transaction().unwrap();
+        let claim = append_claim_record_tx(&tx, origin, "planning-session/example",
+            &format!("planning-session.{kind}"), None, &json!({"fields":fields}), &[], None).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hfdb917e251e0 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+            params![claim.id, accepted.to_string()]).unwrap();
+        if origin == "local" {
+            // Local writers have already projected their claim before backlog projection.
+            let local = claim_by_id_tx(&tx, &claim.id).unwrap().unwrap();
+            project_planning_claim_tx(&tx, &local).unwrap();
+        }
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hd5ad98b66ec3 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER protect_other_planning_session
+            BEFORE DELETE ON planning_sessions WHEN OLD.id='untouched'
+            BEGIN SELECT RAISE(ABORT,'unrelated session rebuilt'); END;").unwrap();
+        for _ in 0..2 {
+            // Re-delivery of the same range is idempotent, including local claims.
+            assert!(matches!(try_project_simple_replication_tx(&tx, "local", claim.store_index).unwrap(),
+                IncrementalProjection::Projected));
+        }
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h33474a0faac0 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER protect_other_planning_session").unwrap();
+        let incremental = snapshot(&tx);
+        if kind == "started" {
+            assert_eq!(incremental[0].len(), 2);
+            assert_eq!(incremental[1].len(), 1, "retry the early candidate after its start");
+        }
+        if kind == "previewed" {
+            assert_eq!(incremental[2].len(), 1);
+        }
+        if kind == "revision-requested" {
+            assert!(incremental[2].is_empty());
+        }
+        replay_graph_from_nothing_tx(&tx).unwrap();
+        assert_eq!(incremental, snapshot(&tx), "{origin} {kind}");
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h783add75a3c5 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET last_good_store_index=?1 WHERE aggregate='graph'",
+            [claim.store_index]).unwrap();
+        tx.commit().unwrap();
+    }
+}
+
+#[test]
 fn resource_observation_projection_does_not_rebuild_operation_history() {
     let store = Store::open_memory("node").unwrap();
     assert!(store.project_replication_backlog().unwrap());

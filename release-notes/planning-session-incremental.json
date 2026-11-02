@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Planning-session claims rebuild only their affected session instead of replaying the entire graph while holding the store writer",
+  "replay": {"status": "none", "detail": "Incremental projection canonically rebuilds the affected session, candidates and previews. Existing state needs no replay."},
+  "schema": {"status": "none", "detail": "No storage or schema changes."},
+  "rules": {"status": "none", "detail": "Planning claims retain canonical ordering and per-claim quarantine behavior."},
+  "compatibility": {"status": "none", "detail": "No wire, claim or client format changes."},
+  "downtime": {"status": "none", "detail": "No restart-time work."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Rollback restores full replay on receipt without changing stored claims."}
+}
