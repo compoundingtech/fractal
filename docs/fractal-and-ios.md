@@ -86,3 +86,21 @@ st devices --as person/ada pair --full-control 'Garden iPhone'
 ```
 
 In the app, enter the reachable gateway URL, pairing ID, and code. Open **Agents**, select your worker, and send a message. To read a document, open **Resources**, then **Documents**: tap one in the list, or type `doc/NAME` and tap **Open**. A `doc/…` link in a message, a mission or a step opens that document; inside it, tap a link to follow it and use back to return. Documents are read-only. Images in a conversation and on an ask's card show as a box naming the image, its type and its size; each loads when it scrolls into view. Tap one to zoom (pinch, **Close**) or **Share** it to save it or open it in another app; see [what shows where](st3/attachments.md#what-shows-where). [Build and run the iOS app](site/guides/ios-app.md) has the Xcode prerequisites, simulator and Debug workflow, signing details, and pairing troubleshooting.
+
+### Issue a foreground phone command
+
+Find the phone's device id with `st devices --as person/ada`, then keep the app
+in the foreground and use the same member where it was paired:
+
+```sh
+st devices --as person/ada command device/PHONE inspect
+st devices --as person/ada command device/PHONE navigate Agents
+st devices --as person/ada command device/PHONE mark-read attention/ITEM --json
+```
+
+Each command waits for one correlated outcome, not an offline queue. `--ttl`
+sets milliseconds (default 30000, range 1–60000). Human output shows the id,
+outcome and result; `--json` returns the client envelope. Completed exits 0,
+failed 1, refused 3, expired 4 and not-foreground 5. Mark-read calls the same
+handler as tapping the app's card and needs `control.messages`.
+

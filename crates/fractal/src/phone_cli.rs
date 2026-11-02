@@ -1,4 +1,5 @@
 use super::*;
+use fractal_daemon::cli_println as println;
 use fractal_client::{DeviceCommandRequest, DeviceCommandState, PhoneCommand, PhoneNavigateArgs};
 
 #[derive(Args)]
