@@ -321,7 +321,7 @@ async fn a_viewer_reads_a_relay_hosts_seat_from_it_and_unknown_when_it_does_not_
         Some(relay(root.path(), hung().await)),
     );
     let started = Instant::now();
-    let unknown = message_reads::read(&silent, asks, Duration::from_millis(500)).await;
+    let unknown = message_reads::read(&silent, asks.clone(), Duration::from_millis(500)).await;
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "{:?}",
@@ -329,6 +329,14 @@ async fn a_viewer_reads_a_relay_hosts_seat_from_it_and_unknown_when_it_does_not_
     );
     assert!(
         matches!(unknown.get(&message.subject), Some(Relayed::Unknown { host, .. }) if host == OWNER)
+    );
+    // The next check a few seconds later does not wait for the silent host again.
+    let started = Instant::now();
+    let again = message_reads::read(&silent, asks, Duration::from_secs(2)).await;
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    assert!(
+        matches!(again.get(&message.subject), Some(Relayed::Unknown { host, reason }) if host == OWNER && reason.contains("did not answer")),
+        "{again:?}"
     );
     let socket = serve(root.path(), silent).await;
     let status: Value = crate::client::Client::unix(&socket)

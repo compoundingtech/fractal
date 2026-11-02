@@ -7794,7 +7794,8 @@ fn publication_evidence_check(store: &Store) -> DoctorCheck {
 
 /// `seats` (seat, count, oldest), with each seat whose host keeps its receipts counted from what
 /// that host answers about its held mail sent before `before`: read or closed mail goes, and mail
-/// the host did not answer for stays, as this member cannot say it was read.
+/// the host did not answer for stays, as this member cannot say it was read. A seat with more held
+/// mail than one read asks of a host keeps this member's own count, which can only be higher.
 fn relayed_held_mail(
     state: &AppState,
     seats: Vec<(String, u64, u128)>,
@@ -7811,6 +7812,7 @@ fn relayed_held_mail(
         .collect::<BTreeMap<_, _>>();
     let mut asks = BTreeMap::<String, Vec<String>>::new();
     let mut sent = BTreeMap::<String, (String, u128)>::new();
+    let mut past_bound = BTreeSet::<String>::new();
     for (seat, _, _) in seats
         .iter()
         .filter(|(seat, _, _)| host_of.contains_key(seat))
@@ -7826,10 +7828,14 @@ fn relayed_held_mail(
                  LIMIT ?3",
             )?
             .query_map(
-                rusqlite::params![i64::try_from(before).unwrap_or(i64::MAX), seat, message_reads::MAX_MESSAGES_PER_HOST as i64],
+                rusqlite::params![i64::try_from(before).unwrap_or(i64::MAX), seat, message_reads::MAX_MESSAGES_PER_HOST as i64 + 1],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)),
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        if held.len() > message_reads::MAX_MESSAGES_PER_HOST {
+            past_bound.insert(seat.clone());
+            continue;
+        }
         for (subject, at) in held {
             asks.entry(host_of[seat].clone())
                 .or_default()
@@ -7853,7 +7859,7 @@ fn relayed_held_mail(
     Ok(seats
         .into_iter()
         .filter_map(|(seat, count, oldest)| {
-            if !host_of.contains_key(&seat) {
+            if !host_of.contains_key(&seat) || past_bound.contains(&seat) {
                 return Some((seat, count, oldest));
             }
             counted

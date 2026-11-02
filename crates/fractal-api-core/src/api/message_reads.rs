@@ -7,7 +7,8 @@
 //! `conversations status` or doctor's mail checks, asks the host and never guesses. A host that
 //! does not answer within the deadline reads as unknown, never as sent.
 //!
-//! Answers are kept a few seconds, so repeated reads of one message ask the host once. One read
+//! Answers are kept a few seconds, so repeated reads of one message ask the host once, and so is
+//! a host's silence, so doctor's checks, one after another, wait for a silent host once. One read
 //! asks at most [`MAX_HOSTS`] hosts, all at once, and at most [`MAX_MESSAGES_PER_HOST`] messages
 //! of each, so a slow host costs one deadline and a large backlog a bounded number of requests.
 
@@ -20,7 +21,7 @@ use std::collections::HashMap;
 pub const STATUS_DEADLINE: Duration = Duration::from_secs(3);
 /// How long a doctor check, cleanup or backlog read waits for every host it asks.
 pub const CHECK_DEADLINE: Duration = Duration::from_secs(10);
-/// How long a host's answer about a message is reused.
+/// How long a host's answer about a message, or its silence, is reused.
 const KEEP_FOR: Duration = Duration::from_secs(5);
 /// The most answers kept; past it the oldest half goes.
 const KEPT_ANSWERS: usize = 8_192;
@@ -55,14 +56,29 @@ impl Relayed {
     }
 }
 
-/// Answers this member read from hosts, by message, for [`KEEP_FOR`].
+/// Answers this member read from hosts, by message, and the hosts that did not answer, with why,
+/// each for [`KEEP_FOR`].
 #[derive(Default)]
-pub struct KeptAnswers(std::sync::Mutex<HashMap<String, (Instant, MessageMarksAnswer)>>);
+pub struct KeptAnswers {
+    answers: std::sync::Mutex<HashMap<String, (Instant, MessageMarksAnswer)>>,
+    silent: std::sync::Mutex<HashMap<String, (Instant, String)>>,
+}
 
 impl KeptAnswers {
+    fn silent(&self, host: &str) -> Option<String> {
+        let silent = self.silent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        silent.get(host).filter(|(at, _)| at.elapsed() < KEEP_FOR).map(|(_, reason)| reason.clone())
+    }
+
+    fn fell_silent(&self, host: &str, reason: &str) {
+        let mut silent = self.silent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        silent.retain(|_, (at, _)| at.elapsed() < KEEP_FOR);
+        silent.insert(host.to_owned(), (Instant::now(), reason.to_owned()));
+    }
+
     fn get(&self, subject: &str) -> Option<MessageMarksAnswer> {
         let kept = self
-            .0
+            .answers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         kept.get(subject)
@@ -72,7 +88,7 @@ impl KeptAnswers {
 
     fn keep(&self, answers: impl IntoIterator<Item = MessageMarksAnswer>) {
         let mut kept = self
-            .0
+            .answers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
@@ -201,11 +217,13 @@ pub async fn read(
             continue;
         }
         let mut asked = Vec::new();
+        let silent = kept.silent(&host);
         for subject in subjects {
-            match kept.get(&subject) {
-                Some(answer) => heard.push((host.clone(), Ok(answer))),
-                None if asked.len() < MAX_MESSAGES_PER_HOST => asked.push(subject),
-                None => {
+            match (kept.get(&subject), &silent) {
+                (Some(answer), _) => heard.push((host.clone(), Ok(answer))),
+                (None, Some(reason)) => heard.push((host.clone(), Err((subject, reason.clone())))),
+                (None, None) if asked.len() < MAX_MESSAGES_PER_HOST => asked.push(subject),
+                (None, None) => {
                     let reason =
                         format!("one read asks at most {MAX_MESSAGES_PER_HOST} messages of a host");
                     heard.push((host.clone(), Err((subject, reason))));
@@ -259,6 +277,7 @@ pub async fn read(
                     Ok(Err(error)) => format!("{host} did not answer: {error:#}"),
                     Err(_) => format!("{host} did not answer in {deadline:?}"),
                 };
+                kept.fell_silent(&host, &reason);
                 heard.extend(
                     subjects
                         .into_iter()
