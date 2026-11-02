@@ -113,19 +113,6 @@ owned_fractal_link() {
     return 1
 }
 canonical=$bin_dir/fractal
-if [ -e "$canonical" ] || [ -L "$canonical" ]; then
-    owned=false
-    if owned_fractal_link "$canonical"; then
-        owned=true
-    elif [ -f "$canonical" ] && [ -x "$canonical" ] && [ ! -L "$canonical" ]; then
-        owned=true
-        for name in st st3; do
-            if [ ! -L "$bin_dir/$name" ]; then owned=false; break; fi
-            case "$(readlink "$bin_dir/$name")" in fractal|"$canonical") ;; *) owned=false; break ;; esac
-        done
-    fi
-    "$owned" || { printf 'install: refusing to replace foreign fractal command: %s\n' "$canonical" >&2; exit 1; }
-fi
 old_ifs=$IFS
 IFS=:
 set -f
@@ -205,6 +192,77 @@ tar -xzf "$work/$archive" -C "$work"
 # This is an archive-format decoder, not a fallback around a foreign destination.
 command_name=fractal
 [ -x "$work/$package/bin/fractal" ] && [ ! -L "$work/$package/bin/fractal" ] || command_name=st3
+# Verify locally: retained releases predate the hidden setup receipt protocol.
+# Never execute the destination, or waive verification for an older release.
+receipt_owned=false
+for receipt in "$bin_dir/.fractal-install.json" "$bin_dir/.fractal-install.json.pending"; do
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+        command -v python3 >/dev/null 2>&1 || {
+            printf 'install: Python 3 is required to verify install receipt %s; reinstall Fractal\n' "$receipt" >&2
+            exit 1
+        }
+        python3 - "$bin_dir" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+paths = [root / '.fractal-install.json', root / '.fractal-install.json.pending']
+try:
+    values = []
+    for path in paths:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            if os.path.lexists(path):
+                raise
+            continue
+        with os.fdopen(fd, 'rb') as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise ValueError('receipt must be a regular non-symlink file')
+            value = json.load(source)
+        digest = value.get('sha256')
+        if (type(value.get('schema')) is not int or value['schema'] != 1
+                or value.get('name') != 'fractal' or not isinstance(digest, str)
+                or len(digest) != 64 or any(c not in '0123456789abcdefABCDEF' for c in digest)):
+            raise ValueError('invalid receipt fields')
+        values.append(value)
+    target = root / 'fractal'
+    if not os.path.lexists(paths[0]) and not os.path.lexists(target) and values:
+        sys.exit(0)  # Prepared fresh install, before executable publication.
+    physical = target.resolve(strict=True)
+    fd = os.open(physical, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError('executable must be a regular file')
+        digest = hashlib.sha256()
+        for block in iter(lambda: source.read(65536), b''):
+            digest.update(block)
+    if not any(value['sha256'] == digest.hexdigest() for value in values):
+        raise ValueError('receipt does not match the installed executable')
+except Exception as error:
+    sys.exit(f'invalid install receipt {paths[0]} or {paths[1]}; reinstall Fractal: {error}')
+PY
+        receipt_owned=true
+        break
+    fi
+done
+if ! "$receipt_owned" && { [ -e "$canonical" ] || [ -L "$canonical" ]; }; then
+    owned=false
+    if owned_fractal_link "$canonical"; then
+        owned=true
+    elif [ -f "$canonical" ] && [ -x "$canonical" ] && [ ! -L "$canonical" ]; then
+        owned=true
+        for name in st st3; do
+            if [ ! -L "$bin_dir/$name" ]; then owned=false; break; fi
+            case "$(readlink "$bin_dir/$name")" in fractal|"$canonical") ;; *) owned=false; break ;; esac
+        done
+    fi
+    "$owned" || { printf 'install: refusing to replace foreign fractal command: %s\n' "$canonical" >&2; exit 1; }
+fi
 # Retained releases keep their historical installer spelling.
 "$work/$package/install.sh" --bin-dir "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd)
@@ -215,10 +273,16 @@ write_receipt() (
     trap '[ -z "$receipt_stage" ] || rm -f "$receipt_stage"' EXIT
     release_binary="$work/$package/bin/$command_name"
     version=$("$release_binary" --version --json) || return 1
-    case "$version" in '{"machine_version":"'*'"}') ;; *) return 1 ;; esac
-    version=${version#'{"machine_version":"'}
-    version=${version%'"}'}
-    commit=${version##*+}
+    case "$version" in
+        *'"commit":"'*)
+            commit=${version#*'"commit":"'}
+            commit=${commit%%'"'*} ;;
+        '{"machine_version":"'*'"}')
+            version=${version#'{"machine_version":"'}
+            version=${version%'"}'}
+            commit=${version##*+} ;;
+        *) return 1 ;;
+    esac
     case "$commit" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "${#commit}" -ge 7 ] || return 1
     receipt="$bin_dir/RELEASE.json"
