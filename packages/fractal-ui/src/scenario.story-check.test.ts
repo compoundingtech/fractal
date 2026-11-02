@@ -199,7 +199,7 @@ test('the scenario inventory covers exactly the CSFs loaded by kit Storybook', (
 })
 
 test('story-local play tags preserve the main play sets, including unlisted spread aliases', () => {
-  const baseline: { MERGE_ONLY: string[], BOTH_WIDTHS: string[], exports: Record<string, string[]> } = JSON.parse(readFileSync(new URL('../scripts/kit-play-main-baseline.json', import.meta.url), 'utf8'))
+  const baseline: { MERGE_ONLY: string[], BOTH_WIDTHS: string[], exports: Record<string, string[]> } = JSON.parse(readFileSync(nodePath.resolve(uiSource, '../scripts/kit-play-main-baseline.json'), 'utf8'))
   // Freeze main's original exports, not the evolving inventory. New stories
   // never require editing this historical regression fixture or a lane file.
   const entries = Object.fromEntries(Object.entries(baseline.exports).flatMap(([file, names]) => {
