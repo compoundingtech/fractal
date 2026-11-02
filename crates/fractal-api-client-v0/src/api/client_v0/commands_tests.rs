@@ -23,7 +23,7 @@ pub(super) fn pair(state: &AppState, device: &str, person: &str, scopes: &[&str]
 pub(super) fn request(device: &str, kind: &str) -> client_commands::DeviceCommandRequest {
     serde_json::from_value(json!({
         "api_version":CLIENT_API_VERSION,"device":device,"kind":kind,
-        "args":if kind == "phone.message.read" { json!({"attention_id":"attention/example"}) }
+        "args":if kind == "phone.message.read" { json!({"message_id":"message/example"}) }
             else if kind == "phone.navigate" { json!({"screen":"Agents"}) }
             else { json!({}) }
     })).unwrap()
@@ -149,10 +149,8 @@ async fn phone_command_message_read_admission_uses_daemon_state() {
                 ("content".into(), json!("Read this existing message.")), ("status".into(), json!("sent")),
             ]), evidence: vec![], expected_subject: None, idempotency_key: Some("admission-message".into()),
         }).unwrap();
-        let card = client_attention_resources(&state.store, Some("person/ada"), false).unwrap()
-            .into_iter().find(|card| card["source_id"] == sent.subject).unwrap();
         let mut request = request("device/target", if case == "verb" { "phone.inspect" } else { "phone.message.read" });
-        if case != "verb" { request.args = json!({"attention_id":card["id"]}); }
+        if case != "verb" { request.args = json!({"message_id":sent.subject}); }
         if matches!(case, "expired" | "race") { request.ttl_ms = Some(1); }
         let command = client_commands::issue(&state, &owner, request).unwrap();
         let id = command["id"].as_str().unwrap();

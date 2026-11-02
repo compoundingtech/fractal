@@ -70,8 +70,8 @@ Result content is command-specific JSON, not a new resource or stream frame.
 For a commanded message-read, the existing `message.read` action includes optional top-level
 `device_command: "device-command/…"`; ordinary Home actions omit it and are unchanged.
 The daemon requires the same live pairing session, a `phone.message.read` command in `pending`
-or `delivered`, an unexpired daemon deadline, and an attention card whose source is the exact
-target message. The normal message scope, recipient, fence and idempotency checks still apply.
+or `delivered`, an unexpired daemon deadline, and the exact `args.message_id` target owned by
+or addressed to the calling person. Normal message scope, recipient, fence and idempotency checks still apply.
 Admission and the real lifecycle write hold the same member-local command lock as expiry and
 result reporting; no network operation or await occurs under that lock.
 

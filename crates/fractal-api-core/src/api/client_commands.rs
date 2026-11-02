@@ -226,12 +226,10 @@ pub fn with_message_read<T>(
         return Err(denied("expired"));
     }
     if row.resource["command_kind"] != "phone.message.read" { return Err(denied("mismatch")); }
-    let attention = super::client_attention_resources(&state.store, Some(&row.person), false)
-        .map_err(ApiError::internal)?;
-    if !attention.iter().any(|item| item["id"] == row.resource["args"]["attention_id"]
-        && item["source_id"] == target && item["actions"].as_array()
-            .is_some_and(|actions| actions.iter().any(|action| action == "message.read")))
-    { return Err(denied("mismatch")); }
+    if row.resource["args"]["message_id"] != target { return Err(denied("mismatch")); }
+    let message = state.store.message(target).map_err(ApiError::internal)?
+        .ok_or_else(|| denied("mismatch"))?;
+    if message.to != row.person && message.from != row.person { return Err(denied("foreign")); }
     // Projection/DB reads can wait; recheck the daemon deadline immediately before admission.
     if client_now_ms() >= row.expires { return Err(denied("expired")); }
     let written = write();
