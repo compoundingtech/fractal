@@ -63,10 +63,9 @@ pub fn validate_fields(fields: &BTreeMap<String, Value>) -> Result<(), Validatio
     if !fields.get("audience").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty()) {
         return Err(error("invalid-subject-note", "audience must be a nonblank open-enum string"));
     }
-    if let Some(session) = fields.get("session") {
-        if target_spec.family != "agent" || !session.as_str().is_some_and(|value| !value.trim().is_empty()) {
-            return Err(error("invalid-subject-note", "session must be a nonblank incarnation id on an agent target"));
-        }
+    if let Some(session) = fields.get("session")
+        && (target_spec.family != "agent" || !session.as_str().is_some_and(|value| !value.trim().is_empty())) {
+        return Err(error("invalid-subject-note", "session must be a nonblank incarnation id on an agent target"));
     }
     if let Some(value) = fields.get("expires_at") {
         expiry(value.as_str().ok_or_else(|| error("invalid-subject-note", "expires_at must be a UTC timestamp string"))?)?;
