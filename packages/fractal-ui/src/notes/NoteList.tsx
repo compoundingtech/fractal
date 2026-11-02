@@ -1,11 +1,13 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
+import { Focusable } from 'react-aria-components'
 import { VisuallyHidden } from 'react-aria'
 import type { SubjectNote } from '@fractal/client/schema'
 import { DateTime, Option } from 'effect'
-import { Button } from '../assistant-ui/composition/Controls'
-import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as text, typeVars as t } from '../assistant-ui/composition-tokens.stylex'
+import { Button, Tooltip } from '../assistant-ui/composition/Controls'
+import { borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as text, typeVars as t } from '../assistant-ui/composition-tokens.stylex'
 import { HumanTime } from '../time/HumanTime'
+import { isSessionTarget, sessionNoteReach } from './NoteComposer'
 import { newestFirst } from './order'
 
 export interface NoteListProps {
@@ -79,7 +81,9 @@ function NoteRow({ note, own, state, onArchive }: { readonly note: SubjectNote; 
       <span data-testid="note-author" {...stylex.props(styles.author)}>{own ? 'You' : note.author}</span>
       <span aria-hidden="true">·</span>
       <HumanTime at={DateTime.toEpochMillis(note.created_at)} aria-label="Added" />
-      {note.target.startsWith('session/agent/') && <span data-testid="note-session" {...stylex.props(styles.chip)}>This session</span>}
+      {isSessionTarget(note.target) && <Tooltip label={sessionNoteReach} placement="top">
+        <Focusable><span tabIndex={0} role="img" aria-label={`This session. ${sessionNoteReach}`} data-testid="note-session" {...stylex.props(styles.tag)}>This session</span></Focusable>
+      </Tooltip>}
       {expiresAt !== undefined && <HumanTime at={DateTime.toEpochMillis(expiresAt)} prefix="Expires " data-testid="note-expires" />}
       {own && onArchive !== undefined && <span {...stylex.props(styles.action)}>
         <Button isDisabled={pending || accepted} aria-describedby={textId} onPress={onArchive}>{pending ? 'Archiving…' : accepted ? 'Archived' : 'Archive'}</Button>
@@ -94,7 +98,11 @@ function NoteRow({ note, own, state, onArchive }: { readonly note: SubjectNote; 
 }
 
 const styles = stylex.create({
-  root: { minWidth: 0, fontFamily: t.fontSans, color: text.fg, outlineStyle: 'none' },
+  // Archive moves focus here; keyboard users keep a visible position while the row leaves.
+  root: {
+    minWidth: 0, fontFamily: t.fontSans, color: text.fg, borderRadius: r.sm, outlineStyle: 'none',
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
+  },
   list: {
     listStyle: 'none', margin: s.zero, padding: s.zero, display: 'flex', flexDirection: 'column', minWidth: 0,
     outlineStyle: 'none',
@@ -109,7 +117,12 @@ const styles = stylex.create({
     fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fgMuted,
   },
   author: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: g.crumbMax },
-  chip: { paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.keyboard, fontSize: t.denseSize },
+  // A tag, not a key cap: filled pill, no border.
+  tag: {
+    display: 'inline-flex', alignItems: 'center', paddingInline: s.sm, borderRadius: r.full, backgroundColor: surface.washSubtle, color: text.fgSoft,
+    fontSize: t.denseSize, lineHeight: t.metaLeading, cursor: 'default', outlineStyle: 'none',
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
+  },
   action: { marginInlineStart: 'auto' },
   text: { margin: s.zero, fontSize: t.uiSize, lineHeight: t.uiLeading, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   error: { margin: s.zero, fontSize: t.metaSize, lineHeight: t.metaLeading, color: status.dangerFg },
