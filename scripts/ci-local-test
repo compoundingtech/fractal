@@ -204,6 +204,26 @@ class CiLocal(unittest.TestCase):
         run, = logs.glob('run-*')
         self.assertIn('compiling', (run / 'tests.log').read_text())
 
+    def test_a_stage_s_wait_at_the_admission_gate_after_its_slot_is_queue_time_too(self):
+        events = Path(self.tmp.name) / 'queue-events'
+        # The cargo shim holds its slot, then waits at the admission gate, which prints no end: the build's own output ends the wait.
+        queue = ('#!/usr/bin/env bash\necho "cargo: waiting in order for a host build slot (all 6 busy)"\nsleep 1.1\n'
+                 'echo "cargo: got build slot 0 and a heavy slot"\n'
+                 'echo "build-admission: cargo:build waits to start: 2 build(s) ahead (2 ahead, waited 0 s)" >&2\nsleep 2.1\n'
+                 'echo "   Compiling fractal v0.1.0"\nsleep 1.1\necho done\n')
+        done, _ = self.run_local('tests', ci_linux=queue, CI_LOCAL_QUEUE_LOG=str(events))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        row, = [line for line in done.stdout.splitlines() if line.startswith('ci-local:   tests')]
+        waits, seconds = re.search(r'queue: (\d+) waits, (\d+)s', row).groups()
+        self.assertEqual(waits, '2')
+        self.assertGreaterEqual(int(seconds), 3)
+        self.assertLess(int(seconds), int(re.search(r'(\d+)s +exit', row).group(1)))  # the compile after it ran
+        self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] tests: waiting for build admission', done.stdout)), 1)
+        lines = [line.split(' ') for line in events.read_text().splitlines()]
+        self.assertEqual([(kind, stage) for kind, _, stage in lines], [('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests')])
+        at = [int(when) for _, when, _ in lines]
+        self.assertGreaterEqual(at[3] - at[2], 2)
+
     def test_each_wait_for_a_build_slot_is_written_as_it_starts_and_ends_to_the_queue_log(self):
         events = Path(self.tmp.name) / 'queue-events'
         # Two waits that end with a slot, then one the stage never leaves (its cargo gave up): the run's end closes it.

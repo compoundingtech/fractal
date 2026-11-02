@@ -202,8 +202,9 @@ queue_event() {
 # Passes a stage's output through, stamping the build admission queue's lines and adding up the time spent in the queue, into
 # $log_dir/STAGE.queue or the file given second. With `gates` third, the waits that print no end line count too: the admission gate's
 # ("build-admission: LABEL waits to start", every minute while it waits, and the cargo shim's "next in order; waiting for the build
-# admission gate"), which end when the command prints anything else (its build has started) or ends. The setup's builds use it: their
-# waits are all the time a warm setup's swing came from (42 to 274 s on one tree, 2026-11-02), and they were counted as setup's running.
+# admission gate"), which end when the command prints anything else (its build has started) or ends. The setup and the stages use it:
+# the setup's waits are all the time a warm setup's swing came from (42 to 274 s on one tree, 2026-11-02), and a stage's cargo waits at
+# the gate after "got build slot"; both were counted as running.
 queue_times() {
   local stage=$1 file=${2:-$log_dir/$1.queue} gates=${3:-} line waiting=-1 gate=0 count=0 total=0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -290,9 +291,9 @@ run_stage() {
   # Both streams into one pipe. PIPESTATUS[0] is the stage's own status.
   set +e
   if [ "$stage" = isolation-vm ]; then
-    { "${low[@]}" bash scripts/ci-local-isolation-vm; } 2>&1 | queue_times "$stage" | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
+    { "${low[@]}" bash scripts/ci-local-isolation-vm; } 2>&1 | queue_times "$stage" "" gates | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
   else
-    { "${low[@]}" bash scripts/ci-linux "$stage"; } 2>&1 | queue_times "$stage" | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
+    { "${low[@]}" bash scripts/ci-linux "$stage"; } 2>&1 | queue_times "$stage" "" gates | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
   fi
   code=${PIPESTATUS[0]}
   set -e
