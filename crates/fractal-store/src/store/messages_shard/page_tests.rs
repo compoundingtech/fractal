@@ -175,3 +175,64 @@ fn a_title_that_matches_nothing_reads_the_whole_shard_once() {
     assert_eq!(page.len(), 50);
     println!("{}", json!({"items": items, "sender_items": items / 2, "title_matching_nothing_ms": title_ms, "plain_page_of_50_ms": plain_ms}));
 }
+
+/// A recipient's mailbox page lists what is addressed to it by any of its names, in the graph half
+/// and the stream half alike, and the stream half lists what the view filter it used before
+/// listed. A stream item names its recipient by a full reference (a bare name is refused, as the
+/// graph refuses it), so its only other names are aliases recorded in `identity_names`, which
+/// the view resolves to the recipient and the shard's query matches by name.
+#[test]
+fn a_mailbox_page_lists_a_recipient_s_aliases_in_both_halves_as_the_views_did() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+    let shard = open(&graph, root.path()).unwrap();
+    graph
+        .connection
+        .write()
+        .execute(
+            "INSERT INTO identity_names(name, identity, claim_id) VALUES
+             ('agent/oldcedar', 'agent/cedar', NULL), ('agent/oldfir', 'agent/fir', NULL)",
+            [],
+        )
+        .unwrap();
+    let sent = |subject: String, to: &str| ClaimInput {
+        subject,
+        kind: "message.sent".into(),
+        actor: Some("agent/alder".into()),
+        fields: serde_json::from_value(json!({"from": "agent/alder", "to": to, "content": format!("to {to}"), "status": "sent"})).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    // A bare name is no subject reference: neither half admits one.
+    for bare in ["cedar", "oldcedar"] {
+        assert_eq!(graph.append_claim(&sent("message/graph-bare".into(), bare)).unwrap_err().code, "invalid-subject-reference");
+        assert!(shard.append_claim(&sent(format!("message/{:016x}", 0xbfff), bare)).is_err(), "{bare}");
+    }
+    let names = ["agent/cedar", "agent/oldcedar", "agent/fir", "agent/oldfir"];
+    let mut graph_items = Vec::new();
+    let mut stream_items = Vec::new();
+    for (index, to) in names.iter().enumerate() {
+        graph_items.push(graph.append_claim(&sent(format!("message/graph-{index}"), to)).unwrap().subject);
+        stream_items.push(shard.append_claim(&sent(format!("message/{:016x}", 0xb000 + index), to)).unwrap().subject);
+    }
+    let through = graph.index().unwrap();
+    for (recipient, own) in [("agent/cedar", 0..2), ("agent/fir", 2..4)] {
+        let mut cursor = None;
+        let mut listed = Vec::new();
+        loop {
+            let (page, next) = graph.messages_page_inner(Some(recipient), true, cursor, through, 1, false).unwrap();
+            assert!(next.is_none() || !page.is_empty(), "an empty page with a next cursor");
+            listed.extend(page.into_iter().map(|message| message.subject));
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        // Its own name and its alias, graph first, then stream.
+        let expected: Vec<String> = graph_items[own.clone()].iter().chain(&stream_items[own.clone()]).cloned().collect();
+        assert_eq!(listed, expected, "{recipient}");
+        // The stream half is what filtering every item's view by its resolved recipient lists.
+        assert_eq!(by_view(&graph, &stream_items, Some(recipient), None, true), stream_items[own].to_vec(), "{recipient}");
+    }
+}
