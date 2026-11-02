@@ -1,6 +1,6 @@
 export { NoteBadge, noteCountLabel, type NoteBadgeProps } from './NoteBadge'
 export { NoteList, type NoteListProps } from './NoteList'
-export { NoteComposer, noteTextLimitBytes, type NoteComposerProps } from './NoteComposer'
+export { NoteComposer, isSessionTarget, noteTextLimitBytes, sessionNoteReach, type NoteComposerProps } from './NoteComposer'
 export { AgentMarker } from './AgentMarker'
 export { shortcutContextBlocked } from './shortcut-guard'
-export { NoteQuickAdd } from './NoteQuickAdd'
+export { NoteQuickAdd, useNoteQuickAdd, useNoteShortcut, type NoteQuickAddProps, type NoteQuickAddRequest, type NoteQuickAddState } from './NoteQuickAdd'
