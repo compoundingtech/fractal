@@ -3446,6 +3446,41 @@ fn a_remote_stop_without_process_authority_cannot_poison_the_running_owner() {
 }
 
 #[test]
+fn a_nonowner_end_never_stands_for_a_seat_its_desired_host_observes() {
+    // cedar runs the seat now; birch, where it ran before, records its own old runtime ending.
+    let owner_running = json!({"fields": {"status": "running", "host": "cedar", "incarnation_id": "on-cedar"}});
+    let stale_stop = json!({"fields": {"status": "stopped", "host": "birch", "incarnation_id": "on-birch"}});
+    let rows = [
+        ("a", "runtime.observed", "cedar", &owner_running),
+        ("b", "runtime.observed", "birch", &stale_stop),
+    ];
+    let (id, origin, rivals) = select_actual_source(&rows, Some("cedar")).unwrap();
+    assert_eq!((id.as_str(), origin.as_str()), ("a", "cedar"));
+    assert!(rivals.is_empty(), "{rivals:?}");
+    // With no known desired host, the newest record stands, as before.
+    assert_eq!(select_actual_source(&rows, None).unwrap().0, "b");
+    // The desired host's own end stands.
+    let owner_stop = json!({"fields": {"status": "exited", "host": "cedar", "incarnation_id": "on-cedar"}});
+    let rows = [
+        ("a", "runtime.observed", "cedar", &owner_running),
+        ("b", "runtime.observed", "birch", &stale_stop),
+        ("d", "runtime.observed", "cedar", &owner_stop),
+    ];
+    assert_eq!(select_actual_source(&rows, Some("cedar")).unwrap().0, "d");
+    // A non-owner that runs the seat is real state: it is selected and the owner is its rival.
+    let remote_running = json!({"fields": {"status": "running", "host": "birch", "incarnation_id": "again"}});
+    let rows = [
+        ("a", "runtime.observed", "cedar", &owner_running),
+        ("c", "runtime.observed", "birch", &remote_running),
+    ];
+    let (id, _, rivals) = select_actual_source(&rows, Some("cedar")).unwrap();
+    assert_eq!((id.as_str(), rivals), ("c", vec!["a".to_owned()]));
+    // Before the desired host has observed the seat, the non-owner's record is all there is.
+    let rows = [("b", "runtime.observed", "birch", &stale_stop)];
+    assert_eq!(select_actual_source(&rows, Some("cedar")).unwrap().0, "b");
+}
+
+#[test]
 fn apply_is_subject_cas_and_idempotent() {
     let store = Store::open_memory("node").expect("store");
     let intent = simple("true");
