@@ -9514,6 +9514,7 @@ async fn action_inner(
     let mut reconciled_attachment = None;
     let mut checked_fence = request.fence.clone();
     if matches!(request.action_type.as_str(), "work.withdraw-handoff" | "work.decline-handoff") {
+        use rusqlite::OptionalExtension;
         let withdraw = request.action_type == "work.withdraw-handoff";
         if session.assistant_write.is_some()
             || !session.authority_actor.starts_with(if withdraw { "agent/" } else { "person/" }) {
