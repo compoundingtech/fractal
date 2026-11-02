@@ -2,6 +2,12 @@ import { CommonActions } from '@react-navigation/native';
 import type { PhoneNavigateArgs } from '../../clients/typescript/fractal-client';
 import { navigationRef } from './navigation';
 
+export const inspectPhone = (state: { connection: { status: string; route: string }; foreground: boolean; session_actor?: string; windows: { attention: number; missions: number; agents: number } }): unknown => ({
+  route: navigationRef.getCurrentRoute()?.name ?? null,
+  tab: navigationRef.getRootState()?.routes[navigationRef.getRootState()?.index ?? 0]?.name ?? null,
+  ...state,
+});
+
 /** Dispatch into the focused tab's real stack (the root ref itself names tabs, not screens). */
 export const navigatePhone = async (args: PhoneNavigateArgs): Promise<{ route: string }> => {
   if (!navigationRef.isReady()) throw new Error('Navigation is not ready');
@@ -15,7 +21,9 @@ export const navigatePhone = async (args: PhoneNavigateArgs): Promise<{ route: s
   };
   const stop = navigationRef.addListener('state', () => { if (reached()) { clearTimeout(timer); stop(); } });
   const timer = setTimeout(() => { stop(); reject(new Error('Navigation did not reach the requested screen')); }, 1000);
-  navigationRef.dispatch(CommonActions.navigate({ name: args.screen, ...(params ? { params } : {}) }));
+  const root = navigationRef.getRootState();
+  const tab = args.screen === 'NowRoot' ? 'Now' : root.routes[root.index]?.name;
+  navigationRef.dispatch(CommonActions.navigate({ name: tab, params: { screen: args.screen, ...(params ? { params } : {}), initial: false } }));
   if (reached()) { clearTimeout(timer); stop(); }
   return promise;
 };

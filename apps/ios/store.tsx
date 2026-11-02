@@ -40,9 +40,8 @@ import { recordDiagnosticCapabilities } from './diagnostics';
 import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
 import { PhoneCommands, phoneCommandsGranted, type PhoneBindings } from './phoneCommands';
-import { markMessageRead } from './messageRead';
-import { navigatePhone } from './phoneNavigation';
-import { navigationRef } from './navigation';
+import { markMessageRead, readPhoneMessage } from './messageRead';
+import { inspectPhone, navigatePhone } from './phoneNavigation';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -452,7 +451,7 @@ function useAppStore(proof?: FabricProfile) {
   async function clearCachedProjection() { cacheGeneration.current++; clearCaches(); if (!proof) await AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
 
   // Capabilities once per connection: limits, the session's actor, and what it may control.
-  const loadCapabilities = useCallback(async (current: () => boolean) => {
+  const loadCapabilities = useCallback(async (current: () => boolean, onLoaded?: (caps: Capabilities) => void) => {
     if (!client) return;
     try {
       const capability = await client.capabilities();
@@ -462,6 +461,7 @@ function useAppStore(proof?: FabricProfile) {
       cachedActor.current = capability.value.session_actor;
       capsClient.current = client;
       setCaps(capability.value);
+      onLoaded?.(capability.value);
     } catch (e) { if (current()) setError(errorText(e)); }
   }, [client]);
 
@@ -474,17 +474,14 @@ function useAppStore(proof?: FabricProfile) {
   const bindings: PhoneBindings = {
     foreground: () => foreground.current.active,
     online: () => status === 'online',
-    inspect: () => ({
-      route: navigationRef.getCurrentRoute()?.name ?? null,
-      tab: navigationRef.getRootState()?.routes[navigationRef.getRootState()?.index ?? 0]?.name ?? null,
+    inspect: () => inspectPhone({
       connection: { status, route: routeLabel(routeRef.current) }, foreground: foreground.current.active,
       session_actor: caps?.session_actor, windows: { attention: data.attention.length, missions: data.missions.length, agents: data.agents.length },
     }),
     navigate: navigatePhone,
-    markRead: async id => { const item = data.attention.find(row => row.id === id && row.actions.includes('message.read')); return item ? markRead(item, true) : false; },
+    markRead: id => readPhoneMessage(id, data.attention, item => markRead(item, true)),
   };
   const commandBindings = useRef(bindings); commandBindings.current = bindings;
-  useEffect(() => { feed?.setCommandsGranted(capsClient.current === client && phoneCommandsGranted(caps)); }, [feed, caps, client]);
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
   // current. It closes in the background and opens fresh, snapshots first, in the foreground.
   useEffect(() => {
@@ -540,7 +537,7 @@ function useAppStore(proof?: FabricProfile) {
         if (state !== 'live') { connection++; capsClient.current = null; setCaps(null); }
         if (state === 'live') {
           const epoch = connection;
-          setError(''); void loadCapabilities(() => current() && epoch === connection);
+          setError(''); void loadCapabilities(() => current() && epoch === connection, caps => opened.setCommandsGranted(phoneCommandsGranted(caps)));
           carrier.feedLive(); feedMisses.current = 0;
         }
         // The bridge's own connection failing twice running (one dropped socket the feed mends itself):

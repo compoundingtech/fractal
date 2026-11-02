@@ -4,6 +4,10 @@ import { registerHooks } from 'node:module';
 
 // Native-only dependencies use test ports. They never initialize React Native in Node.
 const nativeStubs = {
+  '@react-navigation/native': `
+    export const createNavigationContainerRef = () => globalThis.testPhoneNavigation;
+    export const CommonActions = { navigate: payload => ({ type: 'NAVIGATE', payload }) };
+  `,
   'expo-constants': `
     export default { get expoConfig() { return globalThis.testPushExpoConfig; } };
   `,

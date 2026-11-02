@@ -1,5 +1,10 @@
 import { notApplied, retryTransient, type Attention, type FractalClient } from '../../clients/typescript/fractal-client';
 
+export const readPhoneMessage = async (id: string, attention: Attention[], markRead: (item: Attention) => Promise<boolean>): Promise<boolean> => {
+  const item = attention.find(row => row.id === id && row.actions.includes('message.read'));
+  return item ? markRead(item) : false;
+};
+
 /** Shared by the Home action and phone control; the same acted bookkeeping, fresh fence and retries. */
 export const markMessageRead = async (client: Pick<FractalClient, 'messageRead' | 'capabilities'>, item: Attention, acted: Set<string>, actionId: () => string): Promise<void> => {
   acted.add(item.id);
