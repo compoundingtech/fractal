@@ -190,7 +190,7 @@ fn a_mailbox_page_lists_a_recipient_s_aliases_in_both_halves_as_the_views_did() 
         .connection
         .write()
         .execute(
-            "INSERT INTO identity_names(name, identity, claim_id) VALUES
+            /* sqlite-large-value: allow-for-now lv-h4347267af912 owner=fractal_store::store::messages_shard::page_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO identity_names(name, identity, claim_id) VALUES
              ('agent/oldcedar', 'agent/cedar', NULL), ('agent/oldfir', 'agent/fir', NULL)",
             [],
         )
