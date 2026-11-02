@@ -137,7 +137,7 @@ export const HarnessAnswerAlert = ({
     })
   }
   return (
-    <section aria-label={ask.title} {...stylex.props(styles.alert)}>
+    <section role="group" aria-label={ask.title} {...stylex.props(styles.alert)}>
       <div {...stylex.props(styles.title)}>◆ {ask.title}</div>
       {ask.questions.length > 1 ? (
         <Aria.Tabs selectedKey={tab} onSelectionChange={(key) => setTab(String(key))}>

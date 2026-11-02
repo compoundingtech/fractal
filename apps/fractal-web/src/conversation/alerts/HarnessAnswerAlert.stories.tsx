@@ -41,8 +41,8 @@ const HarnessAnswerStory = ({ scheme, frame, allStates }: StoryArgs) => {
           <div data-testid="multi-question"><HarnessAnswerAlert key={ask.callId} ask={ask} onOpenTerminal={() => setTerminalHandoffs(count => count + 1)} /></div>
           <output aria-label="Terminal handoffs">Terminal handoffs: {terminalHandoffs}</output>
           {allStates ? <>
-            <section aria-label="Single-question layout"><h2>Single question</h2><HarnessAnswerAlert ask={{ ...ask, title: 'The agent has a rollout question', callId: `${ask.callId}/single`, questions: [ask.questions[0]!] }} onOpenTerminal={() => setTerminalHandoffs(count => count + 1)} /></section>
-            <section aria-label="Terminal unavailable layout"><h2>Terminal navigation unavailable</h2><HarnessAnswerAlert ask={{ ...ask, title: 'The agent has an evidence question', callId: `${ask.callId}/no-terminal`, questions: [ask.questions[1]!] }} /></section>
+            <section aria-label="Single-question layout"><h2>Single question</h2><HarnessAnswerAlert ask={{ ...ask, callId: `${ask.callId}/single`, questions: [ask.questions[0]!] }} onOpenTerminal={() => setTerminalHandoffs(count => count + 1)} /></section>
+            <section aria-label="Terminal unavailable layout"><h2>Terminal navigation unavailable</h2><HarnessAnswerAlert ask={{ ...ask, callId: `${ask.callId}/no-terminal`, questions: [ask.questions[1]!] }} /></section>
           </> : null}
         </>}
         <section aria-label="Scenario conversation">

@@ -67,6 +67,25 @@ it('times each answered alert until the strip no longer shows it, and drops refu
   container.remove()
 })
 
+it('groups simultaneous native questions without creating duplicate navigation landmarks', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  data.attention = []
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const calls = ['first', 'second'].map(id => ({
+    _tag: 'ToolCall', id: `item/${id}`, callId: id, name: 'ask', status: 'running', callSeen: true,
+    input: { questions: [{ id: 'storage', question: 'Storage?', options: [{ label: 'SQLite' }] }] },
+  }))
+  await act(async () => root.render(<LiveAgentAlerts agentRef={seat} items={calls} />))
+  const alerts = container.querySelectorAll('section[aria-label="The agent has a question"]')
+  expect(alerts).toHaveLength(2)
+  for (const alert of alerts) expect(alert.getAttribute('role')).toBe('group')
+  expect(container.querySelector('[role="region"]')).toBeNull()
+  await act(async () => root.unmount())
+  container.remove()
+})
+
 it('shows native OMP asks without attention, opens the terminal and clears the draft on native settlement', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   data.attention = []
