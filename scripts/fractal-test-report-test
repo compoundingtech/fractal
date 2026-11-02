@@ -67,7 +67,7 @@ class StTestReport(unittest.TestCase):
         result = self.result(record(600), record(610), record(89, code=4), record(100, full=False), record(2000, warm=False),
                              record(2000, warm=None), record(300, code=1), record(5000, hours_ago=30))
         self.assertEqual(result['count'], 2)
-        self.assertEqual(result['excluded'], {'not_full': 1, 'cold': 2, 'partial': 1, 'failed': 1})
+        self.assertEqual(result['excluded'], {'not_full': 1, 'cold': 2, 'partial': 1, 'failed': 1, 'candidate': 0})
         self.assertEqual([run['total_s'] for run in result['runs']], [600, 610])
         self.assertEqual(sorted(result['runs'][0]), ['ended', 'host', 'total_s', 'tree'])
         # A wider window takes the old run in; --since sets the start itself.
@@ -86,6 +86,7 @@ class StTestReport(unittest.TestCase):
         self.assertEqual(spike['breach_reasons'], ['1 full warm run(s) over 900s (slowest 901s)'])
         self.assertFalse(self.result(record(800), args=('--slo-s', '900'))['breach'])
         empty = self.result(record(5000, warm=False))
+        self.assertEqual(empty['excluded']['candidate'], 0)
         self.assertEqual((empty['count'], empty['p50_s'], empty['p90_s'], empty['max_s'], empty['within_slo'], empty['breach']),
                          (0, None, None, None, None, False))
 

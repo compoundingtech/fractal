@@ -14,6 +14,7 @@ import time
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import socket
 import subprocess
@@ -1412,6 +1413,79 @@ class StTest(unittest.TestCase):
         self.assertLess(header, out.index('WEB-PAYLOAD'))
         self.assertLess(header, out.index('evidence-wrap argv:', header))
         self.assertNotIn('--check fractal-web', err)
+
+    def interrupted_web(self, during_join=False):
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        self.addCleanup(os.close, write)
+        lock = Path(self.tmp.name) / 'web-slot'
+        state = {}
+        real_run, real_join = st_test.run_limited, st_test.join_lanes
+        script = ('import fcntl, os, subprocess; '
+                  f'slot=open({str(lock)!r}, "w"); fcntl.flock(slot, fcntl.LOCK_EX); '
+                  'child=subprocess.Popen(["sleep", "30"]); '
+                  f'os.write({write}, (str(child.pid)+"\\n").encode()); child.wait()')
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name == st_test.WEB:
+                return real_run([sys.executable, '-c', script], st_test.Limit(8), kill_group=True,
+                                groups=options.get('groups'), pass_fds=(write,), stdout=options.get('stdout'))
+            if name == 'demo':
+                self.assertTrue(select.select([read], [], [], 5)[0], 'web child did not start')
+                state['child'] = int(os.read(read, 64).strip())
+                if not during_join:
+                    state['interrupted'] = time.monotonic()
+                    raise KeyboardInterrupt()
+            return 0
+
+        def join(lanes):
+            if during_join and 'interrupted' not in state:
+                state['interrupted'] = time.monotonic()
+                raise SystemExit(143)
+            return real_join(lanes)
+
+        with mock.patch.object(st_test, 'join_lanes', join), self.assertRaises(SystemExit if during_join else KeyboardInterrupt):
+            self.web_lanes(run)
+        self.assertLess(time.monotonic() - state['interrupted'], 4, 'cleanup waited for the web time limit')
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0, 'web slot was not released')
+        stat = Path('/proc', str(state['child']), 'stat')
+        if stat.exists():
+            self.assertEqual(stat.read_text().rsplit(')', 1)[1].split()[0], 'Z', 'web child survived interruption')
+
+    def test_interrupting_the_build_cancels_web_before_joining_and_releases_its_slot(self):
+        self.interrupted_web()
+
+    def test_interrupting_the_join_cancels_web_and_releases_its_slot(self):
+        self.interrupted_web(during_join=True)
+
+    def test_a_web_group_started_after_cancellation_is_stopped_too(self):
+        groups = st_test.ProcessGroups()
+        groups.cancel()
+        started = time.monotonic()
+        code = st_test.run_limited(['sleep', '30'], st_test.Limit(8), kill_group=True, groups=groups)
+        self.assertNotEqual(code, 0)
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(groups.processes, set())
+
+    def test_hup_at_the_entry_point_unwinds_python_cleanup(self):
+        marker = Path(self.tmp.name) / 'hup-cleanup'
+        source = f'''import runpy, signal, sys
+sys.argv = [{str(ROOT / 'scripts/st-test')!r}, '--list']
+try:
+    runpy.run_path(sys.argv[0], run_name='__main__')
+except SystemExit as error:
+    if error.code:
+        raise
+try:
+    signal.raise_signal(signal.SIGHUP)
+finally:
+    open({str(marker)!r}, 'w').write('unwound')
+'''
+        done = subprocess.run([sys.executable, '-c', source], cwd=self.work, capture_output=True, text=True,
+                              env=dict(GIT_ENV, HOME=str(self.home), **{st_test.REEXEC: 'test'}))
+        self.assertEqual(done.returncode, 129, done.stderr)
+        self.assertEqual(marker.read_text(), 'unwound')
 
     def test_a_check_that_builds_uses_its_trees_kept_target_and_another_does_not(self):
         self.commit('b.txt', 'two')

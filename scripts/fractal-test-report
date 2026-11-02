@@ -101,7 +101,7 @@ def parts(record):
 
 def report(records, since, until, slo_s=720, max_s=900, unreadable=0):
     window = [record for record in records if since <= record['_ended'] <= until]
-    excluded = collections.Counter({'not_full': 0, 'cold': 0, 'partial': 0, 'failed': 0})
+    excluded = collections.Counter({'not_full': 0, 'cold': 0, 'partial': 0, 'failed': 0, 'candidate': 0})
     counted = []
     for record in window:
         reason = excluded_by(record)

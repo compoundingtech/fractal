@@ -1971,7 +1971,10 @@ Locally, web runs in its own thread alongside the Rust build lane and the serial
 counted heavy cargo stage slot for its whole run, including the dev shell; the kit plays inherit that admission and take no second
 place. Rust checks keep their per-command admission because their detached test guardian cannot inherit a held stage slot. Web and
 light output is buffered and printed after the build lane, and a background lane that exits without a result fails its checks.
-On timeout the web process group is killed together with its slot supervisor.
+On timeout or interruption the web process group is killed together with its slot supervisor before the lane is joined; HUP and
+TERM unwind through the same cleanup. A cancelled run also stops a web process that starts during cancellation. Hosts with a cargo
+admission shim must support `--stage-slot`; an unsupported shim fails the check. The web changelog registry writer's generated
+`registry.generated.ts` and its atomic `.tmp` siblings are ignored so they cannot transiently dirty the shared tree for another lane.
 `ST_EVIDENCE_SERIAL=1` restores the listed check order, with web still holding its stage slot.
 
 An explicitly authorized candidate-runner measurement uses `--out` in a disposable directory, never `--push`; its exported packs are

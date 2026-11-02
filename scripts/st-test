@@ -2485,6 +2485,39 @@ def kill_limited(process, group=False):
         process.kill()
 
 
+class ProcessGroups:
+    """Web groups owned by this run, including a child that starts while the foreground is being cancelled."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.processes = set()
+        self.cancelled = False
+
+    def add(self, process):
+        with self.lock:
+            self.processes.add(process)
+            cancelled = self.cancelled
+        if cancelled:
+            kill_limited(process, group=True)
+
+    def discard(self, process):
+        with self.lock:
+            self.processes.discard(process)
+
+    def cancel(self):
+        with self.lock:
+            self.cancelled = True
+            processes = tuple(self.processes)
+        for process in processes:
+            kill_limited(process, group=True)
+
+
+def join_lanes(lanes):
+    for thread, finished in lanes:
+        # An interrupted Thread.join can mark a still-running thread as stopped. Wait for the worker's own completion signal first.
+        finished.wait()
+        thread.join()
+
+
 def wait_limited(process, limit, group=False):
     """The exit code, or 124 after killing the process (with its group when requested) once `limit` has run out."""
     while True:
@@ -2499,16 +2532,21 @@ def wait_limited(process, limit, group=False):
             continue
 
 
-def run_limited(argv, limit, kill_group=False, **options):
+def run_limited(argv, limit, kill_group=False, groups=None, **options):
     """subprocess.run's returncode under `limit`: 124 when it ran out. A web stage owns its slot until its whole process group ends."""
     if kill_group:
         options['start_new_session'] = True
     with subprocess.Popen(argv, **options) as process:
+        if kill_group and groups is not None:
+            groups.add(process)
         try:
             return wait_limited(process, limit, group=kill_group)
         except BaseException:
             kill_limited(process, kill_group)
             raise
+        finally:
+            if kill_group and groups is not None:
+                groups.discard(process)
 
 
 def queue_note(limit):
@@ -2838,6 +2876,7 @@ def run_main(argv, cleanup):
                 gate_stages = {check: Path(scratch) / f'linux-gate-{stage}' for check, (stage, *_) in STAGE_SIGNED.items()}
                 ran = set()  # the checks whose command ran in this round (linux-gate's tells linux-clippy and linux-fleet-compat where their stages ran)
                 stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
+                web_groups = ProcessGroups()
                 def run_one(name, output=None):
                     """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
                     edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in unsignable else []
@@ -2962,7 +3001,8 @@ def run_main(argv, cleanup):
                         stages[:] = ci_local_stages(log)
                         blocked[name] = (round(limit.waiting()), round(blocked_seconds(limit.queue_log, stages)))
                     else:
-                        code = run_limited(command, limit, kill_group=name == WEB, cwd=directory, env=environment, stdout=output,
+                        code = run_limited(command, limit, kill_group=name == WEB, groups=web_groups if name == WEB else None,
+                                           cwd=directory, env=environment, stdout=output,
                                            stderr=subprocess.STDOUT if output else None)
                     seconds = round(time.monotonic() - started)
                     ok = code == 0
@@ -2986,26 +3026,41 @@ def run_main(argv, cleanup):
                     background = [name for lane in (web, light) for name in lane]
                     logs = {name: Path(scratch) / f'{name}.log' for name in background}
 
-                    def buffered_lane(names):
-                        for name in names:
-                            try:
-                                with open(logs[name], 'w') as output:
-                                    results[name] = run_one(name, output)
-                            except Exception as error:  # a lane that dies is a failed check, never a silent pass
-                                results[name] = ((name, f'FAILED ({type(error).__name__})', 0, str(error)[:120]), True, False)
+                    def buffered_lane(names, finished):
+                        try:
+                            for name in names:
+                                try:
+                                    with open(logs[name], 'w') as output:
+                                        results[name] = run_one(name, output)
+                                except Exception as error:  # a lane that dies is a failed check, never a silent pass
+                                    results[name] = ((name, f'FAILED ({type(error).__name__})', 0, str(error)[:120]), True, False)
+                        finally:
+                            finished.set()
 
-                    threads = [threading.Thread(target=buffered_lane, args=(names,), name=f'st-test-{label}')
-                               for label, names in (('web', web), ('light', light)) if names]
+                    threads = []
+                    for label, names in (('web', web), ('light', light)):
+                        if names:
+                            finished = threading.Event()
+                            threads.append((threading.Thread(target=buffered_lane, args=(names, finished), name=f'st-test-{label}'), finished))
                     print(f'fractal-test: {"; ".join(", ".join(lane) for lane in execution_lanes)} run alongside one another; '
                           'background output follows the build lane', flush=True)
-                    for lane in threads:
-                        lane.start()
+                    started_threads = []
                     try:
+                        for lane, finished in threads:
+                            lane.start()
+                            started_threads.append((lane, finished))
                         for name in builds:
                             results[name] = run_one(name)
+                    except BaseException:
+                        web_groups.cancel()
+                        raise
                     finally:
-                        for lane in threads:
-                            lane.join()  # never release the clean tree while a background lane still uses it
+                        try:
+                            join_lanes(started_threads)  # never release the clean tree while a background lane still uses it
+                        except BaseException:  # an interrupt can also arrive while the foreground waits for web
+                            web_groups.cancel()
+                            join_lanes(started_threads)
+                            raise
                     for name in background:
                         results.setdefault(name, ((name, 'FAILED (lane exited)', 0, 'lane exited without a result'), True, False))
                         print(f'\n----- fractal-test: {name} output -----', flush=True)
@@ -3118,6 +3173,7 @@ def run_main(argv, cleanup):
 if __name__ == '__main__':
     # TERM (the pre-push hook's timeout, a closed terminal) unwinds like an error so the throwaway worktree is removed.
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
+    signal.signal(signal.SIGHUP, lambda signum, frame: sys.exit(129))
     if os.environ.get(REEXEC) and Path(__file__).parent.name.startswith('st-test-base-'):
         atexit.register(shutil.rmtree, Path(__file__).parent, True)  # the copy run_base_copy wrote: gone when this run ends
     try:
