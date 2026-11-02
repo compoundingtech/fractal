@@ -6047,6 +6047,7 @@ mod tests {
     fn the_top_bar_counts_alerts_and_prints_nothing_at_zero() {
         let mut ui = glass();
         ui.world.attention = Load::Ready(vec![]);
+        ui.refresh_tab_statuses();
         let none = screen(&ui);
         let first = none.lines().next().unwrap();
         assert!(!first.contains("alert") && !first.contains("need"), "{first}");
@@ -6059,15 +6060,18 @@ mod tests {
             subjects: vec![],
         };
         ui.world.attention = Load::Ready(vec![update.clone()]);
+        ui.refresh_tab_statuses();
         let first = screen(&ui).lines().next().unwrap().to_owned();
         assert!(!first.contains("alert"), "{first}");
         ui.world.attention = Load::Ready(vec![update, alert_prompt("attention/one", "agent/example/atlas/builder")]);
+        ui.refresh_tab_statuses();
         let first = screen(&ui).lines().next().unwrap().to_owned();
         assert!(first.contains("◆ 1 alert ") && !first.contains("alerts"), "{first}");
         ui.world.attention = Load::Ready(vec![
             alert_prompt("attention/one", "agent/example/atlas/builder"),
             alert_prompt("attention/two", "agent/example/docs/writer"),
         ]);
+        ui.refresh_tab_statuses();
         let first = screen(&ui).lines().next().unwrap().to_owned();
         assert!(first.contains("◆ 2 alerts"), "{first}");
     }
