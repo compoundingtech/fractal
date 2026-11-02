@@ -39,7 +39,7 @@ import { DiagnosticsConnection } from './DiagnosticsConnection';
 import { recordDiagnosticCapabilities } from './diagnostics';
 import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
-import { PhoneCommands, phoneCommandsGranted, type PhoneBindings } from './phoneCommands';
+import { PhoneCommands, phoneCommandsGranted, type PhoneBindings, type PhoneCheck } from './phoneCommands';
 import { markMessageRead, readPhoneMessage } from './messageRead';
 import { inspectPhone, navigatePhone } from './phoneNavigation';
 
@@ -472,14 +472,13 @@ function useAppStore(proof?: FabricProfile) {
   }, [client, status]);
 
   const bindings: PhoneBindings = {
-    foreground: () => foreground.current.active,
     online: () => status === 'online',
     inspect: () => inspectPhone({
       connection: { status, route: routeLabel(routeRef.current) }, foreground: foreground.current.active,
       session_actor: caps?.session_actor, windows: { attention: data.attention.length, missions: data.missions.length, agents: data.agents.length },
     }),
     navigate: navigatePhone,
-    markRead: (id, allowed) => readPhoneMessage(id, data.attention, item => markRead(item, true, allowed)),
+    markRead: (id, check) => readPhoneMessage(id, data.attention, item => markRead(item, true, check)),
   };
   const commandBindings = useRef(bindings); commandBindings.current = bindings;
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
@@ -490,11 +489,11 @@ function useAppStore(proof?: FabricProfile) {
     let active = true;
     let connection = 0;
     const current = () => active && generation === cacheGeneration.current;
-    const commands = new PhoneCommands(client, () => commandBindings.current);
+    const commands = new PhoneCommands(client, () => commandBindings.current, foreground.current);
     attentionLive.current = false;
     if (!proofRef.current && timers.current.connect === null) timers.current.connect = observations.begin('ios-connect');
     const opened = new Feed(client, {
-      onCommands: (rows, at, received) => { if (current()) void commands.receive(rows, at, received); },
+      onCommands: (rows, at) => { if (current()) void commands.receive(rows, at); },
       onWindow: (name, rows, hasMore, at, received) => {
         if (!current()) return;
         if (at?.id) lastSnapshot.current = at.id;
@@ -688,9 +687,9 @@ function useAppStore(proof?: FabricProfile) {
     setBusy(true);
     try { await retryTransient(8, action, retryable); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); if (reportFailure) throw e; return false; } finally { setBusy(false); }
   }
-  async function markRead(item: Attention, reportFailure = false, allowed?: () => boolean): Promise<boolean> {
+  async function markRead(item: Attention, reportFailure = false, check?: PhoneCheck): Promise<boolean> {
     if (!client) return false;
-    return runAction(() => markMessageRead(client, item, acted.current, actionId, allowed), [], () => false, reportFailure);
+    return runAction(() => markMessageRead(client, item, acted.current, actionId, check), [], () => false, reportFailure);
   }
 
   /**
