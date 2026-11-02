@@ -911,7 +911,7 @@ pub struct Store {
     /// transaction. Only tests change them.
     pub trim_fault: Mutex<Option<checkpoint_trim::TrimFault>>,
     /// What a test runs after each chunk a trim deletes, given how many it has deleted.
-    pub trim_chunk_hook: Mutex<Option<Box<dyn FnMut(usize) + Send>>>,
+    pub trim_chunk_hook: Mutex<Option<checkpoint_trim::TrimChunkHook>>,
     pub trim_chunk_envelopes: AtomicUsize,
     /// Minimum trim rest in microseconds; tests may set zero to disable pacing.
     pub trim_pause_micros: AtomicU64,

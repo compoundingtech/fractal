@@ -61,6 +61,9 @@ pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_mil
 // (including COMMIT), capped at five seconds per rest. In the uncapped regime this reserves
 // four times the acquired-loan work for other traffic. A slow statement can still exceed the
 // chunk budget; this pacing is not a hard statement or request-latency bound.
+/// What a test runs after each chunk a trim deletes, given how many it has deleted.
+pub type TrimChunkHook = Box<dyn FnMut(usize) + Send>;
+
 /// How often a paced trim's run lets the views refold, while it goes on. They are forgotten
 /// once when the run stops.
 pub const TRIM_VIEW_REFOLD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
