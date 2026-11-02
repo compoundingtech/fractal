@@ -176,6 +176,18 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
     ("POST /v1/client/diagnostics", "requires a current paired session with write.client-diagnostics, absent from generated stores; writes node-local observations and retry receipts; paired admission, deduplication, rate-limit and receipt-reopen tests live in api/client_diagnostics.rs; ingestion cost is not measured here"),
+    (
+        "GET /v1/client/device-commands/{*id}",
+        "reads a bounded member-local in-memory command table, optionally awaiting its wake channel; no claim-history scan; client_v0_contract covers reactive completion and issuer isolation",
+    ),
+    (
+        "POST /v1/client/device-commands",
+        "requires a paired target device, absent from generated cost stores; at most eight pending commands per device and 2048 retained rows, independent of claim history; phone_commands tests cover admission, bounds and expiry",
+    ),
+    (
+        "POST /v1/client/device-results",
+        "requires the addressed paired foreground session, absent from generated cost stores; updates the bounded in-memory command table without a Store mutation; phone_commands tests cover session gating and terminal idempotency",
+    ),
     // A Claude permission hook's or Codex driver's approval poll: one indexed newest-claim read
     // and one operation lookup.
     (
