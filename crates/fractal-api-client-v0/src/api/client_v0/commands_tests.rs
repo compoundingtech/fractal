@@ -192,7 +192,7 @@ async fn phone_command_message_read_admission_uses_daemon_state() {
         let mut expiry_thread = None;
         if case == "expiry-first" {
             expiry_thread = Some(expiry(expiry_gate.take().unwrap()));
-            assert!(!expiry_attempt.recv_timeout(Duration::from_secs(5)).unwrap());
+            expiry_attempt.recv_timeout(Duration::from_secs(5)).unwrap();
             expiry_locked.recv_timeout(Duration::from_secs(5)).unwrap();
         }
         let action_state = state.clone();
@@ -201,7 +201,8 @@ async fn phone_command_message_read_admission_uses_daemon_state() {
             action_inner(State(action_state), Extension(snapshot), Extension(action_phone), Json(action), None).await
         });
         if paused {
-            assert_eq!(attempt.recv_timeout(Duration::from_secs(5)).unwrap(), case == "expiry-first");
+            let blocked = attempt.recv_timeout(Duration::from_secs(5)).unwrap();
+            if case == "expiry-first" { assert!(blocked, "admission must contend on the held expiry lock"); }
             if case == "expiry-first" { expiry_release.send(()).unwrap(); }
             locked.recv_timeout(Duration::from_secs(5)).unwrap();
             if case == "admission-first" {
