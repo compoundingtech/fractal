@@ -1378,6 +1378,7 @@ disposition record even after subsequent work. Client actions `work.withdraw-han
 (`control.work`, handing agent only) and `work.decline-handoff` (`control.attention`, assigned
 person only, not a delegated assistant) take `{target_id,message,reason}` and the normal work
 fence. `message` names the exact handoff note; `reason` is nonblank and at most 2048 UTF-8 bytes.
+Exact durable returns are recovered before mutable subject-revision fences, including lost-receipt retries.
 Errors are typed: `stale-handoff` (409) refuses an old/resolved note or ineligible return;
 `stale-fence` (409) refuses changed work fences; `validation-failed` (422) refuses invalid
 parameters/reasons; `forbidden` (403) refuses actor/session roles; `idempotency-conflict` (409)

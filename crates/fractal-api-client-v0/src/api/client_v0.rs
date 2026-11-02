@@ -9513,6 +9513,28 @@ async fn action_inner(
     }
     let mut reconciled_attachment = None;
     let mut checked_fence = request.fence.clone();
+    if matches!(request.action_type.as_str(), "work.withdraw-handoff" | "work.decline-handoff") {
+        let withdraw = request.action_type == "work.withdraw-handoff";
+        if session.assistant_write.is_some()
+            || !session.authority_actor.starts_with(if withdraw { "agent/" } else { "person/" }) {
+            return Err(forbidden("handoff returns require the handing agent or assigned person session"));
+        }
+        let existing: Option<(String, String)> = state.store.readers.get().query_row(
+            "SELECT subject,body FROM claims WHERE kind='work.handoff-returned' AND json_extract(body,'$.fields.return_request.idempotency_key')=?1",
+            [&request.idempotency_key], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(ApiError::internal)?;
+        if let Some((subject, body)) = existing {
+            let expected = json!({"actor":session.authority_actor, "message":parameter_string(&request.parameters, "message")?,
+                "attempt":request.fence.attempt, "disposition":if withdraw { "withdrawn" } else { "declined" },
+                "reason":parameter_string(&request.parameters, "reason")?, "idempotency_key":request.idempotency_key});
+            let stored: Value = serde_json::from_str(&body).map_err(ApiError::internal)?;
+            if subject != client_detail_id("step-run", &parameter_string(&request.parameters, "target_id")?)
+                || stored["fields"]["return_request"] != expected {
+                return Err(action_idempotency_conflict());
+            }
+            // Recover the exact durable effect before validating revisions it already advanced.
+            checked_fence.subject_revisions.clear();
+        }
+    }
     if matches!(request.action_type.as_str(), "arrangement.edit" | "arrangement.membership.edit") {
         // Layout revisions merge; fenced retirement and graph/launch identity revisions
         // are checked in the writer transaction. Attention episodes and external filesystem
@@ -14592,7 +14614,8 @@ subscription "watch/source" {
                 fence: Fence {
                     snapshot_id: snapshot.id.clone(), mission_generation: Some(work.generation.clone()),
                     step_definition: Some(work.definition_hash.clone()), attempt: Some(work.attempt),
-                    readiness_epoch: Some(u64::from(work.readiness_epoch)), ..Fence::default()
+                    readiness_epoch: Some(u64::from(work.readiness_epoch)),
+                    subject_revisions: BTreeMap::from([(work.subject.clone(), note.id.clone())]), ..Fence::default()
                 },
                 parameters: json!({"target_id":work.subject, "message":note.body["fields"]["handoff_message"], "reason":"Continue on the handing seat"}),
             };
@@ -14626,6 +14649,10 @@ subscription "watch/source" {
             // No action receipt exists: replay the durable primary effect through its stale fence.
             assert!(dispatch_action(&state, &snapshot, &session, &request).await.is_ok());
             let result = action(State(state.clone()), Extension(snapshot.clone()), Extension(session.clone()), Json(request.clone())).await.unwrap().0;
+            assert!(action(State(state.clone()), Extension(snapshot.clone()), Extension(session.clone()), Json(request.clone())).await.is_ok());
+            assert_eq!(state.store.readers.get().query_row(
+                "SELECT count(*) FROM claims WHERE subject=?1 AND kind='work.handoff-returned'",
+                [&work.subject], |row| row.get::<_, u64>(0)).unwrap(), 1);
             assert_eq!(result["affected_ids"], json!([work.subject]));
             let mut conflict = request.clone();
             conflict.parameters["reason"] = json!("Different return");
