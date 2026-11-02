@@ -19,6 +19,30 @@ generated file (`git checkout --theirs -- clients crates/fractal-client/src/cont
 crates/fractal-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.
 
+## Foreground phone commands from the CLI
+
+`fractal devices --as person/alex command device/PHONE inspect` issues one
+member-local command through the generated client, then holds one
+`GET /v1/client/device-commands/{id}?wait=true` until the daemon decides its outcome.
+There is no polling or replay. The phone must be paired on this member.
+
+```sh
+fractal devices --as person/alex command device/PHONE navigate Conversation agent/worker --session-id SESSION
+fractal devices --as person/alex command device/PHONE navigate Document docs/guide --trail docs/index
+fractal devices --as person/alex command device/PHONE --ttl 10000 mark-read message/MESSAGE --json
+```
+
+Navigation accepts the exact typed screen names; `navigate --help` lists them.
+`--ttl` is milliseconds, defaults to 30000 and accepts 1 through 60000.
+Human output shows the correlated command id, outcome, device and returned result;
+`--json` emits the normal client envelope containing the full command row.
+Exit codes: completed 0, failed 1, refused 3, expired 4, not-foreground 5.
+Argument/admission failures retain the existing CLI error handling.
+Commands remain in daemon memory only, with at most eight pending per device.
+`inspect` and `navigate` require `read.projections`; `mark-read` requires
+`control.messages` and executes the phone's existing mark-read handler.
+
+
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
 WebSocket senders now offer only the corresponding `fractal.client.*` protocol

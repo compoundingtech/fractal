@@ -46,7 +46,7 @@ are refused. The supported verbs and scopes are:
 | --- | --- | --- |
 | `phone.inspect` | `{}` | `read.projections` |
 | `phone.navigate` | the restricted screen selection below | `read.projections` |
-| `phone.message.read` | `{attention_id: "attention/…"}` | `control.messages` |
+| `phone.message.read` | `{message_id: "message/…"}` | `control.messages` |
 
 Navigation accepts only these screen/parameter combinations:
 
@@ -63,16 +63,16 @@ characters; a document trail has at most 32 entries. `error_code` is 1–128 ASC
 digits, `_`, `.` or `-`.
 
 Inspection reads phone-local route, connection, foreground and held-window state. Navigation
-changes phone-local UI only. Message-read addresses the phone's held attention card and must use
-its existing mark-read handler, scope checks and action fence/idempotency. Issuance does not grant
+changes phone-local UI only. Message-read addresses an existing message by its message ID and uses
+the existing mark-read handler, scope checks and action fence/idempotency. Issuance does not grant
 the phone extra authority: a limited phone can refuse a write even when its issuer may request it.
 Result content is command-specific JSON, not a new resource or stream frame.
 
 For a commanded message-read, the existing `message.read` action includes optional top-level
 `device_command: "device-command/…"`; ordinary Home actions omit it and are unchanged.
 The daemon requires the same live pairing session, a `phone.message.read` command in `pending`
-or `delivered`, an unexpired daemon deadline, and an attention card whose source is the exact
-target message. The normal message scope, recipient, fence and idempotency checks still apply.
+or `delivered`, an unexpired daemon deadline, and the exact `args.message_id` target owned by
+or addressed to the calling person. Normal message scope, recipient, fence and idempotency checks still apply.
 Admission and the real lifecycle write hold the same member-local command lock as expiry and
 result reporting; no network operation or await occurs under that lock.
 

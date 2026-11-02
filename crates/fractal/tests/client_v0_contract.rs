@@ -137,10 +137,12 @@ fn device_commands_have_strict_arguments_terminal_reports_and_existing_stream_fr
     request["args"]["unexpected"] = serde_json::json!(true);
     assert!(!request_validator.is_valid(&request), "inspect args are closed");
     request["kind"] = serde_json::json!("phone.message.read");
-    request["args"] = serde_json::json!({"attention_id": "attention/message"});
+    request["args"] = serde_json::json!({"message_id": "message/example"});
     assert_conforms(&request_validator, "message-read request", &request);
+    request["args"] = serde_json::json!({"attention_id": "attention/message"});
+    assert!(!request_validator.is_valid(&request), "message-read rejects the obsolete attention id argument");
     request["args"] = serde_json::json!({});
-    assert!(!request_validator.is_valid(&request), "message-read requires an attention id");
+    assert!(!request_validator.is_valid(&request), "message-read requires a message id");
     request["kind"] = serde_json::json!("phone.navigate");
     request["args"] = command["value"]["args"].clone();
     assert_conforms(&request_validator, "navigate request", &request);

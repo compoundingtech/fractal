@@ -55,7 +55,7 @@
     },
     {
       "id": "devices", "task": "Pair, inspect, scope, and revoke remote devices", "model": "devices.v0", "cli": "st devices ls",
-      "sections": ["paired", "sessions", "scopes", "revocations"], "actions": ["device.pair", "device.revoke"]
+      "sections": ["paired", "sessions", "scopes", "revocations", "command-result"], "actions": ["device.pair", "device.revoke", "phone.inspect", "phone.navigate", "phone.message.read"]
     },
     {
       "id": "work", "task": "See exactly what work is ready, claimed, blocked, or historical", "model": "work.v0", "cli": "st work ls",

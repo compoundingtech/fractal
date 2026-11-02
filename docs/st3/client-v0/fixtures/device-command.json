@@ -11,8 +11,8 @@
   "value": {
     "id": "device-command/019a0000-0000-8000-8000-000000000001",
     "kind": "device-command",
-    "command_kind": "phone.navigate",
-    "args": {"screen": "Conversation", "params": {"target": "agent/worker"}},
+    "command_kind": "phone.message.read",
+    "args": {"message_id": "message/example"},
     "revision": "device-command/019a0000-0000-8000-8000-000000000001:pending",
     "updated_at": "2026-10-30T12:00:00Z",
     "device_id": "device/device-7",

@@ -2600,7 +2600,7 @@ export type PhoneInspectArgs = typeof PhoneInspectArgs.Type
 export type PhoneInspectArgsEncoded = typeof PhoneInspectArgs.Encoded
 
 export const PhoneMessageReadArgs = /*#__PURE__*/ (() => Schema.Struct({
-  "attention_id": Schema.String.check(Schema.isPattern(new RegExp("^attention/.+", "u"))).check(Schema.isMaxLength(4096))
+  "message_id": Schema.String.check(Schema.isPattern(new RegExp("^message/.+", "u"))).check(Schema.isMaxLength(4096))
 }).annotate({ identifier: "PhoneMessageReadArgs" }))()
 export type PhoneMessageReadArgs = typeof PhoneMessageReadArgs.Type
 export type PhoneMessageReadArgsEncoded = typeof PhoneMessageReadArgs.Encoded
