@@ -2243,7 +2243,10 @@ impl<T: Clone> AuditRecord<T> {
                 .unwrap_or_default()
                 .as_millis(),
             took: started.elapsed(),
-            result: result.as_ref().map(Clone::clone).map_err(|error| format!("{error:#}")),
+            result: match result {
+                Ok(value) => Ok(value.clone()),
+                Err(error) => Err(format!("{error:#}")),
+            },
         }
     }
 }

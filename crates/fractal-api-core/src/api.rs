@@ -8263,9 +8263,10 @@ pub(crate) fn fleet_admission_check(
             let age_ms = now_ms.saturating_sub(record.finished_at_unix_ms);
             if moved {
                 status = "warn";
-                notes.push(format!(
+                notes.push(
                     "fleet membership changed since envelopes admitted before this node knew better were counted; the daemon is counting them again"
-                ));
+                        .to_string(),
+                );
             }
             let when = format!("counted {} min ago ({:.1} s)", age_ms / 60_000, record.took.as_secs_f64());
             match record.result {
