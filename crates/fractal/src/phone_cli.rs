@@ -86,22 +86,23 @@ pub(super) async fn run(client: &GeneratedClient, args: CommandArgs, json_output
     }).await?;
     // One held read; the daemon owns the deadline and result precedence.
     let result = client.device_command_get(&issued.value.header.id, true).await?;
-    let state = serde_json::to_value(&result.value.state)?;
+    let (state, code) = match result.value.state {
+        DeviceCommandState::Completed => ("completed", 0),
+        DeviceCommandState::Refused => ("refused", 3),
+        DeviceCommandState::Expired => ("expired", 4),
+        DeviceCommandState::NotForeground => ("not-foreground", 5),
+        DeviceCommandState::Failed => ("failed", 1),
+        DeviceCommandState::Pending | DeviceCommandState::Delivered =>
+            anyhow::bail!("held phone command read returned a nonterminal state"),
+    };
     if json_output {
         print_client_value(&result, true)?;
     } else {
-        println!("{}  {}  {}", result.value.header.id, state.as_str().unwrap_or_default(), result.value.device_id);
+        println!("{}  {state}  {}", result.value.header.id, result.value.device_id);
         if let Some(error) = &result.value.error_code { println!("  {error}"); }
         if let Some(value) = &result.value.result { println!("{}", serde_json::to_string_pretty(value)?); }
     }
-    let code = match result.value.state {
-        DeviceCommandState::Completed => return Ok(()),
-        DeviceCommandState::Refused => 3,
-        DeviceCommandState::Expired => 4,
-        DeviceCommandState::NotForeground => 5,
-        DeviceCommandState::Failed | DeviceCommandState::Pending | DeviceCommandState::Delivered => 1,
-    };
-    Err(CommandExit(code).into())
+    if code == 0 { Ok(()) } else { Err(CommandExit(code).into()) }
 }
 
 #[cfg(test)]
@@ -134,6 +135,12 @@ mod tests {
             let mut args = vec!["fractal", "devices", "command", "device/a"];
             args.extend(tail);
             assert!(Cli::try_parse_from(args).is_err());
+        }
+        assert!(Cli::try_parse_from(["fractal", "devices", "--as", "agent/worker",
+            "command", "device/a", "inspect"]).is_err());
+        for ttl in ["1", "60000"] {
+            assert!(Cli::try_parse_from(["fractal", "devices", "command", "device/a",
+                "--ttl", ttl, "inspect"]).is_ok());
         }
     }
 }
