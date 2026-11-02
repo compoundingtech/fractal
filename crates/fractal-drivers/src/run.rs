@@ -14,7 +14,7 @@ pub use crate::host::{detect_host, use_harness_state_root};
 pub(crate) use crate::host::{harness_state_root, state_root};
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::os::unix::fs::MetadataExt as _;
