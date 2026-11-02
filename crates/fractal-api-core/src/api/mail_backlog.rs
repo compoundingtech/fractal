@@ -377,7 +377,10 @@ mod tests {
     #[tokio::test]
     async fn backlog_counts_unread_retired_mail_and_cleanup_keeps_fresh_and_read_mail() {
         let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
+        let mut state = super::super::tests::state(root.path());
+        // Doctor runs pinned readers beside the caller's backlog fold. Shared-memory
+        // SQLite returns SQLITE_LOCKED for that overlap; use the daemon's WAL store.
+        state.store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
         let now = client_now_ms();
         for (id, recipient, phase, time) in [
             ("old-sent", "agent/example/retired", "sent", now - 7_200_000),
@@ -454,7 +457,15 @@ mod tests {
             }
         }
         state.store.set_write_clock_at(now).unwrap();
-        assert_eq!(report(&state, now).unwrap().count, 4);
+        let backlog = state.store.read_snapshot(|_| {
+            assert_eq!(report(&state, now)?.count, 4);
+            // Keep the diagnostic snapshot open while the unpinned caller flushes
+            // pending mail. This overlap must work regardless of thread scheduling.
+            std::thread::scope(|scope| {
+                scope.spawn(|| report(&state, now)).join().unwrap()
+            })
+        }).unwrap();
+        assert_eq!(backlog.count, 4);
         let Json(doctor) = doctor_report(&state).unwrap();
         let warning = doctor
             .checks
