@@ -12,6 +12,25 @@ pub const RETENTION_MS: u128 = 5 * 60 * 1000;
 static ROWS: LazyLock<Mutex<BTreeMap<(String, String), Command>>> = LazyLock::new(Mutex::default);
 static CHANGES: LazyLock<tokio::sync::broadcast::Sender<String>> = LazyLock::new(|| tokio::sync::broadcast::channel(64).0);
 
+#[cfg(feature = "test-support")]
+pub type AdmissionTestGate = (std::sync::mpsc::Sender<bool>, std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+#[cfg(feature = "test-support")]
+static ADMISSION_TEST_GATES: LazyLock<parking_lot::Mutex<BTreeMap<(String, String), AdmissionTestGate>>> = LazyLock::new(parking_lot::Mutex::default);
+#[cfg(feature = "test-support")]
+pub fn pause_admission_for_test(state: &AppState, id: &str, gate: AdmissionTestGate) {
+    ADMISSION_TEST_GATES.lock().insert((state.node.clone(), id.into()), gate);
+}
+#[cfg(feature = "test-support")]
+pub fn expire_for_test(state: &AppState, id: &str, gate: AdmissionTestGate) -> Value {
+    gate.0.send(ROWS.try_lock().is_err()).unwrap();
+    let mut rows = ROWS.lock().unwrap();
+    let row = rows.get_mut(&(state.node.clone(), id.into())).unwrap();
+    row.expire(row.expires, false);
+    gate.1.send(()).unwrap();
+    gate.2.recv().unwrap();
+    row.resource.clone()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceCommandRequest {
@@ -208,14 +227,20 @@ pub fn with_message_read<T>(
     write: impl FnOnce() -> Result<T, ApiError>,
     result: impl FnOnce(&T) -> Value,
 ) -> Result<T, ApiError> {
-    let session = revalidate_session(state, session)?;
     let denied = |reason| ApiError {
         status: StatusCode::FORBIDDEN, code: "forbidden".into(),
         message: "device command does not authorize this message.read".into(),
         details: Box::new(serde_json::Map::from_iter([("reason".into(), json!(reason)), ("device_command".into(), json!(id))])),
     };
+    let session = revalidate_session(state, session).map_err(|_| denied("foreign"))?;
     if !paired(&session) { return Err(denied("foreign")); }
+    #[cfg(feature = "test-support")]
+    let gate = ADMISSION_TEST_GATES.lock().remove(&(state.node.clone(), id.into()));
+    #[cfg(feature = "test-support")]
+    if let Some(gate) = &gate { gate.0.send(ROWS.try_lock().is_err()).unwrap(); }
     let mut rows = ROWS.lock().map_err(|_| storage_error())?;
+    #[cfg(feature = "test-support")]
+    if let Some(gate) = gate { gate.1.send(()).unwrap(); gate.2.recv().unwrap(); }
     let row = rows.get_mut(&(state.node.clone(), id.to_owned())).ok_or_else(|| denied("mismatch"))?;
     if !visible(row, &session) { return Err(denied("foreign")); }
     if row.terminal() {
@@ -230,7 +255,9 @@ pub fn with_message_read<T>(
     let message = state.store.message(target).map_err(ApiError::internal)?
         .ok_or_else(|| denied("mismatch"))?;
     if message.to != row.person && message.from != row.person { return Err(denied("foreign")); }
-    // Projection/DB reads can wait; recheck the daemon deadline immediately before admission.
+    // Re-resolve expiry and revocation after all lock/DB waits, immediately before the write.
+    let current = revalidate_session(state, &session).map_err(|_| denied("foreign"))?;
+    if !visible(row, &current) || !current.allows("control.messages") { return Err(denied("foreign")); }
     if client_now_ms() >= row.expires { return Err(denied("expired")); }
     let written = write();
     let now = client_now_ms();

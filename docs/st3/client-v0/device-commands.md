@@ -74,6 +74,8 @@ or `delivered`, an unexpired daemon deadline, and the exact `args.message_id` ta
 or addressed to the calling person. Normal message scope, recipient, fence and idempotency checks still apply.
 Admission and the real lifecycle write hold the same member-local command lock as expiry and
 result reporting; no network operation or await occurs under that lock.
+Pairing expiry and revocation are re-resolved after lock and database waits, immediately before
+the lifecycle write while the command lock remains held; either invalidation refuses with `foreign`.
 
 A successful admitted write atomically settles the command `completed` with result
 `{message_id: "message/…"}`; a failed admitted write settles it `failed`. It cannot subsequently
