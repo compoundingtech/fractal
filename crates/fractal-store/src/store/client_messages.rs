@@ -311,7 +311,10 @@ fn folded_header(connection: &Connection, work: &mut FoldWork) -> Result<Option<
         base.sent_key = sent_key;
         return Ok(Some(base));
     }
-    let indexed: Option<(u64,bool)> = connection.prepare_cached("SELECT created_index,closed FROM message_index WHERE subject=?1")?
+    // The shared index's closed, or this member's closed mark (message_marks.rs), which never
+    // changes the shared index.
+    let indexed: Option<(u64,bool)> = connection.prepare_cached("SELECT created_index,closed OR EXISTS(SELECT 1 FROM local_message_marks
+        WHERE message=message_index.subject AND kind='message.closed') FROM message_index WHERE subject=?1")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h28ac822f10fc owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [&work.subject],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
     let Some((created_index,index_closed)) = indexed else { return Ok(None); };
     let [sender,recipient,tags,status] = std::mem::take(&mut work.values).map(|value| value.and_then(|(_, value)| value));
