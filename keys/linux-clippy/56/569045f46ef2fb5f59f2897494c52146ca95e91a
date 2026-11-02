@@ -1,1 +1,3 @@
 record 96887a65a0c6fdd6f590f0bb836f602add93b652 linux-clippy 0 fleet/ci 2026-11-01T15:21:26Z
+record 19f0c85c01ae7c15222e2afc675207a922302d71 linux-clippy 0 host/spindle 2026-11-01T16:25:05Z
+record 91d50028616e47406c278a026c4597a40cb8d3fb linux-clippy 0 host/anvil 2026-11-01T16:24:15Z
