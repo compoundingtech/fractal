@@ -7422,17 +7422,24 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // Doctor reports the envelopes admitted before this node knew better from this count, made
     // at startup and then every period, and again when doctor finds membership moved since.
     // The first count waits 30 s, so it does not run beside the startup operation audit, unless
-    // doctor asks for it sooner.
+    // doctor asks for it sooner. Counts doctor asks for come at most once a minute, however
+    // often doctor runs while fleet rows replicate.
     {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("fleet.admission_residue", async move {
             let mut wait = Duration::from_secs(30);
+            let mut counted: Option<tokio::time::Instant> = None;
             loop {
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}
-                    () = store.fleet_residue_wanted.notified() => {}
+                    () = store.fleet_residue_wanted.notified() => {
+                        if let Some(counted) = counted {
+                            tokio::time::sleep_until(counted + Duration::from_secs(60)).await;
+                        }
+                    }
                 }
                 count_fleet_residue(&store).await;
+                counted = Some(tokio::time::Instant::now());
                 wait = fractal_daemon::store::OPERATION_AUDIT_PERIOD;
             }
         }));

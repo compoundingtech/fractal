@@ -2210,8 +2210,9 @@ pub struct Store {
     /// reports instead of reading the whole store inline; in memory, so a restart has neither
     /// until its startup audits finish.
     pub last_operation_audit: Mutex<Option<OperationAuditRecord>>,
-    /// The residue count is kept with the `fleet_generation` its membership was read at.
-    pub last_fleet_residue: Mutex<Option<(i64, FleetResidueRecord)>>,
+    /// The residue count is kept with the `fleet_generation` its membership was read at, or
+    /// none when it could not start or stopped.
+    pub last_fleet_residue: Mutex<Option<(Option<i64>, FleetResidueRecord)>>,
     /// Wakes the daemon's residue count when doctor finds membership moved since the last one.
     pub fleet_residue_wanted: tokio::sync::Notify,
 }
@@ -2787,11 +2788,17 @@ impl Store {
     /// later admission is judged by the membership in force, so a count stays exact until the
     /// generation moves.
     pub fn audit_fleet_admission_residue(&self) -> Result<Vec<FleetAdmissionResidue>> {
-        let generation = smallclaims::store::FleetAuthority::fleet_generation(&self.graph)?;
         let started = std::time::Instant::now();
+        let generation = match smallclaims::store::FleetAuthority::fleet_generation(&self.graph) {
+            Ok(generation) => generation,
+            Err(error) => {
+                self.fleet_residue_stopped(format!("{error:#}"));
+                return Err(error);
+            }
+        };
         let residue = self.graph.fleet_admission_residue();
         *self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner) =
-            Some((generation, AuditRecord::finished(started, &residue)));
+            Some((Some(generation), AuditRecord::finished(started, &residue)));
         residue
     }
 
@@ -2801,7 +2808,8 @@ impl Store {
         let generation = smallclaims::store::FleetAuthority::fleet_generation(&self.graph)?;
         let last = self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner).clone();
         Ok(last.map(|(counted_at, record)| {
-            let moved = counted_at != generation;
+            // A count that stopped says so itself; the next one comes at the daemon's period.
+            let moved = counted_at.is_some_and(|counted_at| counted_at != generation);
             if moved {
                 self.fleet_residue_wanted.notify_one();
             }
@@ -2819,7 +2827,7 @@ impl Store {
             took: std::time::Duration::ZERO,
             result: Err(error),
         };
-        *self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner) = Some((-1, record));
+        *self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner) = Some((None, record));
     }
 
     pub fn rebuild_claim_projections(&self) -> Result<()> {

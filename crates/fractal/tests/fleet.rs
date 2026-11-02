@@ -2890,7 +2890,7 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
     // The membership change wakes the daemon to count the admission residue again; doctor
     // reports the new count once it is made.
     let mut admission = Value::Null;
-    wait_until("doctor reports the admissions from before the rejoin", 60, || {
+    wait_until("doctor reports the admissions from before the rejoin", 120, || {
         let doctor = c.st(&["--json", "doctor"]);
         let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
         admission = doctor["checks"]
