@@ -319,10 +319,43 @@ class TreeOrphansTest(unittest.TestCase):
         self.process(101, cwd='/', argv=['tail', '-f', str(self.tree / 'log')])
         with mock.patch.object(st_test.os, 'pidfd_open') as opened, \
                 mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
+            started = time.monotonic()
             with self.assertRaisesRegex(st_test.Failure, r'argv-only.*101.*tail.*refusing'):
-                st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc)
+                st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=0.6)
+            self.assertGreaterEqual(time.monotonic() - started, 0.5)  # it stayed through the settle: still refused
         opened.assert_not_called()
         sent.assert_not_called()
+
+    def test_an_argv_only_reference_that_ends_within_the_settle_does_not_refuse_the_tree(self):
+        entry = self.process(101, cwd='/', argv=['cat', str(self.tree / 'log')])
+        slept = []
+
+        def sleep(seconds):  # the reference exits while the tree waits for it
+            slept.append(seconds)
+            shutil.rmtree(entry, ignore_errors=True)
+        with mock.patch.object(st_test.time, 'sleep', side_effect=sleep), \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
+            st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=30)
+        self.assertEqual(len(slept), 1)
+        sent.assert_not_called()
+
+    def test_another_st_test_sizing_the_tree_is_no_reference_and_costs_no_wait(self):
+        self.process(200, cwd='/', argv=[sys.executable, '/var/tmp/st-test-base-x/st-test', '--push', 'origin'])
+        self.process(201, cwd='/', argv=['du', '-sk', '--', str(self.tree)], ppid=200)
+        self.process(202, cwd='/', argv=['du', '-sk', str(self.tree / 'target')], ppid=200)
+        with mock.patch.object(st_test.time, 'sleep') as slept, \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
+            st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=30)
+        slept.assert_not_called()
+        sent.assert_not_called()
+        # The same du from anything but an st-test, or any other command from one, is a reference as before.
+        for pid, argv, ppid in ((203, ['du', '-sk', '--', str(self.tree)], 1), (204, ['du', '-s', str(self.tree)], 200),
+                                (205, ['rm', '-rf', '--', str(self.tree)], 200)):
+            with self.subTest(argv=argv, ppid=ppid):
+                entry = self.process(pid, cwd='/', argv=argv, ppid=ppid)
+                with self.assertRaisesRegex(st_test.Failure, rf'argv-only.*{pid}'):
+                    st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=0)
+                shutil.rmtree(entry)
 
     def test_termination_escalates_only_survivors_and_refuses_dirty_tree(self):
         for exits_on in (st_test.signal.SIGTERM, st_test.signal.SIGKILL, 'chdir', None):
@@ -3035,6 +3068,12 @@ finally:
         self.assertEqual(st_test.ci_local_stages(log), [{'name': 'fleet-compat', 'start': '2026-10-23T10:11:00Z', 'end': '2026-10-23T10:12:00Z',
                                                          'seconds': 60, 'exit': 1, 'queue_waits': 3, 'queue_s': 12}])
         self.assertEqual(st_test.ci_local_stages(Path(self.tmp.name) / 'missing.log'), [])
+        # The setup row as ci-local prints it since its admission waits are counted: no exit, a queue.
+        row = subprocess.run(['printf', 'ci-local:   %s\n', subprocess.run(['printf', '%-26s %s  %s  %6ss  queue: %s waits, %ss', 'setup', '2026-11-02T03:57:46Z',
+                              '2026-11-02T04:02:20Z', '274', '2', '232'], capture_output=True, text=True).stdout], capture_output=True, text=True).stdout
+        log.write_text(row)
+        self.assertEqual(st_test.ci_local_stages(log), [{'name': 'setup', 'start': '2026-11-02T03:57:46Z', 'end': '2026-11-02T04:02:20Z',
+                                                         'seconds': 274, 'exit': None, 'queue_waits': 2, 'queue_s': 232}])
 
     def test_a_check_that_runs_ci_local_still_prints_as_it_goes_and_its_stages_and_warmth_are_recorded(self):
         self.commit('b.txt', 'two')
@@ -3565,6 +3604,10 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(st_test.queued_seconds(log), 160)                      # the union of the waits, as before
         self.assertEqual(st_test.blocked_seconds(log, []), 160)                 # no stage times: every wait counts
         self.assertEqual(st_test.blocked_seconds(Path(self.tmp.name) / 'missing', stages), 0)
+        # The setup's admission waits (ci-local writes them as setup's) are blocked time too, and waiting, not running, for the time limit.
+        log.write_text(log.read_text() + f'wait {t0 - 50} setup\nslot {t0 - 20} setup\n')
+        self.assertEqual(st_test.blocked_seconds(log, stages), 130)
+        self.assertEqual(st_test.queued_seconds(log), 190)
 
     def test_an_interrupted_waiter_leaves_no_ticket(self):
         self.root.mkdir(parents=True)
