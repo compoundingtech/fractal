@@ -20,7 +20,7 @@ esac
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
 if $dry_run; then
-  printf 'cargo build --release --locked --target %s -p fractal\n' "$target"
+  printf 'cargo build --release --locked --target %s -p fractal-cli\n' "$target"
   printf 'stage bin/%s\n' "${runtime_binaries[@]}"
   printf 'nix build .#fractal-web --no-link --print-out-paths; stage share/fractal-web\n'
   # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
@@ -66,7 +66,7 @@ if [[ $target == *linux* ]]; then
   export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$repo/scripts/linux-release-cc"
   export CC_x86_64_unknown_linux_gnu="$repo/scripts/linux-release-cc"
 fi
-cargo build --release --locked --target "$target" -p fractal
+cargo build --release --locked --target "$target" -p fractal-cli
 build_dir=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 for binary in "${binaries[@]}"; do
   install -m 0755 "$build_dir/$target/release/$binary" "$work/$package/bin/$binary"

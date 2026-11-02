@@ -1,0 +1,65 @@
+{
+  "description": "Two stream items that arrive at the same graph index in the same millisecond, as a conversation page serves them (crates/fractal-api-client-v0 test stream_items_that_share_a_graph_index_and_a_millisecond_keep_their_entries_together). IDs are renamed by their sort order and sequences are relative to the arrival graph index times four.",
+  "items": [
+    {
+      "id": "timeline-entry/stream-pairs/2",
+      "sequence": 2,
+      "revision": 1,
+      "timestamp": "2026-09-21T14:13:20.000Z",
+      "role": "user",
+      "type": "message",
+      "final": true,
+      "body": {
+        "message_id": "message/00000000000000d1",
+        "reply_to": null,
+        "from": "agent/birch",
+        "to": "agent/stream-pairs",
+        "title": "first"
+      }
+    },
+    {
+      "id": "timeline-entry/stream-pairs/3",
+      "sequence": 3,
+      "revision": 1,
+      "timestamp": "2026-09-21T14:13:20.000Z",
+      "role": "user",
+      "type": "content",
+      "final": true,
+      "body": {
+        "media_type": "text/plain",
+        "message_id": "message/00000000000000d1",
+        "text": "first"
+      }
+    },
+    {
+      "id": "timeline-entry/stream-pairs/0",
+      "sequence": 2,
+      "revision": 1,
+      "timestamp": "2026-09-21T14:13:20.001Z",
+      "role": "user",
+      "type": "message",
+      "final": true,
+      "body": {
+        "message_id": "message/00000000000000d2",
+        "reply_to": null,
+        "from": "agent/cedar",
+        "to": "agent/stream-pairs",
+        "title": "second"
+      }
+    },
+    {
+      "id": "timeline-entry/stream-pairs/1",
+      "sequence": 3,
+      "revision": 1,
+      "timestamp": "2026-09-21T14:13:20.001Z",
+      "role": "user",
+      "type": "content",
+      "final": true,
+      "body": {
+        "media_type": "text/plain",
+        "message_id": "message/00000000000000d2",
+        "text": "second"
+      }
+    }
+  ]
+}
