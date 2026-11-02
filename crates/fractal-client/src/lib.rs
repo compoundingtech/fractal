@@ -142,11 +142,21 @@ pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf 
         return runtime.to_path_buf();
     };
     if runtime == published {
-        return target;
+        // A short parent symlink can be addressable even when its canonical target is not.
+        return if unix_socket_path_fits(&target) {
+            target
+        } else {
+            runtime.to_path_buf()
+        };
     }
     if std::fs::canonicalize(runtime).ok().as_ref() == Some(&target) {
         return runtime.to_path_buf();
     }
+    let target = if unix_socket_path_fits(&target) {
+        target
+    } else {
+        published.to_path_buf()
+    };
     let answers = |socket: &Path| {
         unix_socket_path_fits(socket) && std::os::unix::net::UnixStream::connect(socket).is_ok()
     };
@@ -5801,6 +5811,49 @@ mod tests {
                 default_unix_socket(&primary, &primary),
                 primary.canonicalize().unwrap()
             );
+        }
+    }
+
+    #[test]
+    fn discovery_keeps_addressable_spellings_when_parent_symlinks_expand_past_the_budget() {
+        for (primary_name, legacy_name) in [
+            ("fractal.sock", "st3.sock"),
+            ("fractal-client.sock", "st3-client.sock"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut directory = root.path().join("long-directory");
+            while unix_socket_path_fits(&directory.join(legacy_name)) {
+                directory = directory.join("long-directory");
+            }
+            std::fs::create_dir_all(&directory).unwrap();
+            let short = root.path().join("short");
+            std::os::unix::fs::symlink(&directory, &short).unwrap();
+            let primary = short.join(primary_name);
+            let legacy = short.join(legacy_name);
+            assert!(unix_socket_path_fits(&primary));
+            let old_daemon = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+            assert!(!unix_socket_path_fits(&legacy.canonicalize().unwrap()));
+            let identity = UnixSocketDiscovery::Defaults {
+                runtime: primary.clone(),
+                published: primary.clone(),
+            };
+            let separate_runtime = UnixSocketDiscovery::Defaults {
+                runtime: root.path().join("missing").join(primary_name),
+                published: primary.clone(),
+            };
+            assert_eq!(identity.resolve(), legacy);
+            std::os::unix::net::UnixStream::connect(identity.resolve()).unwrap();
+            assert_eq!(separate_runtime.resolve(), legacy);
+            std::os::unix::net::UnixStream::connect(separate_runtime.resolve()).unwrap();
+            drop(old_daemon);
+            std::fs::remove_file(&legacy).unwrap();
+            let _new_daemon = std::os::unix::net::UnixListener::bind(&primary).unwrap();
+            std::os::unix::fs::symlink(primary_name, &legacy).unwrap();
+            assert!(!unix_socket_path_fits(&primary.canonicalize().unwrap()));
+            assert_eq!(identity.resolve(), primary);
+            std::os::unix::net::UnixStream::connect(identity.resolve()).unwrap();
+            assert_eq!(separate_runtime.resolve(), primary);
+            std::os::unix::net::UnixStream::connect(separate_runtime.resolve()).unwrap();
         }
     }
 
