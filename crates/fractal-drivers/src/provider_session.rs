@@ -197,6 +197,18 @@ extern "C" fn on_stop_signal(_signal: libc::c_int) {
 
 extern "C" fn on_interrupt_signal(_signal: libc::c_int) {}
 
+/// The stop flags are process-global: every test that reads or raises them holds this lock, so
+/// parallel readers never see another test's stop.
+#[cfg(test)]
+pub(crate) fn stop_flag_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(std::sync::Mutex::default);
+    match LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 pub(crate) fn install_signal_handler() {
     STOP.store(DRIVER_STOP.load(Ordering::SeqCst), Ordering::SeqCst);
     install_stop_handlers();
@@ -814,9 +826,12 @@ mod tests {
     fn a_driver_stop_survives_a_wrapper_that_starts_after_it() {
         // The driver can give up before its provider's wrapper reaches its handler install,
         // for example when the daemon refuses the mailbox at once.
+        let _stop_exclusive = stop_flag_tests();
         request_stop();
         install_signal_handler();
         assert!(stop_requested());
+        DRIVER_STOP.store(false, Ordering::SeqCst);
+        STOP.store(false, Ordering::SeqCst);
     }
 
     #[test]
