@@ -17,13 +17,14 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
-fn subject_note_create_retains_scope_and_can_omit_default_audience() {
+fn subject_note_create_retains_scope_without_an_audience_choice() {
     let request: SubjectNoteCreate = decode("subject-note-create.json");
-    assert_eq!(request.audience, Some(NoteAudience::SelfOnly));
+    assert_eq!(request.target, "agent/example/reviewer");
     assert_eq!(request.session.as_deref(), Some("incarnation/example"));
     assert_eq!(request.expires_at.as_deref(), Some("2026-10-15T09:00:00Z"));
     let defaults: SubjectNoteCreate = serde_json::from_value(serde_json::json!({"target":"mission/example","text":"Context"})).unwrap();
-    assert!(defaults.audience.is_none());
+    assert!(defaults.session.is_none());
+    assert!(defaults.expires_at.is_none());
     assert_eq!(serde_json::to_value(defaults).unwrap(), serde_json::json!({"target":"mission/example","text":"Context"}));
 }
 
