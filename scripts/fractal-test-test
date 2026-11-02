@@ -342,6 +342,8 @@ class TreeOrphansTest(unittest.TestCase):
         self.process(200, cwd='/', argv=[sys.executable, '/var/tmp/st-test-base-x/st-test', '--push', 'origin'])
         self.process(201, cwd='/', argv=['du', '-sk', '--', str(self.tree)], ppid=200)
         self.process(202, cwd='/', argv=['du', '-sk', str(self.tree / 'target')], ppid=200)
+        self.process(206, cwd='/', argv=[sys.executable, '/home/x/fractal/scripts/fractal-test', '--all'])
+        self.process(207, cwd='/', argv=['du', '-sk', '--', str(self.tree)], ppid=206)
         with mock.patch.object(st_test.time, 'sleep') as slept, \
                 mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
             st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=30)
