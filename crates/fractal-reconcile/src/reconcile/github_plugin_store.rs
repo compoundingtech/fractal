@@ -235,6 +235,7 @@ impl GithubPluginStore {
         }
         let freshness = ObserverFreshness { started_at_unix_ms: now, last_complete_unix_ms: None };
         connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h6388f1a4bc1c owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
             "INSERT INTO plugin_meta(key, value) VALUES (?1, ?2)",
             params![key, serde_json::to_string(&freshness)?],
         )?;
@@ -247,6 +248,7 @@ impl GithubPluginStore {
     ) -> Result<()> {
         let next = ObserverFreshness { last_complete_unix_ms: Some(now), ..*freshness };
         self.connection.lock().unwrap_or_else(PoisonError::into_inner).execute(
+            /* sqlite-large-value: allow-for-now lv-hbd0b2188b3ea owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
             "UPDATE plugin_meta SET value=?2 WHERE key=?1",
             params![format!("observer-freshness:{observer}"), serde_json::to_string(&next)?],
         )?;
