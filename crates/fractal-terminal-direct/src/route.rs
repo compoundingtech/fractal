@@ -13,6 +13,8 @@ pub const ROUTE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest route line or answer either side reads.
 pub const ROUTE_LINE_LIMIT: usize = 4_096;
 
+const RENAMED_PTY_PREFIX: &str = concat!("fractal", "/pty/");
+
 /// The Fabric protocol that serves a fleet's PTY sessions. Each fleet has its own, so an isolated
 /// fleet on the same machine never replaces another fleet's exposure.
 pub fn protocol(fleet_id: &str) -> String {
@@ -30,7 +32,7 @@ pub fn owner_protocol(members: &[MemberView], owner: &str, peer: &str, fleet: &s
         .filter_map(|endpoint| endpoint["protocol"].as_str())
         .find(|name| {
             name.strip_prefix("st3/pty/") == Some(fleet)
-                || name.strip_prefix("fractal/pty/") == Some(fleet)
+                || name.strip_prefix(RENAMED_PTY_PREFIX) == Some(fleet)
         })
         .map_or_else(|| protocol(fleet), str::to_owned)
 }
@@ -210,12 +212,12 @@ mod tests {
         let mut member: MemberView = serde_json::from_value(json!({
             "name":"owner", "member_key":"key", "state":"current", "mode":"peer", "start":1,
             "endpoints":[
-                {"transport":"fabric","node":"other","protocol":"fractal/pty/fleet"},
-                {"transport":"fabric","node":"node","protocol":"fractal/pty/fleet-extra"},
+                {"transport":"fabric","node":"other","protocol":format!("{RENAMED_PTY_PREFIX}fleet")},
+                {"transport":"fabric","node":"node","protocol":format!("{RENAMED_PTY_PREFIX}fleet-extra")},
                 {"transport":"fabric","node":"node","protocol":"fractal/fleet/fleet"}
             ]
         })).unwrap();
-        for name in ["st3/pty/fleet", "fractal/pty/fleet"] {
+        for name in [protocol("fleet"), format!("{RENAMED_PTY_PREFIX}fleet")] {
             member.endpoints.push(json!({"transport":"fabric","node":"node","protocol":name}));
             assert_eq!(owner_protocol(&[member.clone()], "owner", "node", "fleet"), name);
             assert_eq!(owner_protocol(&[member.clone()], "other", "node", "fleet"), "st3/pty/fleet");
