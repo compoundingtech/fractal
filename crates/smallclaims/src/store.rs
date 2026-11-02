@@ -89,6 +89,7 @@ pub mod checkpoint_staging;
 mod checkpoint_completion;
 pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
+pub mod wal_escalation;
 pub mod document_index;
 mod document_pages;
 pub mod claim_ranges;
@@ -921,6 +922,8 @@ pub struct Store {
     pub trim_row_cost_micros: AtomicU64,
     /// When a trim stops deleting to restart the WAL; only tests change it.
     pub trim_wal: Mutex<checkpoint_trim::TrimWal>,
+    /// When the daemon's WAL recycle restarts a WAL that keeps growing; only tests change it.
+    pub wal_escalation: Mutex<wal_escalation::WalEscalation>,
     /// The last seal-identity digest, and the capture epoch it holds for; see
     /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
     pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
@@ -1310,6 +1313,7 @@ impl Store {
             trim_view_refold_micros: AtomicU64::new(checkpoint_trim::TRIM_VIEW_REFOLD_INTERVAL.as_micros() as u64),
             trim_row_cost_micros: AtomicU64::new(0),
             trim_wal: Mutex::new(checkpoint_trim::TRIM_WAL),
+            wal_escalation: Mutex::new(wal_escalation::WAL_ESCALATION),
             sealed_identity_memo: Mutex::new(None),
             runtime,
         })
