@@ -482,6 +482,8 @@ store work after the upgrade names what it checks: `task mailbox-fence` (the bin
 each dirty pass and each report without a peer), `task mailbox-report` (admitting a report),
 `task mailbox-replay` (a replay proof), `task mailbox-primary` (a Claude primary's generation),
 `task mailbox-rollout`, `task mailbox-attachment`, `task mailbox-own-post` and `task mailbox-loss`.
+With task metrics on, the stream's writes stay under `mailbox.write`, as before. A label shows only
+where no operation is already running on that thread.
 The background maintenance loops that run after commits name theirs
 `maintenance.client_message_selectors`, `maintenance.completion_health`,
 `maintenance.response_expiry_deadline` and `maintenance.response_expiry_clock`. Attention's collection clock

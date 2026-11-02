@@ -738,7 +738,7 @@ fn own_post_reactor(state: &AppState, fence: &Fence) -> tokio::sync::mpsc::Sende
         while let Some(subject) = pending.recv().await {
             let store = state.store.clone();
             let binding = fence.clone();
-            let result = store.connection.write_workers().spawn_blocking(move || crate::profile::task("task mailbox-own-post", || crate::task_cpu::blocking("mailbox.write", || {
+            let result = store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || crate::profile::task("task mailbox-own-post", || {
                 store.close_mailbox_own_post_wake(&binding, &subject)
             }))).await;
             match result {
@@ -796,7 +796,7 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         let Ok(admission) = fractal_drivers::harness_state::record_lock_admission(
             &authority::source_agent_dir(&state, &fence),
         ).await else { return; };
-        let _ = tokio::task::spawn_blocking(move || crate::profile::task("task mailbox-loss", || crate::task_cpu::blocking("mailbox.write", || {
+        let _ = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || crate::profile::task("task mailbox-loss", || {
             let _admission = admission;
             authority::loss_if_current(&state, &fence, &peer)
         }))).await;
@@ -983,7 +983,7 @@ async fn stream_with_timers_inner<F, S, H>(
                 let Ok(admission) = fractal_drivers::harness_state::record_lock_admission(
                     &authority::source_agent_dir(&state, &fence),
                 ).await else { return; };
-                match tokio::task::spawn_blocking(move || crate::profile::task("task mailbox-fence", || crate::task_cpu::blocking("mailbox.write", || {
+                match tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || crate::profile::task("task mailbox-fence", || {
                     let _admission = admission;
                     let started = std::time::Instant::now();
                     let admitted = repair_state.store.check_mailbox(&repair_fence).is_ok();
@@ -1238,7 +1238,7 @@ async fn stream_with_timers_inner<F, S, H>(
                         let legacy = false;
                         #[cfg(test)]
                         let blocking_started = control.report_blocking_started.clone();
-                        let action = move || crate::profile::task("task mailbox-report", || crate::task_cpu::blocking("mailbox.write", || {
+                        let action = move || crate::task_cpu::blocking("mailbox.write", || crate::profile::task("task mailbox-report", || {
                             #[cfg(test)]
                             if let Some(started) = blocking_started { let _ = started.send(()); }
                             authority::admit_report(&checked_state, &binding, &peer, &raw)
@@ -1306,7 +1306,7 @@ async fn stream_with_timers_inner<F, S, H>(
                             let Ok(admission) = fractal_drivers::harness_state::record_lock_admission(
                                 &authority::source_agent_dir(&state, &fence),
                             ).await else { return; };
-                            replay_proven = tokio::task::spawn_blocking(move || crate::profile::task("task mailbox-replay", || crate::task_cpu::blocking("mailbox.write", || {
+                            replay_proven = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || crate::profile::task("task mailbox-replay", || {
                                 let _admission = admission;
                                 authority::repair_proven(&repair_state, &binding, &peer, &raw)
                             }))).await.ok().and_then(Result::ok);
@@ -3596,6 +3596,35 @@ mod tests {
             server.abort();
         });
         }
+    }
+
+    #[cfg(all(feature = "test-support", target_os = "linux"))]
+    #[tokio::test]
+    async fn a_profiled_stream_names_its_fence_report_and_rollout_work() {
+        // Profiling is process-global. A child gives this test its own enabled profiler without
+        // changing the accounting of other tests running in parallel.
+        const CHILD: &str = "ST3_PROFILE_MAILBOX_LABEL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "api::mailbox::tests::a_profiled_stream_names_its_fence_report_and_rollout_work", "--nocapture"])
+                .env(CHILD, "1")
+                .env("ST3_PROFILE_DIR", directory.path())
+                .env("ST3_PROFILE_SLOW_MS", "0")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated mailbox label test failed");
+            let records = std::fs::read_to_string(directory.path().join("slow.jsonl")).unwrap();
+            let records = records.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).collect::<Vec<_>>();
+            // Without the labels this work ran on worker threads with no operation.
+            for label in ["task mailbox-fence", "task mailbox-report", "task mailbox-rollout"] {
+                assert!(records.iter().any(|record| record["label"] == label && record["sql_count"].as_u64() > Some(0)),
+                    "{label} missing from the profile");
+            }
+            return;
+        }
+        crate::profile::init_from_env();
+        report_control_effects(true).await;
     }
 
     #[cfg(all(feature = "test-support", target_os = "linux"))]
