@@ -31,7 +31,7 @@ keys = importlib.util.module_from_spec(importlib.util.spec_from_loader(LOADER.na
 LOADER.exec_module(keys)
 
 GLOBAL = ['.cargo', '.config/daily-only.filterset', '.config/nextest.toml', 'Cargo.lock', 'Cargo.toml', 'flake.lock', 'flake.nix',
-          'scripts/ci-local', 'scripts/ci-linux', 'scripts/ci-nextest', 'scripts/ci-nextest-flaky', 'scripts/ci-nextest-targets',
+          'scripts/ci-local', 'scripts/ci-linux', 'scripts/ci-nextest', 'scripts/ci-nextest-flaky',
           'scripts/ci-rustc-wrapper', 'scripts/rust-test-keys', 'scripts/fractal_test_process.py']
 LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
 BUILDS_A_PATH = re.compile(r'CARGO_MANIFEST_DIR|"\.\."')
