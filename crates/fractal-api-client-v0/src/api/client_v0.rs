@@ -8422,6 +8422,36 @@ async fn dispatch_action(
             .0;
             Ok(vec![format!("launch/{}", launch.id)])
         }
+        action @ ("work.withdraw-handoff" | "work.decline-handoff") => {
+            use crate::store::adhoc_work::{AdhocWorkStore, HandoffDisposition, HandoffReturnRequest};
+            let withdraw = action == "work.withdraw-handoff";
+            if session.assistant_write.is_some()
+                || !authority_actor.starts_with(if withdraw { "agent/" } else { "person/" })
+            {
+                return Err(forbidden("handoff returns require the handing agent or assigned person session"));
+            }
+            let target = client_detail_id("step-run", &parameter_string(p, "target_id")?);
+            let reason = parameter_string(p, "reason")?;
+            if reason.trim().is_empty() || reason.len() > 2048 {
+                return Err(validation("reason must contain 1–2048 UTF-8 bytes"));
+            }
+            let input = HandoffReturnRequest {
+                actor: authority_actor.clone(), message: parameter_string(p, "message")?,
+                attempt: request.fence.attempt.ok_or_else(|| validation("handoff return requires an attempt fence"))?,
+                disposition: if withdraw { HandoffDisposition::Withdrawn } else { HandoffDisposition::Declined },
+                reason, idempotency_key: request.idempotency_key.clone(),
+            };
+            // The primary effect may survive a lost action receipt and later step changes.
+            let applied: bool = state.store.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='work.handoff-returned' AND json_extract(body,'$.fields.return_request.idempotency_key')=?1)",
+                [&input.idempotency_key], |row| row.get(0)).map_err(ApiError::internal)?;
+            if !applied {
+                validate_work_fence(state, &target, &request.fence)?;
+            }
+            let result = state.store.return_handoff(&target, &input).map_err(ApiError::bad)?;
+            signal_changed(state);
+            Ok(vec![result.subject])
+        }
         action @ ("work.claim" | "work.renew" | "work.progress" | "work.complete" | "work.fail"
         | "work.release") => {
             let target = parameter_string(p, "target_id")?;
@@ -9483,6 +9513,29 @@ async fn action_inner(
     }
     let mut reconciled_attachment = None;
     let mut checked_fence = request.fence.clone();
+    if matches!(request.action_type.as_str(), "work.withdraw-handoff" | "work.decline-handoff") {
+        use rusqlite::OptionalExtension;
+        let withdraw = request.action_type == "work.withdraw-handoff";
+        if session.assistant_write.is_some()
+            || !session.authority_actor.starts_with(if withdraw { "agent/" } else { "person/" }) {
+            return Err(forbidden("handoff returns require the handing agent or assigned person session"));
+        }
+        let existing: Option<(String, String)> = state.store.readers.get().query_row(
+            "SELECT subject,body FROM claims WHERE kind='work.handoff-returned' AND json_extract(body,'$.fields.return_request.idempotency_key')=?1",
+            [&request.idempotency_key], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(ApiError::internal)?;
+        if let Some((subject, body)) = existing {
+            let expected = json!({"actor":session.authority_actor, "message":parameter_string(&request.parameters, "message")?,
+                "attempt":request.fence.attempt, "disposition":if withdraw { "withdrawn" } else { "declined" },
+                "reason":parameter_string(&request.parameters, "reason")?, "idempotency_key":request.idempotency_key});
+            let stored: Value = serde_json::from_str(&body).map_err(ApiError::internal)?;
+            if subject != client_detail_id("step-run", &parameter_string(&request.parameters, "target_id")?)
+                || stored["fields"]["return_request"] != expected {
+                return Err(action_idempotency_conflict());
+            }
+            // Recover the exact durable effect before validating revisions it already advanced.
+            checked_fence.subject_revisions.clear();
+        }
+    }
     if matches!(request.action_type.as_str(), "arrangement.edit" | "arrangement.membership.edit") {
         // Layout revisions merge; fenced retirement and graph/launch identity revisions
         // are checked in the writer transaction. Attention episodes and external filesystem
@@ -14525,6 +14578,87 @@ subscription "watch/source" {
             .unwrap()
             .unwrap();
         assert_eq!(reset.body["fields"]["reason"], "clear restart limit");
+    }
+
+    #[tokio::test]
+    async fn handoff_returns_bind_session_authority_preserve_work_and_recover_effects() {
+        use crate::store::adhoc_work::AdhocWorkStore;
+        use crate::model::{WorkHandoffRequest, WorkStartRequest};
+        for action_type in ["work.withdraw-handoff", "work.decline-handoff"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let agent = "agent/example/worker";
+            let intent = crate::graph::parse_internal_intent(
+                "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }", &state.node).unwrap();
+            state.store.apply_internal(&intent, "return-agent").unwrap();
+            let work = state.store.start_work(&WorkStartRequest {
+                actor: agent.into(), title: "Review checkpoint".into(), idempotency_key: "return-start".into(),
+            }).unwrap();
+            let claim: WorkRequest = serde_json::from_value(json!({
+                "actor":agent, "incarnation":"return-i1", "idempotency_key":"return-claim",
+            })).unwrap();
+            state.store.work_action(&work.subject, "claim", &claim).unwrap();
+            let work = state.store.handoff_work(&work.subject, &WorkHandoffRequest {
+                actor: agent.into(), incarnation: claim.incarnation, to: "person/reviewer".into(),
+                note: "Review checkpoint".into(), evidence: vec![], idempotency_key: "return-handoff".into(),
+            }).unwrap();
+            let note = state.store.latest_claim(&work.subject, Some("work.released")).unwrap().unwrap();
+            let snapshot = new_client_snapshot(&state);
+            let mut session = ClientSession::local(Some("person/reviewer")).unwrap();
+            if action_type == "work.withdraw-handoff" {
+                session.actor = agent.into();
+                session.authority_actor = agent.into();
+            }
+            let request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id: "action/return-handoff".into(),
+                action_type: action_type.into(), idempotency_key: "client-return-handoff-0001".into(),
+                fence: Fence {
+                    snapshot_id: snapshot.id.clone(), mission_generation: Some(work.generation.clone()),
+                    step_definition: Some(work.definition_hash.clone()), attempt: Some(work.attempt),
+                    readiness_epoch: Some(u64::from(work.readiness_epoch)),
+                    subject_revisions: BTreeMap::from([(work.subject.clone(), note.id.clone())]), ..Fence::default()
+                },
+                parameters: json!({"target_id":work.subject, "message":note.body["fields"]["handoff_message"], "reason":"Continue on the handing seat"}),
+            };
+            let mut foreign = session.clone();
+            foreign.authority_actor = if action_type == "work.withdraw-handoff" { "agent/example/foreign" } else { "person/foreign" }.into();
+            assert!(dispatch_action(&state, &snapshot, &foreign, &request).await.is_err());
+            let mut delegated = session.clone();
+            delegated.assistant_write = Some(crate::store::assistant_write::AssistantWriteAuthorization {
+                grant_subject: "assistant-grant/example".into(), actor: "assistant/chatgpt".into(),
+                owner: "person/reviewer".into(), policy_revision: 1, scope: "control.attention".into(), recipient: None,
+            });
+            assert_eq!(dispatch_action(&state, &snapshot, &delegated, &request).await.unwrap_err().code, "forbidden");
+            for reason in [" ".into(), "x".repeat(2049), "é".repeat(1025)] {
+                let mut invalid = request.clone();
+                invalid.parameters["reason"] = json!(reason);
+                assert_eq!(dispatch_action(&state, &snapshot, &session, &invalid).await.unwrap_err().code, "validation-failed");
+            }
+            let mut stale_note = request.clone();
+            stale_note.parameters["message"] = json!("message/obsolete");
+            assert_eq!(dispatch_action(&state, &snapshot, &session, &stale_note).await.unwrap_err().code, "stale-handoff");
+            assert_eq!(dispatch_action(&state, &snapshot, &session, &request).await.unwrap(), vec![work.subject.clone()]);
+            let returned = state.store.step_run(&work.subject).unwrap().unwrap();
+            assert_eq!(returned.status, "ready");
+            assert_eq!(returned.assigned_to.as_deref(), Some(agent));
+            assert!(returned.claimant.is_none());
+            assert_eq!(returned.attempt, work.attempt);
+            assert!(!returned.worker_reported && returned.person_answers.is_empty());
+            for kind in ["work.submitted", "work.person-done", "work.person-cancelled"] {
+                assert!(state.store.latest_claim(&work.subject, Some(kind)).unwrap().is_none());
+            }
+            // No action receipt exists: replay the durable primary effect through its stale fence.
+            assert!(dispatch_action(&state, &snapshot, &session, &request).await.is_ok());
+            let result = action(State(state.clone()), Extension(snapshot.clone()), Extension(session.clone()), Json(request.clone())).await.unwrap().0;
+            assert!(action(State(state.clone()), Extension(snapshot.clone()), Extension(session.clone()), Json(request.clone())).await.is_ok());
+            assert_eq!(state.store.readers.get().query_row(
+                "SELECT count(*) FROM claims WHERE subject=?1 AND kind='work.handoff-returned'",
+                [&work.subject], |row| row.get::<_, u64>(0)).unwrap(), 1);
+            assert_eq!(result["affected_ids"], json!([work.subject]));
+            let mut conflict = request.clone();
+            conflict.parameters["reason"] = json!("Different return");
+            assert_eq!(dispatch_action(&state, &snapshot, &session, &conflict).await.unwrap_err().code, "idempotency-conflict");
+        }
     }
 
     #[tokio::test]

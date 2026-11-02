@@ -1368,6 +1368,26 @@ or checkpoint authority. Existing canonical claims and checkpoint rules are unch
 | Declarative/owned-set apply, quick agent creation | Direct declarations carry a primary caller association. Compound publication operations retain their existing durable operation ids; identical retries are no-ops. Claimless unchanged apply is safe to recompute. A compound-only apply with different bytes and a reused key after expiry is a new apply, so clients must never reuse keys. Declaration and quick-agent response commit together. |
 | Resource observation completion | Recognise the primary actual observation/state/delivery claim and refuse terminally before another delivery. A completion with no recorded change has no receipt/effect to repeat. |
 
+The store's person-handoff return transition records `work.handoff-returned`: the handing
+agent may withdraw, or the assigned person may decline, the exact current note and attempt.
+Only a ready, unclaimed step in the live generation qualifies, acknowledged or not. It returns
+assignment to the handing agent and advances readiness without changing completion, acceptance,
+evidence, progress, answers or gates. The resolved note no longer requires acknowledgment.
+The actor, step, note, disposition and reason bind the key; retries recover the original
+disposition record even after subsequent work. Client actions `work.withdraw-handoff`
+(`control.work`, handing agent only) and `work.decline-handoff` (`control.attention`, assigned
+person only, not a delegated assistant) take `{target_id,message,reason}` and the normal work
+fence. `message` names the exact handoff note; `reason` is nonblank and at most 2048 UTF-8 bytes.
+`st work handoff withdraw STEP --reason TEXT --as AGENT` withdraws the current note; optional
+`--message NOTE` pins an explicitly observed note and `--idempotency-key KEY` recovers the original
+note and attempt on retry, including after a replacement handoff.
+Exact durable returns are recovered before mutable subject-revision fences, including lost-receipt retries.
+Errors are typed: `stale-handoff` (409) refuses an old/resolved note or ineligible return;
+`stale-fence` (409) refuses changed work fences; `validation-failed` (422) refuses invalid
+parameters/reasons; `forbidden` (403) refuses actor/session roles; `idempotency-conflict` (409)
+refuses conflicting key reuse. Neither action completes work, acknowledges a note or answers asks.
+The legacy withdrawal adapter also reports `invalid-handoff-return` (422) for a missing retry key.
+
 Asks, attention actions, message sends and held effects are not pinned by this local-response
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.
 Client actions keep their server-only `client.action-result` receipt in the owner-local

@@ -2550,6 +2550,15 @@
         "actor_environment": "ST_AGENT",
         "ignores_actor": false
       },
+      "st work handoff withdraw": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st work ls": {
         "actor": "optional",
         "accepts_person": true,

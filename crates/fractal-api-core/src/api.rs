@@ -464,6 +464,7 @@ impl ApiError {
             | "custody-pending"
             | "stale-subject"
             | "stale-fence"
+            | "stale-handoff"
             | "idempotency-conflict"
             | "private-notes-carrier-conflict"
             | "owned-set-refused"
@@ -965,6 +966,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/work/ask", post(work::ask_person))
         .route("/v1/work/start", post(work::start_work))
         .route("/v1/work/handoff/{*subject}", post(work::handoff_work))
+        .route("/v1/work/handoff-return/{*subject}", post(work::return_handoff))
         .route("/v1/work/acknowledge/{*subject}", post(work::acknowledge_work))
         .route("/v1/github/watch", post(github_watch::watch))
         .route("/v1/github/unwatch", post(github_watch::unwatch))
@@ -2006,6 +2008,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-membership-operations"
         | "membership-edit-too-large"
         | "stale-fence"
+        | "stale-handoff"
+        | "invalid-handoff-return"
         | "timeline-history-incomplete"
         | "projection-detail-too-large"
         | "projection-detail-invalid-source"

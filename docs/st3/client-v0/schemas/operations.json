@@ -163,6 +163,8 @@
     "work.ask": { "capability": "control.work", "parameters": "PersonAskParameters" },
     "work.done": { "capability": "control.attention", "parameters": "PersonStepParameters" },
     "work.cancel-ask": { "capability": "control.work", "parameters": "PersonStepParameters" },
+    "work.withdraw-handoff": { "capability": "control.work", "parameters": "HandoffReturnParameters" },
+    "work.decline-handoff": { "capability": "control.attention", "parameters": "HandoffReturnParameters" },
     "work.claim": { "capability": "control.work", "parameters": "TargetParameters" },
     "work.renew": { "capability": "control.work", "parameters": "TargetParameters" },
     "work.progress": { "capability": "control.work", "parameters": "TargetParameters" },

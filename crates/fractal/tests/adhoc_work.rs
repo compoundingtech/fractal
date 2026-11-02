@@ -550,6 +550,39 @@ async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
 }
 
 #[tokio::test]
+async fn requester_withdraws_exact_person_handoff_and_retries_after_reclaim() {
+    let root = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(root.path());
+    daemon.declare();
+    daemon.start().await;
+    let opened = daemon.ok(&["work", "start", "Review fixture", "--as", ALDER]).await;
+    let step = opened["subject"].as_str().unwrap();
+    daemon.ok(&["work", "claim", step, "--as", ALDER, "--incarnation", "alder-one"]).await;
+    daemon.ok(&["work", "handoff", step, "--as", ALDER, "--incarnation", "alder-one",
+        "--to", "person/reviewer", "--note", "Next: check the fixture"]).await;
+    daemon.fails(&["work", "handoff", "withdraw", step, "--as", "person/reviewer",
+        "--reason", "Resume"], "agent actor").await;
+    daemon.fails(&["work", "handoff", "withdraw", step, "--as", BIRCH,
+        "--reason", "Resume"], "stale-handoff").await;
+    daemon.fails(&["work", "handoff", "withdraw", step, "--as", ALDER,
+        "--reason", "Resume", "--message", "message/stale"], "stale-handoff").await;
+    let withdraw = ["work", "handoff", "withdraw", step, "--as", ALDER,
+        "--reason", "Resume", "--idempotency-key", "withdraw-fixture"];
+    let returned = daemon.ok(&withdraw).await;
+    assert_eq!(returned["kind"], "work.handoff-returned");
+    assert_eq!(returned["body"]["fields"]["handoff_message"], daemon.note("person/reviewer"));
+    daemon.ok(&["work", "claim", step, "--as", ALDER, "--incarnation", "alder-one"]).await;
+    assert_eq!(daemon.ok(&withdraw).await["id"], returned["id"]);
+    daemon.ok(&["work", "handoff", step, "--as", ALDER, "--incarnation", "alder-one",
+        "--to", "person/reviewer", "--note", "Next: review the replacement"]).await;
+    assert_eq!(daemon.ok(&withdraw).await["id"], returned["id"]);
+    let mut exact_retry = withdraw.to_vec();
+    exact_retry.extend(["--message", returned["body"]["fields"]["handoff_message"].as_str().unwrap()]);
+    assert_eq!(daemon.ok(&exact_retry).await["id"], returned["id"]);
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn person_handoff_is_visible_acknowledged_and_closed_with_evidence() {
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
