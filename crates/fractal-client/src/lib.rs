@@ -2178,6 +2178,17 @@ impl Client {
     pub async fn capabilities(&self) -> Result<Envelope<Capabilities>, ClientError> {
         self.capabilities_internal().await
     }
+    pub async fn device_command_get(
+        &self,
+        id: &str,
+        wait: bool,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.get(&format!(
+            "/v1/client/device-commands/{}?wait={wait}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn document_get(&self, name: &str) -> Result<Envelope<DocumentContent>, ClientError> {
         self.get(&format!(
             "/v1/client/documents/content?name={}",
