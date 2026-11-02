@@ -2796,7 +2796,7 @@ export type PersonUpdate = {
 export type PhoneInspectArgs = Record<string, never>;
 
 export type PhoneMessageReadArgs = {
-  attention_id: string;
+  message_id: string;
 };
 
 export type PhoneNavigateArgs = ({
