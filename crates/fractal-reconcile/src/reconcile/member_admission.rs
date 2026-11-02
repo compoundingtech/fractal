@@ -22,6 +22,8 @@ const ADMISSION_KEY: &str = "member-admission";
 #[derive(Default)]
 pub(super) struct MemberAdmission {
     admitted: bool,
+    /// Whether this process has cleared an alert left from a start that had the setting on.
+    cleared_while_off: bool,
     /// When this member began waiting, monotonic and wall.
     waiting_since: Option<(Instant, u128)>,
 }
@@ -107,12 +109,20 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn observe_member_admission(&self) -> Result<()> {
         // Once admitted, a member stays admitted for this start: a released peer that comes back
         // does not pause seats the member already acts on.
+        if !self.waits_for_peers_after_start {
+            // Off: admitted. An alert raised while the setting was on is cleared once.
+            let clear = {
+                let mut state = self.member_admission.lock().unwrap_or_else(PoisonError::into_inner);
+                state.admitted = true;
+                !std::mem::replace(&mut state.cleared_while_off, true)
+            };
+            if clear {
+                self.clear_member_admission_alert()?;
+            }
+            return Ok(());
+        }
         let latched = self.member_admission.lock().unwrap_or_else(PoisonError::into_inner).admitted;
-        let waiting = if latched || !self.waits_for_peers_after_start {
-            None
-        } else {
-            self.member_admission_waiting()?
-        };
+        let waiting = if latched { None } else { self.member_admission_waiting()? };
         let admitted = waiting.is_none();
         self.incremental.observe_value(ADMISSION_KEY, admitted.to_string());
         let wall = now_ms();
@@ -137,16 +147,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let attention = attention_subject(&self.host);
         let Some(peers) = waiting else {
-            if let Some(failure) = self.store.operational_failure(&attention)?
-                && failure.status == "pending"
-            {
-                self.store.recover_operational_failure(
-                    &attention,
-                    "The member caught up with a peer, or an override released the peers it waited for.",
-                    &format!("member-admission-cleared:{}", failure.request),
-                )?;
-            }
-            return Ok(());
+            return self.clear_member_admission_alert();
         };
         let peers = self.describe_admission_peers(&peers);
         self.record_once(
@@ -182,6 +183,20 @@ impl<R: RuntimeControl> Reconciler<R> {
             actor: RECONCILER_ACTOR.into(),
             idempotency_key: format!("member-admission-waiting:{}:{since_wall}", self.host),
         })?;
+        Ok(())
+    }
+
+    fn clear_member_admission_alert(&self) -> Result<()> {
+        let attention = attention_subject(&self.host);
+        if let Some(failure) = self.store.operational_failure(&attention)?
+            && failure.status == "pending"
+        {
+            self.store.recover_operational_failure(
+                &attention,
+                "The member caught up with a peer, an override released the peers it waited for, or waiting after a start was turned off.",
+                &format!("member-admission-cleared:{}", failure.request),
+            )?;
+        }
         Ok(())
     }
 

@@ -1311,6 +1311,16 @@ mod tests {
     }
 
     #[test]
+    fn waiting_for_peers_after_start_is_off_unless_set_true() {
+        assert!(!Config::default().waits_for_peers_after_start());
+        assert!(!toml::from_str::<Config>("").unwrap().waits_for_peers_after_start());
+        assert!(!toml::from_str::<Config>("wait_for_peers_after_start = false").unwrap().waits_for_peers_after_start());
+        assert!(toml::from_str::<Config>("wait_for_peers_after_start = true").unwrap().waits_for_peers_after_start());
+        assert!(toml::from_str::<Config>("wait_for_peers_after_start = \"yes\"").is_err());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("wait_for_peers_after_start"));
+    }
+
+    #[test]
     fn seat_priority_defaults_to_background_and_accepts_normal() {
         use fractal_runtime::SeatPriority;
         assert_eq!(Config::default().active_seat_priority(), SeatPriority::Background);
