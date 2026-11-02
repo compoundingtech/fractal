@@ -3072,7 +3072,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["api_version", "id", "type", "idempotency_key", "fence", "parameters"],
-      "allOf": [{"if": {"required": ["device_command"]}, "then": {"properties": {"type": {"const": "message.read"}}}}],
+      "allOf": [{"if": {"required": ["device_command"], "properties": {"device_command": true, "type": true}}, "then": {"properties": {"type": {"const": "message.read"}}}}],
       "properties": {
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "id": { "$ref": "#/$defs/Id" },
@@ -4173,7 +4173,7 @@
         "retryable": { "type": "boolean" },
         "retry_after_ms": { "x-st-codec": "duration-ms", "type": "integer", "minimum": 0 },
         "applied": { "type": "string", "enum": ["none", "unknown"] },
-        "details": { "type": "object", "additionalProperties": {}, "allOf": [{"if": {"required": ["device_command"]}, "then": {"$ref": "#/$defs/DeviceCommandAdmissionDetails"}}], "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
+        "details": { "type": "object", "additionalProperties": {}, "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
       }
     },
     "SubscribeTraceContext": {
