@@ -12,6 +12,7 @@ pub struct Waiting {
 pub fn request(key: &str, reason: Option<&str>, wait_ms: Option<u64>) -> WorkRequest {
     WorkRequest {
         wait_ms,
+        wait_on: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("current".into()),
         summary: None,

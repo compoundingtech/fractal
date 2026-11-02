@@ -1374,6 +1374,7 @@ mission "example/review" state="ready" {{
                         action,
                         &fractal_daemon::model::WorkRequest {
                             wait_ms: None,
+                            wait_on: None,
                             actor: Some(WORKER.into()),
                             incarnation: Some("4242:fixture".into()),
                             summary: Some("Drafted the copper proof.".into()),
@@ -5540,6 +5541,7 @@ mission "example/review" state="ready" {{
                         action,
                         &fractal_daemon::model::WorkRequest {
                             wait_ms: None,
+                            wait_on: None,
                             actor: Some(WORKER.into()),
                             incarnation: Some("4242:fixture".into()),
                             summary: Some("Drafted the copper proof.".into()),

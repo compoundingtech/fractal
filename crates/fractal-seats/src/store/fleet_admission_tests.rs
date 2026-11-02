@@ -154,6 +154,7 @@ mission "garden" state="ready" {
                 "claim",
                 &WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(actor.into()),
                     incarnation: Some(incarnation.into()),
                     summary: None,
@@ -171,6 +172,7 @@ mission "garden" state="ready" {
             "complete",
             &WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some(actor.into()),
                 incarnation: Some(incarnation.into()),
                 summary: None,
@@ -347,6 +349,7 @@ mission "garden" state="ready" {
     let step = run.steps[0].subject.clone();
     let request = |key: &str, wait_ms: Option<u64>, reason: Option<&str>| WorkRequest {
         wait_ms,
+        wait_on: None,
         actor: Some("agent/garden/worker".into()),
         incarnation: Some("garden:one".into()),
         summary: None,

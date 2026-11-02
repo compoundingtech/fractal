@@ -88,6 +88,15 @@ characterization `[34]` does not apply: with v7 seeds 2 and 34 do not trim a che
 other 15 fixed seeds do, measured with
 `cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.
 
+`claims-v13.json` is generated the same way from the declared-waits registry on top of v12's
+(`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v13.json`).
+It adds `work.wait-ended`, which closes a declared wait, and the `wait_on` field the work claim
+kinds carry; it also captures fields main added to `agent.retired` (`desired_revision`,
+`runtime_incarnation`) and `runtime.action.requested` (`ignore_fit`) after v12 was generated.
+Nothing in v12 is removed, and v1 to v12 stay frozen. The simulation selects v13 and records that
+filename in its audit summary. Every fixed seed converges and trims a checkpoint, so
+`NEVER_TRIMS` is empty. Characterization used the same command as v12.
+
 `claims-v8.json` captures the six durable version-1 deployment audit kinds added
 on top of v7. Regenerate it with
 `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v8.json`;

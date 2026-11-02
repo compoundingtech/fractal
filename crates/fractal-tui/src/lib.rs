@@ -1766,6 +1766,7 @@ mission "release" state="ready" {
                     action,
                     &fractal_daemon::model::WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: Some(worker.clone()),
                         incarnation: Some("worker-one".into()),
                         summary: Some("Drafted".into()),

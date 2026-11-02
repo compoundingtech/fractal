@@ -53,6 +53,7 @@ use crate::resource::{
 use crate::store::Store;
 
 pub mod channel_recovery;
+pub mod declared_waits;
 pub mod github_events;
 pub mod github_plugin_store;
 pub mod plugin_store;
@@ -11121,6 +11122,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             return Ok(changed);
                         }
                     }
+                    if !view.agentless && matches!(view.status.as_str(), "claimed" | "working") {
+                        changed |= self.watch_declared_wait(view)?;
+                    }
                     if !self.step_declarations_hold(run, &view.subject)? {
                         return Ok(changed);
                     }
@@ -13975,6 +13979,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         blockers: Vec::new(),
                         not_before_unix_ms: None,
                         nudged_at_unix_ms: None,
+                        waiting_on: None,
                         created_at_unix_ms: run.created_at_unix_ms,
                         updated_at_unix_ms: run.updated_at_unix_ms,
                         person_answers: Vec::new(),
@@ -23463,6 +23468,7 @@ mission "nested-wake" state="ready" {
             .unwrap();
         let request = |key: &str| crate::model::WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -24182,6 +24188,7 @@ version 2
                     action,
                     &crate::model::WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: Some("agent/node.worker".into()),
                         incarnation: Some("test".into()),
                         summary: Some("published the change".into()),
@@ -24320,6 +24327,7 @@ version 2
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some("agent/node.planner".into()),
                     incarnation: Some("test".into()),
                     summary: None,
@@ -24345,6 +24353,7 @@ version 2
                 "complete",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some("agent/node.planner".into()),
                     incarnation: Some("test".into()),
                     summary: Some("published the complete mission".into()),
@@ -24384,6 +24393,7 @@ version 2
                     action,
                     &crate::model::WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: Some("agent/node.planner".into()),
                         incarnation: Some("test".into()),
                         summary: None,
@@ -24440,6 +24450,7 @@ version 2
                         action,
                         &crate::model::WorkRequest {
                             wait_ms: None,
+                            wait_on: None,
                             actor: Some("agent/node.planner".into()),
                             incarnation: Some("test".into()),
                             summary: None,
@@ -24908,6 +24919,7 @@ mission "feedback-review" state="ready" {
         store.set_step_state(&step.subject, "ready", None).unwrap();
         let work = |key: &str| crate::model::WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some(claimant.clone()),
             incarnation: Some("test-incarnation".into()),
             summary: Some("Draft submitted".into()),
@@ -28897,6 +28909,7 @@ mission "proof" state="ready" {{
             .clone();
         let request = |key: &str| crate::model::WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: Some("Merged the change.".into()),
@@ -29890,6 +29903,7 @@ mission "asks" state="ready" {
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some("agent/node.asker".into()),
                     incarnation: Some("asker-one".into()),
                     summary: None,
@@ -32673,6 +32687,7 @@ schedule "daily" {{
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: result.assigned_to.clone(),
                     incarnation: Some("worker-one".into()),
                     summary: None,
@@ -32717,6 +32732,7 @@ schedule "daily" {{
                     action,
                     &crate::model::WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: stuck.assigned_to.clone(),
                         incarnation: Some("worker-one".into()),
                         summary: None,
@@ -32819,6 +32835,7 @@ schedule "daily" {{
             .unwrap();
         let request = |key: &str, reason: Option<&str>| crate::model::WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: step.assigned_to.clone(),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -35579,6 +35596,7 @@ mission "waiting" state="ready" {
         }
         let work = |key: &str| crate::model::WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/node.builder".into()),
             incarnation: Some("builder-one".into()),
             summary: Some("Draft built".into()),
@@ -36268,6 +36286,7 @@ mission "queue-nested" state="ready" {
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(first_work.assigned_to.clone().unwrap()),
                     incarnation: Some("current".into()),
                     summary: None,
@@ -36282,6 +36301,7 @@ mission "queue-nested" state="ready" {
 
         let work = |key: &str, actor: String| crate::model::WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some(actor),
             incarnation: Some("current".into()),
             summary: None,
@@ -37874,6 +37894,7 @@ version 2
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some("agent/node.one".into()),
                     incarnation: Some("incarnation-one".into()),
                     summary: None,
@@ -37900,6 +37921,7 @@ version 2
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some("agent/node.missing".into()),
                     incarnation: Some("other".into()),
                     summary: None,
@@ -43649,6 +43671,7 @@ version 2
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(worker.clone()),
                     incarnation: Some("keep-incarnation".into()),
                     summary: None,
@@ -47372,6 +47395,7 @@ mission "pair" state="ready" {
             reason: Some("handing it back".into()),
             evidence: Vec::new(),
             wait_ms: None,
+            wait_on: None,
             idempotency_key: format!("{key}-{ending}"),
         };
         observe("working", "pair-working");
@@ -47735,6 +47759,7 @@ mission "work-alert" state="ready" {
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some("agent/node.worker".into()),
                     incarnation: Some("worker-two".into()),
                     summary: None,
@@ -47832,6 +47857,7 @@ mission "ios-proof-blocked" state="ready" {
         let subject = run.steps[0].subject.clone();
         let work = |key: &str, reason: Option<&str>| crate::model::WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/node.ios-owner".into()),
             incarnation: Some("ios-owner-one".into()),
             summary: None,
@@ -47961,6 +47987,7 @@ mission "ios-proof-blocked" state="ready" {
             blockers: Vec::new(),
             not_before_unix_ms: None,
             nudged_at_unix_ms: None,
+            waiting_on: None,
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
             person_answers: Vec::new(),
@@ -48124,6 +48151,7 @@ mission "ios-proof-blocked" state="ready" {
             blockers: Vec::new(),
             not_before_unix_ms: None,
             nudged_at_unix_ms: None,
+            waiting_on: None,
             created_at_unix_ms: 10,
             updated_at_unix_ms: 10,
             person_answers: Vec::new(),
@@ -48620,6 +48648,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
             blockers: Vec::new(),
             not_before_unix_ms: None,
             nudged_at_unix_ms: None,
+            waiting_on: None,
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
             person_answers: Vec::new(),
@@ -48738,6 +48767,7 @@ mission "context" state="ready" {
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(SEAT.into()),
                     incarnation: Some(incarnation.into()),
                     summary: None,
@@ -49128,6 +49158,7 @@ mission "gated" state="ready" {
                     action,
                     &crate::model::WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: Some(SEAT.into()),
                         incarnation: Some("seat-one".into()),
                         summary: None,
@@ -49805,6 +49836,7 @@ mission "draining" state="ready" revision-cutover="when-idle" {
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some("agent/node.helper".into()),
                     incarnation: Some("helper-one".into()),
                     summary: None,
