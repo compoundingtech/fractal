@@ -411,12 +411,13 @@ impl Store {
             held_ms = held_ms.max(report.truncate_ms.unwrap_or(0));
             if report.recycled || started.elapsed() >= limits.wait {
                 let restarted = report.recycled;
-                let pause_ms = started.elapsed().as_millis() as u64;
-                if restarted {
-                    tracing::info!(frames, attempts, pause_ms, held_ms = held_ms as u64, "a trim restarted the WAL");
-                } else {
-                    tracing::warn!(frames, attempts, pause_ms, held_ms = held_ms as u64, "a trim could not restart the WAL and stops until the next step");
-                }
+                // The daemon's own stderr, as its WAL checkpoint lines are: `up` sets no stderr
+                // tracing subscriber.
+                eprintln!(
+                    "st3: {} {}",
+                    if restarted { "a trim restarted the WAL" } else { "a trim could not restart the WAL and stops until the next step" },
+                    serde_json::json!({"frames": frames, "attempts": attempts, "pause_ms": started.elapsed().as_millis(), "held_ms": held_ms}),
+                );
                 wal.checked = Some(std::time::Instant::now());
                 return Ok(restarted);
             }
