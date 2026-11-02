@@ -1,5 +1,5 @@
 //! Resync events: supervisor-emitted notifications when a live agent's declared resource carriers
-//! change on disk ([`06-resync`](../docs/vrs/06-resync/spec.md)).
+//! change on disk.
 //!
 //! Delivery rides the event-stream machinery through a crate-internal admission for the built-in
 //! reserved `resync` stream that exists on every running agent without declaration. Public event
@@ -1048,7 +1048,7 @@ impl Worker {
     /// Re-register watches so every distinct parent directory of the current watch set is covered,
     /// dropping directories that left the set or were replaced (identity change). A replaced watch
     /// stays blind until the next pass rebuilds it — bounded by the reconcile interval, the same
-    /// tradeoff `CatalogDeclarationWatcher` accepts for declarations.
+    /// tradeoff used for shallow declaration subscriptions.
     ///
     /// Reports whether the registration set actually changed, because a backend is not obliged to
     /// leave its other subscriptions undisturbed while it does. `notify`'s macOS FSEvents backend

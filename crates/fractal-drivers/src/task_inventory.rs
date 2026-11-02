@@ -4,8 +4,6 @@
 //! expose a reconcile plan and cannot mutate catalog or runtime state.
 
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(target_os = "linux")]
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use agent_spec::spec::{TaskKind, TaskLifecycle};
@@ -169,107 +167,6 @@ impl RuntimeGeneration {
     pub fn resource_target(&self) -> &ResourceTarget {
         &self.resource_target
     }
-}
-
-/// Fence a process-derived locator between two reads of the kernel's process
-/// start token. This rejects exit and PID reuse during observation, including
-/// races that happen while the cgroup membership itself is being read.
-fn fence_resource_target<ReadStart, ReadTarget>(
-    expected_start_time_ticks: Option<u64>,
-    mut read_start: ReadStart,
-    read_target: ReadTarget,
-) -> ResourceTarget
-where
-    ReadStart: FnMut() -> Result<u64, ()>,
-    ReadTarget: FnOnce() -> Result<ResourceTarget, ResourceTargetUnavailableReason>,
-{
-    let Ok(initial_start) = read_start() else {
-        return ResourceTarget::unavailable(ResourceTargetUnavailableReason::ProcessUnavailable);
-    };
-    if expected_start_time_ticks.is_some_and(|expected| expected != initial_start) {
-        return ResourceTarget::unavailable(ResourceTargetUnavailableReason::GenerationChanged);
-    }
-
-    let candidate = read_target();
-    let Ok(final_start) = read_start() else {
-        return ResourceTarget::unavailable(ResourceTargetUnavailableReason::ProcessUnavailable);
-    };
-    if final_start != initial_start
-        || expected_start_time_ticks.is_some_and(|expected| expected != final_start)
-    {
-        return ResourceTarget::unavailable(ResourceTargetUnavailableReason::GenerationChanged);
-    }
-    candidate.unwrap_or_else(ResourceTarget::unavailable)
-}
-
-/// Parse the unified hierarchy entry without treating a legacy/hybrid entry as
-/// cgroup v2 and without admitting a path that can escape the cgroup mount.
-#[cfg(any(target_os = "linux", test))]
-fn parse_unified_cgroup_path(raw: &str) -> Result<String, ()> {
-    let mut unified = None;
-    for line in raw.split_terminator('\n') {
-        if line.is_empty() || line.contains('\r') || line.contains('\0') {
-            return Err(());
-        }
-        let mut fields = line.splitn(3, ':');
-        let hierarchy = fields.next().ok_or(())?;
-        let controllers = fields.next().ok_or(())?;
-        let path = fields.next().ok_or(())?;
-        if hierarchy != "0" || !controllers.is_empty() {
-            continue;
-        }
-        if unified.is_some()
-            || !path.starts_with('/')
-            || (path.len() > 1 && path.ends_with('/'))
-            || (path != "/"
-                && path
-                    .split('/')
-                    .skip(1)
-                    .any(|component| component.is_empty() || component == "." || component == ".."))
-        {
-            return Err(());
-        }
-        unified = Some(path.to_owned());
-    }
-    unified.ok_or(())
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn observe_resource_target(
-    pid: u32,
-    expected_start_time_ticks: Option<u64>,
-) -> ResourceTarget {
-    fence_resource_target(
-        expected_start_time_ticks,
-        || crate::exec_backend::process_start_time_ticks(pid as i32).map_err(|_| ()),
-        || {
-            let raw = fs::read_to_string(format!("/proc/{pid}/cgroup"))
-                .map_err(|_| ResourceTargetUnavailableReason::CgroupV2Unavailable)?;
-            parse_unified_cgroup_path(&raw)
-                .map(|path| ResourceTarget::LinuxCgroupV2 { path })
-                .map_err(|()| ResourceTargetUnavailableReason::CgroupV2Unavailable)
-        },
-    )
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn observe_resource_target(
-    pid: u32,
-    expected_start_time_ticks: Option<u64>,
-) -> ResourceTarget {
-    fence_resource_target(
-        expected_start_time_ticks,
-        || crate::exec_backend::process_start_time_ticks(pid as i32).map_err(|_| ()),
-        || Ok(ResourceTarget::DarwinProcessTree { root_pid: pid }),
-    )
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn observe_resource_target(
-    _pid: u32,
-    _expected_start_time_ticks: Option<u64>,
-) -> ResourceTarget {
-    ResourceTarget::unavailable(ResourceTargetUnavailableReason::UnsupportedPlatform)
 }
 
 /// Closed runtime observation. Invalid state/generation/error products are unrepresentable.
@@ -1446,92 +1343,9 @@ mod tests {
     }
 
     #[test]
-    fn unified_cgroup_parser_accepts_one_exact_v2_path_and_rejects_ambiguous_or_unsafe_input() {
-        assert_eq!(
-            parse_unified_cgroup_path("9:cpu,cpuacct:/legacy\n0::/user.slice/st2:worker scope\n"),
-            Ok("/user.slice/st2:worker scope".into())
-        );
-        assert_eq!(parse_unified_cgroup_path("0::/\n"), Ok("/".into()));
-
-        for malformed in [
-            "",
-            "9:cpu:/legacy\n",
-            "0:memory:/not-unified\n",
-            "0::relative\n",
-            "0::/a/../b\n",
-            "0::/a//b\n",
-            "0::/a/\n",
-            "0::/first\n0::/second\n",
-            "0::/ok\r\n",
-            "0::/ok\n\n0::/also\n",
-        ] {
-            assert_eq!(
-                parse_unified_cgroup_path(malformed),
-                Err(()),
-                "{malformed:?} was admitted"
-            );
-        }
-    }
-
-    #[test]
-    fn process_fence_accepts_only_the_same_live_generation() {
-        let expected = ResourceTarget::LinuxCgroupV2 {
-            path: "/st2/task".into(),
-        };
-        let mut stable = [Ok(41), Ok(41)].into_iter();
-        assert_eq!(
-            fence_resource_target(Some(41), || stable.next().unwrap(), || Ok(expected.clone())),
-            expected
-        );
-
-        let mut target_read = false;
-        assert_eq!(
-            fence_resource_target(
-                Some(41),
-                || Ok(42),
-                || {
-                    target_read = true;
-                    Ok(ResourceTarget::LinuxCgroupV2 {
-                        path: "/already-recycled".into(),
-                    })
-                }
-            ),
-            ResourceTarget::unavailable(ResourceTargetUnavailableReason::GenerationChanged)
-        );
-        assert!(!target_read, "a mismatched generation read the target");
-
-        let mut recycled = [Ok(41), Ok(42)].into_iter();
-        assert_eq!(
-            fence_resource_target(
-                Some(41),
-                || recycled.next().unwrap(),
-                || Ok(ResourceTarget::LinuxCgroupV2 {
-                    path: "/wrong-generation".into(),
-                })
-            ),
-            ResourceTarget::unavailable(ResourceTargetUnavailableReason::GenerationChanged)
-        );
-
-        let mut exited = [Ok(41), Err(())].into_iter();
-        assert_eq!(
-            fence_resource_target(
-                Some(41),
-                || exited.next().unwrap(),
-                || Ok(ResourceTarget::LinuxCgroupV2 {
-                    path: "/exited".into(),
-                })
-            ),
-            ResourceTarget::unavailable(ResourceTargetUnavailableReason::ProcessUnavailable)
-        );
-    }
-
-    #[test]
     fn degraded_linux_and_darwin_targets_have_strict_tagged_wire_shapes() {
-        let mut stable = [Ok(7), Ok(7)].into_iter();
-        let degraded = fence_resource_target(
-            Some(7),
-            || stable.next().unwrap(),
-            || Err(ResourceTargetUnavailableReason::CgroupV2Unavailable),
+        let degraded = ResourceTarget::unavailable(
+            ResourceTargetUnavailableReason::CgroupV2Unavailable,
         );
         assert_eq!(
             serde_json::to_value(degraded).unwrap(),
@@ -1547,21 +1361,6 @@ mod tests {
                 "rootPid": 73
             })
         );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn current_process_resource_target_is_associated_with_its_proven_generation() {
-        let pid = std::process::id();
-        let start_time_ticks = crate::exec_backend::process_start_time_ticks(pid as i32).unwrap();
-        let target = observe_resource_target(pid, Some(start_time_ticks));
-        #[cfg(target_os = "linux")]
-        assert!(matches!(
-            target,
-            ResourceTarget::LinuxCgroupV2 { ref path } if path.starts_with('/')
-        ));
-        #[cfg(target_os = "macos")]
-        assert_eq!(target, ResourceTarget::DarwinProcessTree { root_pid: pid });
     }
 
     #[test]

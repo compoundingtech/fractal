@@ -120,6 +120,16 @@ claim kind for `/v1/claims`), replication receives, the reconciler's own timers 
 Every member runs a reconcile pass for each change in the fleet, so this table names the writes
 that keep an idle daemon busy. Wakes that arrive during a pass share the next one.
 
+The fault snapshot that delivers faults to their owners keeps each operational failure's answer
+and the keys its reading noted (its source, its targets, its run and the runs above it, their
+steps and declarations). A snapshot reads a failure again only when the change feed names one of
+those keys, when its time comes, or when its answer rests on a read the feed does not carry (a
+when-idle restart's release, a deferred stop's repairs, a provider login's person, a missing
+agent's eligibility). Every five minutes it reads every failure again and compares: a different
+answer is counted under `incremental_corrections` as `fault-snapshot` and means a read is missing
+its key. After a day with no correction the full reading comes every half hour, and any correction
+brings it back to every five minutes. The cache is in memory, so a daemon start reads everything.
+
 Native mailbox streams report their store work as `task mailbox-change-check` and
 `task mailbox-snapshot`, including CPU time. These tasks continue after the subscription request
 upgrades to a WebSocket, so their cost appears separately from that initial request. They count

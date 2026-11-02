@@ -1,11 +1,10 @@
-# Runs three retained st2 controls and four current-runtime scope controls in a VM with a real
+# Runs the four current-runtime scope controls in a VM with a real
 # systemd user manager for a lingering user, as on a fleet host. The isolation-vm CI job builds
 # this test's driver and runs it outside the Nix sandbox with its prebuilt nextest archive:
 #
-#   ST_ISOLATION_ARCHIVE    workspace archive containing the retained st2 controls and fractal-runtime tests
-#   ST_ISOLATION_WORKSPACE  the checkout the archive was built in; the test binary's compiled-in
-#                           st2 path lies below it, so the archive is extracted at the same path.
-#                           nextest also requires each selected package's working directory.
+#   ST_ISOLATION_ARCHIVE    workspace archive containing the fractal-runtime tests
+#   ST_ISOLATION_WORKSPACE  the checkout the archive was built in; nextest requires each
+#                           selected package's original working directory.
 #   ST_ISOLATION_TIMINGS    JSON file that receives the boot and test durations
 #
 # The VM compiles nothing. KVM is required; there is no emulation fallback.
@@ -14,24 +13,6 @@ let
   user = "tester";
   uid = 1000;
   controls = [
-    {
-      package = "fractal-legacy-runner";
-      binary = "integration";
-      kind = "test";
-      name = "transport_isolation::exec_task_survives_transport_cgroup_cascade";
-    }
-    {
-      package = "fractal-legacy-runner";
-      binary = "integration";
-      kind = "test";
-      name = "transport_isolation::pty_task_survives_transport_cgroup_cascade";
-    }
-    {
-      package = "fractal-legacy-runner";
-      binary = "integration";
-      kind = "test";
-      name = "nomad_survival::managed_agent_color_contract_crosses_systemd_scope";
-    }
     {
       package = "fractal-runtime";
       binary = "scope_cascade";
@@ -143,7 +124,7 @@ let
   '';
 in
 pkgs.testers.runNixOSTest {
-  name = "st2-transport-isolation";
+  name = "fractal-transport-isolation";
   # QEMU fails instead of falling back to emulation without usable KVM.
   qemu.forceAccel = true;
   nodes.machine = {
@@ -185,14 +166,14 @@ pkgs.testers.runNixOSTest {
 
     machine.copy_from_host(archive, "/tmp/isolation.tar.zst")
     # Archives carry built binaries, not package source directories. Provision the manifests
-    # and working directories for the selected root fractal-legacy-runner and crates/fractal-runtime packages.
+    # and working directories for the selected crates/fractal-runtime package.
     for manifest in ("Cargo.toml", "crates/fractal-runtime/Cargo.toml"):
         path = os.path.join(workspace, manifest)
         directory = shlex.quote(os.path.dirname(path))
         machine.succeed(f"mkdir -p {directory} && chown ${user} {directory}")
         machine.copy_from_host(path, path)
     # A transient service of the user's own manager: the tests start their scopes inside the
-    # user's delegated cgroup subtree, as st2 does under a fleet seat.
+    # user's delegated cgroup subtree, as a Fractal runtime does under a fleet seat.
     started = time.monotonic()
     output = machine.succeed(
         "su ${user} -s /bin/sh -c '"
@@ -202,7 +183,7 @@ pkgs.testers.runNixOSTest {
     )
     test_seconds = time.monotonic() - started
     print(output)
-    assert re.search(r"\b7 tests run: 7 passed\b", output), "all seven explicitly selected systemd-scope cases must run and pass"
+    assert re.search(r"\b4 tests run: 4 passed\b", output), "all four explicitly selected systemd-scope cases must run and pass"
 
     # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     with open((os.environ["FRACTAL_ISOLATION_TIMINGS"] if "FRACTAL_ISOLATION_TIMINGS" in os.environ else os.environ["ST_ISOLATION_TIMINGS"]), "w") as timings:
