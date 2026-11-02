@@ -89,6 +89,22 @@ class StTestReport(unittest.TestCase):
         self.assertEqual((empty['count'], empty['p50_s'], empty['p90_s'], empty['max_s'], empty['within_slo'], empty['breach']),
                          (0, None, None, None, None, False))
 
+    def test_candidate_measurements_are_separate_from_every_slo_figure(self):
+        head = 'a' * 40
+        candidate = dict(record(5000, host='box-candidate'), candidate=head)
+        failed_candidate = dict(candidate, exit=1, full=False, warm=False)
+        result = self.result(record(600), candidate, failed_candidate)
+        self.assertEqual((result['count'], result['p90_s'], result['max_s'], result['breach']), (1, 600, 600, False))
+        self.assertEqual(result['excluded']['candidate'], 2)
+        self.assertEqual(set(result['by_host']), {'box-a'})
+        self.assertEqual(result['slowest'][0]['mean_s'], 600)
+        self.assertEqual([row['head'] for row in result['candidates']], [head, head])
+        self.assertEqual([row['exit'] for row in result['candidates']], [0, 1])
+        code, out, err = self.run_report(str(self.write([record(600), candidate])), '--markdown')
+        self.assertEqual(code, 0, err)
+        self.assertIn('Candidate measurements (excluded from SLO figures):', out)
+        self.assertIn(f'{head}: 5000s, exit 0', out)
+
     def test_by_host_and_the_slowest_use_the_stages_when_a_run_has_them(self):
         stage = lambda name, seconds: {'name': name, 'start': 's', 'end': 'e', 'seconds': seconds, 'exit': 0, 'queue_waits': 0, 'queue_s': 0}
         rows = [{'name': 'linux-gate', 'result': 'passed', 'seconds': 500}, {'name': 'typescript-client', 'result': 'passed', 'seconds': 200}]

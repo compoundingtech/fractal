@@ -104,6 +104,21 @@ class CiLocalWeb(unittest.TestCase):
         self.assertEqual(env['KIT_PLAY_WORKERS'], str(cores()))  # one heavy slot when the host names none
         self.assertNotIn('BUILD_ADMISSION_CONFIG', env)
 
+    def test_nested_kit_admission_does_not_wait_under_the_lanes_held_stage(self):
+        admission = self.wrappers / 'build-admission'
+        admission.write_text('#!/bin/sh\necho nested-admission-would-wait >&2\nexit 75\n')
+        admission.chmod(0o755)
+        # Run the production nested invocation after ci-local-web has scrubbed the environment and changed HOME.
+        source = (ROOT / 'scripts/ci-fractal-web').read_text()
+        start = source.index('kit_plays() (')
+        kit_plays = source[start:source.index('\n)\n', start) + 3]
+        with (self.work / 'scripts/ci-fractal-web').open('a') as script:
+            script.write(kit_plays + '\nnode() { :; }\nkit_receipt_dir=$KIT_RECEIPT_DIRECTORY\nkit_plays\n')
+        done, calls = self.run_web(CARGO_SLOT_HELD='stage:123', BUILD_ADMISSION_HELD='1')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(calls[-1]['env']['KIT_PLAY_ADMISSION_BIN'], str(admission))
+        self.assertNotIn('nested-admission-would-wait', done.stderr)
+
     def test_the_host_watchman_service_is_named_by_its_socket(self):
         user = subprocess.run(['id', '-un'], capture_output=True, text=True, check=True).stdout.strip()
         state = self.home / '.local/state/watchman' / f'{user}-state'

@@ -815,12 +815,12 @@ def seat_lane(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
     return lane, None
 
 
-def governed(argv, name):
+def governed(argv, name, output=None):
     """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
     everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
     memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
 
-    No heavy-slot ticket is held for the whole check (`cargo --stage-slot`): the checks' tests run under the test guardian
+    No heavy-slot ticket is held for a whole Rust check (`cargo --stage-slot`): those tests run under the test guardian
     (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
     stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
@@ -843,20 +843,33 @@ def governed(argv, name):
         return argv
     cap = own_cap()
     if cap:
-        print(f'fractal-test: {name} runs in the caller\'s own cap ({cap})', file=sys.stderr)
+        print(f'fractal-test: {name} runs in the caller\'s own cap ({cap})', file=output or sys.stderr)
         return [shutil.which('env') or '/usr/bin/env', 'BUILDS_SLICE_ACTIVE=1'] + argv
     runtime = os.environ.get('XDG_RUNTIME_DIR')
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
     if scope and runtime and Path(runtime, 'bus').exists():
         lane, why = seat_lane()
         if lane:
-            print(f'fractal-test: {name} runs in its seat\'s lane ({lane})', file=sys.stderr)
+            print(f'fractal-test: {name} runs in its seat\'s lane ({lane})', file=output or sys.stderr)
             return [scope, '--user', '--scope', '--quiet', '--collect', f'--slice={lane}', '--property=OOMPolicy=continue', '--',
                     shutil.which('env') or '/usr/bin/env', 'BUILDS_SLICE_ACTIVE=1', f'FRACTAL_LANE_SLICE={lane}'] + argv
         if why:
-            print(f'fractal-test: {name} runs in builds.slice, not its seat\'s lane: {why}', file=sys.stderr)
+            print(f'fractal-test: {name} runs in builds.slice, not its seat\'s lane: {why}', file=output or sys.stderr)
         return [scope, '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--'] + argv
-    print(f'fractal-test: {name} runs without the host build cap (no user systemd bus for a builds.slice scope)', file=sys.stderr)
+    print(f'fractal-test: {name} runs without the host build cap (no user systemd bus for a builds.slice scope)', file=output or sys.stderr)
+    return argv
+
+
+def web_slot(argv):
+    """Hold one counted host heavy slot around the whole web check, including its dev shell and signing wrapper.
+
+    Only web uses a stage slot: Rust's detached test guardian must never inherit one (governed). The web lane removes the
+    account wrappers from PATH and starts no cargo under a guardian. BUILD_ADMISSION_HELD prevents a second admission for its
+    dev shell or kit plays. Hosts without the cargo admission shim have no counted pool to share.
+    """
+    shim = Path.home() / '.local/bin/cargo'
+    if os.access(shim, os.X_OK):
+        return [str(shim), '--stage-slot', WEB, '--', shutil.which('env') or '/usr/bin/env', 'BUILD_ADMISSION_HELD=1', *argv]
     return argv
 
 
@@ -2464,12 +2477,20 @@ class Limit:
         return time.monotonic() - self.started if self.begins_at else self.pre_start
 
 
-def wait_limited(process, limit):
-    """`process`'s exit code, or 124 after killing it (the process itself, as subprocess.run's timeout does) once `limit` has run out."""
+def kill_limited(process, group=False):
+    if group:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    else:
+        process.kill()
+
+
+def wait_limited(process, limit, group=False):
+    """The exit code, or 124 after killing the process (with its group when requested) once `limit` has run out."""
     while True:
         left = limit.remaining()
         if left <= 0:
-            process.kill()
+            kill_limited(process, group)
             process.wait()
             return 124
         try:
@@ -2478,13 +2499,15 @@ def wait_limited(process, limit):
             continue
 
 
-def run_limited(argv, limit, **options):
-    """subprocess.run(argv, **options).returncode under `limit` (a Limit): 124 when it ran out. Any error here kills the process."""
+def run_limited(argv, limit, kill_group=False, **options):
+    """subprocess.run's returncode under `limit`: 124 when it ran out. A web stage owns its slot until its whole process group ends."""
+    if kill_group:
+        options['start_new_session'] = True
     with subprocess.Popen(argv, **options) as process:
         try:
-            return wait_limited(process, limit)
+            return wait_limited(process, limit, group=kill_group)
         except BaseException:
-            process.kill()
+            kill_limited(process, kill_group)
             raise
 
 
@@ -2650,6 +2673,8 @@ def main(argv):
 
 def run_main(argv, cleanup):
     main_started = time.monotonic()
+    # Measurement-only callers may execute a candidate with REEXEC set. Such a run must never enter the accepted runner's SLOs.
+    candidate = bool(os.environ.get(REEXEC) and not Path(__file__).parent.name.startswith('st-test-base-'))
     CLAIMED.clear()
     POOL_SETTINGS.clear()
     POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
@@ -2924,8 +2949,10 @@ def run_main(argv, cleanup):
                         pre_start = pre_start_fifo(Path(scratch) / f'pre-start-{name}.txt')
                         wrap += ['--input-file', f'pre_start_s={pre_start}']
                     command = wrap + ['--'] + LOCAL[name]
-                    print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
-                    command = governed(command, name) if name in BUILDS else command
+                    print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=output or sys.stderr, flush=True)
+                    if name == WEB:
+                        command = web_slot(command)
+                    command = governed(command, name, output=output) if name in BUILDS else command
                     ran.add(name)
                     if streams:
                         # scripts/ci-local ends with a table of its stages' times: its output still reaches this terminal as it comes, and is kept
@@ -2935,7 +2962,7 @@ def run_main(argv, cleanup):
                         stages[:] = ci_local_stages(log)
                         blocked[name] = (round(limit.waiting()), round(blocked_seconds(limit.queue_log, stages)))
                     else:
-                        code = run_limited(command, limit, cwd=directory, env=environment, stdout=output,
+                        code = run_limited(command, limit, kill_group=name == WEB, cwd=directory, env=environment, stdout=output,
                                            stderr=subprocess.STDOUT if output else None)
                     seconds = round(time.monotonic() - started)
                     ok = code == 0
@@ -2947,32 +2974,40 @@ def run_main(argv, cleanup):
                             CLAIMED.extend(record_refs(directory, record))
                     return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
 
-                # The light checks run alongside the ones that build, one after another in a lane of their own, as CI runs them on runners of
-                # their own: they wait on network, Nix and Node rather than the Rust build, and run after it they added minutes to every
-                # run. Their output is kept and printed in order once the build lane is done, so the two never interleave. ST_EVIDENCE_SERIAL=1
-                # runs every check one after another, as before.
-                builds = [name for name in checks if name in BUILDS]
+                # Three lanes: Rust builds and their report readers stay ordered, web holds its own heavy slot, and light checks run
+                # one after another. Print each background check's output whole after the build lane. SERIAL keeps the listed order.
+                builds = [name for name in checks if name in BUILDS and name != WEB]
+                web = [name for name in checks if name == WEB]
                 light = [name for name in checks if name not in BUILDS]
                 results = {}
-                parallel = bool(builds and light and os.environ.get('ST_EVIDENCE_SERIAL') != '1')
+                execution_lanes = [lane for lane in (builds, web, light) if lane]
+                parallel = len(execution_lanes) > 1 and os.environ.get('ST_EVIDENCE_SERIAL') != '1'
                 if parallel:
-                    logs = {name: Path(scratch) / f'{name}.log' for name in light}
+                    background = [name for lane in (web, light) for name in lane]
+                    logs = {name: Path(scratch) / f'{name}.log' for name in background}
 
-                    def light_lane():
-                        for name in light:
-                            with open(logs[name], 'w') as output:
-                                try:
+                    def buffered_lane(names):
+                        for name in names:
+                            try:
+                                with open(logs[name], 'w') as output:
                                     results[name] = run_one(name, output)
-                                except Exception as error:  # a lane that dies is a failed check, never a silent pass
-                                    results[name] = ((name, f'FAILED ({type(error).__name__})', 0, str(error)[:120]), True, False)
+                            except Exception as error:  # a lane that dies is a failed check, never a silent pass
+                                results[name] = ((name, f'FAILED ({type(error).__name__})', 0, str(error)[:120]), True, False)
 
-                    lane = threading.Thread(target=light_lane, name='st-test-light')
-                    print(f'fractal-test: {", ".join(light)} run alongside {", ".join(builds)}; their output follows when it is done', flush=True)
-                    lane.start()
-                    for name in builds:
-                        results[name] = run_one(name)
-                    lane.join()
-                    for name in light:
+                    threads = [threading.Thread(target=buffered_lane, args=(names,), name=f'st-test-{label}')
+                               for label, names in (('web', web), ('light', light)) if names]
+                    print(f'fractal-test: {"; ".join(", ".join(lane) for lane in execution_lanes)} run alongside one another; '
+                          'background output follows the build lane', flush=True)
+                    for lane in threads:
+                        lane.start()
+                    try:
+                        for name in builds:
+                            results[name] = run_one(name)
+                    finally:
+                        for lane in threads:
+                            lane.join()  # never release the clean tree while a background lane still uses it
+                    for name in background:
+                        results.setdefault(name, ((name, 'FAILED (lane exited)', 0, 'lane exited without a result'), True, False))
                         print(f'\n----- fractal-test: {name} output -----', flush=True)
                         sys.stdout.write(logs[name].read_text(errors='replace') if logs[name].exists() else '(no output)\n')
                         sys.stdout.flush()
@@ -3019,7 +3054,7 @@ def run_main(argv, cleanup):
                             'host': socket.gethostname().split('.')[0], 'tree': tree, 'commit': commit, 'base': base_commit, 'behind': lag,
                             'full': not args.check and not args.crate and not round_number, 'top_up': round_number, 'checks': checks, 'pool_tree': n, 'warm': warm,
                             'parallel': parallel, 'rows': [{'name': name, 'result': result, 'seconds': seconds} for name, result, seconds, _ in rows],
-                            'exit': code, 'stages': stages, **held})
+                            'exit': code, 'stages': stages, **held, **({'candidate': commit} if candidate else {})})
                 if code or not args.push or args.out or TARGET or not (merged or whole):
                     # Nothing more to push: a failure, no --push, an export or --seed, or a narrowed run that merged nothing pushes only
                     # its notes, as before.

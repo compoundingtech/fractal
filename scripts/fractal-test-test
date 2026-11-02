@@ -1285,6 +1285,134 @@ class StTest(unittest.TestCase):
             self.assertGreater(float(times['light-start']), float(times['build-end']))  # one after another, in the listed order
             self.assertNotIn('----- fractal-test:', out)
 
+    def web_lanes(self, run, serial=False):
+        """Exercise the real orchestration and ledger; replace only the measured subprocesses with controlled checks."""
+        self.commit('b.txt', 'two')
+        shim = self.home / '.local/bin/cargo'
+        shim.parent.mkdir(parents=True)
+        shim.write_text('#!/bin/sh\nexit 99\n')  # captured by run below, never a real host slot
+        shim.chmod(0o755)
+        with mock.patch.dict(st_test.LOCAL, {'demo': ['true'], st_test.WEB: ['true'], 'light': ['true']}, clear=True), \
+                mock.patch.object(st_test, 'BUILDS', frozenset({'demo', st_test.WEB})), \
+                mock.patch.object(st_test, 'run_limited', side_effect=run):
+            result = self.run_st_test(extra_env={'ST_EVIDENCE_SERIAL': '1' if serial else '0'})
+        record = json.loads((self.home / '.local/state/st-test/runs.jsonl').read_text().splitlines()[-1])
+        return result, record
+
+    def test_web_runs_concurrently_with_the_build_lane_and_light_checks(self):
+        build, web, light = threading.Event(), threading.Event(), threading.Event()
+        overlap = []
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name == 'demo':
+                build.set()
+                overlap.append(web.wait(5) and light.wait(5))
+            elif name == st_test.WEB:
+                overlap.append(build.wait(5))
+                web.set()
+            else:
+                light.set()
+            return 0
+
+        (code, out, err), record = self.web_lanes(run)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(overlap, [True, True])
+        self.assertTrue(record['parallel'])
+        self.assertEqual([row['name'] for row in record['rows']], ['setup', 'demo', st_test.WEB, 'light'])
+
+    def test_serial_web_keeps_check_order_and_still_holds_one_stage_slot(self):
+        commands = []
+
+        def run(argv, limit, **options):
+            commands.append((argv[argv.index('--check') + 1], argv, options.get('kill_group', False)))
+            return 0
+
+        (code, out, err), record = self.web_lanes(run, serial=True)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual([name for name, *_ in commands], ['demo', st_test.WEB, 'light'])
+        self.assertFalse(record['parallel'])
+        self.assertNotIn('----- fractal-test:', out)
+        web = commands[1][1]
+        self.assertEqual(web.count('--stage-slot'), 1)
+        self.assertIn('BUILD_ADMISSION_HELD=1', web)
+        self.assertNotIn('--stage-slot', commands[0][1])  # Rust's detached guardian must never inherit the web slot
+        self.assertEqual([group for _, _, group in commands], [False, True, False])
+
+    def test_a_crashed_web_lane_is_a_failed_check_in_the_summary_and_ledger(self):
+        def run(argv, limit, **options):
+            if argv[argv.index('--check') + 1] == st_test.WEB:
+                raise RuntimeError('web lane broke')
+            return 0
+
+        (code, out, err), record = self.web_lanes(run)
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'fractal-web +FAILED \(RuntimeError\).*web lane broke')
+        self.assertEqual(record['exit'], 1)
+        self.assertEqual(next(row['result'] for row in record['rows'] if row['name'] == st_test.WEB), 'FAILED (RuntimeError)')
+
+    def test_a_web_thread_that_exits_without_a_result_fails_the_check(self):
+        def run(argv, limit, **options):
+            if argv[argv.index('--check') + 1] == st_test.WEB:
+                raise SystemExit(7)
+            return 0
+
+        (code, out, err), record = self.web_lanes(run)
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'fractal-web +FAILED \(lane exited\)')
+        self.assertEqual(record['exit'], 1)
+
+    def test_the_web_wrapper_holds_one_counted_slot_until_the_check_exits_and_releases_on_failure(self):
+        shim = self.home / '.local/bin/cargo'
+        shim.parent.mkdir(parents=True)
+        shim.write_text('#!/usr/bin/env bash\nset -eu\n'
+                        'test "$1" = --stage-slot; test "$2" = fractal-web; test "$3" = --\n'
+                        'shift 3\nexec flock "$CI_WEB_SLOT_TEST_LOCK" "$@"\n')
+        shim.chmod(0o755)
+        lock = Path(self.tmp.name) / 'heavy0'
+        # A second heavy compile cannot start while the wrapped command runs. A failed check must still give the slot back.
+        check = ['sh', '-c', 'test "$BUILD_ADMISSION_HELD" = 1 || exit 8; '
+                 'if flock -n "$CI_WEB_SLOT_TEST_LOCK" true; then exit 9; fi; exit 7']
+        with mock.patch.dict(os.environ, HOME=str(self.home)):
+            command = st_test.web_slot(check)
+        ran = subprocess.run(command, env=dict(GIT_ENV, CI_WEB_SLOT_TEST_LOCK=str(lock)), capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 7, ran.stderr)
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
+
+    def test_a_timed_out_web_stage_stops_its_children_before_releasing_the_slot(self):
+        lock = Path(self.tmp.name) / 'heavy0'
+        marker = Path(self.tmp.name) / 'child-survived'
+        # A slot supervisor and a delayed child: killing just the supervisor would release the slot with work still running.
+        command = ['flock', str(lock), 'sh', '-c', f'(sleep 2; touch {shlex.quote(str(marker))}) & wait']
+        code = st_test.run_limited(command, st_test.Limit(0.2), kill_group=True, stdout=subprocess.DEVNULL)
+        self.assertEqual(code, 124)
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
+        time.sleep(2.2)
+        self.assertFalse(marker.exists(), 'the web child must stop when its slot supervisor times out')
+
+    def test_web_output_and_wrapper_diagnostics_follow_the_build_without_interleaving(self):
+        printed = threading.Event()
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name == st_test.WEB:
+                print('WEB-PAYLOAD', file=options.get('stdout') or sys.stdout, flush=True)
+                printed.set()
+            elif name == 'demo':
+                print('BUILD-BEGIN', flush=True)
+                printed.wait(5)
+                print('BUILD-END', flush=True)
+            return 0
+
+        (code, out, err), _ = self.web_lanes(run)
+        self.assertEqual(code, 0, out + err)
+        header = out.index('----- fractal-test: fractal-web output -----')
+        self.assertLess(out.index('BUILD-BEGIN'), out.index('BUILD-END'))
+        self.assertLess(out.index('BUILD-END'), header)
+        self.assertLess(header, out.index('WEB-PAYLOAD'))
+        self.assertLess(header, out.index('evidence-wrap argv:', header))
+        self.assertNotIn('--check fractal-web', err)
+
     def test_a_check_that_builds_uses_its_trees_kept_target_and_another_does_not(self):
         self.commit('b.txt', 'two')
         seen = Path(self.tmp.name) / 'seen'
@@ -2734,6 +2862,23 @@ class StTest(unittest.TestCase):
     def runs(self, path=None):
         path = path or self.home / '.local/state/st-test/runs.jsonl'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_candidate_measurements_name_the_head_but_a_real_base_copy_is_not_a_candidate(self):
+        self.commit('b.txt', 'two')
+        head = git(self.work, 'rev-parse', 'HEAD')
+        base = git(self.work, 'rev-parse', 'origin/main')
+        code, out, err = self.run_st_test('--out', str(Path(self.tmp.name) / 'exports'), extra_env={st_test.REEXEC: base})
+        self.assertEqual(code, 0, out + err)
+        candidate, = self.runs()
+        self.assertEqual(candidate['candidate'], head)
+        self.assertEqual(self.statements(), [])
+        base_copy = Path(self.tmp.name) / 'st-test-base-example/st-test'
+        base_copy.parent.mkdir()
+        shutil.copyfile(st_test.__file__, base_copy)
+        with mock.patch.object(st_test, '__file__', str(base_copy)):
+            code, out, err = self.run_st_test(extra_env={st_test.REEXEC: base})
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('candidate', self.runs()[-1])
 
     def test_every_run_appends_one_json_line_with_its_times_and_a_named_check_is_not_a_full_run(self):
         self.commit('b.txt', 'two')

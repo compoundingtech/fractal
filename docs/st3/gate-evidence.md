@@ -1967,6 +1967,18 @@ as to CI's aggregate note; its host and agent levels admit it for `pull_request`
 `scripts/ci-fractal-web-changes` whether any web input changed since HEAD's merge base with the base: when none did, CI does not run the
 lane, so `--status` reads `not relevant` (covered) and a run skips it, neither a failure nor a note.
 
+Locally, web runs in its own thread alongside the Rust build lane and the serial light-check lane. On a build host it holds one
+counted heavy cargo stage slot for its whole run, including the dev shell; the kit plays inherit that admission and take no second
+place. Rust checks keep their per-command admission because their detached test guardian cannot inherit a held stage slot. Web and
+light output is buffered and printed after the build lane, and a background lane that exits without a result fails its checks.
+On timeout the web process group is killed together with its slot supervisor.
+`ST_EVIDENCE_SERIAL=1` restores the listed check order, with web still holding its stage slot.
+
+An explicitly authorized candidate-runner measurement uses `--out` in a disposable directory, never `--push`; its exported packs are
+deleted after measurement. When `ST_TEST_REEXEC` is set outside a base copy's `st-test-base-*` directory, the ledger records the tested
+head as `candidate`. `scripts/fractal-test-report` lists those runs separately and excludes them from every SLO figure. Normal signing
+continues to execute the accepted base's runner.
+
 **Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
 is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory,
 `/dev/shm/cl.XXXXXX` when `/dev/shm` has 20 GiB free and `/var/tmp/cl.XXXXXX` on disk otherwise (`CI_LOCAL_TMP_ROOT` names another root;
