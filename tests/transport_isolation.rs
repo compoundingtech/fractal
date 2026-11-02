@@ -29,7 +29,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use st2::host_lock::process_alive;
+use fractal_legacy_runner::host_lock::process_alive;
 
 const HOST: &str = "isotest";
 // `exec sleep` so `sh -c` replaces itself with the workload (the recorded pid IS the task, not a

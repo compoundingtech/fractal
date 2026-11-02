@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { VisuallyHidden } from 'react-aria'
-import type { SubjectNote } from '@smalltalk/st3-client/schema'
+import type { SubjectNote } from '@fractal/client/schema'
 import { DateTime, Option } from 'effect'
 import { Button } from '../assistant-ui/composition/Controls'
 import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as text, typeVars as t } from '../assistant-ui/composition-tokens.stylex'

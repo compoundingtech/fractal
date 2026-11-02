@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button as AriaButton, Dialog, DialogTrigger, Heading, Input, Label, Menu, MenuItem, MenuTrigger, Modal, ModalOverlay, Popover, Switch, TextField } from 'react-aria-components'
-import type { SubjectNote } from '@smalltalk/st3-client/schema'
+import type { SubjectNote } from '@fractal/client/schema'
 import { NoteBadge, NoteComposer, shortcutContextBlocked } from './index'
 import { agentNote, diffNote, plannerNote, plannerTarget, publishedNote, target } from './notes-fixtures'
 import { NotesFrame, expectNoAudiencePresentation, notesFrameArgTypes, notesFrameArgs, notesStoryStyles as frame, type NotesFrameArgs } from './notes-story-frame'
@@ -156,12 +156,22 @@ function KeyboardPopoverStory({ scheme, width, negativeControl }: NotesFrameArgs
 }
 
 const meta = {
-  title: 'Fractal/Explore/Notes/Keyboard n popover', component: KeyboardPopoverStory, parameters: { layout: 'fullscreen' },
+  excludeStories: ['scenarioExemptions'],
+  title: 'Fractal/Explore/Notes/Keyboard n popover', component: KeyboardPopoverStory,
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Local editable fields, menus, dialogs and IME events pin the shortcut guard and per-target drafts; no scenario slice models subject notes.' }, layout: 'fullscreen' },
   args: notesFrameArgs,
   argTypes: notesFrameArgTypes('Drop the context guard: typing n into the filter opens the popover and the guard assertion must fail.'),
 } satisfies Meta<typeof KeyboardPopoverStory>
 export default meta
 type Story = StoryObj<typeof meta>
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'Dark1440:contract-fixture',
+  'Light1440:contract-fixture',
+  'Light440:contract-fixture',
+]
 
 const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const canvas = within(canvasElement)

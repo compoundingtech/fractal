@@ -1,6 +1,6 @@
 # Token-free delivery probes
 
-`scripts/st3-delivery-probe` runs as a dedicated durable seat on each fleet node.
+`scripts/fractal-delivery-probe` runs as a dedicated durable seat on each fleet node.
 It sends a real message from its local daemon to every other configured node every
 three minutes. The recipient consumes the envelope from the installed binary's
 actual `omp-channel` driver and records `delivered`, `read`, and `closed` claims.
@@ -25,7 +25,7 @@ successful native probe; recovery still requires a fresh recipient read.
 
 Sender state, received envelopes awaiting acknowledgement, and send idempotency
 keys are written and synced before the corresponding network mutations. The seat
-restarts through st, and the consumer reconnects a lost native channel itself.
+restarts through Fractal, and the consumer reconnects a lost native channel itself.
 Receipt replay accepts a message that already advanced only after verifying its
 graph state; a closed message without the recipient's read claim cannot pass.
 The state directory must remain stable across upgrades. A process lock prevents
@@ -138,7 +138,7 @@ matrix exercises the actual omp extension without model calls.
 
 ## Proof
 
-`scripts/st3-delivery-probe-test --binary /path/to/st3` tests a lost send response,
+`scripts/fractal-delivery-probe-test --binary /path/to/st3` tests a lost send response,
 stable idempotency across retry, crash replay of pending receipts, a delivered
 claim without a read, a replay after a competing native acknowledgement, a closed
 message without a read, incorrect read actors, person asks and operations messages,

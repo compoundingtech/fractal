@@ -2,7 +2,7 @@
 //! it hit the spec. Each test builds a minimal catalog exercising one failure mode and asserts the
 //! exact issue code + severity; a clean catalog (and our shipped `examples/`) must validate spotless.
 
-use st2::validate::{Report, Severity, validate, validate_for_host};
+use fractal_legacy_runner::validate::{Report, Severity, validate, validate_for_host};
 
 /// Write a set of `(relative-path, body)` files into a fresh temp catalog.
 fn catalog(files: &[(&str, &str)]) -> tempfile::TempDir {
@@ -492,7 +492,7 @@ fn fleet_validation_compiles_remote_driver_launches() {
   delivery-readiness "credential" account-id="tokengate/shared"
 }"#,
     )]);
-    let found = st2::discover(c.path());
+    let found = fractal_legacy_runner::discover(c.path());
     assert!(!found.specs[0].is_runnable());
 
     for report in [validate(c.path()), validate_for_host(c.path(), "droppy")] {

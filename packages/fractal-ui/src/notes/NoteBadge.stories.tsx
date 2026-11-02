@@ -28,12 +28,22 @@ function NoteBadgeStory({ scheme, width, negativeControl }: NotesFrameArgs) {
 }
 
 const meta = {
-  title: 'Fractal/Plugins/Notes/Note badge', component: NoteBadgeStory, parameters: { layout: 'fullscreen' },
+  excludeStories: ['scenarioExemptions'],
+  title: 'Fractal/Plugins/Notes/Note badge', component: NoteBadgeStory,
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'No scenario slice models subject notes; synthetic notes decoded through the generated SubjectNote schema pin newest-first preview, counts and the no-audience contract.' }, layout: 'fullscreen' },
   args: notesFrameArgs,
   argTypes: notesFrameArgTypes('Drop the newest note from the five-note case and the stored-agent note from the mixed case: the newest-preview and count assertions must fail.'),
 } satisfies Meta<typeof NoteBadgeStory>
 export default meta
 type Story = StoryObj<typeof meta>
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'Dark1440:contract-fixture',
+  'Light1440:contract-fixture',
+  'Light440:contract-fixture',
+]
 
 const badgeIn = (canvasElement: HTMLElement, id: string) => within(canvasElement.querySelector<HTMLElement>(`[data-badge-case="${id}"]`)!).getByTestId('note-badge')
 

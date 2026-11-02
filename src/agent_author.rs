@@ -30,7 +30,7 @@ mod markers;
 mod resource;
 mod stream;
 
-// Re-exported at each item's own visibility so every existing path — `st2::agent_author::*` for
+// Re-exported at each item's own visibility so every existing path — `fractal_legacy_runner::agent_author::*` for
 // the binary and the integration tests, `crate::agent_author::*` for `agent_publish`, and the
 // inline test module's `use super::*` — resolves unchanged.
 pub use declared_field::*;

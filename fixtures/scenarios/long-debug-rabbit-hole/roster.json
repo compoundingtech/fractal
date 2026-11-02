@@ -82,6 +82,7 @@
         "workspace": "~/src/atlas/.worktrees/builder"
       }
     ],
+    "devices": [],
     "machines": [
       {
         "capacity": {
@@ -136,14 +137,15 @@
         "state": "running",
         "updated_at": "2030-01-01T11:20:00.000Z"
       }
-    ]
+    ],
+    "sessions": []
   },
   "timeline": [
     {
       "_tag": "changes",
       "at_ms": 6000,
       "removes": [],
-      "store": 4,
+      "store": 12,
       "upserts": [
         {
           "active_work_count": 1,
@@ -216,7 +218,7 @@
       "_tag": "changes",
       "at_ms": 22000,
       "removes": [],
-      "store": 8,
+      "store": 14,
       "upserts": [
         {
           "active_work_count": 0,

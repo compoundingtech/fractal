@@ -1,5 +1,5 @@
-import { St3Client } from '@smalltalk/st3-client'
-import type { TerminalScreen } from '@smalltalk/st3-client/schema'
+import { FractalClient } from '@fractal/client'
+import type { TerminalScreen } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -46,7 +46,7 @@ const harness = ({
     return reply()
   }
   const factory = gatewayTerminalInput({
-    connect: (fetchImpl) => new St3Client({ baseUrl: 'https://gateway.invalid', fetchImpl, ...(credential === undefined ? {} : { credential }) }),
+    connect: (fetchImpl) => new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl, ...(credential === undefined ? {} : { credential }) }),
     transport,
     snapshot: snapshot ?? (async () => `snapshot/fresh/${(snapshots += 1)}`),
     liveScreen: (address) => (address === subject ? screen : undefined),

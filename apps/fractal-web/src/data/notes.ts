@@ -1,4 +1,4 @@
-import type { SubjectNote } from '@smalltalk/st3-client/schema'
+import type { SubjectNote } from '@fractal/client/schema'
 import { DateTime } from 'effect'
 
 /** Index the independently followed notes once per publication, newest first. */

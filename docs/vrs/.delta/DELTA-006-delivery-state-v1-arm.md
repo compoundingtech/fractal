@@ -5,7 +5,7 @@ Status: open
 ## Divergence
 
 The canonical delivery ledger owns exactly one schema, `st.delivery-ledger.v1`,
-and `crates/st-drivers/src/delivery_ledger.rs` is written as though only that format had ever
+and `crates/fractal-drivers/src/delivery_ledger.rs` is written as though only that format had ever
 shipped. It nevertheless carries one statement that knows otherwise: the
 `ErrorKind::NotFound` arm of `Ledger::open` calls
 `crate::migrations::delivery_state::recover`, which reads the single-binding
@@ -33,18 +33,18 @@ Requirements therefore need no change. What needs recording is that a piece of
 the implementation is deliberately temporary, with the observation that ends
 it.
 
-`crates/st-drivers/src/migrations/delivery_state/` owns the whole boundary:
+`crates/fractal-drivers/src/migrations/delivery_state/` owns the whole boundary:
 `mod.rs` (entry point, ownership filter, legacy filename, recovery and
 resolution-signal logic), `codex_v1.rs`, and `opencode_v1.rs` (one retired wire
 struct each, plus the meaning of its labels — Codex's `accepted` was a typed
 in-turn receipt and grades to `consumed`, OpenCode's was a storage read-back and
 grades to `persisted`; see
-`crates/st-drivers/src/migrations/delivery_state/codex_v1.rs:72` and
+`crates/fractal-drivers/src/migrations/delivery_state/codex_v1.rs:72` and
 `opencode_v1.rs:72`).
 
 Canonical code gains one version-free field, `Attestation{Observed, Asserted}`
 on `Entry`: whether this build graded the phase or another authority asserted
-it (`crates/st-drivers/src/delivery_ledger.rs:160-162`). It changes no
+it (`crates/fractal-drivers/src/delivery_ledger.rs:160-162`). It changes no
 `Retention`, `RetryDecision`, or transport decision; the phase is what keeps
 carried-forward attempts from being re-sent. The field makes the unobserved
 phase countable for clause 2 of the Resolution Signal, so it is trigger
@@ -55,10 +55,10 @@ instrumentation, not a permanent concept.
 **The signal requires two zero counts per admitted host for seven consecutive
 days:** (1) no pre-ledger `delivery-state.json` in the Codex/OpenCode state dirs,
 and (2) no ledger entry carrying an `Asserted` phase. The counts are emitted by
-`resolution_signal` (`crates/st-drivers/src/migrations/delivery_state/mod.rs:107-143`),
+`resolution_signal` (`crates/fractal-drivers/src/migrations/delivery_state/mod.rs:107-143`),
 which checks the legacy path and calls `delivery_ledger::asserted_entries`;
 the latter reads and parses ledgers and counts asserted entries without
-consuming them (`crates/st-drivers/src/delivery_ledger.rs:670-692`). Its
+consuming them (`crates/fractal-drivers/src/delivery_ledger.rs:670-692`). Its
 behavior is pinned for both clauses and read-only repeat measurement in
 `mod.rs:288-334`. `st2 doctor` reports the per-seat advisory only while either
 count is nonzero (`src/main.rs:1140-1162`).
@@ -70,12 +70,12 @@ required below. Code inspection proves
 the local no-old-record case is a no-op (`mod.rs:73-105`, test at
 `mod.rs:269-285`), but does not establish absence of old records fleet-wide.
 `Ledger::open` still calls `recover` on `NotFound`
-(`crates/st-drivers/src/delivery_ledger.rs:265-284`), so deleting the arm now
+(`crates/fractal-drivers/src/delivery_ledger.rs:265-284`), so deleting the arm now
 could discard evidence of an in-flight attempt and permit a duplicate delivery.
 Do not delete the migration code until both signal clauses and the rollback
 decision prerequisite are evidenced.
 
-When ready, deletion is `git rm -r crates/st-drivers/src/migrations`, replacing
+When ready, deletion is `git rm -r crates/fractal-drivers/src/migrations`, replacing
 the seam arm with `Ok(())`, and removing the now-unneeded `Entry.attestation`
 and `Attestation`, `delivery_ledger::asserted_entries`,
 `migrations::delivery_state::resolution_signal`, and doctor row. The recorded
@@ -96,7 +96,7 @@ when both are zero. The trigger resolves when that line is absent from
 `migrations::delivery_state::tests::the_resolution_signal_counts_each_clause_without_consuming_it`;
 measuring is read-only, so a diagnostic cannot make the record it counts
 disappear. Implementation evidence: `src/main.rs:1140-1162` and
-`crates/st-drivers/src/migrations/delivery_state/mod.rs:107-143`.
+`crates/fractal-drivers/src/migrations/delivery_state/mod.rs:107-143`.
 
 The migration also runs inside st through the shared Codex driver. The st daemon
 does not call `resolution_signal` or print this advisory: silence from `st doctor`

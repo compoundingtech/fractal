@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "CI's evidence gate fetches the Cargo.toml blobs a per-crate check needs without negotiation, so a pull request behind main gets them: before, GitHub left out every manifest main had changed since the branch point, the fetch failed, and rust-tests read 'unavailable' (reason=error) instead of judging the notes.",
+  "replay": {"status": "none", "detail": "No record, signature or verifier rule changes."},
+  "schema": {"status": "none", "detail": "No schema or persistent data changes."},
+  "rules": {"status": "none", "detail": "The same blobs are fetched; only the negotiation that dropped some of them is skipped."},
+  "compatibility": {"status": "none", "detail": "No protocol or API change."},
+  "downtime": {"status": "none", "detail": "CI script only."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the change: rust-tests on a branch behind main reads unavailable again and runs."}
+}

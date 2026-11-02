@@ -1,11 +1,12 @@
 # Lanes
 
-A lane is one ordered line of entries that a mission run works through front first. The Small
-Talk merge train is a lane: each entry is a pull request, and the train updates, tests, and merges
-the front one at a time.
+A lane is one ordered line of entries that a mission run works through front first.
+A custom merge driver can use a lane of pull requests and work on its front entry.
+This repository uses GitHub's [merge queue](../ci.md#merge-queue); its former mission
+merge train is retired.
 
 This document explains the model, the declaration, the commands, how the order is stored and
-replicated, and what st leaves to the run that owns the lane.
+replicated, and what Fractal leaves to the run that owns the lane.
 
 ## Model
 
@@ -25,7 +26,7 @@ replicated, and what st leaves to the run that owns the lane.
 - A lane can name one `approver`. Only that person can approve an entry. The run decides which
   entries need an approval and holds them until one is recorded.
 
-st stores and replays the lane and shows it. It does not decide when an entry is ready or what
+Fractal stores and replays the lane and shows it. It does not decide when an entry is ready or what
 working on it means. The run's own work does that, for example an `exec` runtime declared next to
 the lane. A lane never starts, cancels, or reorders mission runs by itself.
 
@@ -89,7 +90,7 @@ lane, or a lane name that only one active lane uses. An entry argument is a full
 part after the lane's `entries` prefix; a leading `#` is dropped.
 
 Every mutation records its actor. An agent inside a harness acts as its own seat. A person passes
-`--as person/NAME`, or the command uses the `person` from the st configuration. `approve` refuses
+`--as person/NAME`, or the command uses the `person` from the Fractal configuration. `approve` refuses
 any actor except the lane's approver.
 
 `st lanes show` prints the entries in order with their status, and the recent joins, leaves,
@@ -134,11 +135,11 @@ observers and schedules.
 
 ## Tests
 
-- `crates/st3/src/lane.rs` unit tests cover the replay: join order, rejoin, moves in every
+- `crates/fractal-kernel/src/lane.rs` unit tests cover the replay: join order, rejoin, moves in every
   placement, and marks and approvals that belong to one membership.
-- `crates/st3/tests/client_v0_cli.rs` declares a lane, lets the reconciler write it for a run, and
+- `crates/fractal/tests/client_v0_cli.rs` declares a lane, lets the reconciler write it for a run, and
   drives it through the CLI: join by prefix, a harness joining as its own seat, show, move, mark,
   approve by the approver only, leave, rejoin, the lane in `missions show` and `missions tree`,
   and a lane that closes with its run.
-- `crates/st3/tests/client_v0_contract.rs` checks the `lanes` collection, `lanes.get`, and the
+- `crates/fractal/tests/client_v0_contract.rs` checks the `lanes` collection, `lanes.get`, and the
   lane actions, including the approver check.

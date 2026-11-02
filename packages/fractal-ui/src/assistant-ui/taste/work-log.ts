@@ -1,7 +1,8 @@
 /** Controlled presentation types for the work log. */
-import type { ConversationItem } from '../embrace-data/model'
+import type { ConversationItem, ToolCallItem } from '../embrace-data/model'
 import { toolHumanSummary, toolOutput } from '../embrace-tool-preview'
-export type WorkKind = 'read' | 'run' | 'edit'
+/** Host-classified operation. `read`/`run`/`edit` keep their row vocabulary; semantic kinds let hosts project recorded evidence. */
+export type WorkKind = 'read' | 'search' | 'run' | 'edit' | 'subagent' | 'web' | 'decision' | 'todo' | 'wait' | 'message' | 'schedule' | 'terminal-input' | 'skill' | 'unknown'
 export interface WorkLogCall {
   readonly id: string
   readonly kind: WorkKind
@@ -9,15 +10,24 @@ export interface WorkLogCall {
   readonly argsSummary?: string
   readonly summary?: string
   readonly status: 'running' | 'success' | 'error' | 'interrupted'
+  readonly skipped?: boolean
   readonly startedAt: string
   readonly endedAt?: string
   readonly detail?: string
   /** Verbatim tool input (pretty JSON, or the raw string). Shown only in an expanded tool detail, never in the row label or failure overlay. */
   readonly rawInput?: string
+  /** Native tool identity and complete recorded payloads for host-owned inspection. */
+  readonly toolName?: string
+  readonly callId?: string
+  readonly input?: unknown
+  readonly output?: unknown
+  readonly view?: Readonly<Record<string, unknown>>
+  readonly metadata?: Readonly<Record<string, unknown>>
+  readonly mediaType?: string
   readonly outputLanguage?: string
   /** Observed edit/write path, not a guessed title. */
   readonly changedPath?: string
-  /** A run's own command or script source; display it only as code inside the raw disclosure. */
+  /** A run's own command or script source, also kept when the host reads that run as a message; display it only as code inside the raw disclosure. */
   readonly command?: string
 }
 export interface WorkLogTurn {
@@ -128,7 +138,7 @@ export const readableCommand = (call: WorkLogCall): string | undefined =>
 
 /** Selected workshop call projection; the host owns classification, lifecycle and timing. */
 export function workLogTurnFromItems(items: readonly ConversationItem[], facts: {
-  readonly kindFor: (name: string) => WorkKind
+  readonly kindFor: (name: string, call?: ToolCallItem) => WorkKind
   readonly running: boolean
   readonly failed: boolean
   readonly interrupted: boolean
@@ -139,7 +149,7 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
 }): WorkLogTurn {
   const calls: WorkLogCall[] = items.flatMap(call => {
     if (call._tag !== 'ToolCall') return []
-    const kind = facts.kindFor(call.name)
+    const kind = facts.kindFor(call.name, call)
     const input = typeof call.input === 'object' && call.input !== null ? call.input as Record<string, unknown> : undefined
     const path = [input?.['path'], input?.['file_path'], input?.['filePath']].find((value): value is string => typeof value === 'string' && value.length > 0)
     const media = call.result?.mediaType?.split(';')[0]?.trim().toLowerCase()
@@ -151,10 +161,13 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
       // Empty input carries nothing to inspect, so it does not make a row expandable.
       rawInput: typeof call.input === 'string' ? call.input || undefined : call.input === undefined || call.input === null || typeof call.input === 'object' && Object.keys(call.input).length === 0 ? undefined : JSON.stringify(call.input, null, 2),
       status: call.status, startedAt: call.at, endedAt: call.result?.at,
+      ...(call.skipped === undefined ? {} : { skipped: call.skipped }),
       detail: toolOutput(call.result?.content) || undefined,
+      toolName: call.name, callId: call.callId, input: call.input, output: call.result?.content, mediaType: call.result?.mediaType,
+      view: call.result?.view ?? call.view, metadata: call.result?.metadata,
       outputLanguage: (media === undefined ? undefined : outputMediaLanguages[media]) ?? (kind === 'run' ? 'bash' : kind === 'read' ? extension : undefined),
       changedPath: kind === 'edit' && call.callSeen && call.status === 'success' ? path : undefined,
-      command: kind === 'run' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined,
+      command: kind === 'run' || kind === 'message' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined,
     }]
   })
   const complete = facts.completeHistory === true
@@ -165,7 +178,7 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
     running: facts.running, failed: facts.failed, interrupted: facts.interrupted,
     failureNote: facts.failureNote, startedAt: facts.startedAt,
     foldable: facts.completeHistory === undefined ? undefined : complete,
-    commands: complete ? items.filter(item => item._tag === 'ToolCall' && item.callSeen && facts.kindFor(item.name) === 'run').length : undefined,
+    commands: complete ? items.filter(item => item._tag === 'ToolCall' && item.callSeen && !item.skipped && facts.kindFor(item.name, item) === 'run').length : undefined,
     changedFiles: complete && edits.every(call => call.changedPath !== undefined) ? new Set(edits.map(call => call.changedPath)).size : undefined,
   }
 }

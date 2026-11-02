@@ -163,6 +163,23 @@ class EvidenceTests(unittest.TestCase):
                            'ST_SCCACHE_READ_SERVER_PORT': port})
             self.assertNotEqual(invalid.returncode, 0, port)
             self.assertNotIn('SCCACHE_WEBDAV_RW_MODE=', invalid.stdout)
+        # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+        for port in ('', '0', '4226', '04226', '65536', 'text'):
+            invalid = run({'FRACTAL_SCCACHE_READ_ENDPOINT': 'https://cache.example.test/',
+                           'FRACTAL_SCCACHE_READ_SERVER_PORT': port,
+                           'ST_SCCACHE_READ_SERVER_PORT': '4499'})
+            self.assertNotEqual(invalid.returncode, 0, port)
+            self.assertNotIn('SCCACHE_WEBDAV_RW_MODE=', invalid.stdout)
+        preferred = run({'FRACTAL_SCCACHE_READ_ENDPOINT': 'https://cache.example.test/',
+                         'FRACTAL_SCCACHE_READ_SERVER_PORT': '4499',
+                         'ST_SCCACHE_READ_SERVER_PORT': '0'})
+        self.assertEqual(preferred.returncode, 0, preferred.stderr)
+        self.assertIn('SCCACHE_SERVER_PORT=4499', preferred.stdout)
+        masked = run({'FRACTAL_SCCACHE_READ_ENDPOINT': '',
+                      'ST_SCCACHE_READ_ENDPOINT': 'https://cache.example.test/',
+                      'ST_SCCACHE_READ_SERVER_PORT': '0'})
+        self.assertEqual(masked.returncode, 0, masked.stderr)
+        self.assertNotIn('SCCACHE_WEBDAV_RW_MODE=', masked.stdout)
         conflict = run({'ST_SCCACHE_READ_ENDPOINT': 'https://cache.example.test/',
                         'ST_SCCACHE_READ_SERVER_PORT': '4499',
                         'SCCACHE_WEBDAV_ENDPOINT': 'existing'})

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "st slo's CI objectives show real values from Workspace CI runs: merge-queue latency, the workspace critical path and ejected merge groups",
+  "replay": {"status": "none", "detail": "No replay or rebuild."},
+  "schema": {"status": "none", "detail": "No tables, columns, indexes or triggers, no new observed facts and no wire format: the runs are held in the daemon's memory only and the rows keep the existing SloRow fields."},
+  "rules": {"status": "none", "detail": "Claim kinds, rules, permissions and digests are unchanged. The reads use the repository observer's existing GitHub token and the list-runs endpoint it already reads."},
+  "compatibility": {"status": "changed", "detail": "A github.repository observer with main_performance_failures also reads two list-runs pages of fleet.yml (successful pull_request runs and completed merge_group runs created since the previous UTC day) each poll, through its conditional cache. On the member that runs it, st slo, GET /v1/slo and GET /v1/client/slo show merge-latency/p50 and /p95 (a green merge group run's created_at to updated_at, a proxy for queue entry to merge), ci-critical-path/p95 (a green pull request run's run_started_at to updated_at) over the last day, and flakes (merge group runs that failed) over the last hour, with met or missed and the budget left. Other members, and rows with no sample in their window, stay no-data. Flaky nextest tests are not counted yet. The SLO history now records these rows once they have a value."},
+  "downtime": {"status": "none", "detail": "None. The runs are read on the observer's existing cadence and the rows are computed on read."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Binary rollback returns the four rows to no-data and stops the two extra reads; nothing was stored, so nothing needs cleaning up."}
+}

@@ -1,4 +1,4 @@
-import { API_VERSION } from '../../clients/typescript/st3-client';
+import { API_VERSION } from '../../clients/typescript/fractal-client';
 
 // Pairing discovery is public; prove that an actual protected route still refuses this client.
 export async function verifyUnpairedFabricGateway(url: string, fetchImpl: typeof fetch = fetch): Promise<void> {

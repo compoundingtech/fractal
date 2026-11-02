@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Require an explicit edge-capable Vite composition for the developer Devnet preview launcher.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Developer-only launcher requirement. Public loopback-only gateway admission is unchanged; preview deployments explicitly select their edge-capable composition with WF_VITE_CONFIG." },
+  "downtime": { "status": "none", "detail": "No deployment changes in this PR." },
+  "manual": { "status": "none", "detail": "No released-product manual step. Deployment owners supply WF_VITE_CONFIG when adopting the developer preview launcher." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

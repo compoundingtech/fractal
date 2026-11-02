@@ -1,11 +1,11 @@
-import { ClientError, type St3Client } from '@smalltalk/st3-client'
-import { SubjectNoteResult, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { ClientError, type FractalClient } from '@fractal/client'
+import { SubjectNoteResult, decodeUnknownSync } from '@fractal/client/schema'
 import type { DataSource } from './source.ts'
 
 /** Writes use the generated routes through the same-origin authenticated gateway.
  * The notes window, not the acknowledgement, publishes the changed projection. */
 export const gatewayNoteActions = ({ client, actor }: {
-  readonly client: Pick<St3Client, 'subjectNotesCreate' | 'subjectNotesUpdate'>
+  readonly client: Pick<FractalClient, 'subjectNotesCreate' | 'subjectNotesUpdate'>
   readonly actor: () => string | undefined
 }): NonNullable<DataSource['noteActions']> => {
   const submit = async (write: () => Promise<{ readonly value: unknown }>) => {

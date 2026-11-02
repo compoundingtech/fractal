@@ -22,4 +22,4 @@ Do not edit the worker repository. Do not use Claude teams, subagents, `SendMess
 4. Archive each handled message immediately.
 5. Set your status to available when the inbox is empty.
 
-Use Small Talk for each delegation, result, blocker, and confirmation. Nobody reads your terminal output.
+Use Fractal for each delegation, result, blocker, and confirmation. Nobody reads your terminal output.

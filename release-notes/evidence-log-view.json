@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The verifier and the gate report the evidence log's shadow view of each decision (log=absent|unsigned|stale|missing|unlogged_pass|ok, log_head, log_age_s, log_missing, log_fetch) once the accepted base pins .st/evidence-log-key; no decision changes.",
+  "replay": {
+    "status": "none",
+    "detail": "Records and verdicts are unchanged; the answer gains fields."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "evidence-verify's JSON gains log, log_head, log_age_s and log_missing with --log-keys or --log-keys-from; the gate's decision line gains log, log_head, log_age_s, log_missing and log_fetch after keys_sha256 ('-' when absent)."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Shadow only: the view is reported and never changes satisfied, skip or reject. Nothing is fetched until the base pins the log key."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The gate passes the log key only to a base verifier that reads it; readers of the decision line parse key=value."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "CI scripts only."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Pinning .st/evidence-log-key is a separate change, once the log host runs."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert removes the fields."
+  }
+}

@@ -11,8 +11,8 @@ only if all of these hold, and otherwise skips it with the reason:
     and names the principal the statement claims;
   * the statement is about THIS checkout's commit and tree, and about one of the allowed checks;
   * the tier is full.
-It creates refs/notes/evidence/<record> (never replacing one) and pushes the accepted ones in one
-push. EVIDENCE_PUSH_TOKEN, if set, is sent as an authorization header and never printed. At most
+It files each record as refs/tags/evidence/<tree>/<record> and, while gates on older bases read only notes, also as
+refs/notes/evidence/<tree>/<record> (never replacing either), and pushes the accepted ones in one push. EVIDENCE_PUSH_TOKEN, if set, is sent as an authorization header and never printed. At most
 --limit (default 40) records are accepted in one run.
 
   exit 0  every note was accepted and published, or there was nothing to publish
@@ -32,6 +32,9 @@ sys.dont_write_bytecode = True
 OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
 NOTES = 'refs/notes/evidence/'
 INPUT_NOTES = 'refs/notes/evidence-input/'
+TAGS = 'refs/tags/evidence/'
+INPUT_TAGS = 'refs/tags/evidence/input/'
+NAMES = ('tag', 'ref', 'input_tag', 'input_ref')  # the names an accepted entry files its record under
 
 
 class Refused(Exception):
@@ -48,6 +51,19 @@ def git(*args, stdin=None, check=True, header=None):
     if check and done.returncode != 0:
         raise Refused(f'git {args[0]}: {done.stderr.decode(errors="replace").strip()[-400:]}')
     return done
+
+
+def file_under(names, record):
+    """Create every ref in names naming record, or none: an existing ref that names another object is refused, never replaced."""
+    missing = []
+    for ref in names:
+        existing = git('for-each-ref', '--format=%(objectname)', ref).stdout.decode().strip()
+        if existing and existing != record:
+            raise Refused(f'{ref} already names {existing}; evidence refs are never replaced')
+        if not existing:
+            missing.append(ref)
+    for ref in missing:
+        git('update-ref', ref, record, '0' * len(record))
 
 
 def accept(summary_path, keys, allowed_checks, commit, tree):
@@ -109,19 +125,15 @@ def main(argv):
             continue
         try:
             record, check, key = accept(summary_path, args.keys, allowed, commit, tree)
-            ref = NOTES + record
-            existing = git('for-each-ref', '--format=%(objectname)', ref).stdout.decode().strip()
-            if existing and existing != record:
-                raise Refused(f'{ref} already names {existing}; evidence refs are never replaced')
-            if not existing:
-                git('update-ref', ref, record, '0' * len(record))
-            entry = {'record': record, 'check': check}
+            # Under the tree it is about: a tree's records are one prefix. The tag is the record; the note is the same
+            # commit under the name gates on bases older than the tag readers look up.
+            entry = {'record': record, 'check': check, 'ref': f'{NOTES}{tree}/{record}', 'tag': f'{TAGS}{tree}/{record}'}
             if key:
                 # An index by input key, one ref per record: a newer record never replaces an older one, so a newer
                 # failure with the same key can be found next to an older pass. The ref name repeats the record.
                 entry['input_ref'] = f'{INPUT_NOTES}{check}/{key}/{record}'
-                if not git('for-each-ref', '--format=%(objectname)', entry['input_ref']).stdout.decode().strip():
-                    git('update-ref', entry['input_ref'], record, '0' * len(record))
+                entry['input_tag'] = f'{INPUT_TAGS}{check}/{key}/{record}'
+            file_under([entry[name] for name in NAMES if name in entry], record)
             result['accepted'].append(entry)
         except (Refused, KeyError, ValueError, IndexError) as error:
             result['refused'].append({'record': summary_path.stem, 'reason': str(error)})
@@ -130,8 +142,7 @@ def main(argv):
         header = None
         if token:
             header = 'Authorization: Basic ' + base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-        refspecs = [f'{NOTES}{a["record"]}:{NOTES}{a["record"]}' for a in result['accepted']]
-        refspecs += [f'{a["input_ref"]}:{a["input_ref"]}' for a in result['accepted'] if a.get('input_ref')]
+        refspecs = [f'{a[name]}:{a[name]}' for a in result['accepted'] for name in NAMES if name in a]
         pushed = git('push', '--quiet', args.remote, *refspecs,
                      check=False, header=header)
         if pushed.returncode != 0:

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/evidence-flip-ready reads a gate job that was cancelled before it wrote a log (GitHub answers 404 for its log) as having no decision line instead of failing the whole cycle as unreadable; any other job whose log cannot be read still makes the cycle unreadable.",
+  "replay": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Changes only whether evidence-flip-ready can finish a cycle when a replaced run's cancelled gates left no log; no skip policy or gate rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  }
+}

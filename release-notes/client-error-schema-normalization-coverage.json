@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve every documented client error code during wire normalization",
+  "replay": { "status": "none", "detail": "No historical claims or action receipts are changed." },
+  "schema": { "status": "none", "detail": "All restored codes already belong to the client-v0 schema and generated clients." },
+  "rules": { "status": "changed", "detail": "Client-v0 normalization also preserves identity-cross-kind, identity-unknown, peer-too-old, invalid-document-reference and document-not-synced. A schema-derived guard prevents declared error codes from silently becoming internal." },
+  "compatibility": { "status": "changed", "detail": "Clients receive the documented error codes rather than internal; HTTP statuses and retryable classifications are unchanged." },
+  "downtime": { "status": "none", "detail": "No downtime is required." },
+  "manual": { "status": "none", "detail": "No manual migration is required." },
+  "recovery": { "status": "none", "detail": "Existing error-specific client recovery rules apply." }
+}

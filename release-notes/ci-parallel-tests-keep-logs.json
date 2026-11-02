@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/ci-parallel-tests (the ci-script-tests and genie-freshness runner) keeps a failing test script's whole log under CI_PARALLEL_TESTS_KEEP (default ~/.cache/ci-parallel-tests, run-TIME-PID/NAME.log, the latest 10 runs) and prints its path above the last 200 lines it already printed, so a failure whose cause is further up than its last lines can still be read",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "Which tests run and how a lane passes or fails are unchanged."},
+  "compatibility": {"status": "none", "detail": "Output gains one 'whole log: PATH' line per failed test; when the directory cannot be made, the output is as before."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

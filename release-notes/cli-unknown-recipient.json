@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reject CLI sends to unknown agents instead of silently recording undeliverable mail",
+  "replay": {"status": "none", "detail": "No claim replay changes. Replies use the original message recipient without a fresh roster lookup."},
+  "schema": {"status": "none", "detail": "No storage or generated client schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or coordinated upgrade changes."},
+  "compatibility": {"status": "none", "detail": "CLI sends preflight the native /v1/messages/recipient endpoint before uploading attachments. Unknown recipients fail with unknown-recipient; declared or runtime-observed remote and stopped seats remain valid. The per-call --allow-undeclared-recipient flag permits unsynchronized recipients. Older daemons returning 404 for the new route retain their send behavior with one stderr upgrade notice. Person-recipient refusals and client-v0 API error shapes are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption or additional startup work."},
+  "manual": {"status": "none", "detail": "Check agent spelling and fleet replication on an unknown-recipient refusal; use the explicit override only for a known unsynchronized recipient."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new rollback restrictions."}
+}

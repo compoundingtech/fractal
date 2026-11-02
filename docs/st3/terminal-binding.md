@@ -1,6 +1,6 @@
 # Binding an agent to a person's terminal
 
-A native driver can run as a child of a shell in an existing st terminal. Declare its seat with `bind-terminal` before starting the driver:
+A native driver can run as a child of a shell in an existing Fractal terminal. Declare its seat with `bind-terminal` before starting the driver:
 
 ```kdl
 version 2

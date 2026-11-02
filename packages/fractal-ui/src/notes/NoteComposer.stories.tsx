@@ -57,12 +57,22 @@ function NoteComposerStory({ scheme, width, negativeControl }: NotesFrameArgs) {
 }
 
 const meta = {
-  title: 'Fractal/Plugins/Notes/Note composer', component: NoteComposerStory, parameters: { layout: 'fullscreen' },
+  excludeStories: ['scenarioExemptions'],
+  title: 'Fractal/Plugins/Notes/Note composer', component: NoteComposerStory,
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Host-controlled create outcomes and per-target drafts isolate the note composer contract; no scenario slice models subject notes.' }, layout: 'fullscreen' },
   args: notesFrameArgs,
   argTypes: notesFrameArgTypes('Remount the refused composer after its failure: the preserved-draft assertion must fail.'),
 } satisfies Meta<typeof NoteComposerStory>
 export default meta
 type Story = StoryObj<typeof meta>
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'Dark1440:contract-fixture',
+  'Light1440:contract-fixture',
+  'Light440:contract-fixture',
+]
 
 const parts = (region: HTMLElement) => {
   const scope = within(region)

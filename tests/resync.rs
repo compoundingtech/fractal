@@ -19,7 +19,7 @@ fn write_agent(root: &Path) -> PathBuf {
 }"#,
     )
     .unwrap();
-    st2::event::publish_owner_binding_for_test(root, "example-linux").unwrap();
+    fractal_legacy_runner::event::publish_owner_binding_for_test(root, "example-linux").unwrap();
     dir
 }
 
@@ -38,7 +38,7 @@ fn write_agent_with_goal_scheme(root: &Path) -> PathBuf {
 }"#,
     )
     .unwrap();
-    st2::event::publish_owner_binding_for_test(root, "example-linux").unwrap();
+    fractal_legacy_runner::event::publish_owner_binding_for_test(root, "example-linux").unwrap();
     dir
 }
 
@@ -77,8 +77,8 @@ fn carrier_change_emits_one_superseded_resync_event_and_silent_stores_stay_quiet
 
     // Seed the baseline before any writes: the seeded digest emits nothing.
     let supervisor =
-        st2::resync::ResyncSupervisor::spawn(catalog.path().to_path_buf(), "example-linux".to_owned());
-    let specs = st2::discover_strict(catalog.path()).specs;
+        fractal_legacy_runner::resync::ResyncSupervisor::spawn(catalog.path().to_path_buf(), "example-linux".to_owned());
+    let specs = fractal_legacy_runner::discover_strict(catalog.path()).specs;
     assert!(
         supervisor
             .refresh(&specs, &specs, "example-linux", &[], &[])
@@ -105,7 +105,7 @@ fn carrier_change_emits_one_superseded_resync_event_and_silent_stores_stay_quiet
         .to_owned();
 
     // Public ingress cannot forge or supersede the supervisor's unread built-in event.
-    let error = st2::event::emit(
+    let error = fractal_legacy_runner::event::emit(
         catalog.path(),
         "example-linux",
         "example-linux.worker",
@@ -168,8 +168,8 @@ fn whole_file_declaration_replacement_by_rename_notifies_immediately() {
     let declaration = agent_dir.join("agent.kdl");
 
     let supervisor =
-        st2::resync::ResyncSupervisor::spawn(catalog.path().to_path_buf(), "example-linux".to_owned());
-    let specs = st2::discover_strict(catalog.path()).specs;
+        fractal_legacy_runner::resync::ResyncSupervisor::spawn(catalog.path().to_path_buf(), "example-linux".to_owned());
+    let specs = fractal_legacy_runner::discover_strict(catalog.path()).specs;
     assert!(
         supervisor
             .refresh(&specs, &specs, "example-linux", &[], &[])
@@ -213,7 +213,7 @@ fn declaring_the_reserved_resync_stream_is_refused() {
 }"#,
     )
     .unwrap();
-    let found = st2::discover_strict(catalog.path());
+    let found = fractal_legacy_runner::discover_strict(catalog.path());
     assert!(
         found.specs.is_empty(),
         "a reserved stream name must not lower to a spec"
@@ -240,7 +240,7 @@ fn catalog_with_profile(catalog: &Path, class: &str) {
     fs::create_dir_all(catalog.join("resolvers")).unwrap();
     fs::copy(demo_wasm_src(), catalog.join("resolvers/goal.wasm")).unwrap();
     fs::write(
-        st2::catalog::config_path(catalog),
+        fractal_legacy_runner::catalog::config_path(catalog),
         format!(
             r#"profile "dev.schickling.agent-goal" {{
   wasm "resolvers/goal.wasm"
@@ -260,14 +260,14 @@ fn declared_wasm_profile_resolves_a_scheme_uri_goal_binding_and_fires_on_change(
     let catalog = tempfile::tempdir().unwrap();
     let agent_dir = write_agent_with_goal_scheme(catalog.path());
     catalog_with_profile(catalog.path(), "immediate");
-    let registry = st2::catalog::declared_profiles(catalog.path()).unwrap();
+    let registry = fractal_legacy_runner::catalog::declared_profiles(catalog.path()).unwrap();
 
-    let supervisor = st2::resync::ResyncSupervisor::with_profiles(
+    let supervisor = fractal_legacy_runner::resync::ResyncSupervisor::with_profiles(
         catalog.path().to_path_buf(),
         "example-linux".to_owned(),
         registry,
     );
-    let specs = st2::discover_strict(catalog.path()).specs;
+    let specs = fractal_legacy_runner::discover_strict(catalog.path()).specs;
     assert!(
         supervisor
             .refresh(&specs, &specs, "example-linux", &[], &[])
@@ -296,12 +296,12 @@ fn declared_profile_class_governs_and_resolver_failures_stay_contained() {
     let silent = tempfile::tempdir().unwrap();
     let silent_dir = write_agent_with_goal_scheme(silent.path());
     catalog_with_profile(silent.path(), "silent");
-    let supervisor = st2::resync::ResyncSupervisor::with_profiles(
+    let supervisor = fractal_legacy_runner::resync::ResyncSupervisor::with_profiles(
         silent.path().to_path_buf(),
         "example-linux".to_owned(),
-        st2::catalog::declared_profiles(silent.path()).unwrap(),
+        fractal_legacy_runner::catalog::declared_profiles(silent.path()).unwrap(),
     );
-    let specs = st2::discover_strict(silent.path()).specs;
+    let specs = fractal_legacy_runner::discover_strict(silent.path()).specs;
     assert!(
         supervisor
             .refresh(&specs, &specs, "example-linux", &[], &[])
@@ -323,14 +323,14 @@ fn declared_profile_class_governs_and_resolver_failures_stay_contained() {
     let broken = tempfile::tempdir().unwrap();
     let broken_dir = write_agent_with_goal_scheme(broken.path());
     fs::write(
-        st2::catalog::config_path(broken.path()),
+        fractal_legacy_runner::catalog::config_path(broken.path()),
         "profile \"dev.schickling.agent-goal\" { wasm \"broken.wasm\" }\n",
     )
     .unwrap();
     fs::write(broken.path().join("broken.wasm"), b"not a module").unwrap();
-    let registry = st2::catalog::declared_profiles(broken.path()).unwrap();
-    let spec = &st2::discover_strict(broken.path()).specs[0];
-    let set = st2::resync::watch_set_for(spec, "example-linux", &registry);
+    let registry = fractal_legacy_runner::catalog::declared_profiles(broken.path()).unwrap();
+    let spec = &fractal_legacy_runner::discover_strict(broken.path()).specs[0];
+    let set = fractal_legacy_runner::resync::watch_set_for(spec, "example-linux", &registry);
     assert!(
         !set.carriers.iter().any(|c| c.label == "goal"),
         "a failing resolver must not produce a carrier"

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reuse immutable installed dependency generations while keeping build snapshots inside repository-store worktrees.",
+  "replay": { "status": "none", "detail": "No application-data replay." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Developer-only deployment tooling. A dedicated FRACTAL_DEP_CACHE is required on the snapshot filesystem; snapshots remain within store-owned worktrees and use the deployment Git wrapper." },
+  "downtime": { "status": "none", "detail": "Publishing helpers does not activate or restart a service." },
+  "manual": { "status": "none", "detail": "No released-product manual step. Deployment owners explicitly configure cache and snapshot roots before adopting these helpers." },
+  "recovery": { "status": "none", "detail": "Production artifact retention remains integrator-owned. Dependency generations retain selected current plus previous under snapshot-held leases; copy-mode deployment helpers remain the operational rollback." }
+}

@@ -1,9 +1,9 @@
 //! Compatibility API for the st2 binary and its root-only catalog tools.
 //!
-//! Harness drivers and their support live in `st-drivers`, shared with st3. Add new
+//! Harness drivers and their support live in `fractal-drivers`, shared with Fractal. Add new
 //! driver work there; these re-exports preserve the existing st2 library paths.
 
-pub use st_drivers::*;
+pub use fractal_drivers::*;
 
 pub mod agent_author;
 pub mod agent_publish;

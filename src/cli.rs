@@ -13,7 +13,7 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "st2",
-    version = st2::version::display_version(),
+    version = fractal_legacy_runner::version::display_version(),
     about = "Harness-agnostic runner over a unified catalog+inbox folder"
 )]
 pub(crate) struct Cli {
@@ -64,7 +64,7 @@ pub(crate) enum Command {
         /// Host idle threshold before an eligible on-demand agent may become cold.
         #[arg(
             long,
-            value_parser = st2::parse_duration,
+            value_parser = fractal_legacy_runner::parse_duration,
             requires = "residency_warm_capacity"
         )]
         residency_idle_after: Option<Duration>,
@@ -765,15 +765,15 @@ impl PresentationArgs {
     pub(crate) fn selection(
         self,
     ) -> Result<(
-        st2::identity::AgentSelector,
+        fractal_legacy_runner::identity::AgentSelector,
         Option<String>,
         bool,
         Option<String>,
     )> {
         let (selector, value) = match self.agent_id {
-            Some(id) => (st2::identity::AgentSelector::Id(id), self.first),
+            Some(id) => (fractal_legacy_runner::identity::AgentSelector::Id(id), self.first),
             None => (
-                st2::identity::AgentSelector::Address(
+                fractal_legacy_runner::identity::AgentSelector::Address(
                     self.first
                         .context("no agent selected: pass an agent reference or the `--id` form")?,
                 ),
@@ -813,7 +813,7 @@ pub(crate) struct ServiceUnitArgs {
     /// Host idle threshold before an eligible on-demand agent may become cold.
     #[arg(
         long,
-        value_parser = st2::parse_duration,
+        value_parser = fractal_legacy_runner::parse_duration,
         requires = "residency_warm_capacity"
     )]
     pub(crate) residency_idle_after: Option<Duration>,
@@ -821,7 +821,7 @@ pub(crate) struct ServiceUnitArgs {
     #[arg(long, requires = "residency_idle_after")]
     pub(crate) residency_warm_capacity: Option<usize>,
     /// Supervisor memory ceiling (MiB). The agents live in sibling scopes and are NOT bounded.
-    #[arg(long = "memory-max-mb", default_value_t = st2::service::DEFAULT_MEMORY_MAX_MB)]
+    #[arg(long = "memory-max-mb", default_value_t = fractal_legacy_runner::service::DEFAULT_MEMORY_MAX_MB)]
     pub(crate) memory_max_mb: u64,
 }
 

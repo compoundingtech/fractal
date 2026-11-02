@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Version the Fractal Web integration loop and install main-follower dependencies in the web shell after materializing locked members.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of application data." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Developer-only operational scripts. Existing integration state filenames and member keys remain compatible. No released application or API changes." },
+  "downtime": { "status": "none", "detail": "No running service is changed by this PR." },
+  "manual": { "status": "none", "detail": "No released-product manual step. Deployment owners supply explicit environment inputs before adopting the repository scripts." },
+  "recovery": { "status": "none", "detail": "No persistent application state changes. Deployment owners can continue running the previous script revision with the existing operational state." }
+}

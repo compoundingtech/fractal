@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/evidence-flip-ready judges a check with no job of its own (the per-crate rust-tests) by the jobs whose `if` reads its gate's skip output (linux-test-build, linux-tests and its shards): its real result is failure when one of them failed or was cancelled, and a satisfied line beside that red is a hidden red. Before, such a check had no real job, so no red under its skip could be seen. While no job skips on it, the check is reported not ready.",
+  "replay": {"status": "none", "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "Changes only which reds evidence-flip-ready counts as hidden for rust-tests when it decides whether that check's flip trigger holds; no skip policy or gate rule changes."},
+  "compatibility": {"status": "none", "detail": "The JSON report keeps its fields; rust-tests gains a why_not entry while no job skips on it."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change."}
+}

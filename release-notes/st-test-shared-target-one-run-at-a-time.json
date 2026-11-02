@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test holds a target named by ST_EVIDENCE_TARGET exclusively for the whole run: two runs on different trees sharing it could test each other's binaries",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Only runs that set ST_EVIDENCE_TARGET change: a second one waits for the first. The default per-tree pool targets are unchanged."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change, or leave ST_EVIDENCE_TARGET unset."}
+}

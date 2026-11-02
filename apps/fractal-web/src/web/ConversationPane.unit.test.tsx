@@ -24,10 +24,14 @@ vi.mock('../data/react.tsx', async () => {
   return ({
   useConversation: (ref: string) => { source.conversation(ref); return source.feed },
   useConversationSync: (ref: string) => { source.conversationSync(ref); return source.sync },
+  useConnection: () => ({ _tag: 'Live' }),
   useDataSource: () => ({ agents, conversationInterest: undefined, retryConversation: source.retryConversation }),
   useFeedInterest: source.feedInterest,
   useNow: () => 1000,
-  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
+  useNowSnapshot: () => 1000,
+  usePausedNow: () => undefined,
+  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }),
+  useAttention: () => ({ _tag: 'Waiting' }),
   })
 })
 
@@ -73,6 +77,47 @@ describe('ConversationPane kit composition', () => {
     expect(html).not.toContain('Cancel:')
     expect(html).not.toContain('role="progressbar"')
     expect(html).not.toContain('Connecting')
+  })
+
+  it('does not repeat the parent name in a single-thread tab strip', () => {
+    const html = render()
+    expect(html).not.toContain('role="tablist"')
+    expect(html).not.toContain('data-agent-thread-strip')
+    expect(html).toContain('textarea')
+  })
+
+  it('shows only children with task-block conversation references as thread tabs', () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [], hasOlder: false, subagents: [
+        { id: 'review', name: 'Reviewer', status: 'running', conversation: { session_id: 'session/external-child-review' } },
+        { id: 'other-harness', name: 'Count only', status: 'running' },
+      ],
+    } }
+    const html = render()
+    expect(html).toContain('Subagents')
+    expect(html).toContain('Reviewer')
+    expect(html).not.toContain('Count only')
+  })
+
+  it('uses a human fallback label instead of a raw child identifier', () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [], hasOlder: false, subagents: [
+        { id: 'internal-task-identifier', status: 'running', conversation: { session_id: 'session/external-child-unnamed' } },
+      ],
+    } }
+    const html = render()
+    expect(html).toContain('Subagent 1')
+    expect(html).not.toContain('internal-task-identifier')
+    expect(html).toContain('Main')
+  })
+
+  it('never mounts a composer for a read-only thread', () => {
+    source.feed = observed(scenario.slice(0, 5))
+    const html = renderToStaticMarkup(<ConversationPane agentRef="session/external-child-review" agentName="Reviewer" onOpenTool={() => {}} readOnly />)
+    expect(html).toContain('data-testid="transcript-scroll"')
+    expect(html).not.toContain('textarea')
+    expect(html).not.toContain('conversation-composer-dock')
+    expect(html).not.toContain('Cancel:')
   })
 
   it('groups a scenario page into turns with rendered markdown and the reasoning disclosure', () => {
@@ -160,7 +205,8 @@ describe('ConversationPane kit composition', () => {
   it('keeps the composer with its draft slot and a send reason while the conversation cannot be read', () => {
     const { html } = notFound()
     expect(html).toContain('textarea')
-    expect(html).toContain('This view cannot send messages.')
+    expect(html).toContain('Conversation not found')
+    expect(html).not.toContain('Messages can be sent once this conversation loads.')
   })
 
   it('keeps rendering the transcript when the sync status is not Live, with the honest SyncLine', () => {
@@ -200,10 +246,11 @@ describe('ConversationPane kit composition', () => {
       ts.forEachChild(node, visit)
     }
     visit(tree)
-    expect(intrinsicElements).toEqual(['div', 'div', 'div'])
+    // The retained parent host and empty-publication placeholder are structural, not transcript presentation.
+    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div', 'div'])
     expect(pane).toContain("style={{ display: 'contents' }}")
     const workspace = readFileSync(new URL('./LiveAgentWorkspace.tsx', import.meta.url), 'utf8')
-    expect(workspace).toContain('createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)')
+    expect(workspace).toContain('<RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === \'changes\'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>')
     expect(workspace).toContain("hiddenPane: { contentVisibility: 'hidden'")
     expect(workspace).toContain('<ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} ux={ux} visible={shown} />')
     expect(workspace).not.toContain('This subject has no available native view.')
@@ -225,7 +272,7 @@ describe('single unavailable state', () => {
     source.sync = { status: { _tag: 'Failed', cause: { _tag: 'Server', code: 'not-found', message: 'diagnostic' } }, observedAt: 500 }
     const html = render()
     const unavailable = html.slice(html.indexOf('data-testid="transcript-unavailable"'))
-    expect(unavailable.match(/Try again/g)).toHaveLength(1)
+    expect(unavailable.match(/>Retry</g)).toHaveLength(1)
     expect(html).not.toContain('role="alert"')
   })
 })

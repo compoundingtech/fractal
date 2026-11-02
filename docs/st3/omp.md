@@ -1,6 +1,6 @@
-# Running st with omp
+# Running Fractal with omp
 
-An omp seat is an ordinary st agent. Declare its workspace, harness, model, and effort in KDL:
+An omp seat is an ordinary Fractal agent. Declare its workspace, harness, model, and effort in KDL:
 
 ```kdl
 version 2
@@ -13,14 +13,14 @@ agent "worker" {
 }
 ```
 
-Before the first launch of an installed omp build, st measures its delivery contract in a disposable
+Before the first launch of an installed omp build, Fractal measures its delivery contract in a disposable
 session and refuses to launch a build that fails ([harness admission](seat-deploys.md#harness-admission-at-the-next-launch)).
-st supplies the channel extension, session directory, and boot prompt. The launcher runs under `bun`, which must be available in the daemon's
+Fractal supplies the channel extension, session directory, and boot prompt. The launcher runs under `bun`, which must be available in the daemon's
 login-shell environment. The seat uses the provider login of the user running the daemon. Confirm
 the selected model in the session transcript; omp may resolve an unavailable model name to another
 one.
 
-The session JSONL is stored in st's driver state for the seat. The `model_change` entry and each
+The session JSONL is stored in Fractal's driver state for the seat. The `model_change` entry and each
 assistant turn identify the selected provider and model. omp's Python `eval` tool has a filtered
 environment; run st commands from its shell tool so `ST_AGENT`, `ST3_BIN`, and `ST3_ENDPOINT` are
 available.
@@ -33,6 +33,15 @@ The in-process OMP extension starts `driver omp-channel` on the executable named
 `ST_OMP_CHANNEL_{BIN,CATALOG,IDENTITY,RUNTIME_ID,SESSION,SEQ}` for its channel
 configuration; `ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION` and
 `ST_OMP_CHANNEL_RESUME_GENERATION` fence a cold residency resume.
+
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
+The provider wrapper also sets matching `FRACTAL_OMP_CHANNEL_*` names. Shared Rust
+channel readers prefer those names, retain the `ST_*` fallback, and reject conflicting
+ownership values. The existing `ST_*` names remain available to hooks and agent policy.
+Daemon-launched seats also receive matching `FRACTAL_*` aliases for the launch
+environment, including `FRACTAL_AGENT` and `FRACTAL_SUBJECT`. CLI identity defaults
+accept either spelling; shell and TypeScript hooks can continue to use the old names.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 
 `session_start` sends the native OMP session ID before accepting Rust's hello.
 A matching ready frame completes the two-way exchange. A cold resume must prove the
@@ -69,7 +78,7 @@ certify only their exact measured builds, not every patch in a release family.
 
 The probe does not certify pricing, context arithmetic, every provider/model combination,
 or every interactive mode. Its retained test captures are in
-[`crates/st-drivers/tests/fixtures/harness-admission`](../../crates/st-drivers/tests/fixtures/harness-admission/).
+[`crates/fractal-drivers/tests/fixtures/harness-admission`](../../crates/fractal-drivers/tests/fixtures/harness-admission/).
 A refusal stops a new OMP provider before it claims the live session. Admission runs on
 restart and residency resume; it does not stop an already-running provider retroactively,
 and adopting an existing provider does not repeat the probe. See
@@ -92,7 +101,7 @@ The command requires no daemon, producer/probe child or model credentials. It re
 reason, time and exact producer/extension identity in a separate `*.override.json` record;
 failed measurements remain intact, and the driver identifies the active exception.
 An executable, interpreter, manifest, lockfile or extension replacement needs a new
-exception. The exception persists across st updates with the same producer and extension.
+exception. The exception persists across Fractal updates with the same producer and extension.
 
 To restore normal admission at the next launch:
 
@@ -128,7 +137,7 @@ then an end outcome. Progress is at most once per ten seconds; a busy heartbeat 
 once per minute. A proven idle or unreadable context clears cached waits and stops
 reporting, and a late turn-end after the end emits nothing. Human asks and approvals
 keep a foreground run busy. IDs are bounded to 256 UTF-8 bytes and names to 128 bytes.
-st ends a subagent that has not reported for five minutes; see
+Fractal ends a subagent that has not reported for five minutes; see
 [subagents](subagents.md) for the roster and lifecycle contract.
 
 ## Authored resume, transcripts and delivery
@@ -177,6 +186,70 @@ normalizers. Response usage comes from `timeline` / `message_end`, including the
 token buckets, model, and reported cost; context occupancy is a separate measurement.
 A `turn` frame carries a terminal result, not usage: provider errors become timeline errors.
 `session` and `ready` frames report the native session ID and transcript for resume.
+
+Native transcript tool results use the message-level `toolCallId` and `isError` to produce
+one typed result paired with its exact call, preserving composite IDs and failure status.
+Text blocks within that result remain its content, not separate plain tool messages.
+
+A visible native OMP `custom_message` (one without `display: false`) keeps its native kind,
+attribution, content and details on its typed blocks. Records with a more specific view
+(`irc:incoming`, `launch-completion`, `async-result`, `skill-prompt`) keep that view: IRC senders
+come from `view.from`, and async task identities stay in `view.jobs` with their native `type`,
+`label` and `id`. Every other visible custom message keeps main's block (`text` for text content) and gains this view and the complete record in `payload.raw`:
+
+```json
+{
+  "type": "omp_event",
+  "kind": "resource-observed",
+  "attribution": "daemon",
+  "content": {"resource": "resource/example", "status": "ready"},
+  "details": {"revision": 3}
+}
+```
+
+`kind` is the native `customType`; `attribution`, `content` and `details` are the native values
+and each is present only when the record carries it. Human, daemon, system, and absent
+attribution are not inferred to be agents; the block's `payload.raw` is the complete native
+record, so attribution is available there for every custom message, typed or not. Mixed or
+multiple jobs remain one native event unless their body has an authoritative partition.
+A `custom_message` with `display: false` stays omitted, as main's omission table states; this is the only `display: false` record that is dropped (the administrative records below are retained and marked instead). The 8 KiB native-value bound
+applies separately to the view's `content` and `details` (UTF-8 aware, and a string of exactly 8 KiB is kept whole), and kind and attribution are bounded separately to 256 bytes; an over-limit one becomes marked
+truncated text without corrupting the view's JSON, and the complete value stays in
+`payload.raw`.
+Timeline page limits are item-count upper bounds: a page can contain fewer entries to stay
+within the 768 KiB page target (offset-cached and native keyset pages alike). Pagination
+preserves each complete entry and advances the continuation cursor by the number actually
+returned; following it does not skip entries. A complete lone entry may exceed the target up to
+the hard response ceiling (1,048,576 minus 128,000 reserved bytes) and is served alone; an entry
+beyond that ceiling is neither skipped nor allowed to fail its page: it is replaced in place by
+a visible `error` entry (`timeline-entry-too-large`, with its size) that keeps its id and
+sequence, and the cursor continues after it. The owner's visible size-limit bounding normally
+keeps entries well below the ceiling.
+Pi shares the native format and gets the same views.
+
+The observed administrative entry types `model_usage`, `title_change`, `session_init`, and
+`ttsr_injection` are `status` blocks rather than unrecognized-entry fallbacks, and keep the
+complete native record in `payload.raw`. `model_usage`, `session_init` and `ttsr_injection` use
+the `omp_event` view: `kind` is the native entry type, there is no `content`, and `details` is the
+bounded native record, including its IDs and timestamp; native attribution is retained when
+present. `title_change` uses the existing `title` view. The timeline timestamp uses the same
+native/predecessor rule as conversation entries. An explicit `display: false` on one of these
+administrative records is retained with the `hidden-by-harness` visibility hint rather than dropped,
+unlike a `custom_message` with `display: false`, which stays omitted (above). This applies
+to the observed kinds: genuinely unknown entry types retain their existing behavior, and the other
+bookkeeping records (`model_change`, `custom`, `credential_pin`, `title`) keep the views and
+visibility the conversation design gives them.
+
+`crates/fractal/fixtures/omp-admin-events.jsonl` preserves one native shape per administrative kind
+from a session resumed on 2026-10-04. Native IDs and timestamps remain exact, but every payload
+string and numeric usage value is redacted. No bootstrap prompt, injected rule, task, model
+label, or tool name from that capture is published.
+
+`crates/fractal/fixtures/omp-native-events.jsonl` contains a redacted 2026-10-01 OMP capture:
+the native tool call/result IDs and error flag, plus an incoming IRC event.
+Tool arguments, result text, sender name and incoming text are redacted; no credentials,
+machine paths, or host metadata are retained. Task-job and structured-resource boundary
+cases are synthetic regression inputs, not additional claims about that capture.
 
 Unsupported frames, including `pre_compact`, produce a structured debug event with
 `frame_type` and `observer_enabled`; frame payloads are not logged. When the managed observation
@@ -248,7 +321,7 @@ there is no bridge; it never chooses a transcript or session itself.
 OMP 18.4.10 needs a temporary, token-free recovery bridge for an open `ask` picker:
 `arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge`
 ([migration registry](https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf)).
-When the selected transcript has an unresolved last ask, st admits the exact installed OMP build
+When the selected transcript has an unresolved last ask, Fractal admits the exact installed OMP build
 and the same shipped extension selected by interactive launch before running a bounded RPC heal
 pass with closed stdin. Admission may run isolated extension probes; an unchanged exact identity
 reuses its measured result. Interactive launch repeats admission before its own fork, then receives
@@ -256,7 +329,7 @@ reuses its measured result. Interactive launch repeats admission before its own 
 fleet launcher can still prepend explicit `-e` extensions. The heal clears `PTY_SESSION`,
 `PTY_ROOT`, `PTY_SESSION_DIR`, and inherited
 `ST3_*`, `ST2_*`, and `ST_*` environment variables (except the launcher's required `ST_AGENT`
-identity) so those extensions cannot reach the seat's PTY or st channel. The bridge's transcript
+identity) so those extensions cannot reach the seat's PTY or Fractal channel. The bridge's transcript
 read logs I/O failures, fails open, decodes bytes lossily, and skips malformed JSONL lines while
 continuing to inspect later valid entries. Read, heal, retry, or diagnostic failures do not stop
 native continuation; an unadmitted OMP build still prevents launch through the driver's gate.
@@ -271,7 +344,7 @@ Its existing state-frame `reason` names the reopened toolCall id
 what the seat is waiting on. Shared native continuation does not depend on the bridge.
 
 The contraction criterion is behavioral, not a version equality assertion. The standalone
-`crates/st3/fixtures/omp-resume/native-reopen-probe.py` copies its adjacent public canary fixture into
+`crates/fractal-daemon/fixtures/omp-resume/native-reopen-probe.py` copies its adjacent public canary fixture into
 a disposable native session directory, renders native resume in a PTY under an empty HOME with no
 auth or extensions, and never sends F5 or a prompt. It requires `OMP_BIN` pointing at the raw pinned
 OMP executable (not a fleet launcher); `--omp` overrides that variable. Optional `--fixture`,
@@ -280,7 +353,7 @@ OMP executable (not a fleet launcher); `--omp` overrides that variable. Optional
 **1** means the original picker reopened natively (contract this migration);
 **2** means probe error, not evidence either way.
 
-Smalltalk does not provide OMP in its checks: the native Rust test runs this probe only with
+Fractal does not provide OMP in its checks: the native Rust test runs this probe only with
 `OMP_BIN` set and otherwise prints an explicit skip. The hermetic gate belongs to the dotfiles
 OMP pin, `flakes/external/omp`: run the same script and fixture verbatim as a flake check on
 **every** OMP bump, including patches. That is where native reopening must fail the bridge-retaining

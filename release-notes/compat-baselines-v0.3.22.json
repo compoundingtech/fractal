@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Roll compatibility baselines forward to v0.3.22",
+  "replay": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  }
+}

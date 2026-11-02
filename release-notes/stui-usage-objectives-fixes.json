@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Make the terminal UI usage pane say when its objectives could not be read: never show a green all-clear while they load or fail, mark rows kept after a failed refresh as the last reading, and drop another member's rows on a member switch",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or replay change; the pane still reads slo.list and slo.history."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index or migration change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Client-only display change; no route, wire field or CLI output changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal restart on deploy."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Nothing to configure."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Swapping back to an older build restores the earlier pane behaviour."
+  }
+}

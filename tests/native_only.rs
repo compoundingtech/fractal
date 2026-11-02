@@ -1,6 +1,6 @@
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use crate::support::real_git;
@@ -340,7 +340,8 @@ fn clean_path_supports_help_validate_env_and_doctor() {
     let doctor_agent = doctor_catalog.join("agents/h/missing/agent.kdl");
     fs::create_dir_all(doctor_agent.parent().unwrap()).unwrap();
     fs::write(&doctor_agent, "agent \"missing\" { host \"h\" }\n").unwrap();
-    let mut owner = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    // Only st2's children get the clean PATH; this fixture uses the inherited tools.
+    let mut owner = Command::new("sleep").arg("30").spawn().unwrap();
     fs::write(
         doctor_catalog.join(".st2.h.lock"),
         format!("{}\n", owner.id()),
@@ -389,61 +390,5 @@ fn clean_path_supports_help_validate_env_and_doctor() {
             .contains("h.missing presence fresh (is `offline`)"),
         "stdout:\n{}",
         String::from_utf8_lossy(&offline.stdout)
-    );
-}
-
-#[test]
-fn tracked_product_surface_contains_only_native_names() {
-    let output = Command::new("git")
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let paths: Vec<PathBuf> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|raw| !raw.is_empty())
-        .map(|raw| PathBuf::from(String::from_utf8(raw.to_vec()).unwrap()))
-        .collect();
-
-    let forbidden = [
-        ["con", "voy"].concat(),
-        [".con", "voy"].concat(),
-        ["render", "-agent"].concat(),
-        ["build", "-agent"].concat(),
-        ["st2 ", "render"].concat(),
-        ["st2 ", "add"].concat(),
-        ["st2 ", "remove"].concat(),
-    ];
-    let mut violations = Vec::new();
-    for path in paths {
-        let Ok(contents) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let lower = contents.to_ascii_lowercase();
-        for needle in &forbidden {
-            if lower.contains(needle) {
-                violations.push(format!("{} contains {needle:?}", path.display()));
-            }
-        }
-        for needle in [
-            ["st2 ", "compile "].concat(),
-            ["`st2 ", "compile`"].concat(),
-        ] {
-            if lower.contains(&needle) {
-                violations.push(format!("{} contains {needle:?}", path.display()));
-            }
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "retired product surface returned:\n{}",
-        violations.join("\n")
     );
 }

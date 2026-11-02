@@ -1,0 +1,15 @@
+[package]
+name = "fractal-mission-ui"
+version = "0.1.0"
+edition = "2024"
+description = "Composable mission steps with optional terminal presentation"
+license = "MIT"
+
+[features]
+default = []
+ratatui = ["dep:ratatui", "dep:fractal-conversation-ui", "fractal-conversation-ui/ratatui"]
+
+[dependencies]
+fractal-ui-model = { path = "../fractal-ui-model" }
+fractal-conversation-ui = { path = "../fractal-conversation-ui", optional = true }
+ratatui = { workspace = true, optional = true }

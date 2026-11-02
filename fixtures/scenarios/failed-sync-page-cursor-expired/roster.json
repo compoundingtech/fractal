@@ -223,6 +223,38 @@
         "workspace": "~/src/atlas/.worktrees/docs"
       }
     ],
+    "devices": [
+      {
+        "expires_at": "2030-01-02T12:00:00.000Z",
+        "grant_kind": "person",
+        "id": "device/scenario-fleet-mid-refactor-person/ada",
+        "kind": "device",
+        "name": "Review phone",
+        "person_id": "person/ada",
+        "revision": "d-1",
+        "scopes": [
+          "read"
+        ],
+        "session_actor": "person/ada/session/scenario",
+        "state": "active",
+        "updated_at": "2030-01-01T11:59:00.000Z"
+      },
+      {
+        "expires_at": "2030-01-02T12:00:00.000Z",
+        "grant_kind": "person",
+        "id": "device/scenario-fleet-mid-refactor-person/robin",
+        "kind": "device",
+        "name": "Fleet tablet",
+        "person_id": "person/robin",
+        "revision": "d-1",
+        "scopes": [
+          "read"
+        ],
+        "session_actor": "person/robin/session/scenario",
+        "state": "active",
+        "updated_at": "2030-01-01T11:59:00.000Z"
+      }
+    ],
     "machines": [
       {
         "capacity": {
@@ -351,6 +383,52 @@
         "runtime_kind": "agent",
         "state": "running",
         "updated_at": "2030-01-01T11:05:00.000Z"
+      }
+    ],
+    "sessions": [
+      {
+        "id": "session/example-atlas-builder",
+        "kind": "session",
+        "owner_id": "agent/example/atlas/builder",
+        "revision": "s-1",
+        "runtime_incarnation": "rt-atlas-builder-271:8",
+        "started_at": "2030-01-01T11:22:00.000Z",
+        "state": "running",
+        "timeline_cursor": "timeline/session/example-atlas-builder/0",
+        "updated_at": "2030-01-01T11:59:56.000Z"
+      },
+      {
+        "id": "session/example-atlas-reviewer",
+        "kind": "session",
+        "owner_id": "agent/example/atlas/reviewer",
+        "revision": "s-1",
+        "runtime_incarnation": "rt-atlas-reviewer-914:1",
+        "started_at": "2030-01-01T11:48:00.000Z",
+        "state": "waiting",
+        "timeline_cursor": "timeline/session/example-atlas-reviewer/0",
+        "updated_at": "2030-01-01T11:59:56.000Z"
+      },
+      {
+        "id": "session/example-atlas-migrator",
+        "kind": "session",
+        "owner_id": "agent/example/atlas/migrator",
+        "revision": "s-1",
+        "runtime_incarnation": "rt-atlas-migrator-210:4",
+        "started_at": "2030-01-01T11:39:00.000Z",
+        "state": "running",
+        "timeline_cursor": "timeline/session/example-atlas-migrator/0",
+        "updated_at": "2030-01-01T11:59:56.000Z"
+      },
+      {
+        "id": "session/example-atlas-docs",
+        "kind": "session",
+        "owner_id": "agent/example/atlas/docs",
+        "revision": "s-1",
+        "runtime_incarnation": "rt-atlas-docs-354:9",
+        "started_at": "2030-01-01T11:05:00.000Z",
+        "state": "waiting",
+        "timeline_cursor": "timeline/session/example-atlas-docs/0",
+        "updated_at": "2030-01-01T11:59:56.000Z"
       }
     ]
   },
@@ -515,6 +593,54 @@
     {
       "codec": "timestamp",
       "pointer": "/state/machines/1/transports/0/last_success_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/sessions/0/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/sessions/0/started_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/sessions/1/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/sessions/1/started_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/sessions/2/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/sessions/2/started_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/sessions/3/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/sessions/3/started_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/devices/0/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/devices/0/expires_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/devices/1/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/devices/1/expires_at"
     },
     {
       "codec": "timestamp",

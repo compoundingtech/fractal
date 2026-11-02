@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Evidence GC writes its lines to the evidence log before it deletes: scripts/evidence-gc --before-delete runs a command on the written plan and deletes nothing if it fails; scripts/evidence-gc-timer uses it to run evidence-log gc --publish on a host that runs the log; evidence-log gc keeps the plan's refs as pending deletions, so a pull in between neither logs them again nor restores them.",
+  "replay": {
+    "status": "none",
+    "detail": "Operator scripts only; no record, signature or verifier rule changes."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "evidence-log gc requires the plan's delete list (evidence-gc --plan-out has always written it) and keeps evidence-log.gc-pending.json, {ref name: unix time}, in the host's copy."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "evidence-gc --apply with --before-delete deletes nothing when the command fails (exit 1). A pull does not log a ref GC planned to delete until the remote no longer has it or 24 hours pass."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Without --before-delete evidence-gc behaves as before; a host without the evidence log runs GC as before."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Operator scripts only."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "On the host that runs both timers, reinstall scripts/evidence-gc-timer in ~/.local/bin after this merges; nothing else to configure."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Remove ~/.local/bin/evidence-log-timer or ~/.config/evidence-log/signer.json to run GC without the log step; delete evidence-log.gc-pending.json to log pending refs again at once."
+  }
+}

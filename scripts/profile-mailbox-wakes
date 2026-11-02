@@ -11,10 +11,21 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tomllib
 
 
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
+
+
+def mailbox_library(root):
+    # Arbitrary historical refs predate the package rename and mailbox split.
+    for name in ("fractal-api-mailbox", "fractal-daemon", "fractal",
+                 "st3-api-mailbox", "st3-daemon", "st3"):
+        library = root / "crates" / name
+        if (library / "src/api/mailbox.rs").is_file():
+            return library
+    raise FileNotFoundError(f"{root}: cannot locate the mailbox library")
 
 
 def main():
@@ -33,13 +44,17 @@ def main():
     if output.exists():
         parser.error("output must be new; existing measurements are never overwritten")
     commit = run("git", "rev-parse", "--verify", f"{args.ref}^{{commit}}", capture_output=True, text=True).stdout.strip()
-    fixture = (repo / "crates/st3/src/api/mailbox_profile.rs").read_bytes()
+    fixture = (mailbox_library(repo) / "src/api/mailbox_profile.rs").read_bytes()
     output.mkdir(parents=True)
     checkout = output / "checkout"
     run("git", "worktree", "add", "--detach", str(checkout), commit)
     try:
-        (checkout / "crates/st3/src/api/mailbox_profile.rs").write_bytes(fixture)
-        mailbox = checkout / "crates/st3/src/api/mailbox.rs"
+        library = mailbox_library(checkout)
+        manifest = tomllib.loads((library / "Cargo.toml").read_text())
+        package = manifest["package"]["name"]
+        target = manifest.get("lib", {}).get("name", package.replace("-", "_"))
+        (library / "src/api/mailbox_profile.rs").write_bytes(fixture)
+        mailbox = library / "src/api/mailbox.rs"
         source = mailbox.read_text()
         if '#[path = "mailbox_profile.rs"]' not in source:
             mailbox.write_text(source + '\n#[cfg(test)]\n#[path = "mailbox_profile.rs"]\nmod profile;\n')
@@ -48,12 +63,12 @@ def main():
                     "idle_messages_per_seat": args.idle}
         (output / "build-metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
         with (output / "build.jsonl").open("w") as stdout, (output / "build.log").open("w") as stderr:
-            run("cargo", "test", "--release", "-p", "st3", "--lib",
+            run("cargo", "test", "--release", "-p", package, "--lib",
                 "api::mailbox::profile::many_streams", "--no-run", "--message-format=json",
                 cwd=checkout, stdout=stdout, stderr=stderr)
         executables = [item["executable"] for line in (output / "build.jsonl").read_text().splitlines()
                        if (item := json.loads(line)).get("reason") == "compiler-artifact"
-                       and item.get("executable") and item["target"]["name"] == "st3"
+                       and item.get("executable") and item["target"]["name"] == target
                        and item["profile"]["test"]]
         if len(executables) != 1:
             raise RuntimeError(f"expected one test executable, got {executables}")

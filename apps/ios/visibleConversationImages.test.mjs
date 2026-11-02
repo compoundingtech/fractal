@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ConversationImageViewport, VisibleConversationImage } from './visibleConversationImages.ts';
-import { contentImageUri, loadConversationContent } from '../../clients/typescript/st3-views/conversationContent.ts';
+import { contentImageUri, loadConversationContent } from '../../clients/typescript/fractal-views/conversationContent.ts';
 
 const tick = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
@@ -327,4 +327,23 @@ test('reentry after a chunk revoked visibility waits for cancellation and cannot
   assert.deepEqual(reads, ['image:1', 'next', 'image:2']);
   image.dispose();
   next.dispose();
+});
+
+test('a zoomed image stays open when the zoom covers its box, and closes after if the box left the screen', async () => {
+  const states = [];
+  const image = new VisibleConversationImage(new ConversationImageViewport(), async () => 'data:image/png;base64,AA==', state => states.push(state));
+  image.setVisible(true);
+  await tick();
+  assert.equal(states.at(-1).kind, 'image');
+  image.hold(true);
+  image.setVisible(false);
+  assert.equal(states.at(-1).kind, 'image', 'the full-screen zoom does not close the image under the person');
+  image.setVisible(true);
+  image.hold(false);
+  assert.equal(states.at(-1).kind, 'image', 'closing zoom over a box still on screen keeps it');
+  image.hold(true);
+  image.setVisible(false);
+  image.hold(false);
+  assert.equal(states.at(-1).kind, 'closed', 'closing zoom over a box that scrolled away releases it');
+  image.dispose();
 });

@@ -10,9 +10,11 @@
   },
   "state": {
     "agents": [],
+    "devices": [],
     "machines": [],
     "order": [],
-    "runtimes": []
+    "runtimes": [],
+    "sessions": []
   },
   "timeline": [],
   "times": [],

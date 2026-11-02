@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The skip policy gains a shadow entry for fractal-web (fleet signer only, enforce false, one in five sampled, the web lane's declared inputs), matching the note each fractal-web-execution shard signs; nothing skips the lane, and web-skip-proof now reports a matching record under a shadow entry as decision=run reason=shadow",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change; the evidence skip policy (read from the accepted base), a local decision tool, docs and tests."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. fractal-web is not enforced and has no evidence gate job, so no run skips it. One shard's note satisfies the rule, so the entry must stay shadow until the verifier can require every shard of one run."},
+  "compatibility": {"status": "none", "detail": "No client, wire or harness contract change. Required checks keep their names and outcomes. Shard notes signed after this merges carry the fractal-web input key and are also filed under refs/notes/evidence-input/fractal-web/."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change; the fractal-web notes then go back to exact-tree records and published ones stay valid."}
+}

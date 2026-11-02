@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import type { SubjectNote } from '@smalltalk/st3-client/schema'
+import type { SubjectNote } from '@fractal/client/schema'
 import { NoteList } from './NoteList'
 import { agentNote, allNotes, diffNote, futureNote, longNote, newestFirstIds, retireNote, target, viewer } from './notes-fixtures'
 import { NotesFrame, expectNoAudiencePresentation, notesFrameArgTypes, notesFrameArgs, notesStoryStyles as styles, type NotesFrameArgs } from './notes-story-frame'
@@ -40,12 +40,22 @@ function NoteListStory({ scheme, width, negativeControl }: NotesFrameArgs) {
 }
 
 const meta = {
-  title: 'Fractal/Plugins/Notes/Note list', component: NoteListStory, parameters: { layout: 'fullscreen' },
+  excludeStories: ['scenarioExemptions'],
+  title: 'Fractal/Plugins/Notes/Note list', component: NoteListStory,
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'No scenario slice models subject notes; synthetic notes with mixed stored audiences pin ordering, archive focus and the no-audience contract.' }, layout: 'fullscreen' },
   args: notesFrameArgs,
   argTypes: notesFrameArgTypes('Render a retired audience label beside the list: the no-audience assertion must fail.'),
 } satisfies Meta<typeof NoteListStory>
 export default meta
 type Story = StoryObj<typeof meta>
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'Dark1440:contract-fixture',
+  'Light1440:contract-fixture',
+  'Light440:contract-fixture',
+]
 
 const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const canvas = within(canvasElement)

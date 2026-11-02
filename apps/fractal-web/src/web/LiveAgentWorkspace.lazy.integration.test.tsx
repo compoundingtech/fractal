@@ -4,6 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { flushSync } from 'react-dom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as Atom from 'effect/reactivity/Atom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as PaneModule from './ConversationPane.tsx'
 import type * as WorkspaceModule from './LiveAgentWorkspace.tsx'
@@ -11,6 +12,9 @@ import type * as FallbackModule from './ConversationPaneFallback.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import type { Feed, Fleet } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
+import { Agent, decodeUnknownSync } from '@fractal/client/schema'
+import { openAgent } from '@fractal/sdk/effect'
+import { fleetFromAgents } from '../data/projections.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 // Header actions read resources from a data source; they are outside this import boundary.
@@ -31,14 +35,22 @@ vi.mock('./ConversationPaneFallback.tsx', async importOriginal => {
 // pending, and no backend is needed to prove when its code is requested.
 let gatewayObservation: FeedSyncObservation | undefined
 const reconnect = vi.fn()
+const askingAgents: ReadonlySet<string> = new Set()
+const waitingFeed = Atom.make({ _tag: 'Waiting' } as const)
 vi.mock('../data/react.tsx', () => ({
   useFleet: () => rosterFeed,
+  // Rows read their own agent feed; serve it from the mocked roster.
+  useAgent: (ref: string) => rosterFeed._tag === 'Observed' ? { ...rosterFeed, value: rosterFeed.value.agents.find(row => row.ref === ref) } : rosterFeed,
+  useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
+  useAskingAgents: () => askingAgents,
   useSubjectList: () => [],
   useConnection: () => ({ _tag: 'Live' }),
   useNow: () => 0,
+  useNowSnapshot: () => 0,
   useGatewaySync: () => gatewayObservation,
-  useDataSource: () => ({ gateway: 'alpha.example', reconnect }),
+  useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, missions: waitingFeed, attention: waitingFeed }),
   useFeedInterest: () => {},
+  useAttention: () => ({ _tag: 'Waiting' }),
 }))
 
 let workspace: typeof WorkspaceModule
@@ -49,12 +61,20 @@ let rejectImport: (reason: Error) => void
 let mountCount: number
 let frameId: number
 const requested = vi.fn()
+const terminalRequested = vi.fn()
+const terminalPrefetch = vi.fn()
+const prepareTerminal = vi.fn(async () => ({ _tag: 'Ready' as const }))
+let resolveTerminal: () => void
+let rejectTerminal: (reason: Error) => void
 const frames = new Map<number, FrameRequestCallback>()
 const paintTasks: (() => void)[] = []
 
 beforeEach(async () => {
   vi.resetModules()
   requested.mockClear()
+  terminalRequested.mockClear()
+  terminalPrefetch.mockClear()
+  prepareTerminal.mockClear()
   gatewayObservation = { status: { _tag: 'Live', since: 0 }, observedAt: 0 }
   reconnect.mockClear()
   mountCount = 0
@@ -71,6 +91,8 @@ beforeEach(async () => {
     unobserve() {}
     disconnect() {}
   })
+  Object.defineProperty(Range.prototype, 'getBoundingClientRect', { configurable: true, value: () => new DOMRect() })
+  Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] })
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     const id = ++frameId
     frames.set(id, callback)
@@ -101,6 +123,12 @@ beforeEach(async () => {
       },
     }
   })
+  const terminalReady = new Promise<void>((resolve, reject) => { resolveTerminal = resolve; rejectTerminal = reject })
+  vi.doMock('../terminal/TerminalDetail.tsx', async () => {
+    terminalRequested()
+    await terminalReady
+    return { prepareTerminal, TerminalDetail: () => <div data-terminal-loaded="">Output</div> }
+  })
   workspace = await import('./LiveAgentWorkspace.tsx')
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -111,6 +139,7 @@ afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
   vi.doUnmock('./ConversationPane.tsx')
+  vi.doUnmock('../terminal/TerminalDetail.tsx')
   vi.unstubAllGlobals()
   window.history.replaceState(null, '', '/')
 })
@@ -132,30 +161,102 @@ const renderShell = async (ux?: UxTelemetry) => {
 }
 
 
-describe('gateway footer honesty', () => {
-  it('uses user-facing connection wording rather than a raw host or Live tag', async () => {
+describe('gateway connection banner', () => {
+  it('shows nothing while live and keeps connection wording out of the footer', async () => {
     await renderShell()
+    expect(container.querySelector('[data-connection-state]')).toBeNull()
     const footer = container.querySelector('footer')
-    expect(footer?.textContent).toContain('Connected')
+    expect(footer?.textContent).not.toContain('Connected')
     expect(footer?.textContent).not.toContain('alpha.example')
-    expect(footer?.textContent).not.toContain('Live')
   })
 
-  it('places one explicit reconnect action next to the countdown', async () => {
+  it('places one band under the thread header with the countdown and one reconnect action', async () => {
     gatewayObservation = {
       status: { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: 3000, issue: 'Private diagnostic' } },
       observedAt: -2000,
     }
     await renderShell()
-    const footer = container.querySelector('footer')
-    expect(footer?.textContent).toContain('Reconnecting in 3s · attempt 2')
-    expect(footer?.textContent).not.toContain('Private diagnostic')
-    const button = [...(footer?.querySelectorAll('button') ?? [])].find(button => button.textContent === 'Reconnect now')
-    expect(button).toBeDefined()
-    await act(async () => button?.click())
+    const bands = container.querySelectorAll('[data-connection-state]')
+    expect(bands).toHaveLength(1)
+    const band = bands[0]
+    expect(band?.getAttribute('data-connection-state')).toBe('reconnecting')
+    expect(band?.closest('section[aria-label="Agent workspace"]')).not.toBeNull()
+    expect(band?.textContent).toContain('Next try in 3s · attempt 2')
+    expect(band?.textContent).not.toContain('Reconnecting in')
+    expect(band?.textContent).not.toContain('Private diagnostic')
+    expect(container.querySelector('footer')?.querySelector('[data-connection-state]')).toBeNull()
+    const buttons = band?.querySelectorAll('button') ?? []
+    expect(buttons).toHaveLength(1)
+    await act(async () => (buttons[0] as HTMLButtonElement | undefined)?.click())
     expect(reconnect).toHaveBeenCalledTimes(1)
   })
 })
+describe('terminal import intent', () => {
+  const terminalRoster = () => {
+    const row = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example', host_id: 'host/example', runtime_ids: ['runtime/example'], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })
+    rosterFeed = { _tag: 'Observed', freshness: 'live', value: fleetFromAgents([openAgent(row)]) }
+  }
+  it('warms code and fonts only after paint and idle, never data without header intent', async () => {
+    const idle: (() => void)[] = []
+    vi.stubGlobal('requestIdleCallback', (callback: () => void) => { idle.push(callback); return 1 })
+    vi.stubGlobal('cancelIdleCallback', vi.fn())
+    terminalRoster()
+    await renderShell()
+    expect(terminalRequested).not.toHaveBeenCalled()
+    await paintShellFrame()
+    await act(async () => { for (const task of paintTasks.splice(0)) task() })
+    expect(terminalRequested).not.toHaveBeenCalled()
+    expect(idle).toHaveLength(1)
+    await act(async () => idle[0]?.())
+    expect(terminalRequested).toHaveBeenCalledTimes(1)
+    expect(terminalPrefetch).not.toHaveBeenCalled()
+    await act(async () => resolveTerminal())
+    expect(prepareTerminal).toHaveBeenCalledTimes(1)
+    const toggle = container.querySelector('[aria-label="Toggle terminal drawer"]')!
+    await act(async () => toggle.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })))
+    expect(terminalPrefetch).toHaveBeenCalledWith('terminal/example')
+    expect(terminalRequested).toHaveBeenCalledTimes(1)
+    await act(async () => toggle.dispatchEvent(new FocusEvent('focusin', { bubbles: true })))
+    expect(terminalPrefetch).toHaveBeenCalledTimes(2)
+    await act(async () => (toggle as HTMLButtonElement).click())
+    // Drawer demand reuses the idle request rather than importing the terminal chunk again.
+    expect(terminalRequested).toHaveBeenCalledTimes(1)
+  })
+  it('renders a loaded terminal in the reopen commit without a lazy fallback', async () => {
+    const show = <workspace.WorkspaceBody current="agent/example" rosterRefs={[]} view={{ _tag: 'Terminal', ref: 'terminal/example' }} agentName="Example" onOpenTool={() => {}} />
+    await act(async () => root.render(show))
+    await act(async () => resolveTerminal())
+    await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-terminal-loaded]')).not.toBeNull()) })
+    await act(async () => root.render(null))
+    // A fresh TerminalCodeBoundary on reopen must render the loaded module in the same synchronous commit.
+    act(() => {
+      flushSync(() => root.render(show))
+      expect(container.querySelector('[data-terminal-loaded]')?.textContent).toBe('Output')
+      expect(container.textContent).not.toContain('Loading terminal')
+    })
+    expect(terminalRequested).toHaveBeenCalledTimes(1)
+  })
+  it('retries a rejected terminal chunk with a fresh lazy identity', async () => {
+    const show = <workspace.WorkspaceBody current="agent/example" rosterRefs={[]} view={{ _tag: 'Terminal', ref: 'terminal/example' }} agentName="Example" onOpenTool={() => {}} />
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await act(async () => root.render(show))
+      await act(async () => rejectTerminal(new Error('Chunk unavailable')))
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain('This terminal view could not load')
+      // Vitest caches the failed module evaluation, not just the loader promise; clearing its
+      // registry models a recovered chunk transport while the real workspace module stays alive.
+      vi.resetModules()
+      vi.doMock('../terminal/TerminalDetail.tsx', () => {
+        terminalRequested()
+        return { prepareTerminal, TerminalDetail: () => <div data-terminal-loaded="">Recovered</div> }
+      })
+      await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Try again')?.click())
+      await act(async () => { await vi.waitFor(() => expect(terminalRequested).toHaveBeenCalledTimes(2)) })
+      await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-terminal-loaded]')?.textContent).toBe('Recovered')) })
+    } finally { errors.mockRestore() }
+  })
+})
+
 describe('conversation import boundary', () => {
   it('reserves non-interactive roster rows while waiting and keeps the honest wait notice', async () => {
     await renderShell()
@@ -166,29 +267,29 @@ describe('conversation import boundary', () => {
     expect(skeleton?.querySelectorAll('[data-wf-skeleton-row]')).toHaveLength(8)
     expect(skeleton?.querySelectorAll('[data-wf-skeleton-line]')).toHaveLength(16)
     expect(skeleton?.querySelectorAll('button, a, input, [tabindex]')).toHaveLength(0)
-    expect(container.textContent).toContain('Waiting for the agent roster.')
+    expect(container.querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents…')
   })
 
   it('removes skeletons for observed empty rosters and read refusals rather than inventing rows', async () => {
     rosterFeed = { _tag: 'Observed', freshness: 'live', value: { agents: [], hosts: [] } }
     await renderShell()
     expect(container.querySelector('[data-wf-roster-skeleton]')).toBeNull()
-    expect(container.textContent).not.toContain('Waiting for the agent roster.')
+    expect(container.querySelector('[data-system-state]')).toBeNull()
     rosterFeed = { _tag: 'Unavailable', reason: 'ungranted', detail: 'not-for-display' }
     await renderShell()
     expect(container.querySelector('[data-wf-roster-skeleton]')).toBeNull()
-    expect(container.textContent).toContain('Read access to the agent roster has not been granted.')
+    expect(container.querySelector('[data-wf-roster-reason="ungranted"]')?.textContent).toBe('No access to the agent rosterRead access has not been granted.')
     expect(container.textContent).not.toContain('not-for-display')
   })
 
   it('discloses partial published roster coverage without disguising it as an empty roster', async () => {
     rosterFeed = { _tag: 'Observed', freshness: 'stale', coverage: { _tag: 'Partial' }, value: { agents: [], hosts: [] } }
     await renderShell()
-    expect(container.textContent).toContain('Showing a partial roster · live updates pending')
+    expect(container.querySelector('[data-system-state="stale"]')?.textContent).toBe('Partial roster')
     expect(container.querySelector('[data-wf-roster-skeleton]')).toBeNull()
     rosterFeed = { _tag: 'Observed', freshness: 'live', value: { agents: [], hosts: [] } }
     await renderShell()
-    expect(container.textContent).not.toContain('Showing a partial roster')
+    expect(container.querySelector('[data-system-state="stale"]')).toBeNull()
   })
 
   it('does not evaluate pane code when the shell module is imported', () => {
@@ -314,12 +415,14 @@ describe('conversation import boundary', () => {
     const ux: UxTelemetry = {
       activeSpan: () => undefined,
       traceContext: () => undefined,
+      beginOpen: () => ({ phase: () => {}, contentCommitted: () => () => {}, cancel: () => {} }),
       shellCommitted: () => capture,
       rosterCommitted: () => () => {},
       beginSwitch: () => {},
       switchDataReady: () => {},
       transcriptCommitted: () => () => {},
       beginSendEcho: () => ({ committed: () => () => {}, cancel: () => {} }),
+    beginAlertAnswer: () => ({ landed: () => () => {}, cancel: () => {} }),
       observeSync: () => {},
       dispose: () => {},
     }

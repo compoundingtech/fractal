@@ -1,8 +1,9 @@
-import { lstat, readdir, readFile } from 'node:fs/promises'
-import { resolve, join, relative } from 'node:path'
+import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
+import { basename, dirname, resolve, join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 
 const repositoryRoot = new URL('../../../../', import.meta.url).pathname
 const binaryManifest = new URL('../../src/terminal/assets/binary-assets.json', import.meta.url)
@@ -78,13 +79,42 @@ export const scanFiles = async (roots, policy, manifest = binaryManifest) => {
   const approvedBinary = (path, bytes) => assets.some((asset) =>
     asset.path === relative(repositoryRoot, path) &&
     asset.sha256 === createHash('sha256').update(bytes).digest('hex'))
-  const visit = async (path) => {
+  const repositories = new Map()
+  /** Git publication inputs under a scan root: committed and untracked non-ignored files,
+   *  including tracked files inside ignored directories. Undefined outside Git (scan all). */
+  const publishedPaths = async (root) => {
+    const stat = await lstat(root)
+    const probe = spawnSync('git', ['-C', stat.isDirectory() ? root : dirname(root), 'rev-parse', '--show-toplevel'], { encoding: 'utf8' })
+    // Generated fixture roots outside Git still receive the full privacy scan.
+    if (probe.status === 128) return undefined
+    if (probe.status !== 0) throw new Error('Cannot resolve scan repository')
+    const repo = probe.stdout.trim()
+    if (!repositories.has(repo)) {
+      const listed = spawnSync('git', ['-C', repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+      if (listed.status !== 0) throw new Error('Cannot enumerate published scan files')
+      const listedPaths = new Set([repo])
+      for (const file of listed.stdout.split('\0').filter(Boolean)) {
+        let path = resolve(repo, file)
+        listedPaths.add(path)
+        while (path !== repo) {
+          path = dirname(path)
+          listedPaths.add(path)
+        }
+      }
+      repositories.set(repo, listedPaths)
+    }
+    const paths = repositories.get(repo)
+    // Git reports the resolved top level; a root reached through a symlinked directory (such as
+    // a temporary directory) must not miss every entry. A symlink root keeps its own name, so it
+    // is still visited and reported; visits never follow symlinks below the root.
+    const real = stat.isDirectory() ? await realpath(root) : join(await realpath(dirname(root)), basename(root))
+    return (path) => paths.has(real + path.slice(root.length))
+  }
+  const visit = async (path, published) => {
+    if (published !== undefined && !published(path)) return
     const stat = await lstat(path)
     if (stat.isDirectory()) {
-      // Installed dependencies and repository state are not published app content.
-      const name = path.split('/').at(-1)
-      if (name === 'node_modules' || name === '.git') return
-      for (const entry of (await readdir(path)).sort()) await visit(join(path, entry))
+      for (const entry of (await readdir(path)).sort()) await visit(join(path, entry), published)
       return
     }
     if (!stat.isFile()) { findings.push({ file: path, line: 1 }); return }
@@ -104,7 +134,10 @@ export const scanFiles = async (roots, policy, manifest = binaryManifest) => {
       if (forbiddenText(normalize(line), compiled)) findings.push({ file: path, line: i + 1 })
     })
   }
-  for (const root of roots) await visit(resolve(root))
+  for (const root of roots) {
+    const path = resolve(root)
+    await visit(path, await publishedPaths(path))
+  }
   return findings
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

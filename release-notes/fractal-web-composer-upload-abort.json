@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fractal web: cancelling a composer image upload aborts its transport, restores the draft without an error, and prevents a late upload result from becoming an attachment.",
+  "replay": { "status": "none", "detail": "No stored state or replay change." },
+  "schema": { "status": "none", "detail": "No protocol change. The existing client request signal reaches the existing blob upload request." },
+  "rules": { "status": "none", "detail": "No checkpoint rule change." },
+  "compatibility": { "status": "none", "detail": "An optional internal upload AbortSignal preserves callers without cancellation. Existing image and text sends are unchanged." },
+  "downtime": { "status": "none", "detail": "No restart or downtime." },
+  "manual": { "status": "none", "detail": "No manual migration step." },
+  "recovery": { "status": "none", "detail": "Cancellation restores the unsent draft and its removable images; a retry uses a new request signal." }
+}

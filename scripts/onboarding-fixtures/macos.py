@@ -86,7 +86,7 @@ class TartMachine:
         return result
 
     def send(self,data,path):
-        remote=shlex.join(['/bin/bash','-c','mkdir -p ~/smalltalk-install; cat > '+shlex.quote(path)])
+        remote=shlex.join(['/bin/bash','-c','mkdir -p ~/fractal-install; cat > '+shlex.quote(path)])
         r=subprocess.run(self.ssh()+[remote],input=data,capture_output=True,timeout=60)
         if r.returncode: raise RuntimeError('copy failed: '+r.stderr.decode(errors='replace'))
 
@@ -180,17 +180,17 @@ print(json.dumps({"app":str(app),"cli_realpath":str(st.resolve()),"executable":i
         if not self.check('fresh-mac',r['exit']==0 and 'Darwin arm64' in r['stdout'],'clean ada home on Apple Silicon macOS with an actual GUI launchd domain'): return
         r=self.execute('No providers or developer tools','for t in gh cargo rustc mold sccache nix claude codex opencode pi omp; do command -v "$t" || true; done')
         if not self.check('clean-tool-path',r['exit']==0 and not r['stdout'].strip(),'no gh, developer toolchain or provider initially installed'): return
-        self.m.send(self.archive.read_bytes(),'/Users/ada/smalltalk-install/candidate.tar.gz')
-        r=self.execute('Extract verified Mac archive','set -e\ncd ~/smalltalk-install\nshasum -a 256 candidate.tar.gz\ntar -xzf candidate.tar.gz\ncat '+shlex.quote(self.metadata['package']+'/BUILD.json'))
+        self.m.send(self.archive.read_bytes(),'/Users/ada/fractal-install/candidate.tar.gz')
+        r=self.execute('Extract verified Mac archive','set -e\ncd ~/fractal-install\nshasum -a 256 candidate.tar.gz\ntar -xzf candidate.tar.gz\ncat '+shlex.quote(self.metadata['package']+'/BUILD.json'))
         if not self.check('archive-extracted',r['exit']==0 and r['stdout'].split()[0]==self.metadata['sha256'],'copied bytes match recorded archive and BUILD.json captured'): return
-        installer='/Users/ada/smalltalk-install/'+self.metadata['package']+'/install.sh'
+        installer='/Users/ada/fractal-install/'+self.metadata['package']+'/install.sh'
         env=['env',*[k+'='+v for k,v in self.signing.items()]]
         r=self.execute('Extracted Mac installer',shlex.join([*env,installer,'--bin-dir','/Users/ada/.local/bin']))
         if not self.check('guide-install',r['exit']==0,'archive installer completes without sudo or password entry'): return
         r=self.execute('App signature verification','/usr/bin/codesign --verify --strict --deep '+shlex.quote(APP))
         self.check('app-signature',r['exit']==0,'installed bundle passes strict deep codesign verification')
         identity=self.identity('Installed bundle identity')
-        self.check('app-identity',bool(identity and identity['cli_realpath']==APP+'/Contents/MacOS/st3' and identity['executable']=='st3' and identity['identifier']=='com.compoundingtech.smalltalk' and identity['requirement']),'st resolves to the fixed app executable with a designated requirement')
+        self.check('app-identity',bool(identity and identity['cli_realpath']==APP+'/Contents/MacOS/fractal' and identity['executable']=='fractal' and identity['identifier']=='com.compoundingtech.smalltalk' and identity['requirement']),'st resolves to the canonical fixed app executable with a designated requirement')
         self.check('stui-absent',bool(identity and identity['stui_absent']),'retired executable absent from app and CLI directory')
         if self.args.macos_signing_team:
             self.check('signing-team',bool(identity and identity['team']==self.args.macos_signing_team),'installed TeamIdentifier matches the explicitly configured team')
@@ -212,13 +212,13 @@ print(json.dumps({"app":str(app),"cli_realpath":str(st.resolve()),"executable":i
         self.check('login-path',r['exit']==0,'st resolves in a fresh login shell')
         status=self.service('Launchd service status')
         self.check('launchd-active',daemon_running(status),'actual launchd user daemon running')
-        code='import json,plistlib; from pathlib import Path; p=plistlib.loads((Path.home()/"Library/LaunchAgents/com.compoundingtech.st3.plist").read_bytes()); print(json.dumps(p)); assert p["Label"]=="com.compoundingtech.st3"; assert p["ProgramArguments"][0]==str(Path.home()/"Applications/SmallTalk.app/Contents/MacOS/st3")'
+        code='import json,plistlib; from pathlib import Path; p=plistlib.loads((Path.home()/"Library/LaunchAgents/com.compoundingtech.st3.plist").read_bytes()); print(json.dumps(p)); assert p["Label"]=="com.compoundingtech.st3"; assert p["ProgramArguments"][0]==str(Path.home()/"Applications/SmallTalk.app/Contents/MacOS/fractal")'
         r=self.execute('LaunchAgent app executable',shlex.join(['python3','-c',code]))
         self.check('launchd-app-path',r['exit']==0,'LaunchAgent executes the installed fixed app binary')
         r=self.cli('Ordinary Mac doctor','doctor')
         self.check('doctor-healthy',r['exit']==0,'ordinary doctor succeeds without gh or a toolchain')
         r=self.cli('Mac service permissions guidance','service','permissions')
-        self.check('permissions-guidance',r['exit']==0 and all(x in self.text(r) for x in ('Full Disk Access','Developer Tools','st service restart',APP+'/Contents/MacOS/st3')),'guidance names actual app executable and manual approvals; no approval is inferred')
+        self.check('permissions-guidance',r['exit']==0 and all(x in self.text(r) for x in ('Full Disk Access','Developer Tools','st service restart',APP+'/Contents/MacOS/fractal')),'guidance names actual app executable and manual approvals; no approval is inferred')
         r=self.cli('No harness setup explanation','setup','--person','ada','--node','studio','--yes','--service','true')
         self.check('no-harness-explained',r['exit']==0 and 'No supported harness is installed' in self.text(r) and 'No onboarding seat was created' in self.text(r),'missing providers are explained without creating onboarding')
         for kind,subject in [('agents','agent/st/assistant'),('missions','mission/st/onboarding')]:

@@ -9,13 +9,96 @@
     "seed": 6
   },
   "state": {
+    "launch_variants": [],
+    "launches": [],
     "missions": [
       {
         "active_runs": 1,
         "id": "mission/example/harbor/deploy-summary",
         "kind": "mission",
         "mission_revision": "sha256:harbor-mission-1",
+        "presentation": {
+          "actions": [],
+          "card": null,
+          "last_progress": null,
+          "progress": {
+            "done": 0,
+            "total": 1
+          },
+          "queued_behind": null,
+          "settled_at": null,
+          "steps": [
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/harbor/deploy-summary/1/step-1",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/harbor/builder",
+                "kind": "agent",
+                "label": "Harbor Builder"
+              },
+              "path": "step-1",
+              "title": "Stream the deployment verification report",
+              "word": "working"
+            }
+          ],
+          "stuck": null,
+          "system": false,
+          "who": {
+            "agent": "agent/example/harbor/builder",
+            "kind": "agent",
+            "label": "Harbor Builder"
+          },
+          "word": "working"
+        },
         "revision": "mr-1",
+        "run_details": [
+          {
+            "current_steps": [
+              {
+                "assignee": "agent/example/harbor/builder",
+                "claimant": "agent/example/harbor/builder",
+                "id": "step-run/example/harbor/deploy-summary/1/step-1",
+                "since": "2030-01-01T11:58:00.000Z",
+                "state": "claimed",
+                "title": "Stream the deployment verification report"
+              }
+            ],
+            "generation_id": "run-generation/example/harbor/deploy-summary/1/g1",
+            "id": "mission-run/example/harbor/deploy-summary/1",
+            "must_act": "agent",
+            "phase": "normal",
+            "progress": {
+              "done": 0,
+              "total": 1
+            },
+            "requester": "person/ada",
+            "state_since": "2030-01-01T11:58:00.000Z",
+            "status": "running",
+            "steps": [
+              {
+                "assignee": "agent/example/harbor/builder",
+                "attempt": 1,
+                "blocked_reason": null,
+                "blockers": [],
+                "claimant": "agent/example/harbor/builder",
+                "constraints": [
+                  "Keep the public API stable until the docs land"
+                ],
+                "goals": [
+                  "Verify readiness, canary checks and error budget"
+                ],
+                "id": "step-run/example/harbor/deploy-summary/1/step-1",
+                "path": "step-1",
+                "since": "2030-01-01T11:58:00.000Z",
+                "state": "claimed",
+                "title": "Stream the deployment verification report"
+              }
+            ]
+          }
+        ],
         "run_generations": {
           "mission-run/example/harbor/deploy-summary/1": "run-generation/example/harbor/deploy-summary/1/g1"
         },
@@ -61,6 +144,18 @@
     {
       "codec": "timestamp",
       "pointer": "/state/missions/0/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/current_steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/state_since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/0/since"
     },
     {
       "codec": "timestamp",

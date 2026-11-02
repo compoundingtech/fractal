@@ -8,7 +8,7 @@ export default githubWorkflow(auditCaches({
   name: 'Draft CI admission',
   on: {
     workflow_run: {
-      workflows: ['Workspace CI', 'Performance', 'Public repository check', 'Nix', 'macOS CI', 'Smalltalk tag release', 'fractal-web'],
+      workflows: ['Workspace CI', 'Performance', 'Public repository check', 'Nix', 'macOS CI', 'Fractal tag release', 'fractal-web'],
       types: ['requested'],
     },
   },

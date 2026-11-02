@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Holding an arrow key now keeps moving through TUI sidebar lists and the picker over an attached terminal, including terminals that report explicit key-repeat events.",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "Client-only input handling fix; terminal input and single-press confirmation behavior are unchanged. Folder placement, creation and deletion confirmations reject all repeat events and still require a fresh press."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No manual steps required."},
+  "recovery": {"status": "none", "detail": "No recovery steps required."}
+}

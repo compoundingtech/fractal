@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add test-only integration coverage proving that shared st3-scenarios replay drives fractal-web's real liveSource roster and conversation projections, including timed updates and a changed-world negative control. No user-facing upgrade impact.",
+  "replay": {
+    "status": "none",
+    "detail": "Scenario replay is used only in tests; no replay or rebuild of deployed runtime state is required."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database, claim, or browser-state schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule or fleet coordination change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No production client, protocol, harness, or CLI change. The scenario package is a test-only workspace dependency; generated lockfile provenance is refreshed."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No deployed service change or interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No installation or operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No runtime recovery or rollback behavior change."
+  }
+}

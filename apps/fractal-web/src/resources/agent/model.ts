@@ -1,4 +1,4 @@
-import type { ResourceObservation } from '@smalltalk/st3-client/schema'
+import type { ResourceObservation } from '@fractal/client/schema'
 import { DateTime } from 'effect'
 
 /** Rich observed resource page with continuation and incremental loading state. */

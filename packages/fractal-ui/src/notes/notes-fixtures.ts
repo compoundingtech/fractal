@@ -1,4 +1,4 @@
-import { SubjectNote, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { SubjectNote, decodeUnknownSync } from '@fractal/client/schema'
 
 /**
  * Synthetic story fixtures: wire-shaped notes decoded through the generated client schema. Stored

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Observe live exec worker threads without blocking on an exited leader thread.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or claim processing change; historical unknown process exit statuses are not backfilled."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Exec generation fields and stored formats remain unchanged."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Exec observation acquires only waitable owned-child statuses without blocking. A zombie main thread with live sibling threads keeps its process group running; owned exit status is still persisted once the process actually exits, including while descendants remain alive. No checkpoint or fleet admission rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client, wire or harness contract change. Owned and adopted execs preserve live worker liveness until actual process completion."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional interruption beyond the normal binary update procedure."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No data conversion or extra operator step is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Existing generation records remain readable; ordinary binary rollback remains available under existing state compatibility procedures."
+  }
+}

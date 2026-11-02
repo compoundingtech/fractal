@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Main pins the evidence log's public key in .st/evidence-log-key (principal log/evidence), so the log host and the verifier read the same trusted key from main; the gate treats a change to that file as protected and never skips it.",
+  "replay": {
+    "status": "none",
+    "detail": "No record, signature or verifier rule changes; the log's view stays shadow only."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "A new allowed-signers file; no stored or wire format changes."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "The verifier's log view (shadow) and the log host's pulls now use the key main pins instead of host configuration. A pull request that changes .st/evidence-log-key always runs its checks."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The log host already signs with this key; its local log-keys file stops being read."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Configuration only."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Interim custody: the private key is a plain file on the log host until a sekrets profile holds it; then signer.json changes, this file does not."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Remove .st/evidence-log-key; the log host falls back to its local key list and the verifier reports no log view."
+  }
+}

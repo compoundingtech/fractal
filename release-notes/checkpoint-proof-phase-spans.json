@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A checkpoint's capture, plan and each proof phase (copy, keep the sealed set, replay and answers before and after the drop, the drop, rollback) are profile spans, with their CPU, SQL and disk reads",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules, seals, digests and proofs are unchanged: the spans only time the existing phases."},
+  "compatibility": {"status": "none", "detail": "No client, wire or harness contract change. Under ST3_PROFILE_DIR the profile's maintenance.checkpoint records gain the new span names."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "An older build records the checkpoint work without these spans."}
+}

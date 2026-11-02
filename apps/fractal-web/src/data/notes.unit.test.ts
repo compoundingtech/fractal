@@ -1,5 +1,5 @@
-import { St3Client } from '@smalltalk/st3-client'
-import { SubjectNote, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { FractalClient } from '@fractal/client'
+import { SubjectNote, decodeUnknownSync } from '@fractal/client/schema'
 import { DateTime } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { notesByTarget } from './notes.ts'
@@ -16,7 +16,7 @@ const makePort = ({ actor = 'person/example', response }: {
   readonly response?: () => Response
 } = {}) => {
   const requests: { path: string; method: string | undefined; body: unknown }[] = []
-  const client = new St3Client({
+  const client = new FractalClient({
     baseUrl: 'https://gateway.invalid',
     fetchImpl: async (input, init) => {
       requests.push({ path: new URL(String(input)).pathname, method: init?.method, body: JSON.parse(String(init?.body)) })
@@ -66,7 +66,7 @@ describe('independent subject notes projection and generated writes', () => {
   })
   it('refuses creating before the signed-in identity is known', async () => {
     const requests: unknown[] = []
-    const client = new St3Client({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input) => { requests.push(input); return Response.json({}) } })
+    const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input) => { requests.push(input); return Response.json({}) } })
     await expect(gatewayNoteActions({ client, actor: () => undefined }).create(note.target, note.text)).rejects.toThrow('signed-in identity')
     expect(requests).toHaveLength(0)
   })

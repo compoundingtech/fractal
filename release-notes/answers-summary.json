@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "smallclaims can summarize what readers answer per claim kind at a cut (each subject and writer's newest claim, with counts and bucket digests), so members that trim on their own can later compare answers; nothing calls it yet",
+  "replay": {
+    "status": "none",
+    "detail": "No claim is written, read differently or replayed; the summary is a read-only function nothing calls yet."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change: the summary reads the existing claims table through its kind index."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No claim kind, field, wire, client or CLI contract changes. The new types are serializable for a later peer route but nothing sends them yet."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart beyond the normal upgrade; no migration or backfill."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No data recovery is needed. Reverting removes an unused module."
+  }
+}

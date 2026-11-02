@@ -78,7 +78,7 @@ fn cli_sets_replaces_and_clears_fields_without_changing_identity_or_other_bytes(
         assert_eq!(receipt["value"], value);
     }
 
-    let found = st2::discover(root);
+    let found = fractal_legacy_runner::discover(root);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     let spec = &found.specs[0];
     assert_eq!(spec.identity, "worker");
@@ -198,7 +198,7 @@ fn cli_clears_a_presentation_field_from_compact_kdl() {
     );
     let authored = fs::read_to_string(root.join("h/worker/agent.kdl")).unwrap();
     assert_eq!(authored, "agent \"worker\" { host \"h\"; command \"x\" }\n");
-    let found = st2::discover(root);
+    let found = fractal_legacy_runner::discover(root);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     assert_eq!(found.specs[0].name, None);
 }
@@ -401,7 +401,7 @@ fn concurrent_cli_writers_serialize_without_losing_either_field() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let found = st2::discover(root);
+    let found = fractal_legacy_runner::discover(root);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     assert_eq!(found.specs[0].name.as_deref(), Some("Build owner"));
     assert_eq!(
@@ -411,6 +411,7 @@ fn concurrent_cli_writers_serialize_without_losing_either_field() {
     assert_eq!(fs::metadata(lock_path).unwrap().ino(), inode);
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn presentation_and_publication_contend_on_the_same_persistent_catalog_lock() {
     let temporary = tempfile::tempdir().unwrap();
@@ -465,7 +466,7 @@ fn presentation_and_publication_contend_on_the_same_persistent_catalog_lock() {
 
     let candidate = temporary.path().join("candidate.kdl");
     fs::copy(&declaration_path, &candidate).unwrap();
-    let digest = st2::agent_publish::digest_source(st2::agent_publish::PublishSource::Spec(
+    let digest = fractal_legacy_runner::agent_publish::digest_source(fractal_legacy_runner::agent_publish::PublishSource::Spec(
         candidate.clone(),
     ))
     .unwrap();
@@ -536,6 +537,7 @@ fn catalog_lock_refuses_a_symlinked_control_directory() {
     assert!(!outside.join("catalog-authoring.lock").exists());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn presentation_crash_stages_only_in_the_control_plane() {
     let temporary = tempfile::tempdir().unwrap();
@@ -595,6 +597,7 @@ fn presentation_crash_stages_only_in_the_control_plane() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn presentation_post_commit_generation_failure_is_fenced_and_recovered() {
     let temporary = tempfile::tempdir().unwrap();
@@ -650,6 +653,7 @@ fn presentation_post_commit_generation_failure_is_fenced_and_recovered() {
     assert!(!root.join(".st2/catalog-generation-incomplete").exists());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn control_directory_swap_cannot_redirect_presentation_staging() {
     let temporary = tempfile::tempdir().unwrap();

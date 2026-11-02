@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A pre-sign worker for the signing host: two systemd user timers (light every 2 min, heavy every 5 min) sign one ready pull request head of the host's own authors per tick with scripts/st-test --push origin, newest first, never a fork or an outside author, never the same tree twice, within operations' load limits, with a JSON line per attempt and a coverage summary.",
+  "replay": {
+    "status": "none",
+    "detail": "No record or signature format changes: the notes are the ones st-test already makes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored or wire format changes; the worker keeps its own local state files under ~/.local/state/evidence-presign."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "What counts as evidence is unchanged; the worker signs as the host key st-test already uses, at the same levels and lanes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Nothing runs until the units are installed on a host and ~/.config/evidence-presign/authors lists a login."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "On the signing host, after sign-off: write ~/.config/evidence-presign/authors, copy scripts/evidence-presign-timer to ~/.local/bin and the four unit files to ~/.config/systemd/user, then systemctl --user enable --now evidence-presign-light.timer evidence-presign-heavy.timer."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "touch ~/.config/evidence-presign/off stops every tick; systemctl --user disable --now the two timers removes it."
+  }
+}

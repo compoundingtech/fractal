@@ -29,6 +29,10 @@ export type StackParams = {
   NewMission: undefined;
   History: undefined;
   Resource: { id: string; title?: string };
+  /** Documents under a prefix, a page at a time, and a field to open one by name. */
+  Documents: { prefix?: string } | undefined;
+  /** One document, read-only. `trail` is the documents followed to reach it, ending with this one. */
+  Document: { reference: string; trail: string[] };
 };
 /** The four phone tabs. */
 export type TabParams = { [K in Tab]: NavigatorScreenParams<StackParams> | undefined };

@@ -104,6 +104,49 @@ pub fn resolve_tool(override_path: Option<&Path>, name: &str) -> Option<PathBuf>
     })
 }
 
+/// Find the pairing helper: new then legacy environment, beside this executable, then
+/// each PATH directory. Within each directory the new executable name wins.
+/// Configured paths are returned even if absent, so callers retain their absence policy.
+pub fn resolve_fabric_adapter() -> Result<Option<PathBuf>> {
+    let executable = std::env::current_exe().ok();
+    let paths = std::env::var_os("PATH");
+    discover_fabric_adapter(
+        std::env::var_os("FRACTAL_FABRIC_ADAPTER").as_deref(),
+        std::env::var_os("ST_FABRIC_ADAPTER").as_deref(),
+        executable.as_deref().and_then(Path::parent),
+        paths.as_deref(),
+    )
+}
+
+fn discover_fabric_adapter(
+    new_env: Option<&std::ffi::OsStr>,
+    old_env: Option<&std::ffi::OsStr>,
+    beside: Option<&Path>,
+    paths: Option<&std::ffi::OsStr>,
+) -> Result<Option<PathBuf>> {
+    if let (Some(new), Some(old)) = (new_env, old_env) {
+        anyhow::ensure!(
+            new == old,
+            "FRACTAL_FABRIC_ADAPTER and ST_FABRIC_ADAPTER name different paths; \
+             unset one or set both to the same path"
+        );
+    }
+    if let Some(path) = new_env.or(old_env) {
+        return Ok(Some(PathBuf::from(path)));
+    }
+    let in_directory = |directory: &Path| {
+        ["fractal-fabric-adapter", "st-fabric-adapter"]
+            .into_iter()
+            .map(|name| directory.join(name))
+            .find(|candidate| candidate.is_file())
+    };
+    Ok(beside.and_then(in_directory).or_else(|| {
+        paths.and_then(|paths| {
+            std::env::split_paths(paths).find_map(|directory| in_directory(&directory))
+        })
+    }))
+}
+
 #[derive(Debug)]
 struct CommandFailure(String);
 
@@ -342,9 +385,19 @@ pub async fn tailscale_addresses(tailscale: &Path) -> Result<Vec<IpAddr>> {
     Ok(parse_tailscale_ips(&run(tailscale, &["ip"]).await?))
 }
 
+pub const LEGACY_FLEET_PROTOCOL_PREFIX: &str = "st3/fleet/";
+pub const FRACTAL_FLEET_PROTOCOL_PREFIX: &str = "fractal/fleet/";
+
+/// Accept only either fleet protocol name bound to this exact fleet.
+pub fn is_fleet_fabric_protocol(protocol: &str, fleet_id: &str) -> bool {
+    [LEGACY_FLEET_PROTOCOL_PREFIX, FRACTAL_FLEET_PROTOCOL_PREFIX]
+        .into_iter()
+        .any(|prefix| protocol.strip_prefix(prefix) == Some(fleet_id))
+}
+
 /// The default Fabric protocol for a fleet, so a throwaway fleet never collides with another.
 pub fn default_fabric_protocol(fleet_id: &str) -> String {
-    format!("st3/fleet/{fleet_id}")
+    format!("{LEGACY_FLEET_PROTOCOL_PREFIX}{fleet_id}")
 }
 
 /// The `fabric` command, which talks to the local Fabric daemon.
@@ -422,6 +475,23 @@ impl Fabric {
         run(&self.program, &["expose", protocol, "--socket", socket])
             .await
             .map(|_| ())
+    }
+
+    /// Trust `node` under the local `name` for exactly `service`, inbound-only: it may connect
+    /// and use that one service, and this machine never dials, probes or announces to it.
+    /// Needs fabric 0.2.41 or later. `fabric add` reloads the running daemon's peers itself.
+    pub async fn add_inbound_only(&self, node: &str, name: &str, service: &str) -> Result<()> {
+        run(
+            &self.program,
+            &["add", node, name, "--inbound-only", "--allow", service],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Remove a trusted peer by NodeID or name. Fabric ends its admitted sessions.
+    pub async fn remove(&self, peer: &str) -> Result<()> {
+        run(&self.program, &["remove", peer]).await.map(|_| ())
     }
 
     /// The trusted peers in Fabric's `peers.toml`, as NodeID and local name.
@@ -593,15 +663,39 @@ pub fn parse_route(route: &str) -> Option<Route> {
     .then(|| Route::Http(route.trim_end_matches('/').into()))
 }
 
-/// What this machine can use to dial.
+/// What this machine can use to dial, filtered and ordered by its local configuration.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LocalTransports {
     pub tailscale: bool,
     pub fabric: bool,
+    pub fabric_first: bool,
 }
 
-/// A member's routes from its advertised endpoints, in the design's order after any config
-/// override: Tailscale, then Fabric, then loopback. Endpoints this machine cannot use, and any
+impl LocalTransports {
+    /// Apply an explicit transport list to current availability. Without a fleet file,
+    /// retain the legacy Tailscale-first order and allow every available transport.
+    pub fn configured(transports: Option<&[String]>, tailscale: bool, fabric: bool) -> Self {
+        let Some(transports) = transports else {
+            return Self {
+                tailscale,
+                fabric,
+                fabric_first: false,
+            };
+        };
+        let tailscale_position = transports.iter().position(|name| name == "tailscale");
+        let fabric_position = transports.iter().position(|name| name == "fabric");
+        Self {
+            tailscale: tailscale && tailscale_position.is_some(),
+            fabric: fabric && fabric_position.is_some(),
+            fabric_first: fabric_position.is_some_and(|fabric| {
+                tailscale_position.is_none_or(|tailscale| fabric < tailscale)
+            }),
+        }
+    }
+}
+
+/// A member's routes from its advertised endpoints, in the local configured order after
+/// any config override, with loopback last. Endpoints this machine cannot use, and any
 /// address that is neither loopback nor tailnet, are skipped.
 pub fn routes_from_endpoints(endpoints: &[Value], local: LocalTransports) -> Vec<Route> {
     let text = |endpoint: &Value, field: &str| endpoint[field].as_str().map(str::to_owned);
@@ -611,34 +705,33 @@ pub fn routes_from_endpoints(endpoints: &[Value], local: LocalTransports) -> Vec
             .filter(|address| is_permitted_route_address(&address.ip()))
             .map(|address| Route::Http(format!("http://{address}")))
     };
+    let tailscale = endpoints
+        .iter()
+        .filter(|endpoint| local.tailscale && endpoint["transport"] == "tailscale")
+        .filter_map(address)
+        .filter(|route| match route {
+            Route::Http(url) => url
+                .trim_start_matches("http://")
+                .parse::<SocketAddr>()
+                .is_ok_and(|address| is_tailnet_address(&address.ip())),
+            Route::Fabric { .. } => false,
+        });
+    let fabric = endpoints
+        .iter()
+        .filter(|endpoint| local.fabric && endpoint["transport"] == "fabric")
+        .filter_map(|endpoint| {
+            Some(Route::Fabric {
+                node: text(endpoint, "node")?,
+                protocol: text(endpoint, "protocol")?,
+            })
+        });
     let mut routes = Vec::new();
-    if local.tailscale {
-        routes.extend(
-            endpoints
-                .iter()
-                .filter(|endpoint| endpoint["transport"] == "tailscale")
-                .filter_map(address)
-                .filter(|route| match route {
-                    Route::Http(url) => url
-                        .trim_start_matches("http://")
-                        .parse::<SocketAddr>()
-                        .is_ok_and(|address| is_tailnet_address(&address.ip())),
-                    Route::Fabric { .. } => false,
-                }),
-        );
-    }
-    if local.fabric {
-        routes.extend(
-            endpoints
-                .iter()
-                .filter(|endpoint| endpoint["transport"] == "fabric")
-                .filter_map(|endpoint| {
-                    Some(Route::Fabric {
-                        node: text(endpoint, "node")?,
-                        protocol: text(endpoint, "protocol")?,
-                    })
-                }),
-        );
+    if local.fabric_first {
+        routes.extend(fabric);
+        routes.extend(tailscale);
+    } else {
+        routes.extend(tailscale);
+        routes.extend(fabric);
     }
     routes.extend(
         endpoints
@@ -661,6 +754,53 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn fleet_protocol_names_are_bound_to_the_exact_fleet() {
+        for prefix in [LEGACY_FLEET_PROTOCOL_PREFIX, FRACTAL_FLEET_PROTOCOL_PREFIX] {
+            assert!(is_fleet_fabric_protocol(
+                &format!("{prefix}fleet-a"),
+                "fleet-a"
+            ));
+            assert!(!is_fleet_fabric_protocol(
+                &format!("{prefix}fleet-b"),
+                "fleet-a"
+            ));
+            assert!(!is_fleet_fabric_protocol(
+                &format!("{prefix}fleet-a/extra"),
+                "fleet-a"
+            ));
+        }
+        for protocol in ["other/fleet/fleet-a", "fractal/pty/fleet-a", "st3/fleet-a"] {
+            assert!(!is_fleet_fabric_protocol(protocol, "fleet-a"));
+        }
+        assert_eq!(default_fabric_protocol("fleet-a"), "st3/fleet/fleet-a");
+    }
+
+    #[test]
+    fn advertised_fleet_protocol_names_are_read_without_rewriting_routes() {
+        for prefix in [LEGACY_FLEET_PROTOCOL_PREFIX, FRACTAL_FLEET_PROTOCOL_PREFIX] {
+            let protocol = format!("{prefix}fleet-a");
+            let route = Route::Fabric {
+                node: "node-a".into(),
+                protocol: protocol.clone(),
+            };
+            assert_eq!(
+                parse_route(&format!("fabric://node-a/{protocol}")),
+                Some(route.clone())
+            );
+            assert_eq!(
+                routes_from_endpoints(
+                    &[json!({"transport": "fabric", "node": "node-a", "protocol": protocol})],
+                    LocalTransports {
+                        fabric: true,
+                        ..LocalTransports::default()
+                    },
+                ),
+                vec![route],
+            );
+        }
+    }
 
     #[test]
     fn carrier_comes_from_the_dial_route_including_overrides() {
@@ -729,10 +869,7 @@ mod tests {
             json!({"transport": "tailscale", "address": "192.168.1.4:31313"}),
             json!({"transport": "loopback", "address": "192.168.1.4:4000"}),
         ];
-        let all = LocalTransports {
-            tailscale: true,
-            fabric: true,
-        };
+        let all = LocalTransports::configured(None, true, true);
         assert_eq!(
             routes_from_endpoints(&endpoints, all),
             vec![
@@ -748,6 +885,75 @@ mod tests {
             routes_from_endpoints(&endpoints, LocalTransports::default()),
             vec![Route::Http("http://127.0.0.1:4000".into())]
         );
+    }
+
+    #[test]
+    fn configured_transports_filter_availability_and_preserve_local_order() {
+        for (names, tailscale, fabric, fabric_first) in [
+            (None, true, true, false),
+            (Some(vec!["tailscale", "fabric"]), true, true, false),
+            (Some(vec!["fabric", "tailscale"]), true, true, true),
+            (Some(vec!["tailscale"]), true, false, false),
+            (Some(vec!["fabric"]), false, true, true),
+            (Some(vec![]), false, false, false),
+        ] {
+            let names = names.map(|names| names.into_iter().map(String::from).collect::<Vec<_>>());
+            for (available_tailscale, available_fabric) in
+                [(true, true), (false, true), (true, false), (false, false)]
+            {
+                assert_eq!(
+                    LocalTransports::configured(
+                        names.as_deref(),
+                        available_tailscale,
+                        available_fabric,
+                    ),
+                    LocalTransports {
+                        tailscale: tailscale && available_tailscale,
+                        fabric: fabric && available_fabric,
+                        fabric_first,
+                    },
+                    "{names:?}, available: tailscale={available_tailscale}, fabric={available_fabric}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn routes_follow_local_order_and_filter_disabled_transports_with_loopback_last() {
+        let endpoints = [
+            json!({"transport": "loopback", "address": "127.0.0.1:4000"}),
+            json!({"transport": "tailscale", "address": "100.101.102.103:31313"}),
+            json!({"transport": "fabric", "node": "abc", "protocol": "st3/fleet/x"}),
+        ];
+        let tailscale = Route::Http("http://100.101.102.103:31313".into());
+        let fabric = Route::Fabric {
+            node: "abc".into(),
+            protocol: "st3/fleet/x".into(),
+        };
+        let loopback = Route::Http("http://127.0.0.1:4000".into());
+        for (names, expected) in [
+            (
+                vec!["fabric", "tailscale"],
+                vec![fabric.clone(), tailscale.clone(), loopback.clone()],
+            ),
+            (
+                vec!["tailscale", "fabric"],
+                vec![tailscale.clone(), fabric.clone(), loopback.clone()],
+            ),
+            (vec!["fabric"], vec![fabric, loopback.clone()]),
+            (vec!["tailscale"], vec![tailscale, loopback.clone()]),
+            (vec![], vec![loopback]),
+        ] {
+            let names = names.into_iter().map(String::from).collect::<Vec<_>>();
+            assert_eq!(
+                routes_from_endpoints(
+                    &endpoints,
+                    LocalTransports::configured(Some(&names), true, true),
+                ),
+                expected,
+                "{names:?}"
+            );
+        }
     }
 
     fn shim(root: &Path, body: &str) -> PathBuf {
@@ -1103,6 +1309,65 @@ mod tests {
             "echo '{\"socket\":\"dials/node-b.sock\"}'",
         ));
         assert!(relative.dial_socket("node-b", "p").await.is_err());
+    }
+
+    #[test]
+    fn fabric_adapter_environment_precedence_and_conflict() {
+        let new = std::ffi::OsStr::new("new-adapter");
+        let old = std::ffi::OsStr::new("old-adapter");
+        for (new_env, old_env, expected) in [
+            (Some(new), None, new),
+            (None, Some(old), old),
+            (Some(new), Some(new), new),
+        ] {
+            assert_eq!(
+                discover_fabric_adapter(new_env, old_env, Some(Path::new(".")), None).unwrap(),
+                Some(PathBuf::from(expected))
+            );
+        }
+        let error = discover_fabric_adapter(Some(new), Some(old), None, None).unwrap_err();
+        assert!(error.to_string().contains("FRACTAL_FABRIC_ADAPTER and ST_FABRIC_ADAPTER"));
+        assert!(error.to_string().contains("different paths"));
+    }
+
+    #[test]
+    fn fabric_adapter_location_and_name_precedence() {
+        let root = tempfile::tempdir().unwrap();
+        let directories = ["beside", "first", "second"].map(|name| root.path().join(name));
+        for directory in &directories {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let paths = std::env::join_paths(&directories[1..]).unwrap();
+        let candidates: Vec<_> = directories.iter().flat_map(|directory| {
+            ["fractal-fabric-adapter", "st-fabric-adapter"]
+                .map(|name| directory.join(name))
+        }).collect();
+        for candidate in &candidates {
+            std::fs::write(candidate, "").unwrap();
+        }
+        for (new, old) in [(Some("configured"), None), (None, Some("configured"))] {
+            assert_eq!(
+                discover_fabric_adapter(
+                    new.map(std::ffi::OsStr::new),
+                    old.map(std::ffi::OsStr::new),
+                    Some(&directories[0]),
+                    Some(&paths),
+                ).unwrap(),
+                Some(PathBuf::from("configured"))
+            );
+        }
+        for expected in &candidates {
+            // Removing each winner proves both names at every location and that a
+            // legacy name in an earlier directory beats a new name later on.
+            assert_eq!(
+                discover_fabric_adapter(None, None, Some(&directories[0]), Some(&paths)).unwrap(),
+                Some(expected.clone())
+            );
+            std::fs::remove_file(expected).unwrap();
+        }
+        let absent = discover_fabric_adapter(None, None, Some(&directories[0]), Some(&paths))
+            .unwrap();
+        assert!(absent.is_none());
     }
 
     #[test]

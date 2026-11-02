@@ -6,7 +6,7 @@ team "fd" {
     harness "codex" {
       model "gpt-5.6-sol"
       effort "medium"
-      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Small Talk message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Coordinate the design panel, synthesize its result, and send one final requester message."
+      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Fractal message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Coordinate the design panel, synthesize its result, and send one final requester message."
       args "--dangerously-bypass-approvals-and-sandbox" "--dangerously-bypass-hook-trust"
     }
   }
@@ -15,7 +15,7 @@ team "fd" {
     harness "codex" {
       model "gpt-5.6-sol"
       effort "medium"
-      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Small Talk message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Champion your assigned design, debate it through Small Talk, commit your proposal, and report completion."
+      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Fractal message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Champion your assigned design, debate it through Fractal, commit your proposal, and report completion."
       args "--dangerously-bypass-approvals-and-sandbox" "--dangerously-bypass-hook-trust"
     }
   }
@@ -24,7 +24,7 @@ team "fd" {
     harness "codex" {
       model "gpt-5.6-sol"
       effort "medium"
-      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Small Talk message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Champion your assigned design, debate it through Small Talk, commit your proposal, and report completion."
+      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Fractal message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Champion your assigned design, debate it through Fractal, commit your proposal, and report completion."
       args "--dangerously-bypass-approvals-and-sandbox" "--dangerously-bypass-hook-trust"
     }
   }
@@ -33,7 +33,7 @@ team "fd" {
     harness "codex" {
       model "gpt-5.6-sol"
       effort "medium"
-      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Small Talk message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Champion your assigned design, debate it through Small Talk, commit your proposal, and report completion."
+      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Fractal message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Champion your assigned design, debate it through Fractal, commit your proposal, and report completion."
       args "--dangerously-bypass-approvals-and-sandbox" "--dangerously-bypass-hook-trust"
     }
   }

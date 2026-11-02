@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The skip policy and required lanes gain a shadow rust-tests entry (one note per workspace crate, enforce false), and evidence-verify takes --members: every workspace member must have a passing note for its input key",
+  "replay": {"status": "none", "detail": "CI and local tooling only; no product code changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product contract change. The rust-tests policy entry is not enforced and no gate job reads it yet; linux-gate is unchanged."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

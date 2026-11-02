@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Carry current main into transcript image retrieval, keeping both sides' reviewed Storybook fixture identities in the exemption pin.",
+  "replay": {
+    "status": "none",
+    "detail": "No additional replay change from conflict resolution."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No additional schema change from conflict resolution."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No additional checkpoint change from conflict resolution."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Preserves main and transcript image semantics; the scenario exemption registry is the sorted unique union of main's 568 entries and the branch's 25 additions (593)."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No additional manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No additional recovery change."
+  }
+}

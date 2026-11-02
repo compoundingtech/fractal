@@ -1,7 +1,7 @@
 # Owned-seat rollout
 
 A publisher can opt an owned set into draining changed and omitted seats before restarting or
-retiring them. st performs and reports the cutover. The publisher still supplies the complete KDL
+retiring them. Fractal performs and reports the cutover. The publisher still supplies the complete KDL
 bundle, an immutable Git SHA, a strictly increasing source sequence and exact set/member fences.
 Publication alone does not watch a repository or automatically apply its contents.
 
@@ -19,6 +19,7 @@ keep their original launch lineage. Missions and schedules keep their existing s
 preserving active runs after omission.
 
 The initial supported cutover is a top-level native PTY seat on its existing host, harness family and native login account.
+Cross-provider owned-set rollouts are rejected at admission before the incumbent is drained.
 Automatic cutovers refuse authored session selectors and unsupported native launches before
 publication. Manual publication and adoption can retain the seat's authored `--resume` or
 `--continue` selector; they do not request a cutover or prove that the launch can resume.

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expand evidence configuration readers to prefer .fractal/ and read .st/ only when the new file is absent at the same accepted revision or checkout root.",
+  "replay": { "status": "none", "detail": "Signed history is unchanged; historical replay uses tools from its historical accepted base." },
+  "schema": { "status": "none", "detail": "No database or wire schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint-rule change. Evidence protections and review-risk rules cover both configuration directories without changing permissions." },
+  "compatibility": { "status": "none", "detail": "arn:lmig:smalltalk:2026-10-27-dot-fractal-config: all 13 configuration files remain in .st/. New files win when both layouts exist; malformed or unreadable new files and Git failures never downgrade to old trust data. Both layouts enter script-test projections, while required definition paths still name existing .st/." },
+  "downtime": { "status": "none", "detail": "No service deployment or downtime." },
+  "manual": { "status": "none", "detail": "No configuration move or key rotation in this expand step. Accepted-base rollout and external retirement receipts gate the later move." },
+  "recovery": { "status": "none", "detail": "Before the directory move, revert the bridge and projection/protection changes together while .st/ remains the sole layout." }
+}

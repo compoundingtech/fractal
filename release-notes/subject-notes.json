@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Publication requires anchored fleet membership and every active member advertising features.subject_notes=1; fence legacy writers before enabling notes. Adds authenticated subject-notes routes, control.notes paired-client delegation and a reactive notes collection."
+    "detail": "Publication requires anchored fleet membership and every active member advertising features.subject_notes=1; fence legacy writers before enabling notes. Adds authenticated subject-notes routes, control.notes paired-client delegation and a reactive notes collection. Fractal web follows notes and forwards writes through the authenticated gateway; unsupported gateways show explicit unavailability."
   },
   "downtime": {
     "status": "none",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Upgrade active members and fence legacy peers. Use st --instance NAME note add TARGET TEXT for agent context, --session current to narrow to a running agent incarnation, or --expires-at UTC. There is no --for option. Read with note ls and archive with note archive ID. Existing person directive-note commands are unchanged. Clients derive previews and counts from the notes window."
+    "detail": "Upgrade active members and fence legacy peers. Use st --instance NAME note add TARGET TEXT for agent context, --session current to narrow to a running agent incarnation, or --expires-at UTC. There is no --for option. Read with note ls and archive with note archive ID. Existing person directive-note commands are unchanged. Web conversations expose reactive notes with a shared plain-text composer, a 1024-byte counter and own-note archive; failed writes retain the draft."
   },
   "recovery": {
     "status": "changed",

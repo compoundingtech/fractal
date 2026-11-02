@@ -108,6 +108,32 @@ fn incremental_snapshot_tracks_prefix_edits_checkpoint_availability_and_rollback
     check(&store);
 }
 
+#[cfg(feature = "test-support")]
+#[test]
+fn graph_only_snapshot_changes_do_not_rehash_unchanged_inventory() {
+    use smallclaims::store::INVENTORY_IDENTITIES_HASHED;
+
+    let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+    for sequence in 1..=4096 {
+        insert(&store, sequence, sequence);
+    }
+    let original = check(&store);
+    for _ in 0..3 {
+        // A projection/graph write invalidates the snapshot, not its envelope inventory.
+        store.connection.write().execute(
+            "UPDATE graph_generation SET value=value+1 WHERE id=1",
+            [],
+        ).unwrap();
+        INVENTORY_IDENTITIES_HASHED.with(|hashed| hashed.set(0));
+        let snapshot = store.sealed_replication_snapshot().unwrap();
+        assert_eq!(INVENTORY_IDENTITIES_HASHED.with(std::cell::Cell::get), 0);
+        assert!(!Arc::ptr_eq(&original, &snapshot));
+        assert_eq!(snapshot.inventory.digest, original.inventory.digest);
+        let (full, _) = full_compact_replication_inventory(&store.connection.write()).unwrap();
+        assert_eq!(snapshot.inventory.digest, full.digest);
+    }
+}
+
 #[test]
 fn reopening_preserves_mutation_tracking_and_existing_indexes() {
     let directory = tempfile::tempdir().unwrap();

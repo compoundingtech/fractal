@@ -3,7 +3,7 @@
 This st2 eval runs a four-agent design panel with native Codex seats.
 
 Three agents champion distinct designs for a shared human and agent network.
-They debate the designs through Small Talk.
+They debate the designs through Fractal.
 The supervisor writes a recommendation and sends one final requester message.
 
 The held-out judges check repository ownership, distinct proposals, privacy analysis, and the final recommendation.

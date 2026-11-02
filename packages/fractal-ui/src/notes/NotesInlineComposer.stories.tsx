@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button as AriaButton } from 'react-aria-components'
-import type { SubjectNote } from '@smalltalk/st3-client/schema'
+import type { SubjectNote } from '@fractal/client/schema'
 import { NoteBadge, NoteComposer, NoteList } from './index'
 import { agentNote, diffNote, plannerNote, plannerTarget, publishedNote, target, viewer } from './notes-fixtures'
 import { NotesFrame, expectNoAudiencePresentation, notesFrameArgTypes, notesFrameArgs, notesStoryStyles as frame, type NotesFrameArgs } from './notes-story-frame'
@@ -84,12 +84,22 @@ function InlineQuickComposerStory({ scheme, width, negativeControl }: NotesFrame
 }
 
 const meta = {
-  title: 'Fractal/Explore/Notes/Inline quick composer', component: InlineQuickComposerStory, parameters: { layout: 'fullscreen' },
+  excludeStories: ['scenarioExemptions'],
+  title: 'Fractal/Explore/Notes/Inline quick composer', component: InlineQuickComposerStory,
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A local host publishes created notes and keeps per-target drafts; no scenario slice models subject notes.' }, layout: 'fullscreen' },
   args: notesFrameArgs,
   argTypes: notesFrameArgTypes('The host never publishes the created note: the list and badge assertions must fail.'),
 } satisfies Meta<typeof InlineQuickComposerStory>
 export default meta
 type Story = StoryObj<typeof meta>
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'Dark1440:contract-fixture',
+  'Light1440:contract-fixture',
+  'Light440:contract-fixture',
+]
 
 const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const canvas = within(canvasElement)

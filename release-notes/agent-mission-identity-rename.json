@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Rename agent and mission public identities without replacing their immutable storage identities",
+  "replay": {
+    "status": "changed",
+    "detail": "Immutable agent.renamed and mission.renamed claims retain historical names and rebuild the naming projection. Original claims and storage subjects are not rewritten: replicated declarations retain their signed storage subjects regardless of arrival order. Historical names remain reserved and resolve to the same storage identity. Conflicted naming fences effect admission without preventing historical arrangement replay. Agent renames do not rename child missions. Rename request JSON is canonicalized before hashing so replicated canonical serialization preserves admission; its hash contract is introduced with this feature. Checkpoint replay rebuilds identity projections and historical reservations, and canonical projection audits include the naming tables."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds two registered naming claim kinds and derived identity naming tables. Adds agents and missions rename-id HTTP and CLI operations. Existing agents rename remains a display-name operation. Native client rename methods decode the st3.v1 value envelope. Frozen client-v0 agent rows retain immutable storage IDs and their existing response schema, while detail lookups accept aliases."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Rename admission checks source lifecycle, owner locality, target reservation, kind, optional declaration and naming revisions, and the fleet registry. Retired identities cannot be revived. Authority and physical runtime custody remain bound to the immutable storage identity, not the canonical spelling. Locally authored arrangement placements and planning candidates normalize aliases before signing or revision validation. Every bound Unix serving boundary, including custom routers, accepts actor and local-person aliases only when they resolve to the same ancestry-bound identity. Reference readers accept historical storage keys without applying the current declaration grammar. Declaration previews and reconcile work reads normalize aliases before subject-token and work selection. Batched desired and mission readers resolve aliases while preserving naming-head and pending or invalid lifecycle-record refusals, including agents without naming heads and missions without runs. Parked-runtime attention checks for crash-loop decisions before identity and declaration reads; unstarted-seat attention first excludes seats with runtime observations. Quiet rosters avoid per-member identity reads, while actual attention candidates retain the full declaration and lifecycle admission fences. Message body fold regression coverage follows the alias-aware desired lookup and requires keyed searches of desired, identity names, identity heads and lifecycle replica records without scanning owned-set receipts."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Every registered peer must advertise the naming-capable schema digest before rename writes are admitted, using the retirement registry fence. This is a persisted compatibility observation, not a distributed reservation authority or epoch. Concurrent partition-time target collisions are not prevented: projection deterministically assigns the target to the smallest claim ID, retains both facts, and fences the losing rename with LifecycleUnavailable conflict. Downgrade after the first rename is unsupported."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "The identity rename does not require replacing the agent incarnation, native session, or PTY. Fleet binaries must be upgraded before enabling rename writes."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Use agents rename-id or missions rename-id with an attributed actor, reason and idempotency key. Rename missions separately. Upgrade all registered peers before the first rename; do not downgrade afterward."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Naming facts and historical reservations are retained for replay and diagnostics. A conflicting replicated reservation remains unavailable rather than silently transferring custody or authorization. Incomplete or conflicting lifecycle evidence returns lifecycle-unavailable instead of exposing a declaration through an unfenced read. Projection replay reconstructs naming tables from retained durable facts rather than retaining stale naming rows. No history rewrite or public-name reuse is provided."
+  }
+}

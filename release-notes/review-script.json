@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/review: runs an agent CLI (claude, codex or omp, chosen in .st/review-harness.json) over git diff main...HEAD with docs/review.md, computes the deterministic risk floor and per-file patch-ids itself, reads only what changed since an earlier verdict (and carries a verdict over a clean merge of main without a model call), assembles the verdict, validates it with scripts/review-validate and writes it with cost and time measurements. A verdict that does not validate is not written.",
+  "replay": {
+    "status": "none",
+    "detail": "scripts/review, .st/review-harness.json and scripts/review-test (local review tooling) only; no protocol, schema, policy, workflow or note change. The script appends verdicts to review-records/ inside the repository's git directory; nothing else reads them."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "scripts/review, .st/review-harness.json and scripts/review-test (local review tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "scripts/review, .st/review-harness.json and scripts/review-test (local review tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "A new script and config file; nothing existing calls them."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert; nothing depends on it yet."
+  }
+}

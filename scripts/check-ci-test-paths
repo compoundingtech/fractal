@@ -11,7 +11,7 @@ for crate in (ROOT / 'crates').iterdir():
     paths = list((crate / 'tests').rglob('*.rs'))
     paths += list((crate / 'src').rglob('*.rs'))
     for path in paths:
-        if path.relative_to(ROOT).as_posix() == 'crates/st3-client-codegen/src/main.rs':
+        if path.relative_to(ROOT).as_posix() == 'crates/fractal-client-codegen/src/main.rs':
             continue  # Production generator root; never executed from the test archive.
         for number, line in enumerate(path.read_text().splitlines(), 1):
             # test_env! is the deliberate relocation macro, not raw env!.

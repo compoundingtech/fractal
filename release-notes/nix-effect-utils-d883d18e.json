@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Align the effect-utils Nix and source-member pins from 1f601d70e6818b009696748b68c972c83362fa8a to published revision d883d18e3ad7609602db0ec8687c14a77625b905 and remeasure the frozen dependency installation.",
+  "replay": {"status": "none", "detail": "No claim or replay behavior change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination change; CI runners are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Consumer effect-utils inputs must match revision d883d18e3ad7609602db0ec8687c14a77625b905 and its regenerated installation producer identity. Fractal does not use sourceShapeMeasurementStep, so the upstream sourceShapeMeasurementSteps rename needs no migration."},
+  "downtime": {"status": "none", "detail": "The dependency pin refresh does not itself require a daemon restart."},
+  "manual": {"status": "changed", "detail": "Align consumer effect-utils inputs with revision d883d18e3ad7609602db0ec8687c14a77625b905; remeasure installation hashes with scripts/nix-typescript-client-deps-hash when changing the producer."},
+  "recovery": {"status": "none", "detail": "Revert this alignment's input pins, locks and dependency installation pin together to restore the 1f601d70 cohort."}
+}

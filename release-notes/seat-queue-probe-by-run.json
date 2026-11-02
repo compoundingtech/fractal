@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A seat's queue order reads each named closed run through that run's own steps instead of every step the seat was ever assigned",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or cache changes; nothing is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, view, trigger or storage version changes; one query's plan changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The query returns the same rows, so queue order, claims and refusals are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, client or stored-format change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back restores the slower plan; results are the same."
+  }
+}

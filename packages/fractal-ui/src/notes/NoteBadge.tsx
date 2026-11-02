@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Focusable } from 'react-aria-components'
-import type { SubjectNote } from '@smalltalk/st3-client/schema'
+import type { SubjectNote } from '@fractal/client/schema'
 import { Tooltip } from '../assistant-ui/composition/Controls'
 import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, textVars as text, typeVars as t } from '../assistant-ui/composition-tokens.stylex'
 import { newestNote } from './order'

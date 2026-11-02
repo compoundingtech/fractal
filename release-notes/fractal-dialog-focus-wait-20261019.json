@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stabilize the Fractal Web declaration-dialog integration test by awaiting React Aria's deferred focus before asserting focus containment and pressing Escape. Tests only; runtime behavior is unchanged.",
+  "replay": { "status": "none", "detail": "Tests only; no stored data or replay changes." },
+  "schema": { "status": "none", "detail": "Tests only; no schema changes." },
+  "rules": { "status": "none", "detail": "Tests only; no runtime or authority rule changes." },
+  "compatibility": { "status": "none", "detail": "Tests only; no client or protocol changes." },
+  "downtime": { "status": "none", "detail": "Tests only; no deployment changes." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Tests only; no recovery changes." }
+}

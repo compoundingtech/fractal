@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Members fetch writer signatures missing on envelopes they admitted before the writer's window was keyed, so a fresh member that holds those envelopes as unsigned can admit them; replication status shows pending and held envelope counts",
+  "replay": {"status": "none", "detail": "No claim replay or projection changes. No envelope is admitted or revoked by the fetch; held envelopes are admitted by the existing path once a window-key signature arrives."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers or schema digest changes. Fetched signatures are stored in the existing replica_envelope_signatures table through the existing verified path."},
+  "rules": {"status": "none", "detail": "Admission and membership rules are unchanged: a keyed writer's envelope still needs a signature by a key whose window holds its sequence. No checkpoint rule or digest changes."},
+  "compatibility": {"status": "changed", "detail": "Exchanges may carry more signature requests (still at most 512), now also for admitted envelopes. Older peers answer them with their existing exact-identity lookup or ignore them; an answer without signatures changes nothing. ReplicationStatus gains the optional pending_envelopes field (default 0 from older daemons), and `st replication status` prints an additional envelopes-waiting line."},
+  "downtime": {"status": "none", "detail": "Ordinary rolling deployment. After a restart or membership change, a bounded scan (4096 envelope rows per exchange) runs until a pass finds nothing missing, then stops."},
+  "manual": {"status": "none", "detail": "No operator action. A member holding unsigned envelopes admits them once a peer it exchanges with has fetched the writer's signatures; rolling the members that relay for it is enough."},
+  "recovery": {"status": "none", "detail": "Binary swap-back needs no migration. Signatures fetched by the new build stay valid evidence for older builds."}
+}

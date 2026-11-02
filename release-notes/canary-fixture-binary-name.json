@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Boot canaries find seat drivers by the fractal binary name after the fixture rename",
+  "replay": {"status": "none", "detail": "No runtime replay change."},
+  "schema": {"status": "none", "detail": "No database or wire schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "Test script only."},
+  "downtime": {"status": "none", "detail": "No service interruption introduced."},
+  "manual": {"status": "none", "detail": "No deployed installation action required."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery change."}
+}

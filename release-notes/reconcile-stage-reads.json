@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A profile minute reports each reconcile stage's reads: bytes read from disk and bytes read in all, so a stage's page-cache misses show apart from the pages it served from memory",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "Two fields are added to each span in the profile's minutes and slow records; readers that ignore unknown fields are unaffected. Item spans report zero."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure; profiling still runs only with ST3_PROFILE_DIR."},
+  "recovery": {"status": "none", "detail": "Swapping back to an older build drops the two fields."}
+}

@@ -13,7 +13,7 @@ fn bash() -> PathBuf {
         .expect("bash is available on PATH")
 }
 
-use st2::{context, message};
+use fractal_legacy_runner::{context, message};
 
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -63,7 +63,7 @@ impl Fixture {
     fn run(&self, script: &str) -> Output {
         self.run_path(
             &Path::new(test_env!("CARGO_MANIFEST_DIR"))
-                .join("crates/st-drivers/hooks")
+                .join("crates/fractal-drivers/hooks")
                 .join(script),
         )
     }
@@ -94,7 +94,7 @@ impl Fixture {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        st2::hooks::versioned_hooks_dir_at(&self.state.join("st2/hooks"))
+        fractal_legacy_runner::hooks::versioned_hooks_dir_at(&self.state.join("st2/hooks"))
     }
 }
 
@@ -250,7 +250,7 @@ fn stop_fails_open_without_required_commands() {
     let output = Command::new(bash())
         .arg(
             Path::new(test_env!("CARGO_MANIFEST_DIR"))
-                .join("crates/st-drivers/hooks")
+                .join("crates/fractal-drivers/hooks")
                 .join("codex-stop.sh"),
         )
         .env("PATH", fixture._tmp.path().join("missing-bin"))

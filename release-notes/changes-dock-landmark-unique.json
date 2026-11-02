@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Give the docked Changes panel's inner diff landmark its own accessible name (\"Changes, captured diff\") so the dock no longer exposes two complementary landmarks both named Changes (axe landmark-unique, fractal-narrow-layout--drawers-open at 1440). Visible text is unchanged. Follow-up to #3386.",
+  "replay": {"status": "none", "detail": "Accessibility label only; no replay or stored data changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No protocol or rule change."},
+  "compatibility": {"status": "none", "detail": "No runtime compatibility change."},
+  "downtime": {"status": "none", "detail": "No deployment transition."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persisted state or recovery change."}
+}

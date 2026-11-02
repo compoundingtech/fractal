@@ -10,9 +10,9 @@
  * A complete read is finite: it stops at fixed page and item budgets, and closing or refreshing
  * the follow aborts it between pages and cancels its in-flight request.
  */
-import { SIDEBAR_ARRANGEMENT_UUID, St3Client } from '@smalltalk/st3-client'
-import type { Arrangement, ArrangementPage, CollectionSocketFactory, CollectionStream, EnvelopeOf, PageOptions, Snapshot } from '@smalltalk/st3-client'
-import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@smalltalk/st3-client/schema'
+import { SIDEBAR_ARRANGEMENT_UUID, FractalClient } from '@fractal/client'
+import type { Arrangement, CollectionSocketFactory, CollectionStream, Snapshot } from '@fractal/client'
+import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@fractal/client/schema'
 import { Schema } from 'effect'
 
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))
@@ -27,37 +27,21 @@ const isFrameHeader = Schema.is(Schema.Struct({
 }))
 
 export interface ArrangementInventoryGateway {
-  /** One list page; `signal` cancels the request when the read is abandoned. */
-  readonly arrangementsList: (person: string, options: PageOptions, signal: AbortSignal) => Promise<EnvelopeOf<ArrangementPage>>
-  readonly collectionStream: St3Client['collectionStream']
+  /** One list page; `requestOptions.signal` cancels the request when the read is abandoned. */
+  readonly arrangementsList: FractalClient['arrangementsList']
+  readonly collectionStream: FractalClient['collectionStream']
 }
 
-/**
- * A generated client per read captures cancellation permanently. Pagination reuses that
- * read's client; discovery and sockets stay shared without sharing a mutable signal slot.
- */
-export const st3InventoryGateway = ({ baseUrl, fetchImpl }: {
+/** The generated client cancels each request through its own `requestOptions.signal`; discovery stays shared. */
+export const fractalInventoryGateway = ({ baseUrl, fetchImpl }: {
   readonly baseUrl: string
   readonly fetchImpl: typeof globalThis.fetch
-}): ArrangementInventoryGateway & Pick<St3Client, 'discover'> => {
-  const client = new St3Client({ baseUrl, fetchImpl })
-  const readers = new WeakMap<AbortSignal, St3Client>()
+}): ArrangementInventoryGateway & Pick<FractalClient, 'discover'> => {
+  const client = new FractalClient({ baseUrl, fetchImpl })
   return {
     discover: () => client.discover(),
     collectionStream: (options) => client.collectionStream(options),
-    arrangementsList: (person, options, read) => {
-      let reader = readers.get(read)
-      if (reader === undefined) {
-        reader = new St3Client({
-          baseUrl,
-          fetchImpl: (input, init) => fetchImpl(input, { ...init, signal: read }),
-        })
-        // Generated GET calls discover on its receiver. Share negotiation, not cancellation.
-        reader.discover = () => client.discover()
-        readers.set(read, reader)
-      }
-      return reader.arrangementsList(person, options)
-    },
+    arrangementsList: (person, options, requestOptions) => client.arrangementsList(person, options, requestOptions),
   }
 }
 
@@ -93,13 +77,13 @@ export const reservedSidebarSubject = (owner: string): string => `arrangement/${
 /** Exact-name legacy candidates are live, person-owned and ordered by lowercase UUIDv7. */
 export const sidebarCandidates = (items: readonly Arrangement[], owner: string | undefined = items[0]?.owner): readonly Arrangement[] =>
   owner === undefined || !/^person\/[^/\s]+$/.test(owner) ? [] : items.filter((item) =>
-    !item.deleted && item.owner === owner && item.id.startsWith(`arrangement/${owner}/`) &&
+    !item.deleted && item.body.version === 1 && item.owner === owner && item.id.startsWith(`arrangement/${owner}/`) &&
     isArrangementId(item.id) && item.body.name.value === 'Sidebar' && item.id !== reservedSidebarSubject(owner))
     .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
 
-/** The reserved subject is identity, regardless of name; otherwise use the deterministic legacy pick. */
+/** A v1 reserved subject is identity, regardless of name; otherwise use the deterministic v1 legacy pick. */
 export const sidebarWinner = (items: readonly Arrangement[], owner: string | undefined = items[0]?.owner): Arrangement | undefined =>
-  owner === undefined ? undefined : items.find((item) => !item.deleted && item.owner === owner && item.id === reservedSidebarSubject(owner)) ??
+  owner === undefined ? undefined : items.find((item) => !item.deleted && item.body.version === 1 && item.owner === owner && item.id === reservedSidebarSubject(owner)) ??
     sidebarCandidates(items, owner)[0]
 
 /** Rows requested per page; a page returning more is malformed. */
@@ -130,7 +114,7 @@ export const readArrangementInventory = async (
     for (;;) {
       signal.throwIfAborted()
       const options = cursor === undefined ? { limit: inventoryPageLimit } : { cursor, limit: inventoryPageLimit }
-      const response = await Promise.race([gateway.arrangementsList(owner, options, signal), abandoned.promise])
+      const response = await Promise.race([gateway.arrangementsList(owner, options, { signal }), abandoned.promise])
       const page = response.value
       // Continuation pages belong to the initial read, even if a later response has a newer envelope.
       snapshot ??= response.snapshot

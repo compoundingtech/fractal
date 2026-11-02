@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Rename current-product Rust internals and generated schema presentation to Fractal",
+  "replay": {"status": "none", "detail": "Source identifier, test name and documentation presentation changes only; claim projection and replay are unchanged."},
+  "schema": {"status": "none", "detail": "Registry descriptions remain byte-identical compatibility data. Generated Markdown renders Fractal branding without changing the registry, storage version or digests."},
+  "rules": {"status": "none", "detail": "No checkpoint, claim admission or fleet coordination rules change."},
+  "compatibility": {"status": "none", "detail": "Rust driver API identifiers, KDL schema-version identifiers, TUI locals, test names and the paired TUI SLO thread checker/builder are renamed together. Plugin, marketplace, server and channel identities, delivery tags, envelope strings, serialized model values, environment names, executable aliases and persisted paths are unchanged."},
+  "downtime": {"status": "none", "detail": "No runtime cutover or service interruption is required."},
+  "manual": {"status": "none", "detail": "No migration or operator steps are required."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no state conversion; the wire and storage contracts are unchanged."}
+}
