@@ -144,7 +144,7 @@ fn device_commands_have_strict_arguments_terminal_reports_and_existing_stream_fr
     request["args"] = serde_json::json!({});
     assert!(!request_validator.is_valid(&request), "message-read requires a message id");
     request["kind"] = serde_json::json!("phone.navigate");
-    request["args"] = command["value"]["args"].clone();
+    request["args"] = serde_json::json!({"screen": "Conversation", "params": {"target": "agent/worker"}});
     assert_conforms(&request_validator, "navigate request", &request);
     for ttl in [0, 60001] {
         request["ttl_ms"] = serde_json::json!(ttl);
