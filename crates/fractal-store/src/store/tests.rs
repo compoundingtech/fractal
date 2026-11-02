@@ -1029,9 +1029,11 @@ fn planning_incremental_matches_replay_without_replaying_other_sessions() {
         ("local", "started", 100, started.clone()),
         ("remote", "previewed", 102, json!({"candidate_revision":1, "preview_hash":"preview",
             "store_index":1, "graph":"graph", "diff":"diff", "mission":{}})),
-        ("local", "revision-requested", 103, json!({})),
-        ("remote", "approved", 104, json!({"mission_revision":"revision-one"})),
-        ("local", "cancelled", 105, json!({})),
+        ("remote", "question-requested", 103, json!({"decision_id":"decision", "question":"Proceed?"})),
+        ("local", "question-answered", 104, json!({"decision_id":"decision", "response":{}})),
+        ("local", "revision-requested", 105, json!({})),
+        ("remote", "approved", 106, json!({"mission_revision":"revision-one"})),
+        ("local", "cancelled", 107, json!({})),
     ];
     // Keep another session present: an incremental update must not delete/rebuild it.
     {
@@ -1081,6 +1083,20 @@ fn planning_incremental_matches_replay_without_replaying_other_sessions() {
             [claim.store_index]).unwrap();
         tx.commit().unwrap();
     }
+}
+
+#[test]
+fn planning_unknown_kind_keeps_the_full_replay_guard() {
+    let store = Store::open_memory("local").unwrap();
+    store.project_replication_backlog().unwrap();
+    let mut connection = store.connection.lock().unwrap();
+    let tx = connection.transaction().unwrap();
+    let claim = append_claim_record_tx(&tx, "remote", "planning-session/example",
+        "planning-session.unknown", None, &json!({"fields":{}}), &[], None).unwrap();
+    assert!(matches!(
+        try_project_simple_replication_tx(&tx, "local", claim.store_index).unwrap(),
+        IncrementalProjection::ReplayWithContext { reason: "non-incremental-kind", .. }
+    ));
 }
 
 #[test]
