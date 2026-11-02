@@ -5,6 +5,7 @@ fn work_handoff_parses_existing_and_withdraw_forms() {
     let prefix = ["fractal", "work", "handoff"];
     for args in [
         vec!["step-run/example", "--as", "agent/example", "--to", "person/reviewer", "--note", "Review"],
+        vec!["step-run/example", "--as", "agent/example", "--to", "agent/other", "--note", "withdraw"],
         vec!["withdraw", "step-run/example", "--as", "agent/example", "--reason", "Resume"],
         vec!["withdraw", "step-run/example", "--as", "agent/example", "--reason", "Resume", "--message", "message/exact", "--idempotency-key", "retry"],
     ] {

@@ -4129,7 +4129,7 @@ struct WorkStartArgs {
 }
 
 #[derive(Args)]
-#[command(subcommand_negates_reqs = true, subcommand_precedence_over_arg = true)]
+#[command(subcommand_negates_reqs = true)]
 struct WorkHandoffArgs {
     #[command(subcommand)]
     command: Option<WorkHandoffCommand>,
