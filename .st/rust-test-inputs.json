@@ -58,6 +58,7 @@
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "docs/st3/client-v0/schemas/operations.json",
     "examples/fractal/custom-review.json",
+    "fixtures/clients/stream-timeline-pairs-v1.json",
     "scripts/ci-test-paths.rs"
    ]
   },

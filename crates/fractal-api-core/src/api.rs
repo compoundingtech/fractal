@@ -7253,7 +7253,7 @@ pub fn overlay_seat_admission(state: &AppState, items: &mut [Value], history: bo
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({
+    let mut health = json!({
         "status": "ready",
         "node": state.node,
         "version": env!("CARGO_PKG_VERSION"),
@@ -7262,7 +7262,15 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
-    })))
+    });
+    // How far this member's messages stream has come. Absent when it holds no shard, so a
+    // client that waits on both indexes knows there is only the graph to wait on.
+    if let Some(index) = crate::store::messages_shard::stream_reads::stream_index(&state.store)
+        .map_err(ApiError::internal)?
+    {
+        health["messages_store_index"] = json!(index);
+    }
+    Ok(Json(health))
 }
 
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {
@@ -10513,6 +10521,11 @@ fn message_subject(value: &str) -> String {
 pub struct EventQuery {
     #[serde(default, alias = "after_index")]
     after: u64,
+    /// The messages stream's position the client has read through. A client that sends it also
+    /// gets the stream's message events after it, in `stream_items`; one that does not gets the
+    /// graph's events alone, as before.
+    #[serde(default)]
+    messages_after: Option<u64>,
     subject: Option<String>,
     owner_run: Option<String>,
     wait: Option<bool>,
@@ -10526,6 +10539,16 @@ struct EventPage {
     next_after: Option<u64>,
     has_more: bool,
     frontier: u64,
+    /// The messages stream's message events after `messages_after`, when the client asked and
+    /// this member holds a shard. Their `store_index` is the stream's own index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_items: Option<Vec<EventRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_next_after: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_has_more: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_frontier: Option<u64>,
 }
 
 async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPage, ApiError> {
@@ -10540,6 +10563,7 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
     let after = query.after;
     let subject = query.subject.clone();
     let owner = query.owner_run.clone();
+    let messages_after = query.messages_after;
     blocking_store(move || {
         // A commit is visible here before its writer publishes the store index that client
         // snapshots read at. A cursor past that index would let a client read a resource older
@@ -10563,11 +10587,30 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
             }
             let (items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
+            // Stream items have no run owner, so an owner-filtered page has none of them.
+            let stream = match messages_after {
+                Some(messages_after) if owner.is_none() => {
+                    crate::store::messages_shard::stream_reads::stream_events_page(&store, messages_after, limit)?
+                }
+                _ => None,
+            };
+            let stream_items = stream.as_ref().map(|stream| {
+                stream
+                    .items
+                    .iter()
+                    .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
+                    .cloned()
+                    .collect()
+            });
             Ok(Ok(EventPage {
                 items,
                 next_after,
                 has_more,
                 frontier,
+                stream_items,
+                messages_next_after: stream.as_ref().and_then(|stream| stream.next_after),
+                messages_has_more: stream.as_ref().map(|stream| stream.has_more),
+                messages_frontier: stream.as_ref().map(|stream| stream.frontier),
             }))
         })
     })
@@ -10584,8 +10627,12 @@ async fn events_page(
         + Duration::from_millis(query.timeout_ms.unwrap_or(30_000).clamp(10, 30_000));
     loop {
         let page = read_event_page(&state, &query).await?;
-        if page.next_after.is_some() || query.wait != Some(true) {
-            if query.wait == Some(true) && page.items.is_empty() {
+        // A stream event is news for a waiter that asked for them, as a graph event is.
+        if page.next_after.is_some() || page.messages_next_after.is_some() || query.wait != Some(true) {
+            if query.wait == Some(true)
+                && page.items.is_empty()
+                && page.stream_items.as_ref().is_none_or(Vec::is_empty)
+            {
                 // A filtered page can advance through nonmatching rows during migration.
                 // Keep its exact continuation, but pace wait-mode clients instead of inviting
                 // an immediate empty-page repoll. The caller's timeout still bounds the wait.
