@@ -85,9 +85,15 @@ mod tests {
             // Model a timeout or process exit that never runs the store's destructors.
             std::process::exit(0);
         }
+        let temporary = std::env::temp_dir();
+        let base = if super::on_tmpfs(&temporary) {
+            temporary
+        } else {
+            std::path::PathBuf::from("/dev/shm")
+        };
         let run = tempfile::Builder::new()
             .prefix("graph-run-")
-            .tempdir_in("/dev/shm")
+            .tempdir_in(base)
             .unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
