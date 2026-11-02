@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The release workflow's publish steps (release-publish-web-embed and release-publish-edge) no longer fail the whole run on one GitHub 5xx or timeout. They retry it with backoff (10, 30 and 90 seconds), and stay idempotent. A call that GitHub answered with a 504 after it did the work, such as a create that made the release, counts as done instead of failing on \"already exists\". A failed read is retried rather than taken for \"no release\". The web embed is published by scripts/release-publish-embed: a draft a failed attempt left is continued by uploading only the files it lacks, an upload GitHub never finished is removed and sent again, and a published embed is still never replaced (no --clobber). Any other error still fails at once. Fixes #4606.",
+  "replay": {"status": "none", "detail": "No claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Release workflow and scripts only; no product binary, claim or wire change."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Rolling back restores the fail-on-first-error publish steps."}
+}

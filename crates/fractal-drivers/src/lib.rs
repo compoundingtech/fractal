@@ -35,6 +35,7 @@ pub mod account;
 pub mod access;
 pub mod catalog;
 pub mod catalog_archive;
+mod catalog_generation;
 pub mod catalog_lock;
 pub mod catalog_transaction;
 pub mod claude_channel;

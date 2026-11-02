@@ -19,7 +19,7 @@ pub const CAPACITY_ENV: &str = "FRACTAL_SEAT_CAPACITY";
 /// The older spellings of [`CAPACITY_ENV`], removed with it.
 pub const CAPACITY_ENV_ALIASES: [&str; 2] = ["ST_SEAT_CAPACITY", "ST3_SEAT_CAPACITY"];
 
-const GIB: u64 = 1 << 30;
+pub(crate) const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
 /// The smallest memory a lane may declare: below it a harness cannot start.
 const MINIMUM_MEMORY: u64 = 256 * MIB;
@@ -125,6 +125,61 @@ impl std::str::FromStr for Capacity {
             _ => bail!("a capacity names both cores and memory"),
         }
     }
+}
+
+/// A step's `capacity`: the lane its seat holds while it holds the step. What it leaves out stays
+/// the seat's own. A step only raises its seat's lane: lowering a lane's memory under a running
+/// harness could kill the harness itself mid-step.
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct Raise {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cores: Option<u32>,
+    /// Bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<u64>,
+}
+
+impl Raise {
+    /// A declared step lane, held to the same bounds as a seat's.
+    pub fn declared(cores: Option<u32>, memory: Option<&str>) -> Result<Self> {
+        if cores.is_none() && memory.is_none() {
+            bail!("a step's capacity names cores=, memory= or both");
+        }
+        if let Some(cores) = cores
+            && !(1..=MAXIMUM_CORES).contains(&cores)
+        {
+            bail!("capacity cores must be between 1 and {MAXIMUM_CORES}, not {cores}");
+        }
+        let memory = memory.map(parse_memory).transpose()?;
+        if memory.is_some_and(|memory| memory < MINIMUM_MEMORY) {
+            bail!("capacity memory must be at least 256M");
+        }
+        Ok(Self { cores, memory })
+    }
+
+    /// The lane a seat whose own lane is `base` holds for this step, or why the step would lower it.
+    pub fn over(&self, base: Capacity) -> Result<Capacity> {
+        let lower = [
+            self.cores.filter(|cores| *cores < base.cores).map(|cores| format!("cores={cores} is below its {}", base.cores)),
+            self.memory.filter(|memory| *memory < base.memory)
+                .map(|memory| format!("memory={} is below its {}", show_memory(memory), show_memory(base.memory))),
+        ].into_iter().flatten().collect::<Vec<_>>();
+        if !lower.is_empty() {
+            bail!("a step may only raise its seat's lane: {}", lower.join(" and "));
+        }
+        Ok(Capacity {
+            cores: self.cores.unwrap_or(base.cores),
+            memory: self.memory.unwrap_or(base.memory),
+        })
+    }
+}
+
+/// Bytes in the largest binary unit that shows them whole, as a declaration writes them.
+pub fn show_memory(bytes: u64) -> String {
+    [(40, 'T'), (30, 'G'), (20, 'M'), (10, 'K')]
+        .into_iter()
+        .find(|(shift, _)| bytes >= 1 << shift && bytes.is_multiple_of(1 << shift))
+        .map_or_else(|| bytes.to_string(), |(shift, unit)| format!("{}{unit}", bytes >> shift))
 }
 
 /// `4G`, `512M`, `1T` or a byte count: binary units, as systemd reads them.
@@ -300,13 +355,18 @@ fn request_end(slice: &str) -> bool {
 /// Where `slice` sits in the cgroup tree: under `app-lanes.slice` of the user manager this process
 /// runs in.
 fn slice_cgroup(slice: &str) -> Option<std::path::PathBuf> {
+    Some(app_slice_cgroup()?.join(LANES_SLICE).join(slice))
+}
+
+/// `app.slice` of the user manager this process runs in, where seats' scopes and the lanes sit.
+pub(crate) fn app_slice_cgroup() -> Option<std::path::PathBuf> {
     let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let own = own.lines().find_map(|line| line.strip_prefix("0::"))?;
     let parts: Vec<&str> = own.split('/').filter(|part| !part.is_empty()).collect();
     let manager = parts.iter().position(|part| part.starts_with("user@") && part.ends_with(".service"))?;
     let mut path = std::path::PathBuf::from("/sys/fs/cgroup");
     path.extend(&parts[..=manager]);
-    path.extend(["app.slice", LANES_SLICE, slice]);
+    path.push("app.slice");
     Some(path)
 }
 
@@ -436,6 +496,26 @@ mod tests {
         assert!(Capacity::declared(None, Some("100M")).is_err());
         assert!(Capacity::declared(None, Some("4X")).is_err());
         assert!(Capacity::declared(None, Some("4.5G")).is_err());
+    }
+
+    #[test]
+    fn a_step_raises_what_it_names_and_refuses_to_lower_its_seat() {
+        let base = Capacity { cores: 2, memory: 4 * GIB };
+        let memory = Raise::declared(None, Some("16G")).unwrap();
+        assert_eq!(memory.over(base).unwrap(), Capacity { cores: 2, memory: 16 * GIB });
+        let both = Raise::declared(Some(8), Some("4G")).unwrap();
+        assert_eq!(both.over(base).unwrap(), Capacity { cores: 8, memory: 4 * GIB });
+        let lower = Raise::declared(Some(1), Some("2G")).unwrap().over(base).unwrap_err();
+        assert_eq!(
+            lower.to_string(),
+            "a step may only raise its seat's lane: cores=1 is below its 2 and memory=2G is below its 4G"
+        );
+        assert!(Raise::declared(None, None).is_err());
+        assert!(Raise::declared(Some(0), None).is_err());
+        assert!(Raise::declared(None, Some("100M")).is_err());
+        assert_eq!(show_memory(3 * GIB), "3G");
+        assert_eq!(show_memory(1536 * MIB), "1536M");
+        assert_eq!(show_memory(1000), "1000");
     }
 
     #[test]

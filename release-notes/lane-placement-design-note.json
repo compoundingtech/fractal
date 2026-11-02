@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Design note: placing missions that do not pin a host on a member with room for their lanes",
+  "replay": {"status": "none", "detail": "Documentation only."},
+  "schema": {"status": "none", "detail": "Documentation only."},
+  "rules": {"status": "none", "detail": "Documentation only; nothing is built."},
+  "compatibility": {"status": "none", "detail": "Documentation only."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "None."}
+}

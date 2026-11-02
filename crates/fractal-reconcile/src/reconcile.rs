@@ -1647,8 +1647,22 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Whether this host caps a seat that declares `capacity` in its lane (`lanes` in the
     /// install config). Applies to launches after this call.
-    pub fn with_lanes(self, enforced: bool) -> Self {
+    pub fn with_lanes(mut self, enforced: bool) -> Self {
         fractal_runtime::set_lanes_enforced(enforced);
+        self.seat_admission.lanes = enforced
+            .then(fractal_runtime::host::size)
+            .flatten()
+            .map(|size| seat_admission::LaneHost {
+                room: fractal_runtime::host::for_lanes(size),
+                outside: fractal_runtime::host::unlaned_seat_memory,
+            });
+        self
+    }
+
+    /// Admission by fit against a host of the test's choosing, without the process-wide switch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_lane_host(mut self, lanes: Option<seat_admission::LaneHost>) -> Self {
+        self.seat_admission.lanes = lanes;
         self
     }
 
@@ -10901,6 +10915,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .blocked_reason
                             .as_deref()
                             .is_some_and(|reason| reason.starts_with("step baseline `"));
+                    // Waiting for room for the lane the step raises its seat to: tried again until
+                    // it fits.
+                    let lane_blocked = view.status == "blocked"
+                        && view.blocked_reason.as_deref().is_some_and(|reason| reason.starts_with("step lane "));
                     // A blocked step that names no blocker, holds no claim and waits on no ask
                     // is a lost reason, for example a revision that carried it without one.
                     // Nothing else will move it, so recompute it like a pending step.
@@ -10925,6 +10943,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if view.status == "pending"
                         || assignment_blocked
                         || baseline_blocked
+                        || lane_blocked
                         || ready_missing_agent
                     {
                         if view
@@ -13950,6 +13969,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let variables = run_variables(run, step, view);
         let source = crate::mission::interpolate_kdl(source, &variables)?;
+        let source = crate::mission::with_mission_capacity(&source, step.mission_capacity)?;
         let mut intent = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
         if assigned_agents_only {
             let selected_agent = |subject: &str, desired: &DesiredSubject| {
@@ -14027,6 +14047,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             let variables = crate::store::mission_run_variables(run, &mission.revision);
             let source = crate::mission::interpolate_kdl(source, &variables)?;
+            let source = crate::mission::with_mission_capacity(&source, mission.capacity)?;
             let declarations = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
             if declarations
                 .subjects
@@ -14220,6 +14241,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let variables = crate::store::mission_run_variables(run, &mission.revision);
         let source = crate::mission::interpolate_kdl(source, &variables)?;
+        let source = crate::mission::with_mission_capacity(&source, mission.capacity)?;
         #[cfg(any(test, feature = "test-support"))]
         self.mission_declaration_parses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -17370,6 +17392,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     Err(error) => {
+                        let error = if let Some(checkpoint) = error.downcast_ref::<crate::resource::BudgetContinuation>() {
+                            match github_plugin.set_cursor(&observer_subject, &spec.resource, checkpoint.0.as_deref()) {
+                                Ok(()) => {
+                                    let next = checkpoint.0.clone();
+                                    kept_cursor = Some(next.clone());
+                                    completed_cursor = Some(next);
+                                    error
+                                }
+                                Err(persistence) => error.context(format!("could not keep GitHub poll continuation: {persistence:#}")),
+                            }
+                        } else {
+                            error
+                        };
                         let refusal_deadline = error.downcast_ref::<ProviderRateLimit>()
                             .map(|limit| limit.retry_at_unix_ms)
                             .or_else(|| error.downcast_ref::<LocalObserverBudget>()
@@ -18843,6 +18878,8 @@ fn mirror_observation(
     cursor: Option<&str>,
     recorded: &[crate::model::RecordedItem],
 ) {
+    let completed = crate::resource::completed_poll_cursor(polled_from);
+    let polled_from = completed.as_deref();
     let items = recorded
         .iter()
         .filter_map(|recorded| {
@@ -18910,6 +18947,8 @@ fn mirrored_prior(
     facts: &Value,
     polled_from: Option<&str>,
 ) -> Option<crate::model::MirroredPrior> {
+    let completed = crate::resource::completed_poll_cursor(polled_from);
+    let polled_from = completed.as_deref();
     let read = || -> Result<Option<crate::model::MirroredPrior>> {
         // Only a mirror that followed every look up to the one this look starts from knows at
         // least what the graph does.
@@ -19099,6 +19138,9 @@ struct RuntimeStep<'a> {
     spec: &'a StepSpec,
     dependency_prefix: String,
     parent: Option<String>,
+    /// The capacity of the mission that declares this step, nested or not: the lane of the agents
+    /// the step declares without one.
+    mission_capacity: Option<fractal_runtime::Capacity>,
 }
 
 /// Each failed finally step of a run with the reason it failed.
@@ -19133,6 +19175,7 @@ fn flatten_mission_steps(mission: &MissionSpec) -> Vec<RuntimeStep<'_>> {
                 spec: step,
                 dependency_prefix: dependency_prefix.clone(),
                 parent: parent.clone(),
+                mission_capacity: mission.capacity,
             });
             if let Some(nested) = &step.nested_mission {
                 append(
@@ -20595,6 +20638,8 @@ pub mod tests {
     #[cfg(test)]
     mod schedule_standby_parent;
     pub mod mission_eval_reuse;
+    mod mission_capacity_tests;
+    mod lane_admission_tests;
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;
@@ -41539,7 +41584,11 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         // keyed event, and neither writes a snapshot.
         let snapshots = count("resource.observed");
         let states = count("vcs.item.state");
+        // A suspended poll keeps the completed mirror position inside its private cursor.
+        let checkpoint = serde_json::json!({"poll_started_ms": 1, "cursor": "c3"}).to_string();
+        plugin.set_cursor("observer/repo", "resource/repo", Some(&checkpoint)).unwrap();
         poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4").await;
+        assert!(plugin.filled("resource/repo").unwrap(), "a resumed poll keeps mirror continuity");
         assert_eq!(count("resource.observed"), snapshots, "a compact-only change writes no snapshot");
         assert_eq!(count("vcs.item.state"), states + 1);
         assert_eq!(store.latest_actual_value(item).unwrap().unwrap()["facts"]["state"], "closed");

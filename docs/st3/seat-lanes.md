@@ -1,6 +1,8 @@
 # Seat lanes (design note)
 
-Status: step 1 built (lanes on agents, behind a per-host switch); steps after it are design.
+Status: step 1 built (lanes on agents, behind a per-host switch). Step 2 in progress: missions and
+steps declare capacity (built; a mission's lane is applied, a step's is not yet) and seats start by
+fit (built); applying a step's lane at delivery is next.
 
 ## What a seat lane is
 
@@ -19,6 +21,30 @@ agent "example/builder" {
   capacity cores=1 memory="3G"     // base lane: sized for the harness thinking, not for builds
 }
 ```
+
+A mission and a step can declare one too:
+
+```kdl
+mission "example/release" state="ready" {
+  capacity cores=2 memory="4G"     // each agent here that declares no capacity of its own gets this lane
+  agent "builder" { harness "claude" {} }
+  step "build" {
+    assigned-to "agent/${ST_MISSION_RUN}/builder"
+    capacity cores=8 memory="16G"  // raises the builder's lane while it holds this step
+  }
+}
+```
+
+A mission's `capacity` is the lane of each agent declared in the mission or its steps that declares
+none of its own; the agent's own block wins. A run adds it to those agents when it materializes them,
+so the stored seat carries it like any declared lane. A nested mission declares its own. A step's
+`capacity` is the lane its claiming seat holds while it holds that step: what it names raises the
+seat's own lane, and what it leaves out stays the seat's. A step may only raise a lane: lowering a
+lane's memory under a running harness could kill the harness itself mid-step. Publication refuses a
+step whose capacity is below the lane of a seat the same publication declares (an undeclared seat
+counts at the base lane, 1 core and 3G), and an agentless step with one. A seat declared elsewhere is
+to be held to the same rule when the step is delivered. Until admission lands, a step's capacity is
+recorded and checked at publication only: its seat keeps its own lane.
 
 The declaration is `capacity`, not `lane`: the mission's named `lane "NAME" { entries … }` block is
 a merge lane (see [lanes.md](lanes.md)) and keeps that one meaning.
@@ -163,31 +189,84 @@ then add `[unlaned_seat]` and restart. Downgrade: remove the table first, then i
 ## macOS
 
 No cgroups. A declared lane is logged at launch as "not enforced: this host has no systemd user
-scopes (macOS has no per-tree CPU or memory cap for a user process)". Nothing is capped. Step 2
-counts it for admission.
+scopes (macOS has no per-tree CPU or memory cap for a user process)". Nothing is capped. With lanes
+on, admission by fit still counts declared lanes against the host's room; there is no cgroup tree to
+read what seats outside lanes hold, so it counts none.
 
 ## Mixed versions
 
 The member record gains an optional `capacity` field, omitted when absent, so an undeclared seat's
-stored record and revision do not change. An older member reading a laned record drops the field
+stored record and revision do not change. The mission and step records gain one each, omitted when
+absent, so an undeclared mission's revision and its steps' definition hashes do not change, and an
+older member accepts it as before. A mission revision that declares a capacity, on the mission or any
+step, is one an older member cannot accept: it checks a replicated revision by hashing the mission as
+it reads it, its reading drops the field, and the hash no longer matches, so it quarantines the claim
+(projection health `stale`) and keeps the mission's earlier revision. So publication holds such a
+revision until every member reads the field: each daemon advertises `mission_capacity=1` on its own
+`daemon.started`, and a new revision that declares capacity is refused (`mission-capacity-unavailable`,
+also shown as a blocker in `apply --dry-run`) while any current member has not, naming that member,
+or while a host replicates to this one from outside the fleet membership. A host with no other member
+publishes at once. A mission without capacity is never held. An older member reading a laned record drops the field
 (the record has no `deny_unknown_fields`) and runs the seat without a lane. An older CLI refuses a
 file that declares `capacity` at apply (unknown child), as for any new declaration. An older daemon
 refuses a config with `lanes` set (`deny_unknown_fields`) and does not start, so set the key only on
 hosts that run a build with this change, and remove it before downgrading a host to an older build.
 
-## Later steps (decided, not built in step 1)
+## Admission by fit
+
+Where lanes are on, a laned seat starts only when its lane fits what the host has left for lanes.
+One formula on every host, sized to that host: it gives lanes its online CPUs less `max(2, cores/8)`
+and its installed memory less `max(4G, memory/8)`, a reserve for the daemon and the system
+(`fractal_runtime::host`). The online CPUs are the machine's, not the daemon's own quota: a cgroup
+limit shrinks what `nproc` reports. From that room, admission takes:
+
+- the lane of each of the host's other laned seats that runs, or was admitted to start and is not yet
+  seen running (for up to ten minutes): the lane caps it, so its size is firm;
+- what the seats outside lanes hold that the kernel cannot take back, the anonymous and kernel memory
+  of each seat scope in the user manager's `app.slice`. Nothing caps such a seat, so a reservation
+  could not bound it; page cache is left out, since pressure reclaims it.
+
+Memory must fit; cores only need to fit the host's room for lanes, since CPU quotas may oversubscribe
+and weights decide under contention. A seat that does not fit is not started (no workspace, no start
+claim), and its reason shows where admission reasons show (`st agents show`'s `ADMISSION` line, the
+list, the tree and `agents start`), naming the host's free room:
+
+```
+lane 8 cores/30.0G does not fit: 28.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, seats outside lanes 2.0G)
+```
+
+Seats wait in order: a smaller lane that would fit does not pass the first seat in line ("waits
+behind …, first in line for room"), so a large lane is not starved. A lane larger than the host can
+ever give waits out of line and holds no one back. A seat leaves the line when it is no longer tried
+for a start: suspended, stopped, no longer owned, or not tried for six minutes (a crash loop, a
+workspace error). Room is held only for a seat that starts, after any envelope admission also lets it.
+A waiting seat is tried again every 30 seconds, since what seats outside lanes hold changes without a
+claim. A seat without a lane is not held.
+
+To start a waiting seat now despite its fit, for the day a stale measurement holds a seat that must
+run: `st agents restart AGENT --ignore-fit --reason TEXT --as ACTOR`. The restart request records who
+asked (`--as`, a person or an agent acting for one) and why (`ignore_fit` and `reason` on its
+`runtime.action.requested` claim); the daemon logs both when the seat starts, and its lane then holds
+room like any other start.
+
+After a daemon restart the line and the reasons start empty. Seats that kept running count by their
+latest observation, so their lanes still hold room; every seat that is to start is tried in the first
+passes, and each one admitted holds its room from then on, so when every seat starts at once (a host
+that rebooted) they start in the order the passes reach them until the room is full, and the rest
+wait in line with their reasons. The order and
+the reasons live in the daemon's memory, as the envelope queue's do; a daemon restart rebuilds them
+from the next pass. `builds.slice` keeps its own cap and admission and is not counted.
+
+## Later steps (decided, not built)
 
 - **Bursts.** A heavy command asks for a burst; `st-test` asks for one sized to the checks it will
   run (covered checks skip, a docs-only run needs almost nothing). A burst raises the live scope
   with `systemctl --user set-property --runtime` and lowers it when the command ends. A step may
   adjust the base. A seat in `work wait` holds only its base.
-- **Admission by fit.** One formula on every host, sized to that host: capacity is the host's cores
-  and memory less a reserve for the daemon and the system (proposed: cores − max(2, cores/8),
-  memory − max(4G, 12.5%)). Memory is firm: the sum of every lane's base and burst memory must
-  fit. CPU is shareable: quotas may oversubscribe, weights decide under contention. Whatever waits
-  says why, naming the host's free capacity.
-- **Starvation.** Waiters age. After 15 minutes the host drains to fit (admits nothing new until
-  the oldest waiter fits). A lane or burst may declare a minimum and start smaller. After 30
+- **Placement.** A mission that pins no host runs on a member with room for it: see
+  [lane-placement.md](lane-placement.md).
+- **Starvation.** Waiters already wait in order, so the host drains to fit for the first in line
+  (built). A lane or burst may declare a minimum and start smaller. After 30
   minutes the seat should move to a host with room (by hand until moves are automatic). A wait
   over an hour is a fault to the run's report-to. The daily lane-wait p90 per host is the capacity
   signal.
@@ -213,4 +292,4 @@ lane. The tests:
   (`crates/fractal-reconcile/src/reconcile.rs`): an explicit stop ends the lane; an exit or a
   relaunch of a live declaration keeps it.
 
-Mission-level and step-level declarations, bursts and admission are step 2.
+Mission-level and step-level declarations (built), bursts and admission are step 2.
