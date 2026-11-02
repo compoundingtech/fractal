@@ -2880,7 +2880,7 @@ mod tests {
     #[tokio::test]
     async fn a_stopping_daemons_error_does_not_hide_the_outage_note_after_it() {
         let root = tempfile::tempdir().unwrap();
-        let unreachable = Client::unix(&root.path().join("absent.sock"))
+        let unreachable = Client::unix(root.path().join("absent.sock"))
             .get::<serde_json::Value>("/v1/health")
             .await
             .unwrap_err();
