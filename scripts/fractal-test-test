@@ -1119,6 +1119,23 @@ class StTest(unittest.TestCase):
         self.assertFalse([s for s in self.statements() if 'clippy_base_sha' in s['predicate']['observed']['inputs']
                           and s['subject'][0]['digest']['gitTree'] == git(self.work, 'rev-parse', 'HEAD^{tree}')])
 
+    def test_a_base_ref_another_fetch_moves_during_the_run_does_not_change_the_verdict_and_is_reported(self):
+        # Another seat's fetch in the same clone moves origin/main while the check runs, to a base whose key list no longer trusts this
+        # signer. The note was signed for the base the run fetched, and is judged there (#4755: judged at the moved ref, it read wrong_input).
+        self.commit('b.txt', 'two')
+        base = git(self.work, 'rev-parse', 'origin/main')
+        index = self.home / 'moved-index'
+        env_index = dict(GIT_ENV, GIT_INDEX_FILE=str(index))
+        subprocess.run(['git', '-C', str(self.work), 'read-tree', base], env=env_index, check=True)
+        blob = git(self.work, 'hash-object', '-w', '--stdin', stdin=b'')
+        subprocess.run(['git', '-C', str(self.work), 'update-index', '--cacheinfo', f'100644,{blob},.st/evidence-keys'], env=env_index, check=True)
+        tree = subprocess.run(['git', '-C', str(self.work), 'write-tree'], env=env_index, check=True, capture_output=True).stdout.decode().strip()
+        moved = git(self.work, 'commit-tree', tree, '-p', base, '-m', 'a base that trusts no key')
+        code, out, err = self.run_st_test('--check', 'demo', command=['git', '-C', str(self.work), 'update-ref', 'refs/remotes/origin/main', moved])
+        self.assertEqual(git(self.work, 'rev-parse', 'origin/main'), moved)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f'base moved since signing: origin/main is at {moved[:12]} now; these notes are for {base[:12]}', out)
+
     def test_untracked_and_ignored_files_in_the_checkout_cannot_change_the_result(self):
         self.commit('b.txt', 'two')
         (self.work / 'stray.txt').write_text('untracked')
