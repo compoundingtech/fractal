@@ -466,6 +466,9 @@ fn a_paced_local_trim_keeps_the_wal_under_its_bound_with_readers_always_open() {
         check: std::time::Duration::ZERO,
         ..smallclaims::store::checkpoint_trim::TRIM_WAL
     });
+    let logged = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&logged);
+    *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
     let stop = Arc::new(AtomicBool::new(false));
     let daemon = busy_daemon(&store, &stop);
     let sampled = Arc::new(Mutex::new((0, 0, 0)));
@@ -491,6 +494,9 @@ fn a_paced_local_trim_keeps_the_wal_under_its_bound_with_readers_always_open() {
     assert!(written > 10 * bound, "the trim writes far past the bound ({written} frames)");
     // Past the bound by what one chunk and the run between two looks write, never by the cut.
     assert!(largest < bound + bound / 4, "the WAL reached {largest} frames, bound {bound}, chunk {chunk}");
+    // Each restart says so on the daemon's stderr.
+    let restarts = logged.lock().unwrap().iter().filter(|line| line.starts_with("st3: a trim restarted the WAL {")).count();
+    assert!(restarts * bound as usize >= written as usize / 2, "{restarts} restart lines for {written} frames");
 }
 
 /// A trim whose WAL will not restart, because a reader holds a snapshot past the trim's wait,
@@ -528,9 +534,16 @@ fn a_trim_that_cannot_restart_the_wal_stops_until_the_next_step_and_resumes() {
             hook_begun.wait();
         }
     }));
+    let logged = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&logged);
+    *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
     let actions = kinds(&step(&store, &context(scratch.path(), 0)));
     store.trim_chunk_hook.lock().unwrap().take();
     let stopped_at = wal_frames(&store);
+    assert!(
+        logged.lock().unwrap().iter().any(|line| line.starts_with("st3: a trim could not restart the WAL and stops until the next step {")),
+        "the stop is logged: {:?}", logged.lock().unwrap()
+    );
     let left = observer_ids(&store);
     release.store(true, Ordering::Release);
     holder.lock().unwrap().take().unwrap().join().unwrap();
