@@ -3103,6 +3103,7 @@ export type SloHistory = {
 
 export type SloList = {
   as_of_unix_ms: number;
+  otel_ui_url?: string;
   rows: Array<SloRow>;
 };
 
@@ -3121,6 +3122,7 @@ export type SloRow = {
   runs_out_at_unix_ms?: number;
   status: "met" | "missed" | "no-data" | "stale";
   target: string;
+  tone?: string;
   window: string;
 };
 

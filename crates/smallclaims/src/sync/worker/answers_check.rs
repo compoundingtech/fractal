@@ -319,7 +319,10 @@ pub async fn fetch_answers(
     );
     let response: PeerResponse<AnswersReply> =
         serde_json::from_slice(&bytes).context("decode the signed answers")?;
-    anyhow::ensure!(response.api_version == PEER_API_VERSION, "the peer API version differs");
+    anyhow::ensure!(
+        ACCEPTED_PEER_API_VERSIONS.contains(&response.api_version.as_str()),
+        "the peer API version differs"
+    );
     fleet.note_activity(&peer.name);
     let answered = |kind: Option<&str>, cut: u128| kind == request.kind.as_deref() && cut == request.cut_unix_ms;
     anyhow::ensure!(

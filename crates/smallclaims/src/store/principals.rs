@@ -1041,10 +1041,88 @@ fn advance_requeue_tx(connection: &Connection) -> Result<bool> {
     requeue_pending(connection)
 }
 
+/// The claims with more than 32 candidates, which verdict counts read as held: a handful on any
+/// store, found without reading every count row. Built when the store opens, before it serves:
+/// the build reads every count row, 9.5 s cold on a store of 2.9 million signed claims, and must
+/// not hold the writer under traffic. A build older than this one keeps the index and ignores it.
+/// The held counts name it (`INDEXED BY`), so a connection to a store this build never opened
+/// fails to count rather than falling back to reading every row.
+pub(crate) fn initialize_held_index(connection: &Connection, fresh: bool) -> Result<()> {
+    let built: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='claim_signature_counts_held_index')",
+        [],
+        |row| row.get(0),
+    )?;
+    if built {
+        return Ok(());
+    }
+    let started = std::time::Instant::now();
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hff57048bd6a3 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claim_signature_counts_held_index ON claim_signature_counts(candidates,claim_id) WHERE candidates>32",
+    )?;
+    if !fresh {
+        eprintln!(
+            "st3: built the index of claims with many signature candidates in {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
 fn requeue_pending(connection: &Connection) -> Result<bool> {
     Ok(connection
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM meta WHERE key>=?1 AND key<?2)")?
         .query_row(/* sqlite-large-value: allow-for-now lv-hb771731d9c03 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [REQUEUE, REQUEUE_END], |row| row.get(0))?)
+}
+
+/// Verdict counts with held claims counted as held, while no requeue is pending. Each verdict
+/// is counted from its index, and only the held claims, found through the pending index and
+/// the claims with many candidates, are looked up: a per-claim probe over every verdict took
+/// half a minute on a store of millions of claims.
+fn held_verdict_counts(connection: &Connection) -> Result<BTreeMap<String, u64>> {
+    let mut counts = connection
+        .prepare_cached("SELECT verdict, COUNT(*) FROM claim_verdicts GROUP BY verdict")?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+    let held = connection
+        .prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-hc03851889cc8 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ "WITH held(claim_id) AS (
+                 SELECT claim_id FROM claim_signature_judging WHERE complete=0 OR dirty=1 OR blocked=1
+                 UNION
+                 SELECT c.claim_id FROM claim_signature_counts c INDEXED BY claim_signature_counts_held_index
+                 WHERE c.candidates>32 AND NOT EXISTS(
+                     SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=c.claim_id
+                     AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates))
+             SELECT v.verdict, COUNT(*) FROM held CROSS JOIN claim_verdicts v ON v.claim_id=held.claim_id
+             GROUP BY 1",
+        )?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (verdict, count) in held {
+        let remaining = counts.entry(verdict).or_default();
+        *remaining = remaining.saturating_sub(count);
+        *counts.entry("held".into()).or_default() += count;
+    }
+    counts.retain(|_, count| *count != 0);
+    Ok(counts)
+}
+
+/// Where a claim relies on a link whose requeue cursor has not reached it yet, that link: the
+/// claim's page is not queued, so its cached verdict can predate the change and reads as held,
+/// as it did when one transaction queued every dependent.
+pub(super) fn requeue_ahead_of(connection: &Connection, claim_id: &str) -> Result<Option<String>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT l.link FROM meta m JOIN claim_verdict_links l
+               ON l.link=substr(m.key, ?3) AND l.claim_id=?4
+             WHERE m.key>=?1 AND m.key<?2 AND m.value<?4 ORDER BY m.key LIMIT 1",
+        )?
+        .query_row(
+            /* sqlite-large-value: allow-for-now lv-hd85da347d250 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */
+            params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, claim_id],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 /// The links a newly arrived signed claim can change: the claims waiting on it as a
@@ -1573,14 +1651,24 @@ impl Store {
         let judged = self.record_judgment_failure(
             self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS)),
         )?;
-        if self.verdicts_pending()? {
-            self.verdicts_due.store(true, Ordering::Release);
-            // The paced signature job owns what a slice leaves; a faulted member waits for resume.
-            if self.signature_migration()?.fault.is_none() {
-                self.signature_job_wake.notify_one();
-            }
-        }
+        self.hand_off_pending_verdicts()?;
         Ok(judged)
+    }
+
+    /// Leave verdict work that is still pending to the next ordinary pass and to the paced
+    /// signature job, which owns it; a faulted member waits for resume. Nothing pending wakes
+    /// nothing, so a pass that finishes its work never wakes the job again.
+    pub(crate) fn hand_off_pending_verdicts(&self) -> Result<()> {
+        if !self.verdicts_pending()? {
+            return Ok(());
+        }
+        self.verdicts_due.store(true, Ordering::Release);
+        if self.signature_migration()?.fault.is_none() {
+            self.signature_job_wake.notify_one();
+            #[cfg(test)]
+            super::SIGNATURE_JOB_WAKES.with(|wakes| wakes.set(wakes.get() + 1));
+        }
+        Ok(())
     }
 
     /// One resumable judgment loan for the paced signature worker: the bootstrap's shadow
@@ -1784,10 +1872,14 @@ impl Store {
                     Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
                 })?
                 .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
+        } else if !requeue_pending(&connection)? {
+            held_verdict_counts(&connection)?
         } else {
+            // A claim an unfinished requeue has not reached counts as held, as it reads. The
+            // per-row probe runs only while a requeue is pending.
             connection
-            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
-            .query_map([], |row| {
+            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
+            .query_map(params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, true], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
@@ -1795,7 +1887,7 @@ impl Store {
         let pending_uncached: u64 = if serving_legacy {
             0
         } else {
-            connection.query_row("SELECT COUNT(*) FROM claim_signature_counts c JOIN claims ON claims.id=c.claim_id LEFT JOIN claim_verdicts v USING(claim_id) WHERE v.claim_id IS NULL AND c.candidates>32",[],|row|row.get(0))?
+            connection.query_row("SELECT COUNT(*) FROM claim_signature_counts c INDEXED BY claim_signature_counts_held_index JOIN claims ON claims.id=c.claim_id LEFT JOIN claim_verdicts v USING(claim_id) WHERE v.claim_id IS NULL AND c.candidates>32",[],|row|row.get(0))?
         };
         if pending_uncached != 0 {
             *counts.entry("held".into()).or_default() += pending_uncached;
@@ -2092,6 +2184,59 @@ pub(crate) fn envelope_signature(
 }
 
 #[cfg(test)]
+mod held_index_tests {
+    use super::*;
+    use rusqlite::StatementStatus;
+
+    /// The held count finds claims with many candidates through their own index: a store whose
+    /// every claim has a count row does not read them all to find the few that are held.
+    #[test]
+    fn held_counts_read_only_the_claims_with_many_candidates() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for i in 0..10_000 {
+                let claim = format!("ordinary/{i:05}");
+                tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,32)", [&claim]).unwrap();
+                tx.execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES (?1,'verified','node')", [&claim]).unwrap();
+            }
+            tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES ('many/1',33),('many/2',40)", []).unwrap();
+            tx.execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES ('many/1','verified','node'),('many/2','rejected','node')", []).unwrap();
+            tx.commit().unwrap();
+        }
+        let connection = store.readers.get();
+        assert_eq!(held_verdict_counts(&connection).unwrap(),
+            BTreeMap::from([("verified".into(), 10_000), ("held".into(), 2)]));
+        let mut statement = connection.prepare(
+            "SELECT COUNT(*) FROM claim_signature_counts c INDEXED BY claim_signature_counts_held_index WHERE c.candidates>32",
+        ).unwrap();
+        assert_eq!(statement.query_row([], |row| row.get::<_, u64>(0)).unwrap(), 2);
+        assert_eq!(statement.get_status(StatementStatus::FullscanStep), 0);
+        assert!(statement.get_status(StatementStatus::VmStep) < 100, "the ordinary claims were read");
+    }
+
+    /// A store opened by a build without the index gets it when this build opens it.
+    #[test]
+    fn a_store_without_the_held_index_gets_it_when_it_opens() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("claims.sqlite3");
+        let exists = |store: &Store| store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='claim_signature_counts_held_index')",
+            [], |row| row.get::<_, bool>(0)).unwrap();
+        {
+            let store = Store::open(&path, "studio", Arc::new(runtime::Plain)).unwrap();
+            assert!(exists(&store));
+            store.connection.write().execute_batch("DROP INDEX claim_signature_counts_held_index").unwrap();
+            assert!(!exists(&store));
+        }
+        let store = Store::open(&path, "studio", Arc::new(runtime::Plain)).unwrap();
+        assert!(exists(&store));
+        store.claim_verdict_counts().unwrap();
+    }
+}
+
+#[cfg(test)]
 mod signature_alert_tests {
     use super::*;
     use rusqlite::StatementStatus;
@@ -2192,6 +2337,53 @@ mod paced_verdict_tests {
     }
 
     #[test]
+    fn a_claim_sealed_after_the_startup_pass_is_handed_to_the_paced_job_and_judged() {
+        // A single node with no fleet: nothing exchanges, so nothing else judges. Its node key
+        // signs its claims as they are sealed.
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        store.judge_claims_slice(true).unwrap();
+        let wakes = || crate::store::SIGNATURE_JOB_WAKES.with(std::cell::Cell::get);
+        let start = wakes();
+        let write = |subject: &str| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([("state".into(), Value::from("ready"))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
+        };
+        let first = write("agent/studio.first");
+        // As a checkpoint capture does: seal, and judge nothing.
+        store.seal_local_batches().unwrap();
+        assert!(store.verdicts_pending().unwrap());
+        assert!(store.verdicts_due.load(Ordering::Acquire), "the next ordinary pass judges it too");
+        assert_eq!(wakes(), start + 1);
+        // A seal with nothing new to seal hands off nothing.
+        store.seal_local_batches().unwrap();
+        assert_eq!(wakes(), start + 1);
+        // What the woken job does, without a restart: judge while anything is pending.
+        while store.verdicts_pending().unwrap() {
+            store.advance_signature_judgment().unwrap();
+        }
+        assert_eq!(store.claim_verdict(&first.id).unwrap(), Verdict::Verified);
+        // A pass that leaves nothing pending does not wake the job again, so a steady trickle
+        // of passes and empty seals cannot loop it, and leaves the tail no slice to run.
+        store.judge_claims_slice(false).unwrap();
+        store.verdicts_due.store(false, Ordering::Release);
+        store.seal_local_batches().unwrap();
+        assert_eq!(wakes(), start + 1);
+        assert!(!store.verdicts_due.load(Ordering::Acquire));
+        // The next claim sealed is handed off again.
+        write("agent/studio.second");
+        store.seal_local_batches().unwrap();
+        assert_eq!(wakes(), start + 2);
+    }
+
+    #[test]
     fn an_ordinary_pass_takes_a_slice_and_leaves_the_rest_due() {
         let store = root_linked(REQUEUE_PAGE * 2);
         store.judge_claims_slice(true).unwrap();
@@ -2204,6 +2396,149 @@ mod paced_verdict_tests {
         store.judge_claims(true).unwrap();
         assert!(!store.verdicts_pending().unwrap());
         assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+    }
+
+    #[test]
+    fn a_verdict_past_any_unfinished_requeue_cursor_reads_as_held() {
+        for link in [
+            "root",
+            "key:person/ada|device-key",
+            "delegation:claim/grant",
+            "nonce:device-key|nonce-1",
+        ] {
+            let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+            {
+                let mut connection = store.connection.write();
+                let tx = connection.transaction().unwrap();
+                for claim in ["claim/00001", "claim/00002", "claim/00003", "claim/00004"] {
+                    tx.execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES (?1,'verified','host/studio')", [claim]).unwrap();
+                }
+                for claim in ["claim/00001", "claim/00002", "claim/00003"] {
+                    tx.execute(
+                        "INSERT INTO claim_verdict_links(link,claim_id) VALUES (?1,?2)",
+                        [link, claim],
+                    )
+                    .unwrap();
+                }
+                // claim/00004 relies on another link, whose requeue is not running.
+                tx.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES ('delegation:claim/other','claim/00004')", []).unwrap();
+                // The requeue of `link` has queued up to claim/00002.
+                set_meta_tx(&tx, &format!("{REQUEUE}{link}"), "claim/00002").unwrap();
+                tx.commit().unwrap();
+            }
+            let read = |claim: &str| store.claim_verdict(claim).unwrap();
+            assert_eq!(read("claim/00001"), Verdict::Verified, "{link}");
+            assert_eq!(read("claim/00002"), Verdict::Verified, "{link}");
+            assert!(
+                matches!(read("claim/00003"), Verdict::Held(reason) if reason.starts_with("signature-judgment-incomplete:") && reason.ends_with(link)),
+                "{link}"
+            );
+            assert!(store.claim_signature("claim/00003").is_err(), "{link}");
+            assert_eq!(read("claim/00004"), Verdict::Verified, "{link}");
+            let counts = store.claim_verdict_counts().unwrap();
+            assert_eq!(counts.get("verified"), Some(&3), "{link}");
+            assert_eq!(counts.get("held"), Some(&1), "{link}");
+            // A root change starts its requeue before any page: every dependent reads as held.
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            set_meta_tx(&tx, &format!("{REQUEUE}{link}"), "").unwrap();
+            tx.commit().unwrap();
+            drop(connection);
+            for claim in ["claim/00001", "claim/00002", "claim/00003"] {
+                assert!(matches!(read(claim), Verdict::Held(_)), "{link} {claim}");
+            }
+            assert_eq!(read("claim/00004"), Verdict::Verified, "{link}");
+        }
+    }
+
+    #[test]
+    fn indexed_verdict_counts_match_the_per_claim_probe_and_across_a_requeue() {
+        // The per-claim form every count used before, run as it is while a requeue is pending.
+        fn probed(store: &Store) -> BTreeMap<String, u64> {
+            let connection = store.readers.get();
+            let requeuing = requeue_pending(&connection).unwrap();
+            connection
+                .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")
+                .unwrap()
+                .query_map(params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, requeuing], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            // A judging row as complete, dirty, blocked and candidate_count.
+            type Judging = Option<(i64, i64, i64, i64)>;
+            // Claim, stored verdict, judging row, candidates.
+            let rows: &[(&str, &str, Judging, Option<i64>)] = &[
+                ("claim/00001", "verified", None, None),
+                ("claim/00002", "verified", Some((1, 0, 0, 3)), Some(3)),
+                ("claim/00003", "verified", Some((0, 0, 0, 3)), Some(3)),
+                ("claim/00004", "rejected", Some((1, 1, 0, 3)), None),
+                ("claim/00005", "verified", Some((1, 0, 1, 3)), None),
+                ("claim/00006", "verified", Some((1, 0, 0, 40)), Some(40)),
+                ("claim/00007", "verified", Some((1, 0, 0, 39)), Some(40)),
+                ("claim/00008", "verified", None, Some(40)),
+                ("claim/00009", "rejected", None, None),
+                ("claim/00010", "held", Some((0, 1, 1, 3)), Some(50)),
+            ];
+            for (claim, verdict, judging, candidates) in rows {
+                tx.execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES (?1,?2,'host/studio')", [claim, verdict]).unwrap();
+                if let Some((complete, dirty, blocked, count)) = judging {
+                    tx.execute(
+                        "INSERT INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,complete,dirty,blocked) VALUES (?1,?2,'','','',?3,?4,?5)",
+                        params![claim, count, complete, dirty, blocked],
+                    ).unwrap();
+                }
+                if let Some(candidates) = candidates {
+                    tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,?2)", params![claim, candidates]).unwrap();
+                }
+            }
+            for claim in ["claim/00001", "claim/00002", "claim/00009"] {
+                tx.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)", [claim]).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        // The in-memory store has no claims rows, so only cached verdicts count.
+        let verdicts = || {
+            let mut counts = store.claim_verdict_counts().unwrap();
+            assert_eq!(counts.remove("unsigned"), Some(0));
+            counts
+        };
+        let counts = verdicts();
+        assert_eq!(counts, probed(&store));
+        // Held: 00003 incomplete, 00004 dirty, 00005 blocked, 00007 and 00008 judged on fewer
+        // candidates than they have, and 00010 stored held.
+        assert_eq!(counts.get("held"), Some(&6));
+        assert_eq!(counts.get("verified"), Some(&3));
+        assert_eq!(counts.get("rejected"), Some(&1));
+        let requeue = |cursor: Option<&str>| {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            match cursor {
+                Some(cursor) => set_meta_tx(&tx, &format!("{REQUEUE}root"), cursor).unwrap(),
+                None => {
+                    tx.execute("DELETE FROM meta WHERE key=?1", [format!("{REQUEUE}root")]).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        };
+        // A requeue whose cursor has passed every dependent counts as none does: the moment a
+        // requeue ends and the indexed form takes over again changes nothing.
+        requeue(Some("claim/99999"));
+        assert_eq!(verdicts(), counts);
+        assert_eq!(probed(&store), counts);
+        requeue(None);
+        assert_eq!(verdicts(), counts);
+        // A requeue that has just started holds its dependents, through the per-claim form.
+        requeue(Some(""));
+        let started = verdicts();
+        assert_eq!(started, probed(&store));
+        assert_eq!(started.get("held"), Some(&9));
+        assert_eq!(started.get("verified"), Some(&1));
+        assert_eq!(started.get("rejected"), None);
     }
 
     #[test]

@@ -635,6 +635,22 @@
       "verification": "real CLI over private Unix socket; disk store reopened before idempotent replay"
     },
     {
+      "command": "st agents rename-id proof export",
+      "description": "Export exact signed agent identity evidence at the current or selected claim-ID revision",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
+      ],
+      "verification": "real CLI over a fleet Unix socket; alias and canonical exports match across file and stdout output"
+    },
+    {
+      "command": "st agents rename-id proof verify",
+      "description": "Verify portable agent rename evidence offline against a caller-supplied fleet anchor",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
+      ],
+      "verification": "real CLI after daemon shutdown with invalid config, instance and endpoint; successful verdict and stale-revision exit"
+    },
+    {
       "command": "st agents repos",
       "description": "List repositories already used by a host's agents, from replicated graph evidence",
       "tests": [
@@ -1176,6 +1192,14 @@
       "verification": "real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression"
     },
     {
+      "command": "st fleet anchor show",
+      "description": "Print the fleet public trust anchor for offline proof verification",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
+      ],
+      "verification": "real fleet CLI public API read; human and JSON anchor agree and anchor verifies portable exports"
+    },
+    {
       "command": "st fleet create",
       "description": "Found a new fleet with this machine as its first member (the anchor)",
       "tests": [
@@ -1620,6 +1644,16 @@
       "verification": "existing CLI integration"
     },
     {
+      "command": "st missions dismiss-fault",
+      "description": "Dismiss a fault whose run has ended, with a reason, when nothing at its source can close it",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart",
+        "crates/fractal-reconcile/src/reconcile/tests/fault_dismiss_tests.rs::a_person_or_the_fault_agent_dismisses_a_fault_on_an_ended_run_and_no_other_agent",
+        "crates/fractal-api-core/src/api/tests.rs::a_bound_harness_dismisses_a_fault_only_as_itself"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st missions ls",
       "description": "List current missions; use --all for historical terminal missions",
       "tests": [
@@ -1674,6 +1708,22 @@
         "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened before idempotent replay"
+    },
+    {
+      "command": "st missions rename-id proof export",
+      "description": "Export exact signed mission identity evidence at the current or selected claim-ID revision",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
+      ],
+      "verification": "real CLI over a fleet Unix socket; alias and canonical exports match across file and stdout output"
+    },
+    {
+      "command": "st missions rename-id proof verify",
+      "description": "Verify portable mission rename evidence offline against a caller-supplied fleet anchor",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
+      ],
+      "verification": "real CLI after daemon shutdown with invalid config, instance and endpoint; successful verdict and stale-revision exit"
     },
     {
       "command": "st missions report-to",

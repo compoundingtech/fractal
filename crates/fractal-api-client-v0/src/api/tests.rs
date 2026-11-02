@@ -185,11 +185,30 @@ async fn slo_budgets_forecast_their_use_at_the_reset_from_the_local_history() {
         assert_eq!(status, StatusCode::OK, "{list}");
         let five = find(&list, "ada/claude-1/5h");
         assert_eq!(five["forecast_used_percent"], 100.0, "{path}: {five}");
+        // Forty percent used is within its allowance; the row is green, and every row has a tone.
+        assert_eq!(five["tone"], "green", "{path}: {five}");
+        assert!(list["rows"].as_array().unwrap().iter().all(|row| row["tone"].is_string()), "{path}: {list}");
         assert!(five["runs_out_at_unix_ms"].as_u64().unwrap() < now + 2 * 3_600_000, "{path}: {five}");
         assert!(five["explain"].as_str().unwrap().contains("will not last until it resets"), "{path}: {five}");
         // The weekly budget has no history, so it has no forecast.
         assert!(find(&list, "ada/claude-1/weekly").get("forecast_used_percent").is_none(), "{path}");
     }
+}
+
+#[tokio::test]
+async fn slo_points_to_the_otel_ui_only_when_one_is_configured() {
+    let root = tempfile::tempdir().unwrap();
+    let app = router(state(root.path()));
+    crate::slo_history::set_ui_url(None);
+    let (status, none) = get_request(app.clone(), "/v1/client/slo").await;
+    assert_eq!(status, StatusCode::OK, "{none}");
+    assert!(none.get("otel_ui_url").is_none(), "{none}");
+    crate::slo_history::set_ui_url(Some("https://otel.example.test/d/slo".into()));
+    let (_, some) = get_request(app.clone(), "/v1/client/slo").await;
+    let (_, cli) = get_request(app, "/v1/slo").await;
+    crate::slo_history::set_ui_url(None);
+    assert_eq!(some["otel_ui_url"], "https://otel.example.test/d/slo", "{some}");
+    assert_eq!(cli["otel_ui_url"], "https://otel.example.test/d/slo", "{cli}");
 }
 
 #[tokio::test]

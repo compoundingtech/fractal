@@ -127,8 +127,12 @@ pub fn run_with_paths(
         !opencode_argv.is_empty(),
         "opencode driver '{runtime_id}' has no provider argv"
     );
-    let admission =
-        crate::harness_admission::admit(&opencode_argv[0], DiagnosticDriver::OpenCode, None);
+    let admission = crate::harness_admission::admit_for_agent(
+        &opencode_argv[0],
+        DiagnosticDriver::OpenCode,
+        None,
+        agent_dir,
+    );
     let version_ok = admission.passed();
     let producer_version = admission.version.clone();
     let support = admission.support();
@@ -3267,7 +3271,7 @@ mod tests {
     // ---- harness context: frames captured verbatim from OpenCode 1.18.25 (HC-R13) -------------
     //
     // Every constant below is one `data:` payload of the credential-free lab run recorded in
-    // `docs/vrs/08-harness-context/spec.md` §opencode, unedited. The version the frames were
+    // [historical capture](https://github.com/compoundingtech/fractal/blob/bb51bdcb0cd549b06c298d81c1907a7fd35f0c83/docs/vrs/08-harness-context/spec.md) §opencode, unedited. The version the frames were
     // captured against is asserted from the frames themselves — `session.updated` carries
     // `info.version` — so a bump that changes the numerator, the denominator, or the shape of the
     // join fails here rather than silently publishing a differently-meaning number.

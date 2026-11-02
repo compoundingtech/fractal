@@ -279,7 +279,7 @@ async fn over_fabric(
                 "{owner} advertises no Fabric node, and no Fabric peer of this machine has its name"
             ))
         })?;
-    let protocol = fractal_terminal_direct::protocol(&fleet_id);
+    let protocol = fractal_terminal_direct::owner_protocol(&members, owner, &peer, &fleet_id);
     let target = FabricTarget {
         fabric,
         peer,
@@ -347,6 +347,7 @@ mod tests {
 
     fn state(root: &Path) -> fractal_daemon::api::AppState {
         fractal_daemon::api::AppState {
+            seat_admission: Default::default(),
             owning_person: None,
             store: Arc::new(fractal_daemon::store::Store::open_memory("attach-node").unwrap()),
             notify: Arc::new(tokio::sync::Notify::new()),

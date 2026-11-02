@@ -239,16 +239,16 @@ fn scenario_demo_first_frames_match_golden() {
         let mut ui = Ui::new(world.clone());
         ui.glasses = glass::Glasses::open(None, None);
         ui.glasses.sidebar.shown = true;
-        if title == "Agent details" { ui.details_here.insert("agent/example/atlas/builder".into()); }
         if matches!(pane, Pane::Terminal(_)) { ui.attach_terminal("agent/example/atlas/builder"); }
         ui.open_in_glass(pane, glass::Open::Tab);
-        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        let width = if title == "Agent details" { 160 } else { 120 };
+        let mut terminal = Terminal::new(TestBackend::new(width, 32)).unwrap();
         terminal.draw(|frame| ui.render(frame)).unwrap();
         terminal.draw(|frame| ui.render(frame)).unwrap();
         actual.push_str(&format!("=== {title} ===\n"));
         let buffer = terminal.backend().buffer();
         for y in 0..32 {
-            let line: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
+            let line: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
             actual.push_str(line.trim_end());
             actual.push('\n');
         }

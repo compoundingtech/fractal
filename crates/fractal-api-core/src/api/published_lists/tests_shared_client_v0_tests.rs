@@ -104,6 +104,7 @@ pub fn fold(store: &Store) -> (Arc<Publication<MissionRows>>, bool) {
 
 pub fn app_state(root: &std::path::Path) -> AppState {
     AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), "cedar").unwrap()),
         notify: Arc::new(Notify::new()),

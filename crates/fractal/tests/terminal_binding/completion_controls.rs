@@ -127,6 +127,7 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     let runtime = runtime();
     let socket = root.path().join("api.sock");
     let state = fractal_daemon::api::AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),

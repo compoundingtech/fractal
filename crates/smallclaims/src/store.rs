@@ -39,6 +39,7 @@ use crate::sqlite::{
 mod admitted;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
+mod proof;
 pub mod prepared_envelope;
 mod replica_record;
 use crate::operation_metadata::OperationMetadata;
@@ -909,11 +910,19 @@ pub struct Store {
     /// Where the next trim stops, as a crash would, and how many envelopes it deletes per
     /// transaction. Only tests change them.
     pub trim_fault: Mutex<Option<checkpoint_trim::TrimFault>>,
+    /// What a test runs after each chunk a trim deletes, given how many it has deleted.
+    pub trim_chunk_hook: Mutex<Option<checkpoint_trim::TrimChunkHook>>,
+    /// What a test sees of the lines a trim writes to stderr.
+    pub trim_log_hook: Mutex<Option<checkpoint_trim::TrimLogHook>>,
     pub trim_chunk_envelopes: AtomicUsize,
     /// Minimum trim rest in microseconds; tests may set zero to disable pacing.
     pub trim_pause_micros: AtomicU64,
+    /// How long a trim's run goes between view refolds, in microseconds; tests may set zero.
+    pub trim_view_refold_micros: AtomicU64,
     /// Extra time each trimmed row takes. Tests only.
     pub trim_row_cost_micros: AtomicU64,
+    /// When a trim stops deleting to restart the WAL; only tests change it.
+    pub trim_wal: Mutex<checkpoint_trim::TrimWal>,
     /// The last seal-identity digest, and the capture epoch it holds for; see
     /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
     pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
@@ -1164,6 +1173,7 @@ impl Store {
             inventory_generation::initialize(connection)
         })?;
         principals::initialize_schema(connection)?;
+        principals::initialize_held_index(connection, fresh)?;
         if fresh {
             runtime.create_schema_for_fresh_store(connection)?;
         } else {
@@ -1296,9 +1306,13 @@ impl Store {
             path,
             shared_memory,
             trim_fault: Mutex::new(None),
+            trim_chunk_hook: Mutex::new(None),
+            trim_log_hook: Mutex::new(None),
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
             trim_pause_micros: AtomicU64::new(checkpoint_trim::TRIM_MIN_PAUSE.as_micros() as u64),
+            trim_view_refold_micros: AtomicU64::new(checkpoint_trim::TRIM_VIEW_REFOLD_INTERVAL.as_micros() as u64),
             trim_row_cost_micros: AtomicU64::new(0),
+            trim_wal: Mutex::new(checkpoint_trim::TRIM_WAL),
             sealed_identity_memo: Mutex::new(None),
             runtime,
         })
@@ -2500,6 +2514,25 @@ impl Store {
         Ok(membership)
     }
 
+    /// Read only already-sealed membership; never seed or judge local batches on a cache miss.
+    pub fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership> {
+        if let Some(authority) = self.fleet_authority.get() {
+            return authority.fleet_membership_sealed();
+        }
+        self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            let current = fleet_generation(&connection)?;
+            if let Some((folded_at, membership)) = self.membership_cache.lock()
+                .unwrap_or_else(PoisonError::into_inner).as_ref()
+                && *folded_at == current
+            {
+                return Ok(membership.clone());
+            }
+            // Do not populate the sealing path's cache with a fold that can omit local batches.
+            fleet_membership_tx(&connection)
+        })
+    }
+
     /// Whether transport observations about `peer` belong in the graph. A dial-out member is
     /// never dialed and never reports on others, so neither side records one.
     pub fn observes_transport_to(&self, peer: &str) -> Result<bool> {
@@ -3328,6 +3361,7 @@ pub trait FleetAuthority: Send + Sync {
     /// Advances whenever the default store's membership may have changed.
     fn fleet_generation(&self) -> Result<i64>;
     fn fleet_membership(&self) -> Result<crate::fleet::Membership>;
+    fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership>;
     /// Whether this is a default store that takes its fleet from no other store.
     fn is_default_store(&self) -> Result<bool>;
 }
@@ -3343,6 +3377,10 @@ impl FleetAuthority for Store {
 
     fn fleet_membership(&self) -> Result<crate::fleet::Membership> {
         Store::fleet_membership(self)
+    }
+
+    fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership> {
+        Store::fleet_membership_sealed(self)
     }
 
     fn is_default_store(&self) -> Result<bool> {
@@ -4402,6 +4440,9 @@ pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
 /// A checkpoint that waits this long for the writer names the hold that held it up. The daemon
 /// reports the same wait as an abnormal checkpoint.
 const CHECKPOINT_HELD_UP_MS: u128 = 100;
+/// How long one WAL restart attempt copies off the writer, waiting for the readers on older
+/// snapshots to finish, before it gives up without taking the writer.
+const WAL_RESTART_COPY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Full-inventory answers since the daemon started: each lists every identity this node holds,
 /// which on a large store can pass `MAX_EXCHANGE_BYTES` and fail the peer's inflate.
@@ -6762,7 +6803,20 @@ impl Store {
     fn seal_local_batches_after_frontier(&self) -> Result<()> {
         // Capture the target once; concurrent writes belong to the next pass.
         let target = max_batch_rowid(&self.readers.get())?;
+        let sealed_before = self.seeded_batch_rowid.load(Ordering::Acquire);
         while self.seal_local_batch_chunk(target)? {}
+        // Sealing signs this node's claims and leaves each waiting for its first verdict, and no
+        // other work asks for it: a checkpoint, a status read or a proof seals without judging.
+        // Hand what is pending to the paced job, as a slice that leaves work does. A seal that
+        // committed nothing hands off nothing, so idle seals never wake the job.
+        if self.seeded_batch_rowid.load(Ordering::Acquire) > sealed_before
+            && let Err(error) = self.hand_off_pending_verdicts()
+        {
+            // The seal has committed: a failed hand-off must not fail it. The next ordinary pass
+            // judges whatever it left, and the job wakes if that pass leaves work.
+            self.verdicts_due.store(true, Ordering::Release);
+            eprintln!("st3: sealed claims were not handed to the signature job: {error:#}");
+        }
         Ok(())
     }
 
@@ -8145,6 +8199,46 @@ impl Store {
             report.truncate_ms = Some(truncating.elapsed().as_millis());
         }
         Ok(report)
+    }
+
+    /// Restart the WAL while writes keep coming, as a trim needs when no reader ever lets the idle
+    /// recycle in. Pages are copied off the writer until every frame is, which means no reader is
+    /// left on an older snapshot; only then are they flushed and the writer taken, at its FIFO
+    /// turn, to copy what arrived since and wait up to `busy` for readers begun in between. Readers
+    /// that begin after that see a fully copied WAL and read the database file, so they do not
+    /// hold the restart up. An attempt that cannot copy every frame within `WAL_RESTART_COPY`
+    /// leaves the writer alone. `truncate_ms` is the time under the writer.
+    pub fn restart_wal_report(&self, checkpoint: &Connection, busy: std::time::Duration) -> Result<crate::sqlite::WalCheckpointReport> {
+        let copying = std::time::Instant::now();
+        let copied_all = |report: &crate::sqlite::WalCheckpointReport| report.frames >= 0 && report.frames == report.backfilled;
+        let mut copied = crate::sqlite::checkpoint_wal_report(checkpoint)?;
+        while !copied_all(&copied) && copying.elapsed() < WAL_RESTART_COPY {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            copied = crate::sqlite::checkpoint_wal_report(checkpoint)?;
+        }
+        copied.passive_ms = copying.elapsed().as_millis();
+        if !copied_all(&copied) {
+            // Under the writer the rest would be copied while every write waits.
+            return Ok(copied);
+        }
+        // SQLite syncs the database once a checkpoint copies every frame, which is under the
+        // writer here; flushing first leaves that sync only what arrived since.
+        std::fs::File::open(&self.path)?.sync_data()?;
+        let waiting = std::time::Instant::now();
+        let _writer = self.connection.write();
+        let writer_wait_ms = waiting.elapsed().as_millis();
+        let holding = std::time::Instant::now();
+        let last = crate::sqlite::checkpoint_wal_report(checkpoint)?;
+        let recycled = crate::sqlite::restart_wal(checkpoint, busy)?;
+        Ok(crate::sqlite::WalCheckpointReport {
+            frames: last.frames,
+            backfilled: last.backfilled,
+            passive_ms: copied.passive_ms,
+            writer_wait_ms,
+            truncate_ms: Some(holding.elapsed().as_millis()),
+            recycled,
+            blocked_by: None,
+        })
     }
 
     /// Replay the graph from nothing now, as a restored store does once its claims are back.
@@ -10398,6 +10492,8 @@ thread_local! {
     static SEAL_BEFORE_LOAN: std::cell::RefCell<Option<SealHook>> = const { std::cell::RefCell::new(None) };
     /// Sealing chunks this thread prepared again because their store changed before the loan.
     static SEALS_PREPARED_AGAIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Times this thread woke the paced signature job.
+    pub(crate) static SIGNATURE_JOB_WAKES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Signer selections sealing made under the writer on this thread.
     static SIGNERS_SELECTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One-shot: `apply_replication_repairs` stops after its next page, as a crash there would.

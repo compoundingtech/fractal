@@ -3313,48 +3313,6 @@ fn prepared_capture_checkpoint(point: &str) {
 #[cfg(not(debug_assertions))]
 fn prepared_capture_checkpoint(_point: &str) {}
 
-/// A path naming the directory `dir` is open on, which callers may **join a child component onto**.
-/// That last part is the contract — every call site appends to the result — and it is what makes the
-/// two platforms need different mechanisms rather than symmetrical-looking strings.
-#[doc(hidden)]
-pub fn retained_dir_path(dir: &File) -> Result<PathBuf> {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        // A symlink to the pathname, so a child component resolves through it.
-        Ok(PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // `/dev/fd/N` looks like the Linux form but is not the same kind of thing: it names the open
-        // file itself, not a portal into the directory, so `/dev/fd/N/child` does not resolve and
-        // every caller that joins gets ENOENT. `F_GETPATH` is the macOS counterpart to reading the
-        // `/proc/self/fd` symlink — it recovers the descriptor's pathname, which can be joined onto.
-        //
-        // The pathname is resolved at call time rather than staying bound to the descriptor. That
-        // difference is only observable if the directory is renamed between the open and the join;
-        // the call site holding the result longest already `canonicalize()`s it, which discards the
-        // descriptor binding on Linux too.
-        let mut buffer = [0 as libc::c_char; libc::PATH_MAX as usize];
-        // SAFETY: `buffer` is PATH_MAX bytes, which is what F_GETPATH requires, and `dir` owns a
-        // valid descriptor for the duration of the call.
-        let result = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
-        if result == -1 {
-            return Err(std::io::Error::last_os_error())
-                .context("resolve the pathname of a retained directory descriptor");
-        }
-        // SAFETY: on success F_GETPATH wrote a NUL-terminated pathname into `buffer`.
-        let path = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
-        Ok(PathBuf::from(
-            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path.to_bytes()),
-        ))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
-    {
-        let _ = dir;
-        anyhow::bail!("retained-directory capture is unsupported on this platform")
-    }
-}
-
 fn capture_dir_capability(
     source: &File,
     destination: &Path,
@@ -3433,13 +3391,17 @@ fn is_canonical_workspace_fact(path: &Path) -> bool {
         && matches!(components[3], Component::Normal(name) if name == ".workspace")
 }
 
+pub(crate) use crate::directory::openat_dir_nofollow;
+#[doc(hidden)]
+pub use crate::directory::{open_dir_beneath, retained_dir_path};
+
 mod capability;
+pub(crate) use capability::*;
 #[doc(hidden)]
 pub use capability::{
-    link_tempfile_from_control, open_dir_beneath, persist_tempfile_from_control,
-    rename_noreplace_between_dirs, sync_dir,
+    link_tempfile_from_control, persist_tempfile_from_control, rename_noreplace_between_dirs,
+    sync_dir,
 };
-pub(crate) use capability::*;
 
 #[cfg(debug_assertions)]
 fn bootstrap_checkpoint(point: &str) {

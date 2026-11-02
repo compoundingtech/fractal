@@ -1682,6 +1682,15 @@ impl Store {
         Ok(SealedIdentities { digest, count, seal_rowid: probe.seal_rowid })
     }
 
+    /// Inspect a valid warm memo without sealing batches or starting an identity walk.
+    pub(super) fn checkpoint_cached_sealed_digest(&self, cut_unix_ms: u128) -> Result<Option<String>> {
+        let cut = i64::try_from(cut_unix_ms)?;
+        let memo = self.sealed_identity_memo.lock().unwrap_or_else(PoisonError::into_inner)
+            .as_ref().filter(|memo| memo.cut == cut).cloned();
+        let Some(memo) = memo else { return Ok(None) };
+        Ok(self.seal_probe(cut, None, Some(&memo))?.reuses.then_some(memo.digest))
+    }
+
     /// `checkpoint_sealed_identities`, always walking both identity tables and reading at most
     /// `envelope_page` rows of each per read. It never reuses a digest, so it is also what the
     /// reused digest is checked against.
@@ -1767,6 +1776,8 @@ impl Store {
     /// neither drop nor repeat it. Reads are separate snapshots, so the WAL can be checkpointed
     /// between them; one read of the whole set held the WAL pinned for 35 seconds.
     fn sealed_identity_walk(&self, cut: i64, seal_rowid: i64, page: i64) -> Result<(String, usize)> {
+        #[cfg(test)]
+        SEALED_IDENTITY_WALKS.with(|walks| walks.set(walks.get() + 1));
         let identity = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(EnvelopeKey, bool)> {
             Ok((
                 EnvelopeKey {
@@ -2130,6 +2141,15 @@ pub struct CheckpointProofLockForTest(#[allow(dead_code)] super::checkpoint_spac
 pub fn hold_checkpoint_proof_lock_for_test(scratch: &Path) -> Result<CheckpointProofLockForTest> {
     super::checkpoint_space::ProofOwnership::acquire(scratch).map(CheckpointProofLockForTest)
 }
+
+#[cfg(test)]
+thread_local! {
+    static SEALED_IDENTITY_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[path = "checkpoint/status_tests.rs"]
+mod status_tests;
 
 #[cfg(test)]
 mod memory_tests {

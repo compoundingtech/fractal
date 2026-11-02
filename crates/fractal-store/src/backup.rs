@@ -12,7 +12,7 @@ use crate::message_body::BodyAttachment as _;
 
 pub use crate::store::backup_format::{
     FORMAT, Header, MessageBodyRecord, Record, RestoreReport, TableDigest, VERSION,
-    VERSION_WITH_BODIES, VERSION_WITH_LEDGERS,
+    VERSION_WITH_BODIES, VERSION_WITH_LEDGERS, VERSION_WITH_MARKS,
 };
 pub use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
 
@@ -124,7 +124,7 @@ fn read_record(input: &mut impl BufRead) -> Result<Option<(Record, Vec<u8>)>> {
 fn check_header(header: &Header) -> Result<()> {
     ensure!(
         header.format == FORMAT
-            && [VERSION, VERSION_WITH_BODIES, VERSION_WITH_LEDGERS].contains(&header.version),
+            && [VERSION, VERSION_WITH_BODIES, VERSION_WITH_LEDGERS, VERSION_WITH_MARKS].contains(&header.version),
         "unsupported claim backup format/version"
     );
     ensure!(
@@ -177,10 +177,17 @@ pub fn verify_file(path: &Path) -> Result<Header> {
                 );
                 body_bytes(&body)?;
             }
-            Record::Ledger(_) => ensure!(
-                header.version >= VERSION_WITH_LEDGERS,
-                "a ledger page in an archive that does not declare them"
-            ),
+            Record::Ledger(page) => {
+                ensure!(
+                    header.version >= VERSION_WITH_LEDGERS,
+                    "a ledger page in an archive that does not declare them"
+                );
+                ensure!(
+                    header.version >= VERSION_WITH_MARKS
+                        || !crate::store::backup_ledgers::MARK_LEDGERS.contains(&page.table.as_str()),
+                    "message marks in an archive that does not declare them"
+                );
+            }
             Record::End {
                 envelopes: expected,
                 sha256,
