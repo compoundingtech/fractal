@@ -4190,6 +4190,7 @@
       "terminals"
     ] },
     "ResourceCollectionName": { "description": "Collections whose windows hold resources.", "enum": [
+      "notes",
       "missions",
       "attention",
       "agents",
