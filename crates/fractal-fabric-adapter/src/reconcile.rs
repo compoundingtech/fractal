@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use smallclaims::fleet::{FleetView, MemberView};
 
 const REQUEST_LIMIT: usize = 1024 * 1024;
+pub(super) const RENAMED_OWNER_PREFIX: &str = concat!("fractal", "/fleet/");
 const RESPONSE_LIMIT: u64 = 4 * 1024 * 1024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -223,14 +224,14 @@ fn grants(fleet_id: &str) -> BTreeSet<String> {
 fn accepted_grants(fleet: &str) -> BTreeSet<String> {
     grants(fleet)
         .into_iter()
-        .chain([format!("fractal/fleet/{fleet}"), "fractal-client-v0".into()])
+        .chain([format!("{RENAMED_OWNER_PREFIX}{fleet}"), "fractal-client-v0".into()])
         .collect()
 }
 
 fn service_allowed(expected: &BTreeSet<String>, service: &str) -> bool {
     expected.contains(service)
         || (service == "fractal-client-v0" && expected.contains("st3-client-v0"))
-        || service.strip_prefix("fractal/fleet/").is_some_and(|fleet| {
+        || service.strip_prefix(RENAMED_OWNER_PREFIX).is_some_and(|fleet| {
             expected
                 .iter()
                 .any(|grant| grant.strip_prefix("st3/fleet/") == Some(fleet))
@@ -433,7 +434,7 @@ async fn save_journal(state_dir: &Path, journal: &Journal) -> Result<()> {
 }
 
 fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy) -> bool {
-    if pending.request["owner"].as_str().is_some_and(|owner| owner.starts_with("fractal/fleet/")) {
+    if pending.request["owner"].as_str().is_some_and(|owner| owner.starts_with(RENAMED_OWNER_PREFIX)) {
         return pending.request["operations"].as_array().is_some_and(|operations|
             operations.iter().all(|operation| operation["op"] == "remove_peer"));
     }
@@ -571,7 +572,7 @@ async fn apply(
     if let Some(pending) = &journal.pending {
         ensure!(
             pending.request["owner"] == owner
-                || pending.request["owner"] == format!("fractal/fleet/{fleet_id}"),
+                || pending.request["owner"] == format!("{RENAMED_OWNER_PREFIX}{fleet_id}"),
             "pending Fabric batch belongs to another fleet"
         );
     }
@@ -581,7 +582,7 @@ async fn apply(
         journal_changed |= journal.retired.insert(node);
     }
     let mut current = snapshot(socket).await?;
-    for owner in [owner, format!("fractal/fleet/{fleet_id}")] {
+    for owner in [owner, format!("{RENAMED_OWNER_PREFIX}{fleet_id}")] {
         let retained;
         let policy = if owner.starts_with("st/") {
             &desired

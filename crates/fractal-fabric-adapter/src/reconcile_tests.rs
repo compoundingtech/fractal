@@ -56,7 +56,7 @@ fn renamed_owner_reduction_and_recovered_batches_are_reader_only() {
 async fn renamed_pending_addition_is_observed_never_sent() {
     let root = tempfile::tempdir().unwrap();
     let mut pending = uncertain_add();
-    pending.request["owner"] = json!("fractal/fleet/test-fleet");
+    pending.request["owner"] = json!(format!("{RENAMED_OWNER_PREFIX}{FLEET}"));
     let (socket, server) = serve(root.path(), vec![Some(mutation(vec![], "complete"))]);
     complete_pending(&socket, &pending, pending_matches_desired(&pending,
         &DesiredPolicy::from([("peer-node".into(), grants(FLEET))]))).await.unwrap();

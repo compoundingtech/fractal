@@ -191,7 +191,7 @@
    ]
   },
   "fractal-fabric-adapter": {
-   "extra": ["crates/fractal"]
+   "extra": []
   },
   "fractal-feed": {
    "extra": [

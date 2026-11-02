@@ -43,7 +43,7 @@ fn owner(fleet: &str) -> String {
 fn accepted_owner(value: &Value, fleet: &str) -> bool {
     value.as_str().is_some_and(|value| {
         value.strip_prefix("st/fleet/") == Some(fleet)
-            || value.strip_prefix("fractal/fleet/") == Some(fleet)
+            || value.strip_prefix(super::reconcile::RENAMED_OWNER_PREFIX) == Some(fleet)
     })
 }
 fn journal_owner(journal: &Journal) -> Result<std::borrow::Cow<'_, str>> {
@@ -53,7 +53,7 @@ fn journal_owner(journal: &Journal) -> Result<std::borrow::Cow<'_, str>> {
     );
     ensure!(
         selected.strip_prefix("st/fleet/") == Some(journal.fleet.as_str())
-            || selected.strip_prefix("fractal/fleet/") == Some(journal.fleet.as_str()),
+            || selected.strip_prefix(super::reconcile::RENAMED_OWNER_PREFIX) == Some(journal.fleet.as_str()),
         "pairing journal belongs to another fleet"
     );
     Ok(selected)

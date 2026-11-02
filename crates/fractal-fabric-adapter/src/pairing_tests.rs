@@ -84,7 +84,7 @@ fn recovered_pairing_owner_is_exact_and_legacy_journals_keep_their_owner() {
 #[tokio::test]
 async fn renamed_permit_cannot_confirm_or_install_grants() {
     let mut journal = journal();
-    journal.owner = Some("fractal/fleet/fleet".into());
+    journal.owner = Some(format!("{}fleet", super::super::reconcile::RENAMED_OWNER_PREFIX));
     assert!(finish_confirmation(Path::new("absent.sock"), Path::new("absent.json"),
         &mut journal, json!({"operation":"confirm"})).await.unwrap_err()
         .to_string().contains("remains pending"));
