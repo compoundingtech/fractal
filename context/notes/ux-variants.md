@@ -1,7 +1,7 @@
 # Quick-note UX variants
 
-Interview evidence for [CR01, DQ3 and DQ5](./spec.md). These are draft
-prototypes, not a surface or audience decision.
+Interview evidence for [CR01, DQ3 and DQ5](./spec.md). Web V1 and V2 are
+kept entry points sharing one composer, not competing alternatives.
 
 | Source | Review scope |
 |---|---|
@@ -21,11 +21,17 @@ Johannes decided on 2026-10-15:
 - **Plain text only (DQ5):** Up to 1024 UTF-8 bytes; metadata supplies the
   structure. No tags (q3, Axe request `aa3i68`, answer `qwkr79`).
 
+Johannes decided on 2026-11-02 (Axe request `c74ire`, answer `8kco2i`):
+
+- **Web placement — both:** Keep V1's detail-view Notes list with **Add note**
+  and V2's lowercase `n` quick-add popover on the selected row. Both entry
+  points use one shared `NoteComposer`, with no audience choice.
+
 The comparison, input counts and interview prompts below preserve the
-prototype evidence, including its audience controls; they are not the target
-design. The source cutover removes those controls and filters; generated-client
-regeneration and verification are tracked in [Implementation status](./spec.md#implementation-status).
-These decisions do not choose between the web or TUI surface variants.
+prototype evidence, including its audience controls; those controls are not
+the target design. V1 and V2 are kept together, not alternatives. The TUI
+surface choice remains separate. Source cutover, generated-client regeneration
+and verification are tracked in [Implementation status](./spec.md#implementation-status).
 
 ## Input count
 
@@ -50,7 +56,7 @@ after pointer audience selection adds a click if Enter is used there.
 T2's count excludes opening and focusing the drawer. V2's count excludes
 selecting a different row; focus alone does not change its selected target.
 
-## Web V1 — inline quick composer
+## Web V1 — inline quick composer (kept)
 
 Story: `fractal-explore-notes-inline-quick-composer--all-states`.
 Width examples: `--light440`, `--light1440`, `--dark1440`.
@@ -64,7 +70,7 @@ Width examples: `--light440`, `--light1440`, `--dark1440`.
 | Audience | Explicit labelled selection: **Only me** / **Shared with the agent (people can see it too)**. Tab navigates; Space selects. Badge aggregate marker means any current note is agent-shared; newest preview audience is labelled separately. Sharing is not a delivery acknowledgement. Mission copy says shared notes reach agents currently working on the mission. |
 | Weaknesses | Entry below the list may require scrolling; the open composer occupies detail space. Complete correction/retry/retrieval tasks matter more than base input counts. |
 
-## Web V2 — keyboard `n` popover
+## Web V2 — keyboard `n` popover (kept)
 
 Story: `fractal-explore-notes-keyboard-n-popover--all-states`.
 Width examples: `--light440`, `--light1440`, `--dark1440`.

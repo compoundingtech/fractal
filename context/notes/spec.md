@@ -26,9 +26,22 @@ new top-level command will be available through all three binary names.
 Session subjects and the replacement of the note's `session` field by a
 session target (DQ2) are not implemented.
 
-Client regeneration and verification are deferred until dev4 is cleared.
-Run `cargo run -p st3-client-codegen` first, commit the generated output
-separately, then run the codegen `--check` and the notes acceptance checks.
+The web placement decision keeps both entry points: detail-view Notes with
+**Add note**, plus the selected-row `n` popover, using one composer. The
+selected-row quick-add wiring is not implemented.
+
+The main merge retains main's generated clients and lockfiles. Regeneration
+and implementation verification are deferred to gate-slot; no builds, tests,
+codegen or Storybook runs are part of this merge.
+Regenerate all nine `fractal-client-codegen` outputs:
+
+- `crates/fractal-client/src/{contract.rs,generated.rs,lib.rs}`
+- `clients/typescript/fractal-client/{Client,Models,Schema}.generated.ts`
+- `clients/swift/FractalClient/Sources/FractalClient/{Client.swift,Models.swift,Contract.generated.swift}`
+
+Regenerate `pnpm-lock.yaml` for the notes kit's `@fractal/client` dependency;
+refresh `Cargo.lock` if the generator/toolchain requires it. The codegen inputs
+and templates include notes; generated outputs do not yet include this PR.
 
 ## Scope
 
@@ -81,7 +94,7 @@ immutable. The new `note` family has `client_writable=true`; the existing
 `arrangement` family has `client_writable=false`.
 
 `audience` retains the existing codegen open-enum convention
-(`crates/st3-client-codegen/src/rich.rs:132–154,584–588`), not a closed
+(`crates/fractal-client-codegen/src/rich.rs`), not a closed
 string enum (`rich.rs:593–596`). Known wire values remain `self` and `agent`,
 but all new notes use `agent`, regardless of author. Audience is not a user
 choice or an active privacy boundary: every current note, including an
@@ -238,8 +251,8 @@ archive an expired note without making its text readable to other actors.
 Clients subscribe to the `notes` window and derive counts and newest-note
 previews from it. Agent and mission collection rows have no note fields.
 
-The collection is the `notes` `Window` variant in `st3-feed`, with `from_id`
-dispatch and a server collection branch in `crates/st3/src/api/client_v0.rs`.
+The collection is the `notes` `Window` variant in `fractal-feed`, with `from_id`
+dispatch and a server collection branch in `crates/fractal-api-client-v0/src/api/client_v0.rs`.
 Expiry requires clock-follow invalidation through `collection_follows_clock`.
 Runtime-state changes invalidate currency for notes targeting sessions.
 
@@ -291,7 +304,7 @@ The message sender is the daemon, not the note author. Author attribution
 stays in the content. The digest is non-waking, has no session-start wake tag,
 and reaches the agent at its next turn (CR03/CR04). At silent release, the
 daemon re-renders the digest from current notes and drops it if none remain
-current. This requires a currency check in `crates/st3/src/silent.rs`.
+current. This requires a currency check in `crates/fractal-missions/src/silent.rs`.
 
 Existing session-start hooks and `handoff::render` are not the delivery path:
 the hooks emit no context, and handoff skips first incarnations. The digest
@@ -320,26 +333,32 @@ Digest rendering neutralizes delimiter sequences in authored text, including
 ## Clients
 
 ```
-docs/st3/client-v0/schemas  ──codegen──►  st3-client (Rust)  ──► stui, Fractal TUI
-                                      └─► st3-client (TS, Effect Schema) ──► packages/fractal-ui ──► apps/fractal-web
+docs/st3/client-v0/schemas  ──codegen──►  fractal-client (Rust)  ──► fractal-tui, Fractal TUI
+                                      └─► @fractal/client (TS, Effect Schema) ──► packages/fractal-ui ──► apps/fractal-web
 ```
 
 Rust and Swift models require updates to the codegen templates
-`crates/st3-client-codegen/templates/generated.rs.in` and `Models.swift.in`,
+`crates/fractal-client-codegen/templates/generated.rs.in` and `Models.swift.in`,
 plus the operation/client templates and client-v0 schema JSON. Regenerate all
 SDKs after these updates; schema JSON alone does not generate those models.
 
 - stui: a `notes` section in `agent_details` and `mission_detail`; quick input
   reuses the feedback-gate text editor (`edit.rs`) and `drafts_store.rs`.
 - Fractal TUI (`schickling/dotfiles` `flakes/fractal`): already depends on
-  `st3-client` and `st3-conversation-ui` through a pinned Smalltalk git rev.
+  `fractal-client` and `fractal-conversation-ui` through a pinned Fractal git rev.
   The prototype may pin that rev to the draft Smalltalk branch only on a
   non-main Fractal branch; display and quick input are prototyped in the
   `prototype` step.
-- Fractal web: `packages/fractal-ui` gets presentational `NoteList`,
-  `NoteBadge` and `NoteComposer` components that take the generated
-  `SubjectNote` type as props; `apps/fractal-web` wires them to the client.
-  The kit imports no app code.
+- Fractal web: keep **both** entry points (Johannes, 2026-11-02; Axe request
+  `c74ire`, answer `8kco2i`): the detail view shows the Notes list with
+  **Add note** (V1), and unmodified lowercase `n` opens the quick-add popover
+  on the selected row (V2). V1 and V2 are kept together, not alternatives.
+  Both use one shared `NoteComposer`, the same target-bound draft and note
+  write actions; shortcut handling excludes editable fields, IME composition,
+  menus and dialogs and restores focus on close. `packages/fractal-ui`
+  provides presentational `NoteList`, `NoteBadge` and `NoteComposer`
+  components taking the generated `SubjectNote` type; `apps/fractal-web`
+  wires both entry points to the client. The kit imports no app code.
 
 Every composer (stui, Fractal TUI and Fractal web) accepts plain text only,
 up to 1024 UTF-8 bytes, without an audience control or tag picker. Every
