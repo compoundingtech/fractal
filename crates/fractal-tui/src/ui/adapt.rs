@@ -249,6 +249,9 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         missions_followed: extras.missions_followed,
         settled: extras.attention_live && extras.agents_live,
         active_missions: extras.summary.as_ref().map(|summary| summary.active_missions as usize),
+        inbox_alerts: extras.summary.as_ref()
+            .filter(|_| model.now.truncated)
+            .and_then(|summary| summary.alerts.map(|alerts| alerts as usize)),
         attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
         agents: loaded_or_why(model.agents.snapshot.is_some(), agents_at(model, &missions, now), extras.window_errors.get("Agents")),
         missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
@@ -1040,6 +1043,26 @@ pub fn conversation(timeline: &[fractal_client::TimelineEntry], names: &BTreeMap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_badge_inbox_uses_summary_only_for_truncated_attention() {
+        let mut model = Model::default();
+        let mut extras = Extras {
+            summary: Some(serde_json::from_value(serde_json::json!({
+                "id": "summary", "kind": "summary", "revision": "one",
+                "updated_at": "2026-11-02T00:00:00Z",
+                "needs_you": 251, "alerts": 251, "working_agents": 0,
+                "active_missions": 0,
+                "machines": {"connected": 0, "indirect": 0, "offline": 0}
+            })).unwrap()),
+            ..Extras::default()
+        };
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+        model.now.truncated = true;
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, Some(251));
+        extras.summary.as_mut().unwrap().alerts = None;
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+    }
 
     #[test]
     fn identity_labels_show_fallback_ids_only_once() {

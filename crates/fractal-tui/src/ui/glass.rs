@@ -21,6 +21,7 @@ struct TabBadge {
     alerts: Option<usize>,
     ask: bool,
     needs_person: bool,
+    inbox: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -120,6 +121,9 @@ impl TabStatuses {
                 }
             }
         }
+        if let Some(total) = world.inbox_alerts {
+            status.inbox.alerts = total;
+        }
         status
     }
 }
@@ -153,9 +157,9 @@ impl TabBadge {
 
     fn width(self, title: &str, counts: bool) -> usize {
         let attention = self.attention();
-        let count = if counts && !attention.is_empty() {
+        let count = if (counts || self.inbox) && !attention.is_empty() {
             self.alerts
-                .filter(|count| *count > 1)
+                .filter(|count| *count > usize::from(!self.inbox))
                 .map_or(0, |count| count.ilog10() as usize + 1)
         } else {
             0
@@ -172,6 +176,13 @@ impl TabBadge {
         if width == 0 {
             return String::new();
         }
+        // Other tabs surrender their digits first. Inbox only does so when its
+        // complete, unpadded label cannot fit at all.
+        let counts = if self.inbox {
+            self.width(title, true).saturating_sub(2) <= width
+        } else {
+            counts
+        };
         let activity_width = text::width(self.activity);
         if !self.activity.is_empty() && width <= activity_width {
             return text::truncate(self.activity, width);
@@ -180,7 +191,7 @@ impl TabBadge {
         let attention = self.attention();
         let digits = if counts && !attention.is_empty() {
             self.alerts
-                .filter(|count| *count > 1)
+                .filter(|count| *count > usize::from(!self.inbox))
                 .map_or(0, |count| count.ilog10() as usize + 1)
         } else {
             0
@@ -204,12 +215,17 @@ impl TabBadge {
         if !attention.is_empty() {
             label.push(' ');
             label.push_str(attention);
-            if counts && let Some(count) = self.alerts.filter(|count| *count > 1) {
+            if counts && let Some(count) = self.alerts.filter(|count| *count > usize::from(!self.inbox)) {
                 let _ = write!(label, "{count}");
             }
         }
         label.push(' ');
         if text::width(&label) > width {
+            if self.inbox && text::width(&label).saturating_sub(2) <= width {
+                label.remove(0);
+                label.pop();
+                return label;
+            }
             use unicode_width::UnicodeWidthChar as _;
             // Padding may disappear, but truncation never consumes the activity glyph.
             let (prefix_bytes, prefix_width) = if self.activity.is_empty() {
@@ -2705,9 +2721,11 @@ impl Ui {
         let available = strip_room - plus;
         let counts = tabs.iter().map(|(title, badge)| badge.width(title, true) + 1)
             .sum::<usize>() <= usize::from(available);
+        let compact_fits = tabs.iter().map(|(title, badge)| badge.width(title, false) + 1)
+            .sum::<usize>() <= usize::from(available);
         // Reserve both overflow markers and a tab gap before shortening any label. A selected
         // tab must never consume the space needed to reach its hidden neighbors.
-        let label_width = if counts {
+        let label_width = if compact_fits {
             usize::from(available)
         } else {
             usize::from(available.saturating_sub(2 * marker + 1))
@@ -2717,7 +2735,14 @@ impl Ui {
         let label_width = label_width.max(usize::from(available > 0));
         let mut labels: Vec<_> = tabs
             .iter()
-            .map(|(title, badge)| (badge.label(title, label_width, counts), *badge))
+            .map(|(title, badge)| {
+                let width = if badge.inbox {
+                    label_width.max(badge.width(title, true).min(usize::from(strip_room)))
+                } else {
+                    label_width
+                };
+                (badge.label(title, width, counts), *badge)
+            })
             .collect();
         let mut widths: Vec<u16> = labels
             .iter()
@@ -2972,6 +2997,7 @@ impl Ui {
             alerts: statuses.loaded.then_some(subject.alerts),
             ask: subject.ask,
             needs_person: subject.needs_person || subject.alerts > 0 || subject.ask,
+            inbox: matches!(pane, Some(Pane::List(0))),
         }
     }
 
@@ -5498,6 +5524,7 @@ mod tests {
                     alerts,
                     ask,
                     needs_person,
+                    inbox: false,
                 };
                 assert_eq!(
                     badge.label("Atlas", 80, true),
@@ -5591,6 +5618,57 @@ mod tests {
             tab_badge_strip(&ui, 120),
             "●Atlas ?2 ○Idle ×Stopped Mission ?2 Inbox ?2 +"
         );
+    }
+
+    #[test]
+    fn tab_badge_inbox_counts_zero_one_many_and_live_questions() {
+        for (count, ask, expected) in [
+            (0, false, " Inbox "), (1, false, " Inbox ◆1 "),
+            (3, false, " Inbox ◆3 "), (1, true, " Inbox ?1 "),
+            (2, true, " Inbox ?2 "),
+        ] {
+            let badge = TabBadge {
+                inbox: true, alerts: Some(count), ask,
+                needs_person: count > 0, ..TabBadge::default()
+            };
+            for counts in [false, true] {
+                assert_eq!(badge.label("Inbox", 80, counts), expected);
+                assert_eq!(badge.width("Inbox", counts), text::width(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_inbox_complete_window_excludes_closed_snoozed_and_updates() {
+        let mut ui = tab_badge_world();
+        let inbox = Tab::pane("list:home");
+        ui.snoozed.insert("attention/a".into());
+        ui.refresh_tab_statuses();
+        assert_eq!(ui.tab_badge(&inbox, Some(&Pane::List(0))).label("Inbox", 80, true), " Inbox ?1 ");
+        ui.closed.insert("attention/b".into());
+        ui.refresh_tab_statuses();
+        assert_eq!(ui.tab_badge(&inbox, Some(&Pane::List(0))).label("Inbox", 80, true), " Inbox ");
+        ui.world.inbox_alerts = Some(251);
+        ui.refresh_tab_statuses();
+        assert_eq!(ui.tab_badge(&inbox, Some(&Pane::List(0))).label("Inbox", 80, true), " Inbox ◆251 ");
+    }
+
+    #[test]
+    fn tab_badge_inbox_keeps_digits_when_other_tabs_surrender_them() {
+        let mut ui = tab_badge_world();
+        let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+        group.tabs.retain(|tab| tab.pane == "agent:agent/a" || tab.pane == "list:home");
+        group.current = 1;
+        for width in [40, 26, 18, 9] {
+            let row = tab_badge_strip(&ui, width);
+            println!("INBOX {width}: |{row}|");
+            assert!(row.contains("Inbox ?2"), "{width}: {row}");
+            if width == 26 {
+                assert!(row.contains("●Atlas ? "), "{row}");
+                assert!(!row.contains("Atlas ?2"), "{row}");
+            }
+        }
+        assert!(!tab_badge_strip(&ui, 8).contains("?2"));
     }
 
     #[test]
@@ -5714,16 +5792,20 @@ mod tests {
     }
 
     #[test]
-    fn tab_badge_small_strips_keep_both_overflow_targets_inside_the_strip() {
+    fn tab_badge_small_strips_keep_overflow_targets_unless_inbox_needs_the_room() {
         let mut ui = tab_badge_world();
         for current in [0, 2, 4] {
             ui.glasses.glass_mut().layout.group_mut(0).unwrap().current = current;
             for width in [12, 14, 18] {
                 ui.frame.borrow_mut().hits.clear();
                 let shown = tab_badge_strip(&ui, width);
-                assert!(!shown.contains("?2"), "{width}: {shown}");
-                if current > 0 { assert!(shown.contains('‹'), "{width}: {shown}"); }
-                if current < 4 { assert!(shown.contains('›'), "{width}: {shown}"); }
+                if current == 4 {
+                    assert!(shown.contains("Inbox ?2"), "{width}: {shown}");
+                } else {
+                    assert!(!shown.contains("?2"), "{width}: {shown}");
+                    if current > 0 { assert!(shown.contains('‹'), "{width}: {shown}"); }
+                    assert!(shown.contains('›'), "{width}: {shown}");
+                }
                 for (rect, hit) in &ui.frame.borrow().hits {
                     if matches!(hit, Hit::GlassTabMore(..) | Hit::GlassTab(..)) {
                         assert!(rect.right() <= width, "{width}: {hit:?} {rect:?}");
