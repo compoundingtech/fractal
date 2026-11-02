@@ -940,6 +940,51 @@ fn setup_rolls_back_binary_receipt_and_aliases_when_manifest_cannot_be_recorded(
 }
 
 #[test]
+fn setup_from_a_legacy_st3_install_adds_fractal_beside_it_and_keeps_an_existing_fractal() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for existing in [None, Some("regular"), Some("symlink")] {
+        let fixture = Fixture::new();
+        // Laid out before the rename: st3 is the image, st links to it, and there is no fractal.
+        let bin = fixture.path("home/.local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::copy(test_env!("CARGO_BIN_EXE_fractal-fixture"), bin.join("st3")).unwrap();
+        fs::set_permissions(bin.join("st3"), fs::Permissions::from_mode(0o755)).unwrap();
+        symlink("st3", bin.join("st")).unwrap();
+        let canonical = bin.join("fractal");
+        match existing {
+            Some("regular") => fs::write(&canonical, b"someone else's fractal").unwrap(),
+            Some("symlink") => symlink("/usr/bin/env", &canonical).unwrap(),
+            _ => {}
+        }
+        let path = std::env::join_paths([bin.clone(), fixture.path("bin")]).unwrap();
+        let output = fixture.command(&bin.join("st"))
+            .env("PATH", &path)
+            .args(["setup", "--person", "ada", "--yes", "--service", "false", "--start", "false"])
+            .output().unwrap();
+        success(&output);
+        assert!(!bin.join("st3").is_symlink(), "{existing:?}");
+        assert_eq!(fs::read_link(bin.join("st")).unwrap(), Path::new("st3"));
+        match existing {
+            None => {
+                assert_eq!(fs::read_link(&canonical).unwrap(), Path::new("st3"));
+                let version = fixture.command(&canonical)
+                    .env("PATH", &path)
+                    .args(["--version", "--json"])
+                    .output().unwrap();
+                success(&version);
+            }
+            Some("regular") => {
+                assert!(!canonical.is_symlink());
+                assert_eq!(fs::read(&canonical).unwrap(), b"someone else's fractal");
+            }
+            _ => assert_eq!(fs::read_link(&canonical).unwrap(), Path::new("/usr/bin/env")),
+        }
+    }
+}
+
+#[test]
 fn setup_preserves_managed_app_style_executables_and_links() {
     use std::os::unix::fs::MetadataExt as _;
 
