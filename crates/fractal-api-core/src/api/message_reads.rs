@@ -142,8 +142,19 @@ pub fn relay_host(store: &Store, message: &MessageView) -> anyhow::Result<Option
 
 /// The other members that keep their seats' graph mail receipts as marks and answer reads, each
 /// with the seats this member's declarations place on it. Empty until a host advertises
-/// `message_offsets`, so a reader that finds none asks nobody.
+/// `message_offsets`, so a reader that finds none asks nobody and reads no declaration.
 pub fn relay_hosts(store: &Store) -> anyhow::Result<BTreeMap<String, BTreeSet<String>>> {
+    let any_offsets: bool = store
+        .readers
+        .get()
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-he830e5bf3588 owner=fractal_api_core::api::message_reads TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='daemon.started'
+               AND json_extract(body,'$.fields.features.{MESSAGE_OFFSETS_FEATURE}')=1)"
+        ))?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h17ed23f52569 owner=fractal_api_core::api::message_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
+    if !any_offsets {
+        return Ok(BTreeMap::new());
+    }
     let mut hosts = BTreeMap::<String, BTreeSet<String>>::new();
     for desired in store.desired_subjects()? {
         if let Some(member) = desired
@@ -204,7 +215,7 @@ pub async fn read(
 ) -> BTreeMap<String, Relayed> {
     let kept = state.store.extension::<KeptAnswers>();
     // Each message's host, and what it answered or why it did not.
-    let mut heard = Vec::<(String, Result<MessageMarksAnswer, (String, String)>)>::new();
+    let mut heard = Vec::<Heard>::new();
     let mut requests = Vec::new();
     for (position, (host, subjects)) in asks.into_iter().enumerate() {
         if position >= MAX_HOSTS {
@@ -292,10 +303,13 @@ pub async fn read(
         .unwrap_or_default()
 }
 
+/// A message's host, and what it answered or, with the message, why it did not.
+type Heard = (String, Result<MessageMarksAnswer, (String, String)>);
+
 /// What each message's host said, as a status over the seats this member places on that host.
 fn settle(
     store: &Store,
-    heard: Vec<(String, Result<MessageMarksAnswer, (String, String)>)>,
+    heard: Vec<Heard>,
 ) -> BTreeMap<String, Relayed> {
     let mut seats = BTreeMap::<String, Result<BTreeSet<String>, String>>::new();
     heard

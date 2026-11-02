@@ -492,15 +492,8 @@ mod tests {
         assert_eq!(repeat["count"], 0);
         assert_eq!(report(&state, now).unwrap().count, 0);
         let Json(doctor) = doctor_report(&state).unwrap();
-        assert_eq!(
-            doctor
-                .checks
-                .iter()
-                .find(|check| check.name == "mail-backlog")
-                .unwrap()
-                .status,
-            "pass"
-        );
+        let backlog = doctor.checks.iter().find(|check| check.name == "mail-backlog").unwrap();
+        assert_eq!(backlog.status, "pass", "{}", backlog.message);
         for (id, expected) in [
             ("old-sent", "closed"),
             ("old-staged", "closed"),
