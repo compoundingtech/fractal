@@ -136,8 +136,9 @@ The daemon clock alone adjudicates expiry. A phone result admitted strictly befo
 wins. At or after the deadline, the daemon derives `not-foreground` when there is no open
 collections stream for the addressed `session_actor`, or `expired` otherwise. Phone clocks and
 client timestamps do not extend that deadline. A late report cannot replace the terminal decision;
-repeated reports cannot overwrite an already accepted outcome. Before navigation or message writes,
-the app checks a fresh daemon capabilities snapshot against `expires_at`, never a phone-clock deadline.
+repeated reports cannot overwrite an already accepted outcome. Before navigation the app checks
+a fresh daemon capabilities snapshot; message writes instead carry the command id to the daemon's
+atomic admission/write boundary, so even a delayed capabilities response cannot authorize a late write.
 Backgrounding permanently cancels accepted commands and result retries across foreground sessions.
 
 Commands live only in memory on the phone pairing's issuing member. They are never claims,

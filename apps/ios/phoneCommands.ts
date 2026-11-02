@@ -11,11 +11,11 @@ export type PhoneBindings = {
   online(): boolean;
   inspect(): unknown;
   navigate(args: PhoneNavigateArgs): Promise<unknown>;
-  markRead(id: string, check: PhoneCheck): Promise<boolean>;
+  markRead(id: string, check: PhoneCheck, deviceCommand: string): Promise<boolean>;
 };
 
-/** One executor per paired client. Fresh daemon snapshots gate side effects; backgrounding
- * permanently invalidates accepted work, even if its awaited response arrives after resuming. */
+/** One executor per paired client. The daemon admits and settles commanded writes;
+ * backgrounding permanently invalidates work even if awaited responses arrive after resuming. */
 export class PhoneCommands {
   private seen = new Map<string, number>();
   private queue = Promise.resolve();
@@ -53,12 +53,13 @@ export class PhoneCommands {
         case 'phone.inspect': report.result = bindings.inspect(); break;
         case 'phone.navigate': report.result = await bindings.navigate(command.args); break;
         case 'phone.message.read':
-          if (!await bindings.markRead(command.args.attention_id, check)) report = { ...report, outcome: 'refused', error_code: 'attention-unavailable' };
+          if (!await bindings.markRead(command.args.attention_id, check, command.id)) report = { ...report, outcome: 'refused', error_code: 'attention-unavailable' };
           break;
       }
     } catch (error) {
       const refused = error instanceof ClientError && (error.status === 401 || error.status === 403);
-      report = { ...report, outcome: error instanceof PhoneCommandStopped ? error.outcome : refused ? 'refused' : 'failed', error_code: error instanceof ClientError ? error.response.code : 'phone-handler-stopped' };
+      const expired = error instanceof ClientError && error.status === 403 && error.response.details.reason === 'expired';
+      report = { ...report, outcome: error instanceof PhoneCommandStopped ? error.outcome : expired ? 'expired' : refused ? 'refused' : 'failed', error_code: error instanceof ClientError ? error.response.code : 'phone-handler-stopped' };
     }
     try {
       await retryTransient(3, async () => { if (session()) await this.client.deviceResult(report); }, error => session() && isTransient(error));
