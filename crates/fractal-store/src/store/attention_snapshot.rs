@@ -1132,7 +1132,7 @@ impl Store {
             {
                 continue;
             }
-            let Some(claim) = person_work::claim_in_cut(&failure.request, || self.claim_by_id(&failure.request))? else {
+            let Some(claim) = person_work::claim_in_cut(&connection, &failure.request, || self.claim_by_id(&failure.request))? else {
                 continue;
             };
             if claim.body["fields"]["condition"] != GATE_BROKEN_CONDITION {
@@ -1227,7 +1227,7 @@ impl Store {
             {
                 continue;
             }
-            let Some(claim) = person_work::claim_in_cut(&failure.request, || self.claim_by_id(&failure.request))? else {
+            let Some(claim) = person_work::claim_in_cut(&connection, &failure.request, || self.claim_by_id(&failure.request))? else {
                 continue;
             };
             let source = &claim.subject;

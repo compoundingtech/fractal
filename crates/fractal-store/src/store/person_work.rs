@@ -230,16 +230,18 @@ const STEP_QUERY: &str = "SELECT subject, run_id, step_path, definition_hash, st
  FROM step_runs WHERE subject=?1";
 
 pub fn step(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
-    memoized(|memo| &mut memo.steps, subject.to_owned(), || Ok(connection
+    memoized(connection, |memo| &mut memo.steps, subject.to_owned(), || Ok(connection
         .query_row(/* sqlite-large-value: allow-for-now lv-he9da72925547 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ STEP_QUERY, [subject], step_run_from_row)
         .optional()?))
 }
 
 /// What one fault snapshot reads again for every failure under the same run, step or
 /// declaration: thousands of failures share a few hundred runs. Each answer holds only for the
-/// read cut it came from, so the memo lives exactly as long as [`with_cut_memo`].
+/// read cut it came from, so the memo lives exactly as long as [`with_cut_memo`], and answers
+/// only reads on the connection that holds that cut.
 #[derive(Default)]
 struct CutMemo {
+    connection: Option<usize>,
     liveness: HashMap<(String, Option<String>, bool), std::result::Result<(), String>>,
     declarations: HashMap<String, bool>,
     headers: HashMap<String, Option<MissionRunView>>,
@@ -276,28 +278,41 @@ pub fn with_cut_memo<T>(read: impl FnOnce() -> T) -> T {
 }
 
 fn memoized<K: Eq + std::hash::Hash, V: Clone>(
+    connection: &Connection,
     table: fn(&mut CutMemo) -> &mut HashMap<K, V>,
     key: K,
     read: impl FnOnce() -> Result<V>,
 ) -> Result<V> {
+    // The first read names the cut's connection. A read on another one, such as a writer's
+    // transaction, is not in the cut.
+    let at = std::ptr::from_ref(connection) as usize;
     let found = CUT_MEMO.with(|memo| {
-        memo.borrow_mut().as_mut().and_then(|memo| table(memo).get(&key).cloned())
+        in_cut(&mut memo.borrow_mut(), at).and_then(|memo| table(memo).get(&key).cloned())
     });
     if let Some(found) = found {
         return Ok(found);
     }
     let value = read()?;
     CUT_MEMO.with(|memo| {
-        if let Some(memo) = memo.borrow_mut().as_mut() {
+        if let Some(memo) = in_cut(&mut memo.borrow_mut(), at) {
             table(memo).insert(key, value.clone());
         }
     });
     Ok(value)
 }
 
+fn in_cut(memo: &mut Option<CutMemo>, at: usize) -> Option<&mut CutMemo> {
+    let memo = memo.as_mut()?;
+    (*memo.connection.get_or_insert(at) == at).then_some(memo)
+}
+
 /// The claim `id`, read once per cut inside [`with_cut_memo`].
-pub fn claim_in_cut(id: &str, read: impl FnOnce() -> Result<Option<ClaimRecord>>) -> Result<Option<ClaimRecord>> {
-    memoized(|memo| &mut memo.claims, id.to_owned(), read)
+pub fn claim_in_cut(
+    connection: &Connection,
+    id: &str,
+    read: impl FnOnce() -> Result<Option<ClaimRecord>>,
+) -> Result<Option<ClaimRecord>> {
+    memoized(connection, |memo| &mut memo.claims, id.to_owned(), read)
 }
 
 /// [`step_timeout_extension_at`], read once per cut inside [`with_cut_memo`].
@@ -307,19 +322,19 @@ pub fn step_timeout_extension_in_cut(
     attempt: u32,
     as_of: u128,
 ) -> Result<u64> {
-    memoized(|memo| &mut memo.extensions, (subject.to_owned(), attempt, as_of), || {
+    memoized(connection, |memo| &mut memo.extensions, (subject.to_owned(), attempt, as_of), || {
         Ok(step_timeout_extension_at(connection, subject, attempt, as_of)?)
     })
 }
 
 fn run_header(connection: &Connection, run: &str) -> Result<Option<MissionRunView>> {
-    memoized(|memo| &mut memo.headers, run.to_owned(), || {
+    memoized(connection, |memo| &mut memo.headers, run.to_owned(), || {
         Ok(mission_run_header_tx(connection, run).optional()?)
     })
 }
 
 fn desired_row(connection: &Connection, subject: &str) -> Result<Option<DesiredRow>> {
-    memoized(|memo| &mut memo.desired, subject.to_owned(), || current_desired_row(connection, subject))
+    memoized(connection, |memo| &mut memo.desired, subject.to_owned(), || current_desired_row(connection, subject))
 }
 
 pub fn request(connection: &Connection, subject: &str) -> Result<Option<ClaimRecord>> {
@@ -337,7 +352,7 @@ pub fn request(connection: &Connection, subject: &str) -> Result<Option<ClaimRec
 }
 
 pub fn declaration_live(connection: &Connection, subject: &str) -> Result<bool> {
-    memoized(|memo| &mut memo.declarations, subject.to_owned(), || declaration_live_uncached(connection, subject))
+    memoized(connection, |memo| &mut memo.declarations, subject.to_owned(), || declaration_live_uncached(connection, subject))
 }
 
 fn declaration_live_uncached(connection: &Connection, subject: &str) -> Result<bool> {
@@ -380,6 +395,7 @@ pub fn run_liveness(
     failure: bool,
 ) -> Result<std::result::Result<(), String>> {
     memoized(
+        connection,
         |memo| &mut memo.liveness,
         (run.to_owned(), generation.map(str::to_owned), failure),
         || run_liveness_uncached(connection, run, generation, failure),

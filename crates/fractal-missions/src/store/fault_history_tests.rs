@@ -746,6 +746,8 @@ fn a_fault_snapshot_reads_a_run_its_failures_share_once() {
     let (reference_each, memoized_each) = ((reference_many - reference_few) / 8, (memoized_many - memoized_few) / 8);
     println!("statements per added failure: reference={reference_each}, memoized={memoized_each}");
     // A failure costs its own claim and episode reads; its run's liveness is read once.
+    // A ratchet on the reads per failure: a change here is a change in what each failure
+    // reads, not lost parity, which the comparison above checks.
     assert_eq!(reference_each, 6, "the reference walks the run for each failure, twice");
     assert_eq!(memoized_each, 2, "only the failure's own reads; its run is read once per snapshot");
 }
