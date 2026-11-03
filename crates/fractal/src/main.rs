@@ -5173,8 +5173,9 @@ fn cli_main() -> ExitCode {
     // Only the fixture's own entry point sets this. The installed fractal binary cannot enable it with an
     // argument, environment variable, or a different filename.
     #[cfg(feature = "test-support")]
-    let _fixture_shell = fixture()
-        .then(fractal_daemon::test_support::initialize_fixture);
+    if fixture() {
+        fractal_daemon::test_support::initialize_fixture();
+    }
     // SAFETY: no other thread exists yet; the async runtime starts after this returns.
     unsafe { fractal_drivers::reexec::take_resume_environment() };
     if fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV).is_some() {

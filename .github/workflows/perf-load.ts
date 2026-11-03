@@ -127,7 +127,7 @@ python3 scripts/ci-perf-cache pack`,
       ],
     },
     // The same hog run on a macOS runner, under `taskpolicy -b`: the hog's priority on a Mac. It also
-    // keeps the compiled test binary, which is what runs on a fleet Mac (builds happen on hetz2 and
+    // keeps the compiled test binary, which is what runs on a fleet Mac (builds happen on a build host and
     // CI only). It builds cold and keeps no cache.
     'perf-load-hog-macos': {
       'runs-on': macosRunner,
