@@ -1,5 +1,82 @@
 use super::*;
 
+fn parsed_apply_restart_args(flags: &[&str]) -> ApplyRestartArgs {
+    let cli = Cli::try_parse_from(
+        ["st", "apply", "seat.kdl", "--as", "person/operator"]
+            .into_iter()
+            .chain(flags.iter().copied()),
+    ).unwrap();
+    let Command::Apply(args) = cli.command else {
+        panic!("expected apply command");
+    };
+    args.restart
+}
+
+#[test]
+fn apply_request_missing_restart_policy_defaults_to_when_idle() {
+    let request: ApplyRequest = serde_json::from_value(json!({
+        "intent": {"kdl": "version 2", "source_name": null},
+        "expected_subjects": {},
+        "idempotency_key": "default-restart",
+    })).unwrap();
+    assert_eq!(request.defer_restart, fractal_daemon::rollout::default_restart_policy());
+}
+
+#[test]
+fn apply_request_restart_now_serializes_null_and_round_trips_without_deferral() {
+    let request: ApplyRequest = serde_json::from_value(json!({
+        "intent": {"kdl": "version 2", "source_name": null},
+        "expected_subjects": {},
+        "idempotency_key": "restart-now",
+        "defer_restart": null,
+    })).unwrap();
+    assert!(request.defer_restart.is_none());
+    let encoded = serde_json::to_value(&request).unwrap();
+    assert_eq!(encoded.get("defer_restart"), Some(&Value::Null));
+    let decoded: ApplyRequest = serde_json::from_value(encoded).unwrap();
+    assert!(decoded.defer_restart.is_none());
+}
+
+#[test]
+fn apply_restart_args_unflagged_defaults_to_when_idle() {
+    let args = parsed_apply_restart_args(&[]);
+    let policy = args.policy().unwrap().unwrap();
+    assert_eq!(Some(policy.clone()), fractal_daemon::rollout::default_restart_policy());
+    assert_eq!(policy, fractal_daemon::rollout::Policy::when_idle(1_800_000, false));
+}
+
+#[test]
+fn apply_restart_args_restart_now_explicitly_disables_deferral() {
+    let args = parsed_apply_restart_args(&["--restart-now"]);
+    assert!(args.policy().unwrap().is_none());
+}
+
+#[test]
+fn apply_restart_args_accepts_explicit_defer_and_custom_max_wait() {
+    for flags in [
+        vec!["--defer-restart", "--restart-max-wait", "45m"],
+        vec!["--restart-max-wait", "45m"],
+    ] {
+        let args = parsed_apply_restart_args(&flags);
+        assert_eq!(
+            args.policy().unwrap(),
+            Some(fractal_daemon::rollout::Policy::when_idle(2_700_000, false)),
+        );
+    }
+}
+
+#[test]
+fn apply_restart_args_parser_rejects_defer_and_restart_now_together() {
+    let error = match Cli::try_parse_from([
+        "st", "apply", "seat.kdl", "--as", "person/operator",
+        "--defer-restart", "--restart-now",
+    ]) {
+        Err(error) => error,
+        Ok(_) => panic!("conflicting restart policies must not parse"),
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
 #[test]
 fn fleet_admit_without_binds_mutating_actor_to_harness() {
     for actor in ["agent/own", "agent/peer", "person/operator"] {
@@ -8140,6 +8217,7 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
             no_gate_check: false,
             check: false,
             inputs: vec![],
+            restart: ApplyRestartArgs::default(),
         },
         true,
     )

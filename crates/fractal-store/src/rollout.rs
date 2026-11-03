@@ -5,14 +5,84 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Policy {
-    pub mode: Mode,
-    #[serde(default = "default_deadline")]
-    pub deadline_ms: u64,
-    #[serde(default)]
-    pub force_after_deadline: bool,
+pub const OPERATION_ENV: &str = "ST3_ROLLOUT_OPERATION";
+pub const PREDECESSOR_ENV: &str = "ST3_ROLLOUT_PREDECESSOR";
+pub const RESUME_PATH_ENV: &str = "ST3_NATIVE_RESUME_PATH";
+
+pub use fractal_kernel::rollout_policy::{Mode, Policy, default_restart_policy};
+
+/// Publication metadata, fenced by the selected desired claim.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DeferredRestart {
+    pub policy: Policy,
+    pub deadline_unix_ms: u128,
+}
+
+pub fn deferred_restart(store: &Store, subject: &str) -> Result<Option<DeferredRestart>> {
+    let Some(token) = store.selected_desired_token(subject)? else {
+        return Ok(None);
+    };
+    let Some(claim) = store.claim_by_id(&token)? else {
+        return Ok(None);
+    };
+    claim.body.get("deferred_restart").cloned()
+        .map(serde_json::from_value).transpose().map_err(Into::into)
+}
+
+/// Native quiescence plus st-owned asks and deliveries. An ask_person parks its
+/// origin step, releasing the claimant, so suspension blockers alone are insufficient.
+pub fn restart_blockers(store: &Store, subject: &str, incarnation: &str) -> Result<Vec<String>> {
+    let mut blockers = crate::suspension::blockers(store, subject, incarnation)?;
+    if store.restart_person_work_pending(subject)? {
+        blockers.push("pending-person-work".into());
+    }
+    if store.messages(Some(subject), false)?.iter().any(|message| {
+        matches!(message.status.as_str(), "sent" | "staged" | "delivered")
+    }) {
+        blockers.push("pending-delivery".into());
+    }
+    blockers.sort();
+    blockers.dedup();
+    Ok(blockers)
+}
+
+pub fn deferred_restart_status(store: &Store, subject: &str) -> Result<Option<serde_json::Value>> {
+    let Some(pending) = deferred_restart(store, subject)? else {
+        return Ok(None);
+    };
+    let Some(runtime) = store.latest_observation(subject, "runtime.observed")? else {
+        return Ok(None);
+    };
+    let fields = runtime.body.get("fields").unwrap_or(&runtime.body);
+    if fields["status"] != "running" {
+        return Ok(None);
+    }
+    let Some(incarnation) = fields["incarnation_id"].as_str() else {
+        return Ok(None);
+    };
+    let Some((_, old)) = launched_member(store, subject, incarnation)? else {
+        return Ok(None);
+    };
+    let Some((desired, _)) = store.desired_subject_with_writer(subject)? else {
+        return Ok(None);
+    };
+    if desired.member.as_ref().is_none_or(|new| new.launch_changes(&old).is_empty()) {
+        return Ok(None);
+    }
+    let cutover = store.restart_cutover(subject)?;
+    let blocking = restart_blockers(store, subject, incarnation)?;
+    let expired = smallclaims::store::now_ms() >= pending.deadline_unix_ms;
+    Ok(Some(json!({
+        "phase": if cutover { "stopping" } else if expired { "held" } else { "pending" },
+        "mode": "when-idle",
+        "kind": "apply-restart",
+        "deadline_unix_ms": pending.deadline_unix_ms,
+        "status": "restart pending: launch changed",
+        "alert": if expired { Some("restart pending for the maximum wait; original seat keeps running") } else { None },
+        "old_incarnation": incarnation,
+        "blocking": blocking,
+        "reason": if expired { "safe-point deadline reached; original seat keeps running; reapply with --restart-now to interrupt" } else { "launch change pending until idle with no open ask" },
+    })))
 }
 
 #[derive(Clone, Debug)]
@@ -91,7 +161,7 @@ pub fn status(store: &Store, subject: &str) -> Result<Option<serde_json::Value>>
         return Ok(Some(serde_json::to_value(operation)?));
     }
     let Some(selection) = selection else {
-        return Ok(None);
+        return deferred_restart_status(store, subject);
     };
     if selection.manual && hold_render(store, &selection.desired)? {
         let blocking: Vec<String> = selection.desired.member.as_ref()
@@ -118,6 +188,9 @@ pub fn target(desired: &DesiredSubject) -> Result<String> {
 
 /// Before cutover begins, a changed launch must not rewrite the running seat's files.
 pub fn hold_render(store: &Store, desired: &DesiredSubject) -> Result<bool> {
+    if let Some(pending) = deferred_restart_status(store, &desired.subject)? {
+        return Ok(pending["phase"] != "stopping");
+    }
     let Some(selection) = store.rollout_selection(&desired.subject)? else {
         return Ok(false);
     };
@@ -253,27 +326,45 @@ pub fn blockers(store: &Store, subject: &str, operation: &Operation) -> Result<V
     Ok(blockers)
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum Mode {
-    WhenIdle,
+pub fn bound_account(store: &Store, subject: &str, incarnation: &str) -> Result<Option<String>> {
+    Ok(store
+        .claims_for(subject, Some("harness.session-file"))?
+        .into_iter()
+        .rev()
+        .find(|claim| {
+            claim
+                .body
+                .pointer("/fields/incarnation_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(incarnation)
+        })
+        .and_then(|claim| {
+            claim
+                .body
+                .pointer("/fields/account_ref")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        }))
 }
-fn default_deadline() -> u64 {
-    30 * 60 * 1000
-}
-impl Policy {
-    pub fn when_idle(deadline_ms: u64, force_after_deadline: bool) -> Self {
-        Self {
-            mode: Mode::WhenIdle,
-            deadline_ms,
-            force_after_deadline,
-        }
-    }
-    pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!(
-            (1..=7 * 24 * 60 * 60 * 1000).contains(&self.deadline_ms),
-            "rollout deadline must be positive and at most seven days"
-        );
-        Ok(())
-    }
+
+pub fn binding(
+    store: &Store,
+    subject: &str,
+    incarnation: &str,
+) -> Result<Option<(String, String, Option<String>)>> {
+    Ok(store
+        .claims_for(subject, Some("harness.session-file"))?
+        .into_iter()
+        .rev()
+        .find_map(|claim| {
+            let fields = &claim.body["fields"];
+            if fields["incarnation_id"].as_str() != Some(incarnation) {
+                return None;
+            }
+            Some((
+                fields["harness"].as_str()?.into(),
+                fields["session_id"].as_str()?.into(),
+                fields["path"].as_str().map(str::to_owned),
+            ))
+        }))
 }

@@ -7,11 +7,11 @@ pub use fractal_missions::store::rollouts::{intake_held, message_allowed, retiri
 
 pub trait RolloutsStore {
     /// The seat's current intake hold, if a rollout holds its independent mail.
-    fn rollout_intake_hold(&self, subject: &str) -> Result<Option<Operation>, St3Error>;
+    fn rollout_intake_hold(&self, subject: &str) -> Result<IntakeHold, St3Error>;
     /// `rollout_message_allowed` for a message to the seat whose `rollout_intake_hold` is `hold`.
     fn rollout_message_allowed_under(
             &self,
-            hold: Option<&Operation>,
+            hold: &IntakeHold,
             message: &MessageView,
         ) -> Result<bool, St3Error>;
     /// Capture publication and incarnation fences atomically with the durable request.
@@ -30,13 +30,13 @@ pub trait RolloutsStore {
 
 impl RolloutsStore for Store {
 
-    fn rollout_intake_hold(&self, subject: &str) -> Result<Option<Operation>, St3Error> {
+    fn rollout_intake_hold(&self, subject: &str) -> Result<IntakeHold, St3Error> {
         intake_hold(&self.readers.get(), subject)
     }
 
     fn rollout_message_allowed_under(
             &self,
-            hold: Option<&Operation>,
+            hold: &IntakeHold,
             message: &MessageView,
         ) -> Result<bool, St3Error> {
         message_allowed_under(&self.readers.get(), hold, message)

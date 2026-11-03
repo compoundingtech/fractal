@@ -476,7 +476,7 @@ impl MailboxOrder {
 }
 
 /// The seat's rollout intake hold, read at most once per update; `None` until first needed.
-type IntakeHold = Option<Option<crate::rollout::Operation>>;
+type IntakeHold = Option<crate::store::IntakeHold>;
 
 type SnapshotUpdate = (crate::store::MailboxWatermark, Snapshot, bool, MaintenanceIds);
 
@@ -578,7 +578,7 @@ fn filter_messages(
             if hold.is_none() {
                 *hold = Some(store.rollout_intake_hold(&binding.subject)?);
             }
-            store.rollout_message_allowed_under(hold.as_ref().and_then(Option::as_ref), &message)?
+            store.rollout_message_allowed_under(hold.as_ref().expect("hold was just read"), &message)?
         } {
             allowed.push(message);
         } else {
@@ -4541,7 +4541,7 @@ mod tests {
         let fence = store.bind_mailbox(&Fence::new(&subject, "current", "delivery")).unwrap();
         store.request_rollout(&subject, &selected.desired_token, member, "current",
             "person/test", &policy, "stream-drain").unwrap();
-        assert!(store.rollout_intake_hold(&subject).unwrap().is_some());
+        let hold = store.rollout_intake_hold(&subject).unwrap();
         let item = "message/00000000000000f1";
         shard.append_claim(&ClaimInput {
             subject: item.into(),
@@ -4555,6 +4555,8 @@ mod tests {
             ]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
+        let message = store.message(item).unwrap().unwrap();
+        assert!(!store.rollout_message_allowed_under(&hold, &message).unwrap());
         let receipt = |lifecycle: &str, native: Option<&crate::conversation_delivery::NativeReceipt>| {
             let message = store.message(item).unwrap().unwrap();
             record_stream_receipt(&store, &fence, &message, &ClaimInput {

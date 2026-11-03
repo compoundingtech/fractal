@@ -1007,6 +1007,7 @@ impl Store {
         warnings.sort();
         warnings.dedup();
 
+        let mut running_restarts = Vec::new();
         for (subject, desired) in &intent.subjects {
             let current = desired_row_at(&connection, subject, at_index).map_err(internal)?;
             let revision = desired_revision(desired);
@@ -1015,6 +1016,10 @@ impl Store {
                 subject.clone(),
                 intent_leaves_at(&connection, subject, at_index).map_err(internal)?,
             );
+            let restart = running_restart_at(&connection, desired, Some(store_index))?;
+            if let Some(restart) = &restart {
+                running_restarts.push(restart.clone());
+            }
             if changed {
                 changes.push(SubjectChange {
                     subject: subject.clone(),
@@ -1077,12 +1082,16 @@ impl Store {
                     action: "publish-only".into(),
                     reason: "the declaration changes without a member launch change".into(),
                 });
-            } else if desired.member.is_some() && changed {
-                actions.push(PlannedAction {
-                    subject: subject.clone(),
-                    action: "observe-or-start".into(),
-                    reason: "the desired member is active".into(),
-                });
+            } else if desired.member.is_some() {
+                if changed {
+                    actions.push(restart.unwrap_or_else(|| PlannedAction {
+                        subject: subject.clone(),
+                        action: "observe-or-start".into(),
+                        reason: "the desired member is active".into(),
+                    }));
+                } else if let Some(restart) = restart {
+                    actions.push(restart);
+                }
             }
         }
         for mission in intent.missions.values() {
@@ -1235,6 +1244,8 @@ impl Store {
             resolved_intent,
             changes,
             predicted_actions: actions,
+            running_restart_count: running_restarts.len(),
+            running_restarts,
             blockers,
             warnings,
             subject_tokens: tokens,

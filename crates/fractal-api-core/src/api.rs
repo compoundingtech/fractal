@@ -7323,7 +7323,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"apply_deferred_restart":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
     });
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
@@ -10106,11 +10106,12 @@ async fn apply_with_authority(
     }
     let mut response = state
         .store
-        .apply_as(
+        .apply_as_with_restart_policy(
             &intent,
             &request.expected_subjects,
             &request.idempotency_key,
             Some(actor),
+            request.defer_restart.as_ref(),
         )
         .map_err(ApiError::bad)?;
     response.resolved_kdl = request.intent.kdl;

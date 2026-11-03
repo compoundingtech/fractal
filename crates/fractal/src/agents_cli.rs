@@ -309,28 +309,18 @@ pub(super) async fn run_agents(
         AgentsCommand::Apply(args) => {
             crate::stderr_message("st", format_args!("agents apply is legacy; use fractal apply FILE --no-gate-check with the same options"));
             let client = cli_client(endpoint);
-            if !args.dry_run {
-                let (kdl, source_name) = read_intent(Some(&args.file))?;
-                let response = publish_text(
-                    &client,
-                    kdl,
-                    source_name.unwrap_or_else(|| "standard input".into()),
-                    args.actor,
-                )
-                .await?;
-                return print_value(&response, json_output);
-            }
             publish_mission_file(
                 &client,
                 MissionPublishArgs {
                     file: args.file,
-                    dry_run: true,
+                    dry_run: args.dry_run,
                     at_index: None,
                     actor: args.actor,
                     workspace: PathBuf::from("."),
                     no_gate_check: true,
                     check: false,
                     inputs: vec![],
+                    restart: args.restart,
                 },
                 json_output,
             )

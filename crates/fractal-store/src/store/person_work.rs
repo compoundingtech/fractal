@@ -567,10 +567,12 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
     }
     // A top-level seat's ask outlives its restarts and harness changes: only stopping or retiring
     // the seat (above) or cancelling the ask ends it, so a person never loses it to a restart. A
-    // mission's seat lives and dies with its declaration, and so does its ask.
+    // mission's seat lives and dies with its declaration, except while the incumbent's changed
+    // launch waits for a safe point.
     if let Some(declaration) = fields["requester_declaration"].as_str()
         && !fields["owner_run"].is_null()
         && current_desired_row(connection, requester)?.is_none_or(|row| row.claim_id != declaration)
+        && !super::rollouts::deferred_ask_live(connection, ask)?
     {
         return Ok(false);
     }
