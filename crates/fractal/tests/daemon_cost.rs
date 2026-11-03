@@ -172,7 +172,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     (
         "GET /v1/internal/fleet/admission-residue",
-        "the scan doctor's fleet-admission check runs inside GET /v1/doctor, which is measured; st fleet wait reads it once as it ends",
+        "the scan the daemon runs at startup and hourly, off the request path, for doctor's fleet-admission check, in pages that each take their own read snapshot; st fleet wait reads it once as it ends",
     ),
     (
         "GET /v1/fleet/admission-residue",
@@ -424,6 +424,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "explicit identity repair enumerates the old person's current work and reviews once; requires that person's authority and is not a steady-state daemon request; covered by api::tests::human_review_list_and_decisions_use_exact_current_requests",
     ),
     ("POST /v1/agents/restart", "restarts a live seat"),
+    ("POST /v1/agents/lane/burst", "raises a live seat's lane slice"),
+    ("DELETE /v1/agents/lane/burst", "lowers a live seat's lane slice"),
     (
         "POST /v1/agents/rollout",
         "requires a running source-fenced native seat",
