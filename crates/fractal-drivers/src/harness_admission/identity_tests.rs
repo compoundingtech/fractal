@@ -52,34 +52,44 @@ fn dependency_edits_retargets_and_metadata_invalidate_cache() {
     fs::write(&runtime, "runtime-one").unwrap();
     symlink(&source, &binary).unwrap();
     let identity = || executable_identity_with(&binary, &|_| Ok(runtime.clone())).unwrap();
-    let mut previous = identity();
-    for (path, content) in [
+    let seed = || {
+        let value = executable_identity_recorded(&binary, &|_| Ok(runtime.clone()), || SystemTime::now() + Duration::from_secs(120)).unwrap();
+        let before = hashed_files();
+        assert_eq!(value, identity());
+        assert_eq!(before, hashed_files(), "seed must produce a settled cache hit");
+        value
+    };
+    for (index, (path, content)) in [
         (&source, "#!/usr/bin/env runtime\nother"),
         (&runtime, "runtime-two"),
         (&root.join("package.json"), "{}"),
         (&root.join("package-lock.json"), "one"),
         (&root.join("package-lock.json"), "two"),
-    ] {
+    ].into_iter().enumerate() {
+        let previous = seed();
         let before = hashed_files();
         fs::write(path, content).unwrap();
+        File::open(path).unwrap().set_times(fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(10 + index as u64))).unwrap();
         let current = identity();
         assert_ne!(previous, current);
         assert!(hashed_files() > before);
-        previous = current;
     }
+    let previous = seed();
     fs::remove_file(&binary).unwrap();
     symlink(&replacement, &binary).unwrap();
     let retargeted = identity();
     assert_ne!(previous, retargeted, "resolved path is part of identity");
+    seed();
     let before = hashed_files();
     let original = fs::metadata(&replacement).unwrap().permissions().mode();
     fs::set_permissions(&replacement, fs::Permissions::from_mode(original ^ 0o100)).unwrap();
     assert_ne!(retargeted, identity());
     assert!(hashed_files() > before);
+    let previous = seed();
     let before = hashed_files();
-    let previous = identity();
     // Same bytes, size and mode still change ctime/mtime: recompute, retaining the digest.
     fs::write(&replacement, "#!/usr/bin/env runtime\nother").unwrap();
+    File::open(&replacement).unwrap().set_times(fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(30))).unwrap();
     assert_eq!(previous, identity());
     assert!(hashed_files() > before);
 }
@@ -94,7 +104,11 @@ fn same_tick_same_size_writes_are_never_cached_as_settled() {
         File::open(&binary).unwrap().set_times(fs::FileTimes::new().set_modified(tick)).unwrap();
     };
     write("first");
-    let first = executable_identity(&binary).unwrap();
+    let before = hashed_files();
+    let first = executable_identity_recorded(&binary, &|_| unreachable!(), || {
+        assert_eq!(hashed_files(), before, "cutoff must precede content reads");
+        SystemTime::now()
+    }).unwrap();
     let before = hashed_files();
     write("other");
     assert_eq!(fs::metadata(&binary).unwrap().modified().unwrap(), tick);

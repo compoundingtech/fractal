@@ -741,6 +741,8 @@ pub fn executable_identity_with(
 }
 
 fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, recorded_at: impl FnOnce() -> SystemTime) -> Result<String> {
+    // Racy-git rule: cache only writes whose timestamps precede measurement start by a full tick.
+    let settled_before = recorded_at().duration_since(UNIX_EPOCH)?.as_nanos().saturating_sub(1_000_000_000) as i128;
     let mut files = vec![(path.to_owned(), false)];
     let mut probes = vec![path.to_owned()];
     let mut prefix = [0_u8; 256];
@@ -821,8 +823,6 @@ fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<Pa
     }
     let identity = format!("{hash:x}", hash = hash.finalize());
     // Do not retain a result if any dependency changed while bytes were being read.
-    // Racy-git rule: only cache writes whose timestamps precede cache recording by a full tick.
-    let settled_before = recorded_at().duration_since(UNIX_EPOCH)?.as_nanos().saturating_sub(1_000_000_000) as i128;
     let settled = dependencies.iter().flat_map(|d| [&d.link, &d.target]).flatten().all(|m|
         [m.modified, m.changed].iter().all(|(s, ns)| i128::from(*s) * 1_000_000_000 + i128::from(*ns) < settled_before));
     if settled && dependencies == snapshot()? {
