@@ -9567,6 +9567,8 @@ mod tests {
                     blocked_reason: None,
                     last_progress: Some("Tests pass; opening the PR".into()),
                     nudged: None,
+                    waiting_on: None,
+                    stalled: None,
                 },
             );
         }

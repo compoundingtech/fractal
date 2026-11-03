@@ -65,9 +65,20 @@ export function queuedWorkSummary(agent: QueueAgent, now = Date.now()): string |
   return `Next: ${name} · ${agent.queued_work_count ?? queued.length} queued${oldest ? ` · oldest ready ${ago(oldest, now)}` : ''}`;
 }
 
-export function currentWorkSummary(agent: Pick<Agent, 'current_work'>): string | null {
+export function currentWorkSummary(agent: Pick<Agent, 'current_work'>, now = Date.now()): string | null {
   const current = agent.current_work?.[0];
-  return current ? `Current: ${current.title || leaf(current.path)} (${current.state})` : null;
+  if (!current) return null;
+  const hold = holdLine(current, now);
+  return `Current: ${current.title || leaf(current.path)} (${current.state})${hold ? ` · ${hold.text}` : ''}`;
+}
+
+// A held step says what its holder declared it waits on, or that it stalled: no progress and
+// no declared wait past its run's limit. st sends only one of the two.
+type Held = { waiting_on?: string | null; waiting_since?: string | null; stalled_at?: string | null };
+export function holdLine(step: Held, now = Date.now()): { text: string; stalled: boolean } | null {
+  if (step.waiting_on) return { text: `waiting on ${step.waiting_on}${step.waiting_since ? ` · ${ago(step.waiting_since, now)}` : ''}`, stalled: false };
+  if (step.stalled_at) return { text: `stalled ${ago(step.stalled_at, now)} ago: no progress and no declared wait`, stalled: true };
+  return null;
 }
 
 // A mission row carries its runs with their steps: every open run, and the latest run.

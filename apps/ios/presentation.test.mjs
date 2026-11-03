@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { agentHeaderDetail, agentHealth, attentionActionLabel, attentionHeadline, attentionKindLabel, blockedLine, clientDetail, clientTitle, currentWorkSummary, deviceDetail, deviceTitle, missionLabels, missionSteps, olderThanMember, pingPresentation, queuedWorkSummary, fractalPresentation } from './presentation.ts';
+import { agentHeaderDetail, agentHealth, attentionActionLabel, attentionHeadline, attentionKindLabel, blockedLine, clientDetail, clientTitle, currentWorkSummary, deviceDetail, holdLine, deviceTitle, missionLabels, missionSteps, olderThanMember, pingPresentation, queuedWorkSummary, fractalPresentation } from './presentation.ts';
 import { words } from './presentation.ts';
 
 assert.equal(words('st3'), 'ST');
@@ -28,6 +28,12 @@ assert.equal(queuedWorkSummary({ next_work_id: 'step-run/78cb/route', queued_wor
 assert.equal(currentWorkSummary({ current_work: [{ ...route, path: 'review/diff', title: null, state: 'claimed' }] }), 'Current: diff (claimed)');
 assert.equal(currentWorkSummary({ current_work: [{ ...route, title: 'Route output', state: 'claimed' }] }), 'Current: Route output (claimed)');
 assert.equal(currentWorkSummary({}), null);
+// A held step names its declared wait, or says it stalled.
+const held = { ...route, title: 'Route output', state: 'claimed' };
+assert.equal(currentWorkSummary({ current_work: [{ ...held, waiting_on: 'pull request acme/garden#12' }] }, now), 'Current: Route output (claimed) · waiting on pull request acme/garden#12');
+assert.equal(currentWorkSummary({ current_work: [{ ...held, stalled_at: new Date(now - 40 * 60_000).toISOString() }] }, now), 'Current: Route output (claimed) · stalled 40m ago: no progress and no declared wait');
+assert.deepEqual(holdLine({ waiting_on: 'time 2026-10-14T09:00:00.000Z', waiting_since: new Date(now - 2 * 3_600_000).toISOString() }, now), { text: 'waiting on time 2026-10-14T09:00:00.000Z · 2h', stalled: false });
+assert.equal(holdLine({}, now), null);
 
 // A mission's steps are the ones Fractal joined into its runs: no work list.
 const step = (path, state) => ({ id: `step-run/9f/${path}`, path, state, attempt: 1, since: '2026-09-25T08:00:00Z' });

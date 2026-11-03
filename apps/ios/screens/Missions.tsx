@@ -8,7 +8,7 @@ import SegmentedControl from '@react-native-segmented-control/segmented-control'
 import { Banners, Empty, StatusLine, useDebugScroll, useListsOnFocus, useMissionsOnFocus, useRefresh } from '../chrome';
 import { MISSION_LEGEND, actorName, missionLabel, missionRows, missionSections, filterMissionRows, missionTitle, missionWord, stepStyle, wordName, wordStyle, type MissionRow } from '../missionsView';
 import type { RootParams, RootScreen } from '../navigation';
-import { missionSteps } from '../presentation';
+import { holdLine, missionSteps } from '../presentation';
 import { homeRows, type DocumentUnavailable } from '@fractal/views';
 import { documentsServed, referencedDocuments } from '../documents';
 import { useStore, type Planner } from '../store';
@@ -146,6 +146,10 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
           <T><T bold color={style.color}>{style.glyph} </T><T bold>{shown?.path ?? step?.path}</T><T color={style.color}>  {style.word}</T></T>
           {shown?.note ? <T color={theme.waiting} style={{ paddingLeft: 22 }}>{shown.note}</T> : null}
           {shown?.word === 'working' && step?.last_progress ? <T style={{ paddingLeft: 22 }}>{step.last_progress}</T> : null}
+          {(() => {
+            const hold = shown?.word === 'working' && step ? holdLine(step) : null;
+            return hold ? <T color={hold.stalled ? theme.waiting : theme.subtext0} style={{ paddingLeft: 22 }}>{hold.text}</T> : null;
+          })()}
           {step?.goals?.[0] ? <View style={{ paddingLeft: 22 }}><Markdown text={step.goals[0]} color={theme.subtext0} /></View> : null}
           {agent
             ? <Pressable onPress={() => navigation.navigate('Conversation', { target: agent.id, title: agentName(agent) })} style={{ paddingLeft: 22 }}><T><T dim>held by </T><T color={theme.accent}>{agentName(agent)}</T></T></Pressable>

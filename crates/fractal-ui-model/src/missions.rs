@@ -150,6 +150,13 @@ pub struct StepMetadata {
     /// wake it, as an age label such as `40m`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nudged: Option<String>,
+    /// What the holder declared the step waits on, while that wait is open, with how long it
+    /// has waited: `pull request acme/garden#12 · 2h`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<String>,
+    /// How long the step has been stalled, as an age label, while it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stalled: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -374,6 +381,13 @@ pub fn adapt<'a>(
                             blocked_reason: step.blocked_reason.clone(),
                             last_progress: step.last_progress.clone(),
                             nudged: step.nudged_at.as_deref().map(|at| display.age(at, now)),
+                            waiting_on: step.waiting_on.as_deref().map(|on| {
+                                step.waiting_since.as_deref().map_or_else(
+                                    || on.to_owned(),
+                                    |since| format!("{on} · {}", display.age(since, now)),
+                                )
+                            }),
+                            stalled: step.stalled_at.as_deref().map(|at| display.age(at, now)),
                         },
                     )
                 })

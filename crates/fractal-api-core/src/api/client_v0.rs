@@ -1011,6 +1011,9 @@ pub fn mission_list_cards_with(
                 "agentless":step.agentless,"since":client_timestamp(step.updated_at_unix_ms),
                 "keep_open":crate::mission::step_keeps_open(definition.map(|d| &d.mission), &step.step),
                 "progress_at": null,
+                "waiting_on":step.waiting_on.as_ref().map(crate::store::describe_wait),
+                "waiting_since":step.waiting_on.as_ref().map(|wait| client_timestamp(wait.since_unix_ms)),
+                "stalled_at":step.stalled_at_unix_ms.map(client_timestamp),
                 "blocked_reason":step.blocked_reason.as_deref().or_else(|| scheduler_fault.as_deref().filter(|_| step.status=="pending")),"blockers":step.blockers,
                 "goals":step.goals,"constraints":step.constraints
             })).collect::<Vec<_>>();

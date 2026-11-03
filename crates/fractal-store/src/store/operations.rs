@@ -230,6 +230,8 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for step in &mut steps {
             apply_effective_step_state(&connection, step, at_unix_ms)?;
+            declared_waits::enrich_declared_wait_at(&connection, step, at_unix_ms)?;
+            quiet_claims::enrich_stalled_at(&connection, step, at_unix_ms)?;
         }
         Ok((total, done, steps))
     }
