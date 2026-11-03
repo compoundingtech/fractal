@@ -138,6 +138,8 @@ pub enum ErrorCode {
     IssuerRequired,
     SuspendAuthoredSessionSelection,
     StaleFence,
+    StaleHandoff,
+    InvalidHandoffReturn,
     CursorGap,
     PageCursorExpired,
     AgentRosterNotReady,
@@ -3305,6 +3307,10 @@ pub enum ActionType {
     WorkDone,
     #[serde(rename = "work.cancel-ask")]
     WorkCancelAsk,
+    #[serde(rename = "work.withdraw-handoff")]
+    WorkWithdrawHandoff,
+    #[serde(rename = "work.decline-handoff")]
+    WorkDeclineHandoff,
     #[serde(rename = "work.claim")]
     WorkClaim,
     #[serde(rename = "work.renew")]
@@ -3604,6 +3610,12 @@ pub struct TargetParameters {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct WorkRetryParameters {
     pub target_id: String,
+    pub reason: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct HandoffReturnParameters {
+    pub target_id: String,
+    pub message: String,
     pub reason: String,
 }
 

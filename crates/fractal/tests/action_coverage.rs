@@ -875,6 +875,7 @@ async fn dispatch(
         "terminal.create" => terminal_create, "terminal.detach" => terminal_detach,
         "terminal.end" => terminal_end, "terminal.input" => terminal_input, "terminal.resize" => terminal_resize,
         "work.ask" => work_ask, "work.cancel-ask" => work_cancel_ask,
+        "work.withdraw-handoff" => work_withdraw_handoff, "work.decline-handoff" => work_decline_handoff,
         "work.claim" => work_claim, "work.complete" => work_complete,
         "work.done" => work_done, "work.fail" => work_fail, "work.progress" => work_progress,
         "work.publish-mission" => work_publish_mission, "work.release" => work_release,
@@ -1021,6 +1022,38 @@ async fn creation_and_declaration_actions_survive_stale_fences_and_restarts() {
             .kind,
         "stop"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_return_actions_survive_stale_fences_and_restarts() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    for (kind, actor) in [("work.withdraw-handoff", WORKER), ("work.decline-handoff", PERSON)] {
+        let mut daemon = Daemon::new().await;
+        daemon.worker();
+        daemon.apply(r#"version 2
+mission "example/return" state="ready" {
+  goal "Return unfinished work."
+  step "work" { assigned-to "agent/example/worker" }
+}"#, "return-mission");
+        let run = daemon.start("example/return", "return-run");
+        let step = &run.steps[0].subject;
+        daemon.store().set_step_state(step, "ready", None).unwrap();
+        let fence = daemon.work_fence(step).await;
+        daemon.exercise(WORKER, "work.claim", json!({"target_id": step}), fence).await;
+        daemon.store().handoff_work(step, &fractal_daemon::model::WorkHandoffRequest {
+            actor: WORKER.into(), incarnation: Some("4242:fixture".into()), to: PERSON.into(),
+            note: "Review unfinished work".into(), evidence: vec![], idempotency_key: "return-note".into(),
+        }).unwrap();
+        let handoff = daemon.store().latest_claim(step, Some("work.released")).unwrap().unwrap();
+        let mut fence = daemon.work_fence(step).await;
+        fence.snapshot_id = daemon.fence(actor).await.snapshot_id;
+        daemon.exercise(actor, kind, json!({"target_id": step,
+            "message": handoff.body["fields"]["handoff_message"], "reason": "Continue on the handing seat"}), fence).await;
+        let returned = daemon.store().step_run(step).unwrap().unwrap();
+        assert_eq!(returned.assigned_to.as_deref(), Some(WORKER));
+        assert_eq!(returned.status, "ready");
+        assert!(!returned.worker_reported && returned.person_answers.is_empty());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

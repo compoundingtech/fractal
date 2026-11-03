@@ -54,6 +54,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "work.cancel-ask",
     "work.claim",
     "work.complete",
+    "work.decline-handoff",
     "work.done",
     "work.fail",
     "work.progress",
@@ -61,6 +62,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "work.release",
     "work.renew",
     "work.retry",
+    "work.withdraw-handoff",
 ];
 #[rustfmt::skip]
 pub const READ_OPERATIONS: &[(&str, &str)] = &[

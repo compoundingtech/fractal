@@ -1007,6 +1007,8 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
         "work.complete",
         "work.fail",
         "work.release",
+        "work.withdraw-handoff",
+        "work.decline-handoff",
         "work.retry",
         "work.publish-mission",
         "agent.stop",

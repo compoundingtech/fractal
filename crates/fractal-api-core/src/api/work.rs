@@ -543,6 +543,28 @@ pub async fn handoff_work(
     work_action_response(state, "release".into(), subject, request, None, Some(input)).await
 }
 
+pub async fn return_handoff(
+    State(state): State<AppState>,
+    AxumPath(subject): AxumPath<String>,
+    bound: Option<Extension<BoundAgent>>,
+    Json(input): Json<crate::store::adhoc_work::HandoffReturnRequest>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    use crate::store::adhoc_work::HandoffDisposition;
+    if !input.actor.starts_with("agent/") || input.disposition != HandoffDisposition::Withdrawn {
+        return Err(ApiError::bad(St3Error::new("forbidden", "legacy handoff returns require an agent withdrawal")));
+    }
+    if bound.as_ref().is_some_and(|bound| bound.0.0 != input.actor) {
+        return Err(ApiError::bad(St3Error::new("foreign-agent-actor", "a bound harness cannot withdraw another agent's handoff")));
+    }
+    if input.reason.trim().is_empty() || input.reason.len() > 2048 {
+        return Err(ApiError::bad(St3Error::new("validation-failed", "reason must contain 1–2048 UTF-8 bytes")));
+    }
+    let store = state.store.clone();
+    let result = blocking_action(move || store.return_handoff(&subject, &input)).await?;
+    signal_changed(&state);
+    Ok(Json(result))
+}
+
 pub async fn acknowledge_work(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,

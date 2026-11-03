@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Record withdrawal and decline of unclaimed person handoffs without completing work",
+  "replay": {"status":"changed","detail":"work.handoff-returned durably restores the handing agent's assignment and readiness. Replay preserves attempts, progress, evidence and completion state; resolved notes no longer block claims."},
+  "schema": {"status":"changed","detail":"Adds the durable work.handoff-returned claim kind with exact handoff, actor, disposition, reason and retry identity. No database migration or client operation is added."},
+  "rules": {"status":"changed","detail":"Only the handing agent may withdraw or the assigned person decline an exact ready, unclaimed person handoff in the current live generation."},
+  "compatibility": {"status":"changed","detail":"Store callers can return pending or acknowledged handoffs without answers, acknowledgments, read receipts, acceptance or completion. Generic person work and asks are unchanged."},
+  "downtime": {"status":"none","detail":"No additional interruption beyond normal daemon replacement."},
+  "manual": {"status":"none","detail":"No configuration conversion or data repair is required."},
+  "recovery": {"status":"changed","detail":"Exact retries recover the original disposition record after subsequent work. Use an updated projector when replaying returned handoffs; older projectors do not restore their assignment."}
+}

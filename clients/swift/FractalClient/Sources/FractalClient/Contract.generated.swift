@@ -55,6 +55,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case workCancelAsk = "work.cancel-ask"
     case workClaim = "work.claim"
     case workComplete = "work.complete"
+    case workDeclineHandoff = "work.decline-handoff"
     case workDone = "work.done"
     case workFail = "work.fail"
     case workProgress = "work.progress"
@@ -62,6 +63,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case workRelease = "work.release"
     case workRenew = "work.renew"
     case workRetry = "work.retry"
+    case workWithdrawHandoff = "work.withdraw-handoff"
 }
 
 public enum ReadOperation: String, CaseIterable, Sendable {

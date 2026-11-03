@@ -8,8 +8,15 @@ pub fn latest_handoff(
     view: &StepRunView,
     at: u128,
 ) -> Result<Option<ClaimRecord>, St3Error> {
-    connection.query_row(/* sqlite-large-value: allow-for-now lv-hdf17be72f35e owner=fractal_store::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='work.released' AND json_extract(body,'$.fields.handoff_message') IS NOT NULL AND json_extract(body,'$.fields.attempt')=?2 AND CAST(accepted_at_unix_ms AS INTEGER)<=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-        params![view.subject, view.attempt, at as i64], claim_from_row).optional().map_err(internal)
+    let handoff = connection.query_row(/* sqlite-large-value: allow-for-now lv-hdf17be72f35e owner=fractal_store::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='work.released' AND json_extract(body,'$.fields.handoff_message') IS NOT NULL AND json_extract(body,'$.fields.attempt')=?2 AND CAST(accepted_at_unix_ms AS INTEGER)<=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+        params![view.subject, view.attempt, at as i64], claim_from_row).optional().map_err(internal)?;
+    if let Some(handoff) = &handoff {
+        let resolved: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='work.handoff-returned' AND json_extract(body,'$.fields.handoff_claim')=?2 AND CAST(accepted_at_unix_ms AS INTEGER)<=?3)",
+            params![view.subject, handoff.id, at as i64], |row| row.get(0)).map_err(internal)?;
+        if resolved { return Ok(None); }
+    }
+    Ok(handoff)
 }
 
 pub fn acknowledged(

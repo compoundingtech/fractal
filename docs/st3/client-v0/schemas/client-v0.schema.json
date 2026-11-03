@@ -332,6 +332,8 @@
       "issuer-required",
       "suspend-authored-session-selection",
       "stale-fence",
+      "stale-handoff",
+      "invalid-handoff-return",
       "cursor-gap",
       "page-cursor-expired",
       "agent-roster-not-ready",
@@ -3048,6 +3050,8 @@
             "work.ask",
             "work.done",
             "work.cancel-ask",
+            "work.withdraw-handoff",
+            "work.decline-handoff",
             "work.claim",
             "work.renew",
             "work.progress",
@@ -3107,6 +3111,11 @@
     "PersonStepParameters": {
       "type": "object", "additionalProperties": false, "required": ["target_id", "summary", "episode"],
       "properties": {"target_id": {"$ref": "#/$defs/Id"}, "summary": {"type": "string", "minLength": 1}, "episode": {"type": "string"}, "evidence": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "answer": {"$ref": "#/$defs/PersonAnswerInput"}}
+    },
+    "HandoffReturnParameters": {
+      "type": "object", "additionalProperties": false, "required": ["target_id", "message", "reason"],
+      "properties": { "target_id": { "$ref": "#/$defs/Id" }, "message": { "$ref": "#/$defs/Id" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 2048 } }
     },
     "StructuredRequest": {
       "type": "object", "additionalProperties": false, "required": ["version", "type", "question", "why_person"],
@@ -3345,6 +3354,9 @@
             "parameters": { "$ref": "#/$defs/TargetParameters" }
           }
         },
+        { "properties": { "type": { "enum": ["work.withdraw-handoff", "work.decline-handoff"] },
+          "fence": { "allOf": [{ "$ref": "#/$defs/Fence" }, { "required": ["mission_generation", "step_definition", "attempt", "readiness_epoch"] }] },
+          "parameters": { "$ref": "#/$defs/HandoffReturnParameters" } } },
         {
           "properties": {
             "type": { "const": "work.retry" },

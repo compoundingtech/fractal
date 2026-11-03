@@ -1277,6 +1277,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
         | ErrorCode::MessageSelectorsNotReady
+        | ErrorCode::StaleHandoff
+        | ErrorCode::InvalidHandoffReturn
         | ErrorCode::Unknown => message.to_owned(),
     }
 }
@@ -3430,6 +3432,17 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn work_decline_handoff(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HandoffReturnParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::work_decline_handoff(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn work_done(
         &self,
         id: impl Into<String>,
@@ -3504,6 +3517,17 @@ impl Client {
         parameters: WorkRetryParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::work_retry(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn work_withdraw_handoff(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HandoffReturnParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::work_withdraw_handoff(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }

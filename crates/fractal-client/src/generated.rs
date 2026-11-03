@@ -138,6 +138,8 @@ pub enum ErrorCode {
     IssuerRequired,
     SuspendAuthoredSessionSelection,
     StaleFence,
+    StaleHandoff,
+    InvalidHandoffReturn,
     CursorGap,
     PageCursorExpired,
     AgentRosterNotReady,
@@ -3306,6 +3308,10 @@ pub enum ActionType {
     WorkDone,
     #[serde(rename = "work.cancel-ask")]
     WorkCancelAsk,
+    #[serde(rename = "work.withdraw-handoff")]
+    WorkWithdrawHandoff,
+    #[serde(rename = "work.decline-handoff")]
+    WorkDeclineHandoff,
     #[serde(rename = "work.claim")]
     WorkClaim,
     #[serde(rename = "work.renew")]
@@ -4126,6 +4132,20 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn work_decline_handoff(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HandoffReturnParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::WorkDeclineHandoff,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn work_done(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -4219,6 +4239,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::WorkRetry,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn work_withdraw_handoff(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HandoffReturnParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::WorkWithdrawHandoff,
             idempotency_key,
             fence,
             &parameters,
@@ -4435,6 +4469,12 @@ pub struct TargetParameters {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct WorkRetryParameters {
     pub target_id: String,
+    pub reason: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct HandoffReturnParameters {
+    pub target_id: String,
+    pub message: String,
     pub reason: String,
 }
 

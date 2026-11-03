@@ -1201,6 +1201,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
         | ErrorCode::MessageSelectorsNotReady
+        | ErrorCode::StaleHandoff
+        | ErrorCode::InvalidHandoffReturn
         | ErrorCode::Unknown => message.to_owned(),
     }
 }
