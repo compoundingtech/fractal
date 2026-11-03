@@ -48,6 +48,18 @@ fn claims(connection: &Connection) -> i64 {
     connection.query_row("SELECT count(*) FROM claims", [], |row| row.get(0)).unwrap()
 }
 
+#[test]
+fn open_memory_takes_a_write_while_a_reader_holds_a_snapshot() {
+    let store = Store::open_memory("reader-writer", Arc::new(Plain)).unwrap();
+    store.read_snapshot(|_| {
+        assert_eq!(claims(&store.readers.get()), 0);
+        append(&store);
+        assert_eq!(claims(&store.readers.get()), 0, "the held snapshot keeps its original cut");
+        Ok(())
+    }).unwrap();
+    assert_eq!(claims(&store.readers.get()), 1);
+}
+
 fn assert_opened_target(alias: &Path, target: &Path, scratch: &Path) {
     let store = Store::open(alias, "alder", Arc::new(Plain)).unwrap();
     let target = std::fs::canonicalize(target).unwrap();
@@ -140,7 +152,7 @@ fn fresh_relative_store_creates_parents_and_retains_the_opened_absolute_path() {
 
 #[test]
 fn shared_memory_uri_stays_shared_and_copies_in_full() {
-    let store = Store::open_memory("memory", Arc::new(Plain)).unwrap();
+    let store = Store::open_shared_memory("memory", Arc::new(Plain)).unwrap();
     assert!(store.shared_memory && store.readers.shared_memory);
     assert_eq!(store.path, store.readers.path);
     let uri = store.path.to_str().unwrap();

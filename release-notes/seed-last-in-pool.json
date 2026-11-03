@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test gains ST_TEST_POOL_RANK=last: a run whose ticket never ages and is never overdue, and which takes a pool tree only while no other run waits for one and another tree stays free for a seat that comes meanwhile; the shadow queue signer's seed (scripts/evidence-queue-signer seed) now runs that way, so a seat's st-test never waits behind a seed of main's tip; docs/st3/gate-evidence.md also warns never to name a pool path in a command's arguments",
+  "replay": {
+    "status": "none",
+    "detail": "No record, signature or storage format changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "None."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "The pool order: a rank-999 ticket (ST_TEST_POOL_RANK=last) sorts after every other ticket however long it has waited, and its waiter skips the TREE_FREE_FALLBACK_SECONDS liveness path and takes a tree only while at least two are free. Every other ticket's order is unchanged, and QUEUE_RULES is unchanged: no earlier copy writes a rank-999 ticket."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Callers that do not set ST_TEST_POOL_RANK are unchanged. An older st-test ignores the variable. Any other value fails the run before it takes a ticket."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart: the seed timer reads the signer and st-test from main on its next tick."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the change; the seed queues at the host's default rank again."
+  }
+}

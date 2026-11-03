@@ -107,6 +107,8 @@ pub mod agent_queue_values;
 pub mod backup_format;
 pub mod message_bodies;
 pub mod messages_shard;
+#[cfg(test)]
+mod planning_production_copy_tests;
 pub mod projectors;
 #[cfg(test)]
 pub mod projectors_tests;
@@ -2207,6 +2209,48 @@ pub struct Store {
     /// The store index up to which person answers were checked for overriding a deadline's
     /// default; in memory, so a restart checks them again and the notice's key keeps it once.
     pub person_answers_checked: std::sync::atomic::AtomicU64,
+    /// The last operation audit and fleet admission residue this process finished, which doctor
+    /// reports instead of reading the whole store inline; in memory, so a restart has neither
+    /// until its startup audits finish.
+    pub last_operation_audit: Mutex<Option<OperationAuditRecord>>,
+    /// The residue count is kept with the `fleet_generation` its membership was read at, or
+    /// none when it could not start or stopped.
+    pub last_fleet_residue: Mutex<Option<(Option<i64>, FleetResidueRecord)>>,
+    /// Wakes the daemon's residue count when doctor finds membership moved since the last one.
+    pub fleet_residue_wanted: tokio::sync::Notify,
+}
+
+/// How often the daemon audits the operation projection against the claim log and counts the
+/// fleet admission residue. Doctor calls a result older than two periods stale.
+pub const OPERATION_AUDIT_PERIOD: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// One finished background audit: when it finished, how long it took and what it found.
+#[derive(Clone, Debug)]
+pub struct AuditRecord<T> {
+    pub finished_at_unix_ms: u128,
+    pub took: std::time::Duration,
+    pub result: std::result::Result<T, String>,
+}
+
+/// The operation keys whose projection drifted from the claim log.
+pub type OperationAuditRecord = AuditRecord<Vec<String>>;
+/// Envelopes admitted before this node knew their writer's key or end.
+pub type FleetResidueRecord = AuditRecord<Vec<FleetAdmissionResidue>>;
+
+impl<T: Clone> AuditRecord<T> {
+    fn finished(started: std::time::Instant, result: &Result<T>) -> Self {
+        Self {
+            finished_at_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            took: started.elapsed(),
+            result: match result {
+                Ok(value) => Ok(value.clone()),
+                Err(error) => Err(format!("{error:#}")),
+            },
+        }
+    }
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2592,7 +2636,8 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2613,20 +2658,31 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
-    /// Open a shared-memory store for sequential fixtures and short-lived tools.
-    /// Concurrent server tests should use [`Self::open`]: shared-cache read/write
-    /// contention returns `SQLITE_LOCKED` immediately instead of waiting.
+    /// Open an owned temporary WAL store through the normal file-backed path.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_memory(origin: impl Into<String>) -> Result<Self> {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open_memory(origin, fractal.clone())?;
+        Self::finish_open(graph, fractal)
+    }
+
+    /// Open shared-cache memory mode for tests of that mode itself.
+    /// Concurrent server tests should use [`Self::open`]: shared-cache read/write
+    /// contention returns `SQLITE_LOCKED` immediately instead of waiting.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_shared_memory(origin: impl Into<String>) -> Result<Self> {
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open_shared_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -2728,8 +2784,65 @@ impl Store {
         Ok((count, conflicts))
     }
 
+    /// Audit the operation projection against the claim log, and keep the result for doctor.
     pub fn operation_projection_drift(&self) -> Result<Vec<String>> {
-        self.operation_audit(&mut |_| {})
+        let started = std::time::Instant::now();
+        let drift = self.operation_audit(&mut |_| {});
+        *self.last_operation_audit.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(AuditRecord::finished(started, &drift));
+        drift
+    }
+
+    /// The last operation audit this process finished, if any.
+    pub fn last_operation_audit(&self) -> Option<OperationAuditRecord> {
+        self.last_operation_audit.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// Count the fleet admission residue, and keep the result for doctor with the membership
+    /// generation it was counted at. Residue grows only when membership changes, since every
+    /// later admission is judged by the membership in force, so a count stays exact until the
+    /// generation moves.
+    pub fn audit_fleet_admission_residue(&self) -> Result<Vec<FleetAdmissionResidue>> {
+        let started = std::time::Instant::now();
+        let generation = match smallclaims::store::FleetAuthority::fleet_generation(&self.graph) {
+            Ok(generation) => generation,
+            Err(error) => {
+                self.fleet_residue_stopped(format!("{error:#}"));
+                return Err(error);
+            }
+        };
+        let residue = self.graph.fleet_admission_residue();
+        *self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((Some(generation), AuditRecord::finished(started, &residue)));
+        residue
+    }
+
+    /// The last fleet admission residue count, and whether membership has moved since it was
+    /// made. When it has, this wakes the daemon to count again; nothing counts inline.
+    pub fn current_fleet_residue(&self) -> Result<Option<(FleetResidueRecord, bool)>> {
+        let generation = smallclaims::store::FleetAuthority::fleet_generation(&self.graph)?;
+        let last = self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        Ok(last.map(|(counted_at, record)| {
+            // A count that stopped says so itself; the next one comes at the daemon's period.
+            let moved = counted_at.is_some_and(|counted_at| counted_at != generation);
+            if moved {
+                self.fleet_residue_wanted.notify_one();
+            }
+            (record, moved)
+        }))
+    }
+
+    /// Keep a residue count that stopped before it could finish, so doctor reports it.
+    pub fn fleet_residue_stopped(&self, error: String) {
+        let record = AuditRecord {
+            finished_at_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            took: std::time::Duration::ZERO,
+            result: Err(error),
+        };
+        *self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner) = Some((None, record));
     }
 
     pub fn rebuild_claim_projections(&self) -> Result<()> {
@@ -10423,8 +10536,12 @@ pub fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    holds::rebuilt(claim_ids.len());
     clear_quarantined_claims_tx(transaction, "projection:planning")?;
+    project_planning_claims_tx(transaction, claim_ids)
+}
+
+fn project_planning_claims_tx(transaction: &Transaction<'_>, claim_ids: Vec<String>) -> Result<()> {
+    holds::rebuilt(claim_ids.len());
     for id in claim_ids {
         let claim = claim_by_id_tx(transaction, &id)?
             .context("a planning claim disappeared during replay")?;
@@ -10557,6 +10674,33 @@ fn project_planning_claim_tx(transaction: &Transaction<'_>, claim: &ClaimRecord)
         _ => {}
     }
     Ok(())
+}
+
+/// Rebuild one planning session from its own claims. Every planning claim writes only the rows of
+/// the session its subject names, so this gives what `rebuild_planning_tx` gives for that session
+/// and leaves the others as they are. It costs what the session's history costs: rebuilding every
+/// session for each planning claim grew with all the planning the store had ever done.
+pub fn rebuild_planning_session_tx(transaction: &Transaction<'_>, session: &str) -> Result<()> {
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hd29260726759 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews WHERE session_id=?1", [session])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h0604d904ed35 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_candidates WHERE session_id=?1", [session])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hde78ac1818e2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_sessions WHERE id=?1", [session])?;
+    let mut statement = transaction.prepare(
+        /* sqlite-large-value: allow-for-now lv-hc251ec015da5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id
+         FROM claims WHERE subject=?1 AND kind >= 'planning-session.' AND kind < 'planning-session/'
+         ORDER BY CANONICAL_ASC(claims)"),
+    )?;
+    let claim_ids = statement
+        .query_map([format!("planning-session/{session}")], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    // Only this session's claims are decided again, so only their quarantine is forgotten.
+    for id in &claim_ids {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h7241d7e424fd owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:planning:'||?1",
+            [id],
+        )?;
+    }
+    project_planning_claims_tx(transaction, claim_ids)
 }
 
 fn known_replicated_claim_kind(kind: &str) -> bool {
@@ -11459,10 +11603,20 @@ fn select_actual_source(
     rows: &[(&str, &str, &str, &Value)],
     desired_host: Option<&str>,
 ) -> Option<(String, String, Vec<String>)> {
+    // A host the seat is not placed on can still record the end of its own old runtime, for
+    // instance after it restarts holding a seat that has moved (#4743). That end describes its
+    // copy, not the seat: once the desired host has observed the seat, it is never selected over
+    // the desired host's record. A non-owner that runs the seat is real state and still counts.
+    let owner_observed = desired_host.is_some_and(|host| {
+        rows.iter().any(|(_, kind, origin, _)| *kind == "runtime.observed" && *origin == host)
+    });
     let selected = rows
         .iter()
         .rev()
-        .find(|(_, kind, _, _)| *kind == "runtime.observed")
+        .filter(|(_, kind, _, _)| *kind == "runtime.observed")
+        .find(|(_, _, origin, body)| {
+            !(owner_observed && Some(*origin) != desired_host && terminal_observation(body))
+        })
         .or_else(|| rows.last());
     let &(selected_id, _, selected_origin, selected_body) = selected?;
     // An origin's newer runtime observation supersedes its older observations. In particular,
@@ -11544,6 +11698,13 @@ fn subject_descends_from_all(
     Ok(ancestors.iter().all(|ancestor| descends_from(ancestor)))
 }
 
+fn terminal_observation(body: &Value) -> bool {
+    matches!(
+        body.get("fields").unwrap_or(body).get("status").and_then(Value::as_str),
+        Some("stopped" | "absent" | "exited" | "vanished")
+    )
+}
+
 fn nonowner_terminal_observation(
     desired_host: Option<&str>,
     selected_origin: &str,
@@ -11559,13 +11720,7 @@ fn nonowner_terminal_observation(
             None
         }
     });
-    let other_fields = other_body.get("fields").unwrap_or(other_body);
-    owner == Some(selected_origin)
-        && other_origin != selected_origin
-        && matches!(
-            other_fields.get("status").and_then(Value::as_str),
-            Some("stopped" | "absent" | "exited" | "vanished")
-        )
+    owner == Some(selected_origin) && other_origin != selected_origin && terminal_observation(other_body)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -11910,6 +12065,84 @@ fn newest_mailbox_harness_state_query() -> String {
                THEN {INCARNATION_OF_CLAIM} END IS ?2
          ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
     )
+}
+
+/// What an incarnation's runtime records say about it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum IncarnationRuntime {
+    /// It runs, as observed by this record.
+    Running { claim: String },
+    /// It ended, or another incarnation replaced it.
+    Ended,
+    /// Nothing says either.
+    Unknown,
+}
+
+/// What `subject`'s `runtime.observed` records say about `incarnation`, newest first. A `running`
+/// record decides: this incarnation runs, or another replaced it. An end that names this
+/// incarnation ends it, whichever host recorded it. An end of another incarnation counts only
+/// while this one has not been seen running, and an end that names no incarnation counts only
+/// from the host where this one ran: a host that still holds a seat which has since moved records
+/// its own old runtime ending, not this one (#4743).
+pub fn runtime_incarnation_state(
+    connection: &Connection,
+    subject: &str,
+    incarnation: &str,
+) -> Result<IncarnationRuntime> {
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb6fac0d4d660 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT id, origin, body FROM claims
+         WHERE subject=?1 AND kind='runtime.observed'
+         ORDER BY CANONICAL_DESC(claims)",
+    ))?;
+    let rows = statement.query_map([subject], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })?;
+    // The hosts that recorded an end naming no incarnation, newer than any running record read.
+    let mut unnamed_ends = BTreeSet::new();
+    // Whether another incarnation's runtime ended, newer than any running record read so far.
+    let mut other_ended = false;
+    for row in rows {
+        let (claim, origin, body) = row?;
+        let body: Value = serde_json::from_str(&body)?;
+        let fields = body.get("fields").unwrap_or(&body);
+        let observed = fields.get("incarnation_id").and_then(Value::as_str);
+        match fields.get("status").and_then(Value::as_str) {
+            Some("running") => {
+                if let Some(current) = observed {
+                    return Ok(if current != incarnation || unnamed_ends.contains(&origin) {
+                        IncarnationRuntime::Ended
+                    } else {
+                        IncarnationRuntime::Running { claim }
+                    });
+                }
+            }
+            Some("exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
+                Some(ended) if ended == incarnation => return Ok(IncarnationRuntime::Ended),
+                Some(_) => other_ended = true,
+                None => {
+                    unnamed_ends.insert(origin);
+                }
+            },
+            _ => {}
+        }
+    }
+    // With no record that the incarnation ran, any end of the seat's runtime counts.
+    Ok(if other_ended || !unnamed_ends.is_empty() {
+        IncarnationRuntime::Ended
+    } else {
+        IncarnationRuntime::Unknown
+    })
+}
+
+/// Whether `incarnation` of `subject` is live for its work: its runtime records show it running,
+/// by [`runtime_incarnation_state`], and its own harness has not ended.
+pub fn work_incarnation_live(connection: &Connection, subject: &str, incarnation: &str) -> Result<bool> {
+    match runtime_incarnation_state(connection, subject, incarnation)? {
+        IncarnationRuntime::Running { claim } => {
+            Ok(!mailbox_harness_ended(connection, subject, incarnation, &claim)?)
+        }
+        IncarnationRuntime::Ended | IncarnationRuntime::Unknown => Ok(false),
+    }
 }
 
 fn mailbox_harness_ended(
@@ -16372,7 +16605,9 @@ pub fn try_project_simple_replication_tx(
     // A claim that reaches a part of the graph out of the replay's order marks that part to be
     // rebuilt from its own claims; everything else extends the graph as it arrives.
     let mut dirty = BTreeSet::<Aggregate>::new();
-    let mut rebuild_planning = false;
+    // The planning sessions this range's claims are about, or `None` when one names no session
+    // and only the whole planning projection can say where it belongs.
+    let mut planning_sessions = Some(BTreeSet::<&str>::new());
     // A run tree needs rebuilding for this node's own claims only when another writer's claims
     // about the same tree arrived in the same range, since only then can the two be out of the
     // replay's order. A tree that holds this node's claims alone already has them: they were
@@ -16432,7 +16667,10 @@ pub fn try_project_simple_replication_tx(
         // nor that ordering. Validate its shape here and its digest/state in the registry
         // below; do not force a full-store replay based on the identity's prefix.
         if claim.kind.starts_with("planning-session.") {
-            rebuild_planning = true;
+            planning_sessions = planning_sessions.and_then(|mut sessions| {
+                sessions.insert(claim.subject.strip_prefix("planning-session/")?);
+                Some(sessions)
+            });
         }
         if replay_projects_kind(&claim.kind)
             && !Store::simple_replication_kind(&claim.kind)
@@ -16460,6 +16698,14 @@ pub fn try_project_simple_replication_tx(
                     | "step-run.carried"
                     | "step-run.state"
                     | "step-run.retried"
+                    | "planning-session.started"
+                    | "planning-session.candidate-submitted"
+                    | "planning-session.previewed"
+                    | "planning-session.revision-requested"
+                    | "planning-session.approved"
+                    | "planning-session.cancelled"
+                    | "planning-session.question-requested"
+                    | "planning-session.question-answered"
             )
             || (has_operation && operation_parts(&claim.body).is_none())
         {
@@ -16872,9 +17118,21 @@ pub fn try_project_simple_replication_tx(
                 .with_detail("projection_subject", format!("mission-run/{root}"))
         })?;
     }
-    if rebuild_planning {
-        holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
-            .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?;
+    match planning_sessions {
+        Some(sessions) => {
+            for session in sessions {
+                holds::stage("rebuild-planning-session", || {
+                    rebuild_planning_session_tx(transaction, session)
+                })
+                .map_err(|error| {
+                    internal(error)
+                        .with_detail("projection_stage", "planning-rebuild")
+                        .with_detail("projection_subject", format!("planning-session/{session}"))
+                })?;
+            }
+        }
+        None => holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
+            .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?,
     }
     owned_sets::project_tx(transaction)
         .map_err(|error| error.with_detail("projection_stage", "owned-set-project"))?;
