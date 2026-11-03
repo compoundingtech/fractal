@@ -13,6 +13,7 @@ import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
+import { tooltipFor } from './story-play'
 import { surfaceVars as surface, textVars as text, spaceVars as space, typeVars as type, radiusVars as radius } from './assistant-ui/composition-tokens.stylex'
 
 const panes: readonly WorkbenchPane[] = [
@@ -244,20 +245,6 @@ function assertSelected(tab: HTMLElement) {
   const panel = tab.ownerDocument.getElementById(panelId!)!
   requireContract(panel.querySelector<HTMLElement>('[data-pane-key]')?.dataset.paneKey === tab.dataset.tabKey, 'Wrong resource body')
   requireContract(painted(tab), 'Selected resource is not revealed whole')
-}
-/**
- * The tab's disclosure, resolved through its own aria-describedby. A document-wide ByRole
- * query re-runs on every mutation at 46ms (unthrottled) to 319ms (6x CPU) per check on this
- * page, so under load a few checks consumed the whole 1s budget meant for RAC's 0 or 350ms
- * (warm or cold) open delay and missed a tooltip that was already mounted.
- */
-async function tooltipFor(tab: HTMLElement, name: string) {
-  return waitFor(() => {
-    const tooltip = tab.getAttribute('aria-describedby')?.split(/\s+/).map(id => tab.ownerDocument.getElementById(id)).find(node => node?.getAttribute('role') === 'tooltip')
-    requireContract(tooltip !== undefined && tooltip !== null, `Missing tooltip for ${name}`)
-    expect(tooltip).toHaveAccessibleName(name)
-    return tooltip
-  })
 }
 async function interactionPlay({ canvasElement }: { canvasElement: HTMLElement }) {
   const strip = await stripFor(canvasElement)
