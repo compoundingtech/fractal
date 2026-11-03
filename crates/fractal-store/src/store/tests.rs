@@ -1862,11 +1862,12 @@ fn base_replay_body_page_work_does_not_grow_with_selected_order_size() {
     let store = Store::open_memory("node").unwrap();
     let mut connection = store.connection.write();
     let tx = connection.transaction().unwrap();
-    tx.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hdf54adb9112e owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(
-            ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)",
-    )
-    .unwrap();
+    // Normal store initialization creates replay scratch on the writer connection.
+    assert_eq!(
+        tx.query_row("SELECT COUNT(*) FROM temp.heal_replay_base_order", [], |row| row.get::<_, u64>(0)).unwrap(),
+        0,
+        "a fresh store leaves an empty replay order"
+    );
     let mut costs = Vec::new();
     for (start, end) in [(0, 512), (512, 4096)] {
         for number in start..end {
