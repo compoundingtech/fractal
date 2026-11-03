@@ -11,7 +11,7 @@
 //! This module is location-agnostic: it operates on an inbox/agent directory a caller resolves (from
 //! the catalog for VRS-native, or `$ST_ROOT` for a compat shim).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -306,11 +306,6 @@ pub fn materialize_message_once(
 
 /// The staging-name prefix for everything this module stages.
 const TMP_PREFIX: &str = ".message";
-
-/// The full staged-name prefix four inbox and sent-record walkers skip by prefix, spelled ONCE so
-/// a walker cannot drift from the writer. Tied to [`TMP_PREFIX`] by
-/// `the_staging_prefix_is_the_one_the_inbox_walkers_skip`.
-const TMP_STAGING_PREFIX: &str = ".message.tmp-";
 
 fn tmp_name() -> String {
     crate::fsatomic::staging_name(TMP_PREFIX)
@@ -1321,13 +1316,12 @@ fn remove_inbox_duplicate(source: &Path, filename: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// Native inbox walkers skip the staged name by [`TMP_STAGING_PREFIX`]. A shared const
-    /// cannot catch both sides being renamed together, which would leave already-staged files
-    /// unrecognized — hence the value assertion.
+    /// Native inbox walkers reject staged names as non-message filenames. Pin the historical
+    /// prefix on the actual generated name as well as that rejection.
     #[test]
     fn the_staging_prefix_is_the_one_the_inbox_walkers_skip() {
         assert_eq!(TMP_PREFIX, ".message");
-        assert_eq!(TMP_STAGING_PREFIX, format!("{TMP_PREFIX}.tmp-"));
+        assert!(tmp_name().starts_with(".message.tmp-"));
         assert!(
             !is_message_filename(&tmp_name()),
             "a staged name must never look like a message"
@@ -1367,7 +1361,7 @@ mod tests {
         let residue = fs::read_dir(path.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(TMP_STAGING_PREFIX))
+            .filter(|name| name.starts_with(".message.tmp-"))
             .collect::<Vec<_>>();
         assert!(
             residue.is_empty(),
@@ -1400,7 +1394,7 @@ mod tests {
         let residue = fs::read_dir(tmp.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(TMP_STAGING_PREFIX))
+            .filter(|name| name.starts_with(".message.tmp-"))
             .collect::<Vec<_>>();
         assert!(
             residue.is_empty(),
