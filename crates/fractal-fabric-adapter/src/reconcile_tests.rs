@@ -38,7 +38,7 @@ fn renamed_owner_reduction_and_recovered_batches_are_reader_only() {
         BTreeSet::from(["st3/fleet/test-fleet".into()]),
     )]);
     let retained = retained_policy(&snapshot, renamed, &desired);
-    let operations = plan(&snapshot, renamed, &retained);
+    let operations = plan(&snapshot, renamed, &retained, &Expiries::new());
     assert_eq!(
         operations[0],
         json!({"op":"remove_peer","node_id":"old-node"})
@@ -47,9 +47,9 @@ fn renamed_owner_reduction_and_recovered_batches_are_reader_only() {
     let mut pending = uncertain_add();
     pending.request["owner"] = json!(renamed);
     pending.request["operations"][1]["grants"] = json!(["fractal/fleet/test-fleet"]);
-    assert!(!pending_matches_desired(&pending, &desired));
-    pending.request["operations"][1]["grants"] = json!(["fractal/pty/test-fleet"]);
-    assert!(!pending_matches_desired(&pending, &desired));
+    assert!(!pending_matches_desired(&pending, &desired, &Expiries::new()));
+    pending.request["operations"][1]["grants"] = json!([format!("{RENAMED_PTY_PREFIX}{FLEET}")]);
+    assert!(!pending_matches_desired(&pending, &desired, &Expiries::new()));
 }
 
 #[tokio::test]
@@ -59,7 +59,7 @@ async fn renamed_pending_addition_is_observed_never_sent() {
     pending.request["owner"] = json!(format!("{RENAMED_OWNER_PREFIX}{FLEET}"));
     let (socket, server) = serve(root.path(), vec![Some(mutation(vec![], "complete"))]);
     complete_pending(&socket, &pending, pending_matches_desired(&pending,
-        &DesiredPolicy::from([("peer-node".into(), grants(FLEET))]))).await.unwrap();
+        &DesiredPolicy::from([("peer-node".into(), grants(FLEET))]), &Expiries::new())).await.unwrap();
     assert_eq!(server.await.unwrap()[0]["request"]["operation"], "cancellation");
 }
 
@@ -214,7 +214,7 @@ async fn adds_peer_and_replaces_exact_grants_in_one_atomic_batch() {
         vec![
             Some(list(vec![], 7)),
             Some(mutation(vec![], "complete")),
-            Some(list(vec![], 8)),
+            Some(list(vec![peer("peer-node", OWNER, &["st3-client-v0", "st3/fleet/test-fleet"])], 8)),
         ],
     );
     let status = reconcile(
@@ -247,12 +247,16 @@ async fn adds_peer_and_replaces_exact_grants_in_one_atomic_batch() {
 #[tokio::test]
 async fn rekey_removes_old_identity_and_adds_new_in_same_transaction() {
     let root = tempfile::tempdir().unwrap();
+    let services = ["st3-client-v0", "st3/fleet/test-fleet"];
+    let mut membership = view();
+    let member_key = membership.members[1].member_key.clone();
+    membership.members[1].endpoints[0]["node"] = json!("new-node");
     let (socket, server) = serve(
         root.path(),
         vec![
-            Some(list(vec![peer("old-node", OWNER, &["exec", "echo"])], 7)),
+            Some(list(vec![peer("old-node", OWNER, &services)], 7)),
             Some(mutation(vec![], "complete")),
-            Some(list(vec![], 8)),
+            Some(list(vec![peer("new-node", OWNER, &services)], 8)),
         ],
     );
     reconcile(
@@ -260,19 +264,30 @@ async fn rekey_removes_old_identity_and_adds_new_in_same_transaction() {
         &socket,
         FLEET,
         "own-key",
-        &view(),
+        &membership,
         &BTreeSet::new(),
     )
     .await
     .unwrap();
     let requests = server.await.unwrap();
-    let operations = requests[1]["request"]["operations"].as_array().unwrap();
+    assert_eq!(membership.members[1].member_key, member_key);
+    // Only list -> one mutation -> list crosses the control boundary. There is
+    // no separate remove/add request that could expose an intermediate policy.
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0]["request"]["operation"], "list");
+    assert_eq!(requests[2]["request"]["operation"], "list");
+    let batch = &requests[1]["request"];
+    assert_eq!(batch["operation"], "batch");
+    assert_eq!(batch["owner"], OWNER);
+    assert_eq!(batch["expected_revision"], 7);
     assert_eq!(
-        operations[0],
-        json!({"op":"remove_peer", "node_id":"old-node"})
+        batch["operations"],
+        json!([
+            {"op":"remove_peer", "node_id":"old-node"},
+            {"op":"add_peer", "node_id":"new-node"},
+            {"op":"set_grants", "node_id":"new-node", "grants":services}
+        ])
     );
-    assert_eq!(operations[1]["node_id"], "peer-node");
-    assert_eq!(operations.len(), 3);
 }
 
 #[tokio::test]
@@ -289,7 +304,7 @@ async fn existing_owner_grants_are_replaced_without_touching_other_owners() {
                 7,
             )),
             Some(mutation(vec![], "complete")),
-            Some(list(vec![], 8)),
+            Some(list(vec![peer("peer-node", OWNER, &["st3-client-v0", "st3/fleet/test-fleet"])], 8)),
         ],
     );
     reconcile(
@@ -352,7 +367,7 @@ async fn lost_reply_retries_identical_request_id_revision_and_contents() {
             Some(list(vec![], 7)),
             None,
             Some(mutation(vec![], "complete")),
-            Some(list(vec![], 8)),
+            Some(list(vec![peer("peer-node", OWNER, &["st3-client-v0", "st3/fleet/test-fleet"])], 8)),
         ],
     );
     reconcile(
@@ -677,7 +692,7 @@ async fn real_fault_class_revision_conflict_allows_fresh_reconciliation() {
             Some(conflict),
             Some(list(vec![], 8)),
             Some(mutation(vec![], "complete")),
-            Some(list(vec![], 9)),
+            Some(list(vec![peer("peer-node", OWNER, &["st3-client-v0", "st3/fleet/test-fleet"])], 9)),
         ],
     );
     assert!(
@@ -977,3 +992,15 @@ async fn leave_drain_never_replays_full_service_grants() {
         ])
     );
 }
+
+#[tokio::test]
+async fn successful_mutation_without_verified_install_is_an_error() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, server) = serve(root.path(), vec![
+        Some(list(vec![], 7)), Some(mutation(vec![], "complete")), Some(list(vec![], 8)),
+    ]);
+    assert!(reconcile(root.path(), &socket, FLEET, "own-key", &view(), &BTreeSet::new())
+        .await.unwrap_err().to_string().contains("final snapshot"));
+    server.await.unwrap();
+}
+
