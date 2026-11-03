@@ -189,7 +189,7 @@ pub trait AccountsStore {
         ) -> Vec<AccountDecl>;
     /// The account `seat` starts on at `host`, or why it cannot start. A single binding names its
     /// account. A pool keeps the account the seat already runs on, and otherwise takes the one
-    /// with the most usage left.
+    /// with the most usage left. `retain_choice = false` previews without persisting a pool choice.
     fn account_for_start(
             &self,
             seat: &str,
