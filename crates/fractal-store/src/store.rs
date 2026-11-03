@@ -17983,6 +17983,7 @@ pub fn project_mission_run_update(
         }
         if claim.kind == "work.handoff-returned" {
             transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h26512c176d95 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE step_runs SET assignee=?2, available_to='[]', status='ready', lease_owner=NULL,
                  lease_incarnation=NULL, lease_expires_at_unix_ms=NULL, readiness_epoch=?3,
                  updated_at_unix_ms=?4 WHERE subject=?1",
