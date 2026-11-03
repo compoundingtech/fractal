@@ -1,30 +1,51 @@
 //! Host-local launch identity; publication never changes incarnation evidence.
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path, sync::OnceLock};
 
 use anyhow::{Context as _, Result};
 use crate::launch_contract::Contract;
-use crate::model::{DesiredSubject, LaunchSpec};
+use crate::model::{DesiredSubject, LaunchSpec, MemberSpec};
 use crate::store::Store;
 
+type Prepare = Box<dyn Fn(&DesiredSubject) -> Result<MemberSpec> + Send + Sync>;
+#[derive(Default)]
+struct Preparation(OnceLock<Prepare>);
+pub(crate) fn install(store: &Store, prepare: Prepare) {
+    let _ = store.extension::<Preparation>().0.set(prepare);
+}
+
 pub fn declared(store: &Store, desired: &DesiredSubject) -> Result<Contract> {
-    let member = desired.member.as_ref().context("launch contract needs a member")?;
+    let preparation = store.extension::<Preparation>();
+    let member = match preparation.0.get() {
+        Some(prepare) => prepare(desired)?,
+        None => desired.member.clone().context("launch contract needs a member")?,
+    };
+    capture(store, desired, &member, false)
+}
+
+pub(crate) fn capture(store: &Store, desired: &DesiredSubject, member: &MemberSpec, running: bool) -> Result<Contract> {
     let executable = crate::reconcile::launch_executable()?;
     let environment = crate::reconcile::member_environment(&member.environment, &executable, None)?;
-    let mut programs = BTreeMap::from([("launcher", executable)]);
-    let provider = match &member.launch {
+    let resolve = |program: &str| {
+        let mut program = program.to_owned();
+        fractal_runtime::expand_path_placeholder(&mut program, &environment);
+        let path = fractal_runtime::resolve_executable(&program, &environment)?;
+        Ok(if path.is_absolute() { path } else { Path::new(&member.cwd).join(path) })
+    };
+    let authored = desired.member.as_ref().context("launch contract needs a member")?;
+    let provider = match &authored.launch {
         LaunchSpec::Shell(_) => "sh",
         LaunchSpec::Argv(argv) => {
-            let position = if member.driver.is_some() {
+            let position = if authored.driver.is_some() {
                 argv.iter().position(|arg| arg == "--").context("harness launch has no provider")? + 1
             } else { 0 };
             argv.get(position).context("launch has no program")?
         }
     };
-    programs.insert("provider", fractal_runtime::resolve_executable(provider, &environment)?);
-    let binaries = programs.into_iter()
-        .map(|(role, path)| Ok((role.to_owned(), fractal_drivers::harness_admission::executable_identity(&path)?)))
+    let binaries = BTreeMap::from([("launcher", executable), ("provider", resolve(provider)?)])
+        .into_iter().map(|(role, path)| Ok((role.to_owned(),
+            fractal_drivers::harness_admission::executable_identity_with(&path, &resolve)?)))
         .collect::<Result<BTreeMap<_, _>>>()?;
-    crate::launch_contract::capture(store, desired, &binaries)
+    crate::launch_contract::capture_effective(store, desired, &binaries, &environment, running)
 }
 
 /// Running identity is exclusively the receipt for the observed incarnation, never its token's

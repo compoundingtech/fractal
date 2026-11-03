@@ -196,6 +196,7 @@ pub trait AccountsStore {
             binding: &HarnessBinding,
             host: &str,
             now: u128,
+            retain_choice: bool,
         ) -> Result<SeatAccount, String>;
     /// The pool accounts a seat on `host` could move to when `leaving` runs out: the ones other than
     /// `leaving` whose weekly reading is under `limit_percent`, most usage left first.
@@ -290,6 +291,7 @@ impl AccountsStore for Store {
             binding: &HarnessBinding,
             host: &str,
             now: u128,
+            retain_choice: bool,
         ) -> Result<SeatAccount, String> {
         let accounts = self
             .declared_accounts()
@@ -342,8 +344,10 @@ impl AccountsStore for Store {
                                 binding.driver
                             )
                         })?;
-                    self.choose_seat_account(seat, &name, now)
-                        .map_err(|error| error.to_string())?;
+                    if retain_choice {
+                        self.choose_seat_account(seat, &name, now)
+                            .map_err(|error| error.to_string())?;
+                    }
                     bindable
                         .into_iter()
                         .find(|account| account.name == name)

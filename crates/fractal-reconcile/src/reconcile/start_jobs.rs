@@ -217,7 +217,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let result = caught(|| {
                 guard()?;
                 if prepared.subject.kind == "agent" {
-                    contract = Some(runtime.launch_contract(&store, &prepared.subject)?);
+                    contract = Some(runtime.launch_contract(&store, &prepared.subject, &prepared.launch_member)?);
                 }
                 backend_entered = true;
                 runtime.start_guarded(&prepared.launch_member, &guard)?;

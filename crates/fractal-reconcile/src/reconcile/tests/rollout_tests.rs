@@ -16,7 +16,7 @@ struct Runtime {
     late_stops: Mutex<u32>,
 }
 impl RuntimeControl for Runtime {
-    fn launch_contract(&self, store: &Store, desired: &DesiredSubject) -> Result<crate::launch_contract::Contract> {
+    fn launch_contract(&self, store: &Store, desired: &DesiredSubject, _: &MemberSpec) -> Result<crate::launch_contract::Contract> {
         crate::launch_contract::capture(store, desired, &BTreeMap::from([
             ("provider".into(), self.binary.lock().unwrap().clone()),
         ]))
