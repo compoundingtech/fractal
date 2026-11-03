@@ -130,7 +130,7 @@ export const AgentNotes = ({ agentRef, targetLabel }: { readonly agentRef: strin
       collapse()
     }} />
   const observed = feed._tag === 'Observed' ? feed : undefined
-  return <section aria-label="Agent notes" data-testid="agent-notes" data-agent-notes={agentRef} {...stylex.props(styles.host)}>
+  return <section aria-label={`Notes for ${label}`} data-testid="agent-notes" data-agent-notes={agentRef} {...stylex.props(styles.host)}>
     <div {...stylex.props(styles.lane)}>
       <div {...stylex.props(styles.header)}>
         {observed !== undefined

@@ -132,7 +132,7 @@ function FeedCasePane({ feedCase }: { readonly feedCase: FeedCase }) {
   return <section aria-label={feedCase.label} data-feed-case={feedCase.id} {...stylex.props(styles.feedCase)}>
     <h2 {...stylex.props(styles.heading)}>{feedCase.label}</h2>
     <DataSourceProvider source={fixture.source} registry={fixture.registry}>
-      <AgentNotes agentRef={target} targetLabel={feedCase.targetLabel ?? 'Reviewer'} />
+      <AgentNotes agentRef={target} targetLabel={feedCase.targetLabel ?? `Reviewer — ${feedCase.label}`} />
     </DataSourceProvider>
   </section>
 }
@@ -307,6 +307,9 @@ const touchPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
 
 const feedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const pane = (id: string) => within(canvasElement.querySelector<HTMLElement>(`[data-feed-case="${id}"]`)!)
+  for (const feedCase of feedCases(false)) {
+    await expect(pane(feedCase.id).getByRole('region', { name: `Notes for ${feedCase.targetLabel ?? `Reviewer — ${feedCase.label}`}` })).toBeInTheDocument()
+  }
   const openComposer = async (id: string) => {
     await userEvent.click(pane(id).getByTestId('agent-notes-add'))
     return pane(id).getByTestId('note-composer')
