@@ -158,7 +158,6 @@ mod tests {
             }]
         }));
     }
-
     #[test]
     fn every_declared_input_changes_only_its_component() {
         let root = tempfile::tempdir().unwrap();
@@ -188,7 +187,6 @@ mod tests {
             assert_eq!(new.drift(&old), Some(Drift { prompt: false, binary: true }));
         }
     }
-
     #[test]
     fn persona_context_and_tool_file_bytes_are_not_reconstructed_from_paths() {
         let root = tempfile::tempdir().unwrap();
