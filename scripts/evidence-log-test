@@ -165,6 +165,26 @@ sys.exit(log.main(sys.argv[1:]))
         self.assertNotIn(new, self.host_git('for-each-ref', '--format=%(objectname)', log.COPY))
         self.assertEqual(self.pull()[1]['added'], 1)
 
+    def test_each_checkpoint_refuses_a_remote_that_moved_after_the_previous_push(self):
+        self.record(seconds=0)
+        self.record(seconds=10)
+        publish = log.publish
+        pushes = []
+
+        def moved(repo, remote, summary, published):
+            result = publish(repo, remote, summary, published)
+            pushes.append((published, summary['head'], result))
+            if len(pushes) == 1:
+                subprocess.run(['git', '-C', str(self.remote), 'update-ref', log.LOG, self.commit], check=True)
+            return result
+
+        with mock.patch.object(log, 'CHUNK_REFS', 1), mock.patch.object(log, 'publish', side_effect=moved):
+            self.assertEqual(log.main(['pull', '--repo', str(self.host), '--publish', '--signer', json.dumps(self.signer),
+                                       '--log-keys', str(self.log_keys), '--now', str(NOW)]), 1)
+        self.assertEqual([push[2] for push in pushes], [True, False])
+        self.assertEqual(pushes[1][0], pushes[0][1], 'the second checkpoint leases the first published head')
+        self.assertEqual(self.remote_head(), self.commit, 'the concurrent remote change was not overwritten')
+
     def test_elapsed_verification_time_also_triggers_a_checkpoint(self):
         self.record(seconds=0)
         self.record(seconds=10)
