@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 mod rich;
+mod notice;
+mod notice_schema;
 
 const RUST_MODELS_TEMPLATE: &str = include_str!("../templates/generated.rs.in");
 const RUST_CLIENT_TEMPLATE: &str = include_str!("../templates/lib.rs.in");
@@ -69,6 +71,17 @@ fn main() -> Result<()> {
         &rust_client,
         &swift_models,
         &swift_client,
+    )?;
+    let (notice_models, notice_schema) = notice::models(&schema)?;
+    output(
+        &root.join("crates/fractal-client/src/notice_models.generated.rs"),
+        &format_rust(&notice_models)?,
+        check,
+    )?;
+    output(
+        &root.join("crates/fractal-client/src/notice_schema.generated.json"),
+        &notice_schema,
+        check,
     )?;
     output(
         &root.join("crates/fractal-client/src/contract.rs"),
