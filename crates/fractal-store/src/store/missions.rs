@@ -725,6 +725,21 @@ impl Store {
         at_index: Option<u64>,
         declared_agents: &BTreeSet<String>,
     ) -> Result<MissionResponse, St3Error> {
+        // Concurrent publication changes both run existence and capacity. Preview them
+        // from one snapshot, along with the subject tokens that fence publication.
+        self.read_snapshot_unindexed(|| {
+            Ok(self.mission_at_in_snapshot(intent, resolved_intent, at_index, declared_agents))
+        })
+        .map_err(internal)?
+    }
+
+    fn mission_at_in_snapshot(
+        &self,
+        intent: &NormalizedIntent,
+        resolved_intent: IntentInput,
+        at_index: Option<u64>,
+        declared_agents: &BTreeSet<String>,
+    ) -> Result<MissionResponse, St3Error> {
         let connection = self.readers.get();
         let normalized_intent = identities::normalize_intent(&connection, intent)?;
         let intent = normalized_intent.as_ref();
@@ -1236,6 +1251,14 @@ impl Store {
 
 const AGENT_WORK_PREVIEW_LIMIT: usize = 5;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Commit a concurrent publication between the run lookup and later preview reads.
+    pub static MISSION_AFTER_RUN_LOOKUP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_mission_run_declaration(
     connection: &Connection,
@@ -1280,6 +1303,10 @@ fn prepare_mission_run_declaration(
         )
         .optional()
         .map_err(internal)?;
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(after_lookup) = MISSION_AFTER_RUN_LOOKUP.with(|hook| hook.borrow_mut().take()) {
+        after_lookup();
+    }
     if let Some(creation) = &declaration.creation {
         if let Some((mission, revision, workspace, requester, _, _, inputs, mode)) = &current {
             let stored_inputs = serde_json::from_str::<BTreeMap<String, MissionRunInput>>(inputs)
