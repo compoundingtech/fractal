@@ -36,7 +36,7 @@ the history.** Specifically, at any moment it holds at most:
 Everything proportional to the sealed set lives in a staging file on disk: the envelopes, the
 compact claim rows, the drop marks, the new tombstones and the proof's saved answers.
 
-The test (`crates/st3/tests/checkpoint_memory.rs`) states the number. On a synthetic history of
+The test (`crates/fractal/tests/checkpoint_memory.rs`) states the number. On a synthetic history of
 4,800 claims in many small slots, a full pass (capture, plan, prove, trim) raises live heap by at
 most 8 MiB above its starting point, measured by a counting allocator. The same pass on four times
 the history raises it by less than 1.5 times as much. The staged pass holds under 1 MiB at both
@@ -70,6 +70,18 @@ key. The seal pass reads each in key order, 64 rows per snapshot from the last k
 the two streams and feeds the digest as it goes. Each page checks the capture epoch, as capture
 pages do today, so a trim or repair between pages restarts the read instead of tearing it. No
 staging file is needed and nothing is held.
+
+A node waiting for its peers' seals reads the same digest on every pass, and on a large store the
+walk is most of the pass (about 325 s of CPU each on a 2.8M-envelope store, 0.18 cores in all). So
+the seal pass registers its cut and seal row with the capture guard first, as a capture does, and
+the store keeps the last digest it walked with the epoch it walked it at. The next pass returns it
+after one snapshot shows the same cut and epoch and no envelope dated before the cut between the
+row the digest was walked up to, the seal row and the guard's frontier: the guard's triggers move
+the epoch on every change that can alter the set below the frontier, and the rows above it are
+read directly. A walk is kept only if the epoch did not move while it ran. The digest lives in
+memory, so a restart, a trigger migration or a restore walks again. `SealedIdentityMemo` in
+`smallclaims::store::checkpoint` gives the full argument, and
+`checkpoint_identity_reuse_tests` checks it change by change.
 
 ### Capture stages to disk, with a durable cursor
 
@@ -122,8 +134,8 @@ consistent prefix and its cursor. The phases, in order:
    writes one compact row: canonical position, ID, envelope, kind, subject, actor, operation,
    validity, whether it is a first occurrence, its field names, and its rule and slot key or
    status seat, which the runtime computes from the body. It also writes the claim's blob hashes,
-   the IDs it cites as evidence or pins as a run input, and any request it closes. The body is
-   dropped when the page is written.
+   the IDs it cites as evidence, pins as a run input or names as a request's discovery, and any
+   request it closes. The body is dropped when the page is written.
 4. **Protection.** The protected-claim queries, by rowid, into a table of protected IDs.
 5. **Earlier tombstones.** `checkpoint_envelopes` and `checkpoint_claims` before the cut, by
    rowid, as today's filter selects them.

@@ -256,7 +256,7 @@ fn sqlite_contention_rolls_back_without_replay_or_health_change_and_next_pass_co
             assert!(
                 !lines
                     .iter()
-                    .any(|line| line.starts_with("st: projection full replay "))
+                    .any(|line| line.starts_with("fractal: projection full replay "))
             );
             assert!(store.project_replication_backlog().unwrap());
             assert_eq!(health(&store), ("healthy".into(), target));
@@ -490,6 +490,75 @@ fn empty_wal_checkpoint_needs_no_writer_loan() {
     assert_eq!(report.frames, 0);
     assert_eq!(report.writer_wait_ms, 0);
     assert_eq!(report.truncate_ms, None);
+}
+
+#[test]
+fn a_checkpoint_held_up_for_the_writer_names_the_hold_ahead_of_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claims.sqlite3");
+    let store = Arc::new(Store::open(&path, "node", Arc::new(Plain)).unwrap());
+    let checkpoint = Connection::open(&path).unwrap();
+    // Nothing holds the writer: the wait is short and names nothing.
+    pending_claim(&store);
+    let report = store.checkpoint_idle_wal_report(&checkpoint).unwrap();
+    assert!(report.truncate_ms.is_some(), "{report:?}");
+    assert_eq!(report.blocked_by, None);
+    // A borrower holds the writer while the checkpoint asks for it.
+    pending_claim(&store);
+    let held = crate::performance::with_cpu(Some("test/checkpoint-blocker"), Some("member-e"), || store.connection.write());
+    let target = store.clone();
+    let worker = std::thread::spawn(move || {
+        let connection = Connection::open(path).unwrap();
+        target.checkpoint_idle_wal_report(&connection).unwrap()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    drop(held);
+    let report = worker.join().unwrap();
+    assert!(report.writer_wait_ms >= 100, "{report:?}");
+    let blocked_by = report.blocked_by.expect("a held-up checkpoint names what held it up");
+    assert_eq!(blocked_by["holder"], "test/checkpoint-blocker");
+    assert_eq!(blocked_by["client"], "member-e");
+    assert_eq!(blocked_by["kind"], "lend");
+    assert!(blocked_by["at"].as_str().unwrap().contains("projection_busy_tests.rs"), "{blocked_by}");
+    assert!(blocked_by["held_ms"].as_f64().unwrap() >= 300.0, "{blocked_by}");
+    assert!(blocked_by["holds"].as_u64().unwrap() >= 1, "{blocked_by}");
+}
+
+#[test]
+fn healthy_empty_source_skips_runtime_writes_but_not_ahead_frontiers_or_verdicts() {
+    let store = Store::open_memory("node", Arc::new(FaultRuntime::new())).unwrap();
+    assert!(store.project_replication_backlog().unwrap());
+    let writes = store.connection.write().total_changes();
+    let mut phases = Vec::new();
+    assert!(store.project_replication_backlog_with_progress("test", |progress| {
+        phases.push(progress.phase);
+    }).unwrap());
+    assert_eq!(store.connection.write().total_changes(), writes,
+        "a healthy empty source must not execute runtime writes, even rolled-back ones");
+    assert!(phases.contains(&"projection-current"));
+    assert!(!phases.contains(&"projection-committed"));
+
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hbefa73f065eb owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET last_good_store_index=999999 WHERE aggregate='graph'", [],
+    ).unwrap();
+    phases.clear();
+    assert!(store.project_replication_backlog_with_progress("test", |progress| {
+        phases.push(progress.phase);
+    }).unwrap());
+    assert!(phases.contains(&"projection-committed"),
+        "an ahead frontier must reach the runtime's projection guard");
+
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h87a5ba694468 owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET last_good_store_index=0 WHERE aggregate='graph'", [],
+    ).unwrap();
+    store.verdicts_due.store(true, Ordering::Release);
+    phases.clear();
+    assert!(store.project_replication_backlog_with_progress("test", |progress| {
+        phases.push(progress.phase);
+    }).unwrap());
+    assert!(phases.contains(&"projection-committed"),
+        "pending verdicts must retain the projection commit boundary");
+    assert!(!store.verdicts_due.load(Ordering::Acquire));
 }
 
 #[test]

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The evaluation clock elision test runs as two tests, one per fixture (a single untimed step, and 20 steps with timeouts), so they run in parallel: its wall time is about 20 s instead of about 27 s on a build host, with the same checks.",
+  "replay": {"status": "none", "detail": "Test-only change; no claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to run both fixtures in one test again."}
+}

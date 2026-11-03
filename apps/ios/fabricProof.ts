@@ -9,7 +9,7 @@ export type FabricProfile = {
 export function parseFabricProofLink(link: string): FabricProofInput | null {
   let url: URL;
   try { url = new URL(link); } catch { return null; }
-  if (!['com.compoundingtech.smalltalk.starter:', 'com.compoundingtech.smalltalk.fabricproof:'].includes(url.protocol) || url.hostname !== 'fabric-proof') return null;
+  if (!['com.compoundingtech.fractal.starter:', 'com.compoundingtech.fractal.fabricproof:'].includes(url.protocol) || url.hostname !== 'fabric-proof') return null;
   const node = url.searchParams.get('node'), service = url.searchParams.get('service');
   if (!node || !/^[a-f0-9]{64}$/i.test(node) || !service || new TextEncoder().encode(service).length > 255 || service.includes('\n') || service.includes('\0') || service.startsWith('git/')) return null;
   const mode = url.searchParams.get('mode');

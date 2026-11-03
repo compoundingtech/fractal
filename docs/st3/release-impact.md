@@ -38,6 +38,18 @@ Existing fragments are immutable: corrections, later measurements and backfills 
 Reviewers check the metadata against the whole change. Labels can draw attention to an impact,
 but do not replace the committed details.
 
+Under [R49's rolling-fleet contract](compatibility.md#required-rolling-window),
+new changes must not require “deploy daemons together” during the N/N-1 window
+unless incompatible behavior is gated on every active member's advertised support.
+Describe the gate and its tests in the fragment; known mixed-fleet incompatibility
+is `changed`, never `none`. Requiring coordinated deployment without a gate does
+not meet the requirement, regardless of its classification.
+**Open: [#4002](https://github.com/compoundingtech/fractal/issues/4002)** tracks
+automated rejection of ungated coordinated-deployment text and status/text
+contradictions; the current fast check does not enforce that semantic rule.
+It also tracks a fresh correction for the immutable
+`restart-retries-a-parked-launch.json` fragment's `owner_run` compatibility status.
+
 For a schema/rules version change, include integer pairs in `transitions`, for example:
 
 ```json
@@ -112,7 +124,7 @@ the relevant source and tags. `--output FILE --manifest FILE` writes the same no
 classified, and schema/rules changes must have matching metadata; otherwise the command
 fails with the missing sources. Explicit unknowns remain reviewable in the report.
 
-`scripts/release-smalltalk-daily --dry-run` also verifies the existing archives and prints
+`scripts/release-fractal-daily --dry-run` also verifies the existing archives and prints
 the same notes. Manual dispatch uses that same script. Tag publication invokes the same
 renderer before creating a GitHub draft. Both paths publish the impact report alongside
 the existing exact-source manifest/checksums and refuse publication when classifications

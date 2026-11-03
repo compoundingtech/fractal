@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Test only: fractal-api-core's an_event_wait_ignores_a_wake_without_a_matching_event uses a file-backed store, as the daemon does. Its waiter reads while the test appends, and in the shared-cache memory store that read failed at once with \"database table is locked\".",
+  "replay": {
+    "status": "none",
+    "detail": "No record, signature or storage format changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Test only."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Test only."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the change."
+  }
+}

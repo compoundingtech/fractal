@@ -708,6 +708,135 @@ fn admission_keeps_a_record_repaired_before_it() {
     );
 }
 
+/// Snapshot every column, including timestamps and wire bytes.
+fn admission_snapshot(connection: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+    let mut result = Vec::new();
+    for query in [
+        "SELECT * FROM replica_records ORDER BY record_ref",
+        "SELECT * FROM replica_envelopes ORDER BY writer, sequence, envelope_hash",
+    ] {
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h37cf17a6da08 owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ query).unwrap();
+        let columns = statement.column_count();
+        result.extend(
+            statement
+                .query_map([], |row| {
+                    (0..columns).map(|index| row.get(index)).collect()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap(),
+        );
+    }
+    result
+}
+
+#[test]
+fn admission_retry_preserves_rows_and_skips_sqlite_changes() {
+    // Unknown and invalid claims do not touch claim_positions, so the entire admission
+    // has zero changes on retry. A valid claim has one unrelated position UPSERT.
+    for (kind, position_changes, invalid_blob) in [
+        ("example.unknown", 0, false),
+        ("example.extra", 0, false),
+        ("example.bad", 0, false),
+        ("example.note", 1, false),
+        ("example.unknown", 0, true),
+    ] {
+        let source = node("person/robin");
+        let target = node_with("person/recipient", ByKind::new(true));
+        let hash = source.put_blob(b"attachment").unwrap();
+        claim_of(
+            &source,
+            "agent/example-retry",
+            kind,
+            BTreeMap::from([("hash".into(), Value::String(hash))]),
+        );
+        let mut exchange = source
+            .export_replication_exchange(FLEET, &target.replication_inventory().unwrap())
+            .unwrap();
+        if invalid_blob {
+            exchange.envelopes[0] = forged(&exchange.envelopes[0], |payload| {
+                for bytes in payload.blobs.values_mut() {
+                    bytes.push(b'!');
+                }
+            });
+        }
+        target
+            .receive_replication_exchange("person/robin", FLEET, &exchange)
+            .unwrap();
+        target.validate_replication_backlog().unwrap();
+        let connection = target.connection.write();
+        // Use an unmistakably older timestamp; no sleeps or clock-resolution assumptions.
+        connection
+            .execute(/* sqlite-large-value: allow-for-now lv-hbff1a9ddcb96 owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET updated_at_unix_ms='0'", [])
+            .unwrap();
+        connection.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hf22585109b10 owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE admission_writes(table_name TEXT);
+             CREATE TEMP TRIGGER record_admission_write AFTER UPDATE ON main.replica_records
+             BEGIN INSERT INTO admission_writes VALUES ('record'); END;
+             CREATE TEMP TRIGGER envelope_admission_write AFTER UPDATE ON main.replica_envelopes
+             BEGIN INSERT INTO admission_writes VALUES ('envelope'); END;",
+        ).unwrap();
+        let before = admission_snapshot(&connection);
+        let changes = connection.total_changes();
+        for envelope in &exchange.envelopes {
+            validate_and_admit_envelope_tx(
+                &connection, envelope, &*target.runtime, &mut ReplicationAdmission::default(),
+            ).unwrap();
+        }
+        // No envelope/record statement or its triggers changed anything. Only the
+        // existing canonical-position statement can contribute to this delta.
+        assert_eq!(connection.total_changes() - changes, position_changes, "{kind}");
+        assert_eq!(admission_snapshot(&connection), before, "{kind}");
+        let writes: u64 = connection
+            .query_row("SELECT count(*) FROM admission_writes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(writes, 0, "{kind}");
+    }
+}
+
+#[test]
+fn admission_retry_applies_semantic_changes_and_preserves_repairs() {
+    let source = node("person/robin");
+    let target = node_with("person/recipient", ByKind::new(false));
+    claim_of(&source, "agent/example-gated", "example.gated", BTreeMap::new());
+    let exchange = source
+        .export_replication_exchange(FLEET, &target.replication_inventory().unwrap())
+        .unwrap();
+    target.receive_replication_exchange("person/robin", FLEET, &exchange).unwrap();
+    target.validate_replication_backlog().unwrap();
+    let connection = target.connection.write();
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h83b30c1ad48e owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO meta(key,value) VALUES ('gate','open');
+         UPDATE replica_records SET updated_at_unix_ms='0';
+         UPDATE replica_envelopes SET receipt_state='degraded',validation_error='stale',batch_id=NULL;",
+    ).unwrap();
+    let envelope = &exchange.envelopes[0];
+    validate_and_admit_envelope_tx(
+        &connection, envelope, &*target.runtime, &mut ReplicationAdmission::default(),
+    ).unwrap();
+    let record: (String, Option<String>, Option<String>, String) = connection.query_row(
+        "SELECT state,error_code,error_message,updated_at_unix_ms FROM replica_records",
+        [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).unwrap();
+    assert_eq!((&*record.0, record.1, record.2), ("valid", None, None));
+    assert_ne!(record.3, "0");
+    let receipt: (String, Option<String>, Option<String>) = connection.query_row(
+        "SELECT receipt_state,validation_error,batch_id FROM replica_envelopes",
+        [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).unwrap();
+    assert_eq!((&*receipt.0, receipt.1), ("validated", None));
+    assert!(receipt.2.is_some());
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h8d47cd9402ea owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired',error_code='original-error',
+             error_message='repaired by hand',updated_at_unix_ms='0';",
+    ).unwrap();
+    let before = admission_snapshot(&connection);
+    validate_and_admit_envelope_tx(
+        &connection, envelope, &*target.runtime, &mut ReplicationAdmission::default(),
+    ).unwrap();
+    assert_eq!(admission_snapshot(&connection), before);
+}
+
 /// Blob presence is read under the writer, not prepared: a claim whose blob is missing when its
 /// envelope is prepared is admitted when the blob is stored before the loan, and refused when it
 /// is not.

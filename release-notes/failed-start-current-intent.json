@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Failed-start recovery retires expired or superseded restart intent instead of reviving suspended or changed agents; synthesized start controls identify the reconciler and retain the original request as evidence.",
+  "replay": {"status": "none", "detail": "Pending failed-start restart requests are checked against current declaration and later lifecycle controls, including suspension and retirement, and expire after one hour. Obsolete intent is consumed without a launch or producer-closure claim."},
+  "schema": {"status": "none", "detail": "No schema or migration changes. Queued recovery operations retain additive stale_failed_start metadata in their existing JSON body."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordinated-upgrade changes."},
+  "compatibility": {"status": "none", "detail": "Adds restart-retired-obsolete-request decisions and retired restart completion status. Synthesized start control actors use agent/st3/reconciler with the original restart as evidence. Recovery admission, hold release and lifecycle fencing share one writer transaction; dispatch and physical launch recheck the retained request fence. Rejected undispatched recovery operations use the existing never-dispatched cancellation proof, allowing subsequent valid restarts without a daemon restart."},
+  "downtime": {"status": "none", "detail": "No additional downtime."},
+  "manual": {"status": "none", "detail": "After a pending failed-start request expires or is superseded, an authorized new explicit restart is required to request another attempt."},
+  "recovery": {"status": "none", "detail": "Retiring obsolete intent preserves unresolved producer fencing and does not manufacture closure evidence. Drain queued recovery starts before downgrading: older daemons ignore the additive recovery metadata and do not enforce its lifecycle dispatch fence."}
+}

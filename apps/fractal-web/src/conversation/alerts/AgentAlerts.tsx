@@ -1,4 +1,4 @@
-import type * as Native from '@smalltalk/st3-client/schema'
+import type * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 
@@ -14,7 +14,7 @@ import {
   promptCalls,
   questionAnswer,
   type PendingCall,
-} from '../../../../../clients/typescript/st3-views/homeView.ts'
+} from '../../../../../clients/typescript/fractal-views/homeView.ts'
 import { geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useAttention, useDataSource } from '../../data/react.tsx'
 import type { UxTelemetry } from '../../telemetry/ux.ts'
@@ -78,7 +78,7 @@ export const promptAlerts = (items: readonly Native.Attention[], agentRef: strin
   )
 
 /**
- * Every alert this agent's conversation shows, as stui and the phone choose them (`alertsIn`):
+ * Every alert this agent's conversation shows, as the Fractal terminal UI and the phone choose them (`alertsIn`):
  * open, an alert, of a kind Home shows, and naming this conversation.
  */
 export const conversationAlerts = (items: readonly Native.Attention[], agentRef: string): readonly Native.Attention[] =>
@@ -99,7 +99,7 @@ type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertAction
 
 /**
  * The alerts of an agent's conversation, above its composer. A prompt its harness waits on shows
- * with the answers st can deliver: the one waiting call in full beside `allow` (or a plan beside
+ * with the answers Fractal can deliver: the one waiting call in full beside `allow` (or a plan beside
  * `approve`), a question's options to choose and send together, a screen prompt's own answers.
  * Anything else is answered in the seat's terminal, and an answer there still wins. An ask or a
  * review gate shows with its own answers (`AnswerAlert`).
@@ -211,8 +211,8 @@ const PromptAlert = ({
       )}
       {prompt !== null && gated !== undefined && !offered.includes(gated) ? (
         <div {...stylex.props(styles.note)}>
-          {shown.length > 1
-            ? `${shown.length} calls are waiting and the prompt does not say which one it asks about: answer it in the seat's terminal.`
+          {prompt.call_id == null
+            ? 'Fractal does not say which call this asks about: answer it in the seat\'s terminal.'
             : 'What it would let through is not in the conversation yet: answer it in the seat\'s terminal.'}
         </div>
       ) : null}
@@ -248,7 +248,7 @@ export const LiveAgentAlerts = ({
     () => (attention._tag === 'Observed' ? conversationAlerts(attention.value, agentRef) : []),
     [attention, agentRef],
   )
-  // From st taking an answer to the paint that no longer shows its alert (st's `alert_landed`).
+  // From Fractal taking an answer to the paint that no longer shows its alert (Fractal's `alert_landed`).
   const answered = React.useRef(new Map<string, ReturnType<UxTelemetry['beginAlertAnswer']>>())
   const landing = React.useRef<Array<() => void>>([])
   React.useLayoutEffect(() => {

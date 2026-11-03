@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Curate Fractal user documentation for fractal.how with installation, concepts, workflows and reference pages (#3699).",
+  "replay": { "status": "none", "detail": "Documentation only; no replay, backfill or stored-data behavior changes." },
+  "schema": { "status": "none", "detail": "No database, claim or operation schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint, admission, authority or fleet coordination rule changes." },
+  "compatibility": { "status": "none", "detail": "No CLI implementation, client contract or protocol changes. Bundled onboarding guide prose is updated while fenced runtime payloads and asserted phrases are preserved." },
+  "downtime": { "status": "none", "detail": "Documentation only; no deployment or service interruption required." },
+  "manual": { "status": "none", "detail": "Existing installations require no upgrade action; the new setup instructions describe optional user workflows." },
+  "recovery": { "status": "none", "detail": "Documentation only; no runtime state transition or recovery behavior changes." }
+}

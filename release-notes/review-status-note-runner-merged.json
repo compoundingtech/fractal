@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "docs/review.md's status note now says all the review tools (risk script, schema and validator, and the scripts/review runner) are merged, and that the runner is shadow-first: it runs beside the Intake review, is compared, and replaces nothing until that comparison is reported and accepted.",
+  "replay": {
+    "status": "none",
+    "detail": "Documentation only (docs/review.md); no protocol, schema, policy, workflow, script or note change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Documentation only (docs/review.md); no protocol, schema, policy, workflow, script or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Documentation only (docs/review.md); no protocol, schema, policy, workflow, script or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Documentation only (docs/review.md); no protocol, schema, policy, workflow, script or note change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Documentation only (docs/review.md); no protocol, schema, policy, workflow, script or note change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert."
+  }
+}

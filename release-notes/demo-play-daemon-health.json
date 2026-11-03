@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "st demo play waits for its daemon's health answer before seeding, instead of reading the agents roster, which says \"not ready\" until the daemon first publishes it; on a loaded machine the demo no longer stops with \"the demo's daemon did not start\"",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, migrations or wire changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
+  "compatibility": {"status": "none", "detail": "Only `st demo play`'s own start-up wait changes; it still waits up to a minute for the daemon and says so in its play log."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "No persistent state changes."}
+}

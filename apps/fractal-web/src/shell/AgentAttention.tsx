@@ -1,4 +1,4 @@
-import type { Attention } from '@smalltalk/st3-client/schema'
+import type { Attention } from '@fractal/client/schema'
 import type { ReactNode } from 'react'
 import { isWaitingForAnswer } from '../data/attention.ts'
 import { useAgentAttentionSelection } from '../data/react.tsx'

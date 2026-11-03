@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Retain OMP restart-test child stderr and exit diagnostics in failure artifacts.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or backfill. Only isolated test diagnostics change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored schema, checkpoint or digest format changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No production or admission rule changes. The restart test keeps its liveness and empty-stderr assertions; failed guardian cleanup now retains the actual channel stderr and any exit status observed by the test."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No CLI, client, wire or declaration format changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No running service or seat is changed by this test diagnostic correction."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required. The original OMP premature-exit cause remains under investigation."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes. Ordinary source rollback restores the prior test diagnostics."
+  }
+}

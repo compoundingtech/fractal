@@ -1,4 +1,4 @@
-# Instances: a second st on one machine
+# Instances: a second Fractal on one machine
 
 `st --instance NAME` (or `ST_INSTANCE=NAME` in the environment) runs a second, fully separate
 Fractal next to the default one. Use it to try a build without risking your working install, and
@@ -25,9 +25,35 @@ A name is 1 to 24 lowercase letters, digits and single hyphens. The flag works b
 subcommand and wins over the environment variable. Inside an instance, a different name is an
 error, so a seat of one instance cannot start another by accident.
 
+## Directory discovery
+
+The daemon, CLI, standalone client and TUI share one resolver for product config
+and state directories under `fractal`, falling back to `st3` under the same XDG base (`~/.config` and
+`~/.local/state` by default, including on macOS). Instance roots resolve
+`~/.fractal-instance/NAME`, falling back to `~/.st-instance/NAME`; selection is
+per name, and `--instance` still wins over `ST_INSTANCE`.
+
+The new directory is selected only if its
+`.fractal-migration-completed` file contains exactly
+`arn:lmig:smalltalk:2026-10-16-state-dirs-fractal` followed by a newline.
+This receipt is required even when the old directory is absent: an unreceipted
+destination may be a torn copy or foreign data. Otherwise the old path is used,
+with one warning per process when an unreceipted destination exists. A receipt
+is local to the directory it certifies, not its parent or another instance.
+Only the migration's verified completion may write it.
+
+Discovery does not move files or create directories. Creators use the same
+selected root as readers, so a new config file is always read back. Without
+a completed receipt that root remains the old path. Explicit config/state paths are unchanged.
+Instance workspaces remain under `~/.st-instance/NAME/work`; workspace
+relocation is separate. The external installers, hooks and Home Manager
+declarations still use their existing paths; this reader expansion does not
+authorize moving a live installation.
+
 ## What an instance owns
 
-Everything below one directory, `~/.st-instance/NAME`:
+The legacy layout is below `~/.st-instance/NAME` (discovery above also accepts
+an existing migrated root, except that `work/` stays at its legacy location):
 
 | Directory | Holds | Set through |
 | --- | --- | --- |
@@ -90,19 +116,20 @@ outside that directory (for example a `state_dir` set elsewhere in the instance'
 
 `st uninstall` on the default install also removes: the copies of
 the `st` skill that seats install into `~/.claude/skills` and `~/.agents/skills` (only when
-unchanged), st's Claude plugin and marketplace registration, and `~/.local/share/st/plugins`. It
+unchanged), Fractal's Claude plugin and marketplace registration, and `~/.local/share/st/plugins`. It
 still leaves the work folder (`~/st`, see below) and what is in it, the account-wide lingering
 setting, and the managed Claude Code policy, which needs root (`st3 claude-channel
 uninstall-policy`).
 
 ## Proof
 
-`scripts/st3-instance-isolation/run ST3 PTY [OUT]` starts the default st in a throwaway `HOME` with a
+`scripts/fractal-instance-isolation/run ST3 PTY [OUT]` starts the default Fractal in a throwaway `HOME` with a
 scrubbed environment and installs its skill, snapshots every path, mode, link target and file hash,
 then starts an instance, installs its skill, uninstalls it and snapshots again. The snapshots must be
 identical and `~/.st-instance` gone. It then removes the default install and requires no file to
 remain. It uses no service manager and never reads or writes the machine's real install. Run it
-outside a seat's process tree, because a daemon refuses a process that descends from another seat.
+outside a seat's process tree because it acts as a person; a daemon refuses a mutation from a seat's
+process tree whose actor is not that seat (`foreign-agent-actor`).
 
 `scripts/install-macos-test` covers an instance install beside a default one whose plists,
 app and commands stay byte-identical.

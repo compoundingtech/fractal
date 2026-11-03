@@ -107,7 +107,7 @@ class RigChecks(unittest.TestCase):
             self.assertFalse(out.exists())
 
     def test_focus_probe_rejects_sidebar_and_unfocused_composer(self):
-        code='import os,tty; tty.setraw(0); os.write(1,b"\\x1b[?1049h working Assistant sidebar Message Smalltalk Assistant "+"·".encode()+b" click");\nwhile True:\n value=os.read(0,100)\n if b"\\x11" in value: os.write(1,b"\\x1b[?1049l"); break\n if b"home" in value: os.write(1,b"Now Nothing needs you")\n'
+        code='import os,tty; tty.setraw(0); os.write(1,b"\\x1b[?1049h working Assistant sidebar Message Fractal Assistant "+"·".encode()+b" click");\nwhile True:\n value=os.read(0,100)\n if b"\\x11" in value: os.write(1,b"\\x1b[?1049l"); break\n if b"home" in value: os.write(1,b"Now Nothing needs you")\n'
         request={"argv":["python3","-c",code],"timeout":5,"expect_assistant":True,"assistant_focus_timeout":0.1}
         r=subprocess.run(["python3","-c",rig.PTY_PROBE,json.dumps(request)],capture_output=True,text=True,timeout=8)
         self.assertEqual(r.returncode,0)
@@ -117,7 +117,7 @@ class RigChecks(unittest.TestCase):
         self.assertTrue(value["restored"])
 
     def test_focus_probe_accepts_focused_assistant_before_navigation(self):
-        code='import os,tty; tty.setraw(0); os.write(1,b"\\x1b[?1049h working Message Smalltalk Assistant "+"·".encode()+b" type or click");\nwhile True:\n value=os.read(0,100)\n if b"\\x11" in value: os.write(1,b"\\x1b[?1049l"); break\n if b"home" in value: os.write(1,b"Now Nothing needs you")\n'
+        code='import os,tty; tty.setraw(0); os.write(1,b"\\x1b[?1049h working Message Fractal Assistant "+"·".encode()+b" type or click");\nwhile True:\n value=os.read(0,100)\n if b"\\x11" in value: os.write(1,b"\\x1b[?1049l"); break\n if b"home" in value: os.write(1,b"Now Nothing needs you")\n'
         request={"argv":["python3","-c",code],"timeout":5,"expect_assistant":True,"assistant_focus_timeout":0.1}
         r=subprocess.run(["python3","-c",rig.PTY_PROBE,json.dumps(request)],capture_output=True,text=True,timeout=8)
         self.assertEqual(r.returncode,0)
@@ -130,7 +130,7 @@ class RigChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             directory=Path(d)
             for name in ("stubmodel.py","stub-claude.py"):
-                shutil.copyfile(SCRIPTS/"st3-boot-canaries"/name,directory/name)
+                shutil.copyfile(SCRIPTS/"fractal-boot-canaries"/name,directory/name)
             shutil.copyfile(SCRIPTS/"onboarding-fixtures/claude.py",directory/"claude.py")
             master,slave=pty.openpty()
             process=subprocess.Popen(["python3",str(directory/"claude.py"),"--dangerously-load-development-channels=server:st3"],
@@ -160,7 +160,7 @@ class RigChecks(unittest.TestCase):
         for args in variants:
             with self.subTest(args=args),tempfile.TemporaryDirectory() as d:
                 directory=Path(d)
-                shutil.copyfile(SCRIPTS/'st3-boot-canaries/stubmodel.py',directory/'stubmodel.py')
+                shutil.copyfile(SCRIPTS/'fractal-boot-canaries/stubmodel.py',directory/'stubmodel.py')
                 shutil.copyfile(SCRIPTS/'onboarding-fixtures/claude.py',directory/'claude.py')
                 (directory/'.claude').mkdir()
                 (directory/'.claude/onboarding-fixture.json').write_text(json.dumps({'plugins':['st-channel@st'],'marketplaces':[]}))
@@ -189,7 +189,7 @@ class RigChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             directory=Path(d); config=directory/"managed"; home=directory/"home"; home.mkdir()
             for name in ("stubmodel.py","stub-claude.py"):
-                shutil.copyfile(SCRIPTS/"st3-boot-canaries"/name,directory/name)
+                shutil.copyfile(SCRIPTS/"fractal-boot-canaries"/name,directory/name)
             shutil.copyfile(SCRIPTS/"onboarding-fixtures/claude.py",directory/"claude.py")
             env={**os.environ,"HOME":str(home),"CLAUDE_CONFIG_DIR":str(config),"ST_AGENT":"agent/fixture","ST3_INCARNATION":"before"}
             receipt=directory/"receipts-agent-fixture.jsonl"

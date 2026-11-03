@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Transcript press stories reveal deferred messages before asserting full history, and Stop plays check focus-preserving pending controls. Message composer landmarks use optional conversation labels to distinguish multiple composers on one page.",
+  "replay": { "status": "none", "detail": "Browser accessibility names and story setup only; no replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and fleet coordination are unchanged." },
+  "compatibility": { "status": "none", "detail": "Composer form names gain the host conversation label when supplied; message fields retain their names. No protocol, harness contract, or persisted-state changes." },
+  "downtime": { "status": "none", "detail": "No service interruption." },
+  "manual": { "status": "none", "detail": "No manual steps." },
+  "recovery": { "status": "none", "detail": "No persisted-state changes or recovery procedure." }
+}

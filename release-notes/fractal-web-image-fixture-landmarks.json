@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Give transcript image state comparisons unique region and transcript landmark names and use the named native chunk response type in their controlled transport",
+  "replay": { "status": "none", "detail": "Story fixture-only change; no replay impact." },
+  "schema": { "status": "none", "detail": "Reuses existing BlobChunk and ConversationPortResult types without wire changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule change." },
+  "compatibility": { "status": "none", "detail": "State and viewport context distinguish the AllStates landmarks for assistive technology." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual steps required." },
+  "recovery": { "status": "none", "detail": "Revert the story fixture naming change." }
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A reconcile pass no longer revokes a start that finished while the pass was running, so the seat or task that start launched keeps running instead of being stopped right after its launch.",
+  "replay": {"status": "none", "detail": "No claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change; the pass rereads the existing local start record under the start lock it already takes."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change. A start whose launch worker really ended without a result is still revoked as before."},
+  "downtime": {"status": "none", "detail": "No service interruption; one extra read of the local pending starts when a pass finds a start with no running worker."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to restore the earlier behavior."}
+}

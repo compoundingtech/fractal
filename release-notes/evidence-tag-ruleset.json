@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The repository settings declare a second ruleset, evidence-tags: refs/tags/evidence/** cannot be deleted, moved or force-pushed, with no bypass actor; only scripts/evidence-gc turns its enforcement off, around its own tag deletions.",
+  "replay": {
+    "status": "none",
+    "detail": "Repository settings only; no record, signature or verifier rule changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Repository settings only."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Once applied, a pushed evidence record can no longer be deleted or moved by any writer, so a newer failing record cannot be removed to let an older pass decide again. Creating records is unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Producers only create tags; nothing in CI deletes or moves one."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Repository settings only."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "An administrator applies the ruleset (Factory), after the evidence-gc lock window has merged, and writes its id into the lock config on the GC host."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Set the ruleset's enforcement to disabled, or delete it."
+  }
+}

@@ -13,14 +13,35 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 
+class IncompatibleSnapshot(ValueError):
+    """A previous archive layout cannot supply this cache generation."""
+
+
 def api(path):
     return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
+
+
+# Main's load runs: once a day in the daily long lanes (daily-long.yml, job check name daily-perf-load), and
+# perf.yml's main runs, which ran on every push until it became manual-dispatch only and still hold
+# recent reports and snapshots.
+MAIN_WORKFLOWS = {'.github/workflows/daily-long.yml': 'daily-perf-load', '.github/workflows/perf.yml': None}
 
 
 def trusted(run):
     return (run.get('head_branch') == 'main' and run.get('conclusion') == 'success'
             and run.get('event') in ('push', 'schedule', 'workflow_dispatch')
-            and run.get('path') == '.github/workflows/perf.yml')
+            and run.get('path') in MAIN_WORKFLOWS)
+
+
+def load_conclusion(repo, run):
+    """The run as seen by its load job. A daily run's own conclusion covers every lane, so a red lane
+    elsewhere must not discard a passing load report, nor may a green run hide a skipped load."""
+    job = MAIN_WORKFLOWS.get(run.get('path'))
+    if not job:
+        return run
+    jobs = api(f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest&per_page=100")['jobs']
+    conclusion = next((item.get('conclusion') for item in jobs if item.get('name') == job), None)
+    return dict(run, conclusion=conclusion)
 
 
 def trusted_snapshot(run):
@@ -116,7 +137,7 @@ def remember_sources():
 
 def restore_sources(checkpoint=None):
     work = Path(os.environ['GITHUB_WORKSPACE'])
-    checkpoint = checkpoint or Path(os.environ['RUNNER_TEMP']) / 'st-ci-cache/perf-source-state.json'
+    checkpoint = checkpoint or Path(os.environ['RUNNER_TEMP']) / 'fractal-ci-cache/perf-source-state.json'
     if not checkpoint.exists():
         print('Performance source timestamps: no saved checkpoint', flush=True)
         return
@@ -140,9 +161,19 @@ def restore_sources(checkpoint=None):
 def unpack(archive, destination, names):
     # These are main's own archives, but refuse unexpected roots before extracting.
     listing = subprocess.check_output(['tar', '--zstd', '-tf', str(archive)], text=True)
-    for name in listing.splitlines():
-        path = Path(name)
-        if path.is_absolute() or '..' in path.parts or path.parts[0] not in names:
+    paths = [Path(name) for name in listing.splitlines()]
+    for path in paths:
+        if path.is_absolute() or '..' in path.parts or not path.parts:
+            raise ValueError('unexpected snapshot path')
+    legacy = '-'.join(('st', 'ci', 'cache'))
+    roots = {path.parts[0] for path in paths}
+    directories = {name.rstrip('/') for name in listing.splitlines() if name.endswith('/')}
+    if ('fractal-ci-cache' in names and legacy in roots and 'fractal-ci-cache' not in roots
+            and roots <= (set(names) - {'fractal-ci-cache'}) | {legacy}
+            and {'target', 'cargo-home/registry', 'cargo-home/git', 'perf-sccache', legacy} <= directories):
+        raise IncompatibleSnapshot('snapshot uses the previous cache directory')
+    for path in paths:
+        if path.parts[0] not in names:
             raise ValueError('unexpected snapshot path')
     subprocess.run(['tar', '--zstd', '-xf', str(archive), '-C', str(destination)], check=True)
 
@@ -165,7 +196,7 @@ def restore():
             directory = dest / kind
             download(repo, run, name, directory)
             downloaded = time.monotonic()
-            roots = ('target', 'cargo-home', 'perf-sccache', 'st-ci-cache') if kind == 'build' else ('st-bench',)
+            roots = ('target', 'cargo-home', 'perf-sccache', 'fractal-ci-cache') if kind == 'build' else ('st-bench',)
             extracted = directory / 'extracted'
             extracted.mkdir()
             unpack(directory / f'{kind}.tar.zst', extracted, roots)
@@ -180,7 +211,11 @@ def restore():
             pending = [(kind, pool.submit(fetch, kind, name)) for kind, name in wanted.items()
                        if kind not in found and name in names]
             for kind, future in pending:
-                extracted, roots, downloaded, unpacked = future.result()
+                try:
+                    extracted, roots, downloaded, unpacked = future.result()
+                except IncompatibleSnapshot:
+                    print(f"Performance {kind} cache MISS: incompatible archive layout in run {run['id']}", flush=True)
+                    continue
                 for root in roots:
                     target = (work if root == 'target' else temp) / root
                     shutil.rmtree(target, ignore_errors=True)
@@ -223,8 +258,19 @@ def restore():
             if len(found) == 2:
                 break
     # Bound discovery; seven days of snapshots and thirty days of reports fit comfortably.
-    runs = api(f'repos/{repo}/actions/workflows/perf.yml/runs?branch=main&status=completed&per_page=100')
-    for run in runs['workflow_runs']:
+    runs, seen = [], set()
+    for path in MAIN_WORKFLOWS:
+        workflow = path.rsplit('/', 1)[1]
+        for run in api(f'repos/{repo}/actions/workflows/{workflow}/runs?branch=main&status=completed&per_page=100')['workflow_runs']:
+            if run['id'] not in seen:
+                seen.add(run['id'])
+                runs.append(run)
+    runs.sort(key=lambda run: run.get('created_at') or '', reverse=True)
+    for run in runs:
+        # Main's provenance first, then the load job's own conclusion (one jobs read per daily run).
+        if not trusted(dict(run, conclusion='success')):
+            continue
+        run = load_conclusion(repo, run)
         if not trusted_snapshot(run):
             continue
         names = artifact_names(run)
@@ -265,7 +311,7 @@ def pack():
     output = temp / 'perf-snapshots'
     output.mkdir(exist_ok=True)
     checkpoint = temp / 'perf-source-state.json'
-    saved = temp / 'st-ci-cache/perf-source-state.json'
+    saved = temp / 'fractal-ci-cache/perf-source-state.json'
     saved.unlink(missing_ok=True)
     if checkpoint.exists():
         state = json.loads(checkpoint.read_text())
@@ -274,7 +320,7 @@ def pack():
     # Registry source/config files contain no runner credentials; never archive all of CARGO_HOME.
     subprocess.run(['tar', '--format=pax', '-I', 'zstd -1 -T2', '-cf', str(output / 'build.tar.zst'),
                     '-C', str(work), 'target', '-C', str(temp),
-                    'cargo-home/registry', 'cargo-home/git', 'perf-sccache', 'st-ci-cache'], check=True)
+                    'cargo-home/registry', 'cargo-home/git', 'perf-sccache', 'fractal-ci-cache'], check=True)
     subprocess.run(['tar', '--format=pax', '-I', 'zstd -1 -T2', '-cf', str(output / 'stores.tar.zst'),
                     '-C', str(temp), 'st-bench'], check=True)
 

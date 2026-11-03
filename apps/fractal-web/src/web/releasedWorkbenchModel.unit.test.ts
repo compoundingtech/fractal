@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addTabAtPath, findGroupPath, group, nodeAtPath, paneKey, paneKind, paneTitle, parsePaneKey, replaceAtPath, split, splitGroupAtPath, walkSplits } from '@smalltalk/fractal-ui/assistant-ui/workbench-model'
+import { addTabAtPath, findGroupPath, group, nodeAtPath, paneKey, paneKind, paneTitle, parsePaneKey, replaceAtPath, split, splitGroupAtPath, walkSplits } from '@fractal/ui/assistant-ui/workbench-model'
 
 describe('released pure workbench model (not mounted in the live workbench)', () => {
   it('preserves pane view/form identity and identifies unknown resources without fabricating content', () => {

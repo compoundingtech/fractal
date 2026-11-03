@@ -157,8 +157,8 @@ pub(crate) struct SealedBatch {
     /// Each blob hash the claims name, and whether `blobs` held it. A named blob that is not
     /// stored is left out of the payload.
     named_blobs: Vec<(String, bool)>,
-    /// Each claim's `claim_signatures` text, in claim order.
-    stored_signatures: Vec<Option<String>>,
+    /// Each claim's stored signature under the serving authorization model, in claim order.
+    stored_signatures: Vec<Option<ClaimSignature>>,
     /// The signature each signed claim carries, stored before or made now.
     signatures: Vec<(String, ClaimSignature)>,
     pub(crate) payload: Vec<u8>,
@@ -216,14 +216,8 @@ pub(crate) fn seal_batch(
     let mut claim_signatures = BTreeMap::new();
     let mut fresh = Vec::new();
     for claim in &claims {
-        let stored = connection
-            .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h86d76377c311 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get::<_, String>(0))
-            .optional()?;
-        let existing = stored
-            .as_deref()
-            .and_then(|text| serde_json::from_str::<ClaimSignature>(text).ok());
-        let signature = match (existing, sign) {
+        let stored = principals::envelope_signature(connection, &claim.id)?;
+        let signature = match (stored.clone(), sign) {
             (Some(signature), _) => Some(signature),
             (None, Some(sign)) => {
                 let unsealed = principals::Unsealed {
@@ -376,10 +370,7 @@ fn sealed_batch_current(connection: &Connection, sealed: &SealedBatch) -> Result
         }
     }
     for ((claim_id, _), stored) in claims.iter().zip(&sealed.stored_signatures) {
-        let now = connection
-            .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h1ba25ea8cf26 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0))
-            .optional()?;
+        let now = principals::envelope_signature(connection, claim_id)?;
         if now != *stored {
             return Ok(false);
         }
@@ -387,11 +378,13 @@ fn sealed_batch_current(connection: &Connection, sealed: &SealedBatch) -> Result
     Ok(true)
 }
 
-/// What sealing read to sign envelopes: the member key's public half and the fleet id.
+/// What sealing read to sign envelopes: the member key's public half, the fleet id and the
+/// shard the envelopes belong to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EnvelopeSigner {
     member_key: String,
     fleet_id: Option<String>,
+    shard: Option<String>,
 }
 
 /// The next chunk of this node's batches, sealed and signed without the writer.
@@ -426,10 +419,11 @@ impl Store {
         else {
             return Ok(None);
         };
-        let fleet_id = fleet_meta(connection, "fleet_id")?;
+        let fleet_id = self.signing_fleet_id(connection)?;
         let signer = EnvelopeSigner {
             member_key: key.public().to_owned(),
             fleet_id,
+            shard: fleet_meta(connection, "shard_id")?,
         };
         Ok(Some((key, signer)))
     }
@@ -488,6 +482,7 @@ impl Store {
             key,
             EnvelopeSigner {
                 fleet_id: Some(fleet_id),
+                shard,
                 ..
             },
         )) = &signer
@@ -507,7 +502,8 @@ impl Store {
                     .map(|sealed| (sealed.batch.sequence, sealed.envelope_hash.clone())),
             );
             for (sequence, envelope_hash) in unsigned {
-                let signature = key.sign(&crate::fleet::envelope_signature_message(
+                let signature = key.sign(&crate::fleet::envelope_signature_message_in(
+                    shard.as_deref(),
                     fleet_id,
                     &self.origin,
                     sequence,

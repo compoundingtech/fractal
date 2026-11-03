@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "classify-risk-test fails on main (its allow-list still names crates/smallclaims/src/**/migrat*, which now matches crates/smallclaims/src/store/principals/migration.rs) and CI never ran it. Drop the stale allowance and add classify-risk-test to scripts/ci-script-tests. The tracked-file glob check needs the whole repository, which the ci-script-tests lane's sparse tree does not hold, so it skips itself there and still runs on a full checkout; the other tests run in CI.",
+  "replay": {
+    "status": "none",
+    "detail": "scripts/classify-risk-test and scripts/ci-script-tests (local test tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "scripts/classify-risk-test and scripts/ci-script-tests (local test tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "scripts/classify-risk-test and scripts/ci-script-tests (local test tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "scripts/classify-risk-test and scripts/ci-script-tests (local test tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "scripts/classify-risk-test and scripts/ci-script-tests (local test tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert."
+  }
+}

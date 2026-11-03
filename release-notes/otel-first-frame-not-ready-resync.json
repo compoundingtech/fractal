@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test only: the no-export collection stream test accepts the mission list's documented not-ready resync before its first snapshot",
+  "replay": { "status": "none", "detail": "Test change only; no replay or recovery behavior changes." },
+  "schema": { "status": "none", "detail": "No schema or persistent data changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or coordinated upgrade changes." },
+  "compatibility": { "status": "none", "detail": "No protocol or API change; the test now follows the existing not-ready resync contract." },
+  "downtime": { "status": "none", "detail": "No startup work or expected interruption." },
+  "manual": { "status": "none", "detail": "No operator actions or configuration changes." },
+  "recovery": { "status": "none", "detail": "No persistent state changes or new swap-back restrictions." }
+}

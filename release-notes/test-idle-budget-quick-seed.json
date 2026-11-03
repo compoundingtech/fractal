@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The idle daemon budget test seeds its graph without waiting on an fsync for each of its 1,450 commits, then restores the store's own setting before the daemon starts; it takes about 49 s instead of 66 s and measures the same window.",
+  "replay": {"status": "none", "detail": "Test-only change; no claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to seed with an fsync per commit again."}
+}

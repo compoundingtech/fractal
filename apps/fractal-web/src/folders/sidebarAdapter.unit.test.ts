@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest'
-import { ArrangementEditParameters, ArrangementKey } from '@smalltalk/st3-client/schema'
+import { ArrangementEditParameters, ArrangementKey } from '@fractal/client/schema'
 import { Effect, Schema } from 'effect'
 import * as fc from 'fast-check'
 import { generateNKeysBetween } from 'fractional-indexing'
@@ -36,6 +36,7 @@ const apply = (doc: SidebarDocument, operations: readonly SidebarOperation[]): S
     position: { value: { parent: regs.position?.parent ?? null, key: regs.position?.key ?? '' }, revision: regs.position?.at[2] ?? 'claim/test' },
     tombstone: regs.deleted === undefined ? null : { value: true, revision: regs.deleted[2] },
   }]))
+  if (arrangement.body.version !== 1) throw new Error('the fixture is a version 1 layout')
   arrangement.body.placements = Object.fromEntries(Object.entries(doc.placements).map(([subject, value]) => [subject, { value: { folder: value.folder, key: value.key }, revision: value.at[2] }]))
   return { ...arrangementSidebarDoc(optimisticArrangement(arrangement, operations)), roster: doc.roster }
 }
@@ -51,6 +52,29 @@ const expectCanonicalKey = (key: string) => {
   expect(key.length === integerLength || !key.endsWith('0')).toBe(true)
   expect(key[0] === 'A' && /^0+$/.test(key.slice(1, integerLength))).toBe(false)
 }
+
+it('groups unfiled agents by reported project without moving explicitly filed agents', () => {
+  const doc = setup()
+  const rows = doc.roster.map(row => ({ ...row, host: 'build-1', project: 'example/product' }))
+  const tree = sidebarTree(sidebarProjection({ ...doc, roster: rows }), rows, new Map())
+  expect(tree[0]).toMatchObject({ _tag: 'Folder', id: a })
+  expect(tree.at(-1)).toMatchObject({ _tag: 'Group', id: 'wf/project/example%2Fproduct', label: 'example/product', children: [{ id: 'alpha.new' }] })
+  expect(doc.placements['agent/new']).toBeUndefined()
+})
+
+it('keeps native children under their canonical parent seat without independent arrangement membership', () => {
+  const doc = setup()
+  const nested = { _tag: 'Agent' as const, id: 'wf/subagent/reviewer', subject: 'agent/one', parent: 'beta.one', childId: 'reviewer', label: 'Review changes' }
+  const rows = doc.roster.map(seat => seat.id === 'beta.one' ? { ...seat, children: [nested] } : seat)
+  const state = { ...doc, roster: rows }
+  const tree = sidebarTree(sidebarProjection(state), rows, new Map())
+  const filtered = filterSidebarTree(tree, 'Review')
+  expect(filtered).toMatchObject([{ id: a, collapsed: false, children: [{ id: 'beta.one', collapsed: false, children: [{ id: nested.id }] }] }])
+  expect(canDrop(state, move(nested.id, { _tag: 'Into', folder: b }))).toHaveProperty('refused')
+  expect(operationsForMove(state, move('beta.one', { _tag: 'Into', folder: b }))).toMatchObject([{ op: 'subject.place', subject: 'agent/one', folder: b }])
+  const parentFolder = tree[0]!
+  expect(parentFolder.children?.find(node => node.id === 'beta.one')).toMatchObject({ collapsed: true, children: [nested] })
+})
 
 describe('sidebar matrix operations', () => {
   it('Create folder appends, normalizes blank names and falls back from a missing parent', () => {
@@ -228,7 +252,7 @@ describe('sidebar matrix operations', () => {
     expect(rowStatus({ phase: 'refused', refusal, retryReady: false, onRetry: retry }, targets).get('alpha.one')).toEqual({ _tag: 'Refused', reason: 'The folder layout changed elsewhere; refresh and try again.' })
     expect(rowStatus({ phase: 'refused', refusal, retryReady: true, onRetry: retry }, targets).get('beta.one')).toMatchObject({ onRetry: retry })
   })
-  it('Generated keys are st ArrangementKey values, rekeying legacy or colliding neighbours in the same edit', () => {
+  it('Generated keys are Fractal ArrangementKey values, rekeying legacy or colliding neighbours in the same edit', () => {
     expect(nativeInsertAt([], 0).key).toBe('a0')
     const legacy = nativeInsertAt(['V', 'W'], 1)
     expect(legacy.rekeyed.map(([index]) => index)).toEqual([0, 1])
@@ -257,7 +281,7 @@ describe('sidebar matrix operations', () => {
     expectCanonicalKey(`${prefix}1`)
     expect(nativeInsertAt(['a0', `${prefix}1`], 1)).toEqual({ key: 'a1', rekeyed: [[0, 'a0'], [1, 'a2']] })
   })
-  it('Repeated same-gap insertion rekeys the full partition before exceeding the st key bound', () => {
+  it('Repeated same-gap insertion rekeys the full partition before exceeding the Fractal key bound', () => {
     const siblings = [{ id: 0, key: 'a0' }, { id: 1, key: 'a1' }]
     let rekeyed = false
     let inserted = 0

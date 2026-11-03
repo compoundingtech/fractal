@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The action_coverage tests wait for their isolated daemon to listen instead of giving up after a fixed number of probes",
+  "replay": {"status": "none", "detail": "Test-only change; no claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "No runtime, client, wire or harness change; only crates/fractal/tests/action_coverage.rs."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}

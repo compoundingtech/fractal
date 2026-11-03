@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Explain Fractal kit play readiness with lifecycle and unchanged a11y-step timings, phase distributions, slow cases, story-family totals and filter benchmark margins; publish web lane costs as a public check annotation.",
+  "replay": { "status": "none", "detail": "CI observability only; no runtime replay change." },
+  "schema": { "status": "none", "detail": "No database or protocol schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Same play cases, assertions, accessibility rules, shard assignment and isolation; only timing receipts and their publication change." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step. Web-specific runner-seconds SLOs require a new observer series and API support, not an unfed target." },
+  "recovery": { "status": "none", "detail": "Reverting removes the extra timing observations and public cost table; no live state to recover." }
+}

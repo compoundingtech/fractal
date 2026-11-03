@@ -1,0 +1,33 @@
+[package]
+name = "fractal-attention"
+version = "0.1.0"
+edition = "2024"
+description = "The attention domain of the store"
+license = "MIT"
+
+[features]
+# Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
+test-support = ["fractal-seats/test-support"]
+
+[dependencies]
+fractal-seats = { path = "../fractal-seats" }
+anyhow = "1"
+hex = "0.4"
+rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+smallclaims = { path = "../smallclaims" }
+fractal-kernel = { path = "../fractal-kernel" }
+fractal-store = { path = "../fractal-store" }
+fractal-client = { path = "../fractal-client", features = ["trace-propagation"] }
+fractal-schema = { path = "../fractal-schema" }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+
+[dev-dependencies]
+fractal_attention_self = { package = "fractal-attention", path = ".", features = ["test-support"] }
+smallclaims = { path = "../smallclaims", features = ["test-support"] }
+tokio = { version = "1", features = ["test-util"] }
+proptest = "1"

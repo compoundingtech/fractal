@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest'
-import type { CollectionSocket } from '@smalltalk/st3-client'
+import type { CollectionSocket } from '@fractal/client'
 import { createTestGateway, testSelection, testSnapshot } from './testGateway.ts'
 import { selectionParts } from './client.ts'
 import { followArrangementInventory, type InventoryEvent } from '../data/arrangements.ts'
@@ -14,6 +14,14 @@ it('uses real generated SDK arrangements routes, explicit owner and action reque
     expect(gateway.calls.map((call) => call.url)).toContain('/v1/client/arrangements?person=person%2Fexample&cursor=cursor%2Fexample')
     expect(gateway.calls.find((call) => call.url === '/v1/client/actions')?.body).toMatchObject({ api_version: 'st3.client.v0', type: 'arrangement.edit', parameters: { owner: testSelection.owner, subject: testSelection.subject } })
     expect(gateway.calls.every((call) => call.url.startsWith('/v1/client/'))).toBe(true)
+  } finally { await gateway.close() }
+})
+it('accepts arrangements capability v2 while reading legacy v1 layouts', async () => {
+  const gateway = await createTestGateway()
+  gateway.state.capabilityVersion = 2
+  try {
+    await expect(gateway.client.discover()).resolves.toMatchObject({ value: { capabilities: [{ id: 'arrangements', state: 'granted', version: 2 }] } })
+    await expect(gateway.client.read()).resolves.toMatchObject({ value: { body: { version: 1 } } })
   } finally { await gateway.close() }
 })
 it('refuses missing arrangements grants before any arrangement read or mutation', async () => {

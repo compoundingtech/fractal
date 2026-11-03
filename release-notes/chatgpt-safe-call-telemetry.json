@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add opt-in, content-free st-chatgpt per-call outcome, latency, exact response byte count and daemon request correlation evidence. Refs #3336, #2172, #3257.",
+  "replay": { "status": "none", "detail": "No stored data or replay changes." },
+  "schema": { "status": "none", "detail": "No published client or MCP schema change." },
+  "rules": { "status": "none", "detail": "No grant, authorization or write admission changes." },
+  "compatibility": { "status": "none", "detail": "Tool responses are unchanged. Logs allow only closed tool names, adapter codes, timing, bytes and validated daemon request UUIDs." },
+  "downtime": { "status": "none", "detail": "No migration or service activation required by the code change." },
+  "manual": { "status": "none", "detail": "Capture is off by default. Set RUST_LOG=st_chatgpt::call=info on the adapter to emit structured completion records to stderr. Daemon tracing must be enabled separately for server joins. Real browser read/send correlation remains rollout acceptance; no permission widening or new production write probes are authorized." },
+  "recovery": { "status": "none", "detail": "Unset the diagnostic filter to stop capture; no durable state changes." }
+}

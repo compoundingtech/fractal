@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The feed's quiet check, ping, pong wait and retry delays can be capped with STUI_FEED_TIMER_CAP_MS, which only the end-to-end tests set, like STUI_OFFLINE_GRACE_MS. The daemon-less stui pairing test sets 2 s and takes about 21 s instead of about 37 s, most of which was waiting 20 s to drop a silent link.",
+  "replay": {"status": "none", "detail": "No claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change: unset, every timer keeps its value."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit; the test then waits out the default timers again."}
+}

@@ -15,19 +15,29 @@ const sendFailureCopy: Readonly<Record<Extract<SendState, { _tag: 'Failed' }>['r
   SnapshotUnavailable: "Couldn't send: conversation not loaded yet. Nothing was sent.",
 }
 
-/** Failed send: danger reason line; host-supplied detail opens on disclosure. */
+/** Failed send: danger reason line; host-supplied detail and native code open on disclosure. */
 export function SendFailure({ state, onRetry }: { readonly state: Extract<SendState, { _tag: 'Failed' }>; readonly onRetry?: () => void }) {
   const [open, setOpen] = React.useState(false)
   const detailId = React.useId()
-  const retryable = state.reason._tag === 'Failed' || state.reason._tag === 'StaleFence' || state.reason._tag === 'SnapshotUnavailable'
-  return <div role="alert" data-testid="send-failure" data-send-failure-reason={state.reason._tag} {...stylex.props(styles.sendFailure)}>
-    <Button aria-expanded={open} aria-controls={state.detail === undefined ? undefined : detailId} onPress={() => setOpen(value => !value)} {...stylex.props(styles.sendFailureLine)}>{sendFailureCopy[state.reason._tag]}{state.detail !== undefined && <Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} />}</Button>
-    {open && state.detail !== undefined ? <div id={detailId} {...stylex.props(styles.sendFailureDetail)}>{state.detail}</div> : null}
+  // Source-controlled retryability wins; terminal invalid/expired/revoked rows never offer a blind Retry.
+  const retryable = state.retryable ?? (state.reason._tag === 'Failed' || state.reason._tag === 'StaleFence' || state.reason._tag === 'SnapshotUnavailable')
+  const hasDetail = state.detail !== undefined || state.code !== undefined
+  return <div role="alert" data-testid="send-failure" data-send-failure-reason={state.reason._tag} data-send-failure-code={state.code} {...stylex.props(styles.sendFailure)}>
+    <Button aria-expanded={open} aria-controls={hasDetail ? detailId : undefined} onPress={() => setOpen(value => !value)} {...stylex.props(styles.sendFailureLine)}>{sendFailureCopy[state.reason._tag]}{hasDetail && <Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} />}</Button>
+    {open && hasDetail ? <div id={detailId} {...stylex.props(styles.sendFailureDetail)}>{[state.detail, state.code === undefined ? undefined : `Code ${state.code}`].filter(Boolean).join(' · ')}</div> : null}
     {retryable && onRetry !== undefined && <Button onPress={onRetry} {...stylex.props(styles.sendFailureLine)}>Retry</Button>}
   </div>
 }
 
-/** Unconfirmed send: a neutral status, not a failure; st may already have it, so Send again repeats it. */
+/** Host-observed send lifecycle under a user prompt. Sent means accepted, never delivered or read. */
+export function SendStatus({ state, onRetry }: { readonly state: SendState | undefined; readonly onRetry?: () => void }) {
+  if (state === undefined) return null
+  if (state._tag === 'Failed') return <SendFailure state={state} onRetry={onRetry} />
+  if (state._tag === 'Unconfirmed') return <SendUnconfirmed state={state} onRetry={onRetry} />
+  return <span role="status" data-testid="send-status" {...stylex.props(styles.sendStatus)}>{state._tag === 'Pending' ? 'Sending…' : 'Sent'}</span>
+}
+
+/** Unconfirmed send: a neutral status, not a failure; Fractal may already have it, so Send again repeats it. */
 export function SendUnconfirmed({ state, onRetry }: { readonly state: Extract<SendState, { _tag: 'Unconfirmed' }>; readonly onRetry?: () => void }) {
   const [open, setOpen] = React.useState(false)
   const detailId = React.useId()
@@ -51,4 +61,5 @@ const styles = stylex.create({
   sendFailureLine: { display: 'inline-flex', alignItems: 'center', gap: s.xs, alignSelf: 'flex-start', minHeight: g.controlSm, padding: 0, borderWidth: 0, backgroundColor: surface.transparent, color: status.dangerFg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   sendUnconfirmedLine: { color: ink.fgMuted },
   sendFailureDetail: { color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
+  sendStatus: { display: 'block', marginTop: s.xs2, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
 })

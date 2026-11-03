@@ -1,0 +1,19 @@
+[Unit]
+Description=Pre-sign worker, heavy class: sign the heavy checks (tens of minutes of the build host) for one ready pull request head of our own authors (scripts/evidence-presign-worker)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# builds.slice: where every shim cargo build and test binary on the signing host already runs (low CPU and IO weight, a memory cap,
+# watched by oomd); the heavy run's test binaries run outside build admission, so the slice is their guard.
+Slice=builds.slice
+Environment=PATH=%h/.local/bin:/run/current-system/sw/bin:/usr/bin:/bin
+# The environment is minimal on purpose: it runs pull request code with the host's signing key within reach, so it carries no
+# secret beyond that key (the signer reads it from ~/.config/st/evidence-sign.json) and the git credential the notes push uses.
+# ~/.config/evidence-presign/env is for settings only (EVIDENCE_PRESIGN_*); put no token, password or other secret in it.
+EnvironmentFile=-%h/.config/evidence-presign/env
+ExecStart=/usr/bin/env bash %h/.local/bin/evidence-presign-timer heavy
+TimeoutStartSec=4h
+Nice=10
+IOSchedulingClass=idle

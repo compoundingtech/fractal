@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Declare the real OMP harness in subagent publisher integration fixtures.",
+  "replay": { "status": "none", "detail": "No production claim replay changes." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet coordination changes." },
+  "compatibility": { "status": "none", "detail": "Integration fixtures now declare an OMP harness instead of a driverless shell command, matching real OMP seat declarations. The tests assert the projected driver is omp before reading subagents. Production observer eligibility is unchanged." },
+  "downtime": { "status": "none", "detail": "Test-only change; no service interruption." },
+  "manual": { "status": "none", "detail": "No manual steps required." },
+  "recovery": { "status": "none", "detail": "Test-only change; normal rollback remains supported." }
+}

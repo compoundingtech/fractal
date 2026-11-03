@@ -1,4 +1,4 @@
-import { judgeQuality, type QualityHour, type SloTarget } from '../../clients/typescript/st3-views/slo';
+import { judgeQuality, type QualityHour, type SloTarget } from '../../clients/typescript/fractal-views/slo';
 const LABELS: Record<SloTarget, string> = {
   panics_max: 'Panics', silent_exits_per_100_active_hours_lt: 'Exits / 100 active h',
   first_frame_p95_ms_lt: 'First frame p95', first_real_state_p95_ms_lt: 'Real state p95',

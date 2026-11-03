@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A checkpoint proof no longer fails when the daemon commits between proof admission and the store clone",
+  "replay": {"status": "none", "detail": "No replay or projection changes; the proof copies and proves exactly as before."},
+  "schema": {"status": "none", "detail": "No database, claim kind or schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged; members may upgrade in any order."},
+  "compatibility": {"status": "none", "detail": "st replication checkpoint plan and the scheduled checkpoint no longer answer 500 'checkpoint raw clone exceeds admitted copy bound' when the live WAL grew after admission. The raw clone is now capped at the admitted copy plus the WAL growth the live writer is already allowed (the same allowance the VACUUM copy uses); the scratch budget and live reserve checks are unchanged, and admission reserves the same space as before."},
+  "downtime": {"status": "none", "detail": "A daemon restart to install the build; no additional startup work."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swap back to the previous binary freely; nothing is persisted."}
+}

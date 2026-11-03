@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Preserve current accountable-root guidance in a maintained reference when retiring the migration guide.",
+  "replay": {
+    "status": "none",
+    "detail": "Documentation relocation only; no projection or claim replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Current reference prose only; the existing schema reference, registry, generated schema and stored fields are unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, retention or authority rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Preserves the existing all-member upgrade and remove-before-rollback requirements without changing behavior."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No runtime operation."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No new required manual step; existing declaration and rollout requirements remain documented."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Existing rollback qualifications are preserved; no recovery behavior changes."
+  }
+}

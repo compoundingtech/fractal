@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "On a member with [trim] local = true, the retired-identity ledger is the authority for what it deleted: admission refuses those envelopes and claims from any peer, its inventory lists them so no peer sends them, and it serves none of them. Off by default",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "changed", "detail": "Two inventory-generation triggers on retired_envelopes and one meta key (retired_identities_authoritative). No table or claim schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. No claim family is trimmed locally yet."},
+  "compatibility": {"status": "none", "detail": "No wire, stored row format or claim kind change. Nothing changes on a member without [trim] local. With it, the member's inventory also lists retired envelope identities without payload, as it lists checkpoint tombstones, which every build already understands."},
+  "downtime": {"status": "none", "detail": "None. On first start with the setting, one transaction judges the ledger, reading each checkpoint table once."},
+  "manual": {"status": "none", "detail": "No manual step. Nothing changes unless a member opts in."},
+  "recovery": {"status": "none", "detail": "Remove the setting and restart: the member reads its checkpoint tables again, as before."}
+}

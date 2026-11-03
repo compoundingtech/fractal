@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # A local Nix binary cache in a keyed Namespace-backed Actions cache, for Nix-built outputs and downloads.
 #
 # /nix itself cannot be cached: a restored /nix carries the Nix installer's receipt but not its
@@ -20,7 +21,7 @@ case "$cmd" in
     sudo chown -R "$(id -un)" "$cache"
     nix store info --store "file://$cache" > /dev/null
     # One signing key per cache entry; Actions scopes entries to the repository and ref.
-    [ -s "$key.sec" ] || nix key generate-secret --key-name st-ci-cache-1 > "$key.sec"
+    [ -s "$key.sec" ] || nix key generate-secret --key-name fractal-ci-cache-1 > "$key.sec"
     nix key convert-secret-to-public < "$key.sec" > "$key.pub"
     {
       echo "NIX_CONFIG<<ST_CI_NIX_CONFIG"
@@ -77,8 +78,13 @@ case "$cmd" in
     [ -e "$RUNNER_TEMP/vm-driver" ] && roots+=("$RUNNER_TEMP/vm-driver")
     # Performance keeps its small devShell closure as well as downloads, avoiding cold tool setup.
     [ -n "${CI_PERF_SHELL_ROOT:-}" ] && roots+=("$CI_PERF_SHELL_ROOT")
-    [ -e "$RUNNER_TEMP/baseline" ] && roots+=("$RUNNER_TEMP/baseline")
-    [ -n "${ST3_MESSAGING_COMPAT_BIN:-}" ] && roots+=("${ST3_MESSAGING_COMPAT_BIN%/bin/st3}")
+    # Native release downloads are not store paths. Only the sandbox's packaged
+    # messaging baseline belongs in this Nix cache.
+    if [[ "${FRACTAL_MESSAGING_COMPAT_BIN-${ST3_MESSAGING_COMPAT_BIN:-}}" == /nix/store/* ]]; then
+      # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      fractal_selected=${FRACTAL_MESSAGING_COMPAT_BIN-${ST3_MESSAGING_COMPAT_BIN-}}
+      roots+=("${fractal_selected%/bin/st3}")
+    fi
     [ -n "${ST2_VISTA_COMPONENT:-}" ] && roots+=("${ST2_VISTA_COMPONENT%%/share/*}")
     if [ "${#roots[@]}" -gt 0 ]; then
       printf 'Nix cache: closures of %s\n' "${roots[*]}"

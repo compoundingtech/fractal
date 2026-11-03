@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { WorkspaceBody } from './LiveAgentWorkspace.tsx'
-import { retainPane, workspaceView, type RetainedPane } from './workspaceView.ts'
+import { paneTabLabel, retainPane, workspaceHref, workspaceView, type RetainedPane } from './workspaceView.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -59,3 +59,34 @@ describe('retained conversation panes', () => {
   })
 })
 
+
+describe('workspace tab labels', () => {
+  it('reads app screens in sentence case beside Thread', () => {
+    expect(paneTabLabel('missions', undefined)).toBe('Missions')
+    expect(paneTabLabel('monitor/quota', undefined)).toBe('Usage')
+    expect(paneTabLabel('doc/notes', undefined)).toBe('Notes')
+  })
+  it('keeps a subject title verbatim', () => {
+    expect(paneTabLabel('terminal/workstation-a/one', 'example agent SDK')).toBe('example agent SDK')
+  })
+})
+
+describe('workspace navigation URL', () => {
+  it('preserves the replay world across agent and pane navigation for the next reload', () => {
+    const next = workspaceHref('agent/example/sprout/builder', 'doc/example:detail', '?scenario=first-run-onboarding&open=thread')
+    expect(next).toBe('/w/agent/example/sprout/builder?open=doc%2Fexample%3Adetail&scenario=first-run-onboarding')
+    expect(workspaceHref('agent/other', 'thread', next.slice(next.indexOf('?')))).toContain('scenario=first-run-onboarding')
+  })
+  it('keeps empty replay selections visible rather than silently switching to live', () => {
+    expect(workspaceHref('agent/example', 'thread', '?scenario=')).toBe('/w/agent/example?open=thread&scenario=')
+  })
+  it('leaves live navigation unchanged', () => {
+    expect(workspaceHref('agent/example', 'thread', '?other=value')).toBe('/w/agent/example?open=thread')
+  })
+  it('ignores the development signal in production', () => {
+    vi.stubEnv('DEV', false)
+    try {
+      expect(workspaceHref('agent/example', 'thread', '?scenario=first-run-onboarding')).toBe('/w/agent/example?open=thread')
+    } finally { vi.unstubAllEnvs() }
+  })
+})

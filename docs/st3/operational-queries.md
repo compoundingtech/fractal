@@ -23,6 +23,25 @@ histogram of rebuild attempts, including failed attempts. The existing single-fl
 coalesces commits, reads large folds in chunks, and pauses between attempts rather than letting
 polling increase rebuild concurrency.
 
+Current `/v1/client/runtimes` pages serve the latest complete background publication,
+under that publication's snapshot and `published_at` time. Reads clone only the requested
+page: they do not reduce runtime status or hash the complete collection. The shared
+collection refresher coalesces commits, runs one rebuild at a time, and pauses at least
+one second and as long as the preceding rebuild between attempts. Before the first
+publication, reads return HTTP 503 `runtime-list-not-ready` with `retryable=true`; a
+stopped refresher returns `runtime-list-ended` with `retryable=false` and requires a restart.
+Continuations retain the first page's frozen collection until its existing cursor expiry,
+including across republishes. Repeated first-page reads reuse that collection's cache entry
+and original expiry. Terminal permissions are applied to
+each returned page for its authenticated caller. `history=true` and exact runtime detail
+reads keep their existing snapshot reductions.
+
+OTel metrics `st.runtime_list.publication.age` (gauge, seconds) and
+`st.runtime_list.rebuild.duration` (histogram, seconds) distinguish stale publications
+from slow rebuild attempts. Publication age is absent until a complete list is available;
+rebuild duration includes failed attempts. The background rebuild still reduces the full
+runtime collection; publication removes that work from ordinary list requests.
+
 ```sh
 st missions ls --all
 st missions ls --all --cursor 'CURSOR'
@@ -64,6 +83,18 @@ default work list remains fully enriched. Performance tasks distinguish `work/re
 from `work/list`; native diagnostics, timeline binding, wait interruption and subagent
 attribution have fixed caller labels too. Labels are never actor-derived.
 
+Conversation routing resolves an exact agent's runtime and incarnation at the request's captured
+claim frontier. Sparse identity fields use newest-first partial-index seeks, including explicit
+nulls and state-transition resets, rather than replaying every heartbeat or harness report.
+Runtime authority selects the newest canonical observation per origin; rival origins retain
+the desired-host and checkpoint-aware ancestry rules. Resource identity fields use the same
+bounded seeks; attribution-only opener receipts do not replace identity. These reads introduce
+no routing cache or wire format change.
+
+Transport routes likewise seek the newest canonical observation per observer/host pair instead
+of ranking the complete transport history. Original success timestamps, clock-skew limits,
+expiry, and dial-out membership exclusions still decide whether that evidence is usable.
+
 ```sh
 st doctor
 st doctor --performance
@@ -88,6 +119,16 @@ It also counts what woke the reconciler: each request that changed the graph, by
 claim kind for `/v1/claims`), replication receives, the reconciler's own timers and deadlines.
 Every member runs a reconcile pass for each change in the fleet, so this table names the writes
 that keep an idle daemon busy. Wakes that arrive during a pass share the next one.
+
+The fault snapshot that delivers faults to their owners keeps each operational failure's answer
+and the keys its reading noted (its source, its targets, its run and the runs above it, their
+steps and declarations). A snapshot reads a failure again only when the change feed names one of
+those keys, when its time comes, or when its answer rests on a read the feed does not carry (a
+when-idle restart's release, a deferred stop's repairs, a provider login's person, a missing
+agent's eligibility). Every five minutes it reads every failure again and compares: a different
+answer is counted under `incremental_corrections` as `fault-snapshot` and means a read is missing
+its key. After a day with no correction the full reading comes every half hour, and any correction
+brings it back to every five minutes. The cache is in memory, so a daemon start reads everything.
 
 Native mailbox streams report their store work as `task mailbox-change-check` and
 `task mailbox-snapshot`, including CPU time. These tasks continue after the subscription request

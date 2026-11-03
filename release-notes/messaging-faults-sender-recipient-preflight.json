@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Wait for sender recipient preflight readiness in the messaging-faults test fixture",
+  "replay": {
+    "status": "none",
+    "detail": "Only test fixture setup and development documentation change; production claim replay is unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema, index, trigger or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No production admission, checkpoint rule or fleet coordination changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The isolated fixture polls the existing native recipient preflight before warmup. Production client, protocol and harness contracts are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Test-only readiness synchronization requires no service restart or migration."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual upgrade steps are required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No production state or recovery path changes."
+  }
+}

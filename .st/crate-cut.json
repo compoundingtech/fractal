@@ -1,9 +1,9 @@
 {
   "order": [
-    "attention",
-    "missions",
     "delivery",
+    "missions",
     "seats",
+    "attention",
     "evidence"
   ],
   "domains": {
@@ -32,10 +32,10 @@
     ]
   },
   "crates": {
-    "attention": "st3-attention",
-    "missions": "st3-missions",
-    "delivery": "st3-delivery",
-    "seats": "st3-seats",
-    "evidence": "st3-evidence"
+    "attention": "fractal-attention",
+    "missions": "fractal-missions",
+    "delivery": "fractal-delivery",
+    "seats": "fractal-seats",
+    "evidence": "fractal-evidence"
   }
 }

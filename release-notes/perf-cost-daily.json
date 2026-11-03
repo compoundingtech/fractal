@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The optional perf-cost check leaves pull requests and runs once a day as daily-perf-cost in the daily long lanes; Main upkeep still runs it on each push to main",
+  "replay": {"status": "none", "detail": "CI only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "perf-cost was never required and never ran in the merge queue; no required check or ruleset change. The quarantined messaging_faults::link_minutes case moves with it."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "A red daily-perf-cost appears in the daily report and opens or comments on the one daily tracking issue."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Agent signing accounts get their own evidence trust level, agent/ALIAS: admitted where host keys are (pull requests only), additionally held to the accepted base's lane definition, and revocable one account at a time",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. The skip policy admits the agent level for two checks' wrapper kind and gains a per-level lane switch; no key is added here, so no agent note counts until a key line lands."},
+  "compatibility": {"status": "none", "detail": "Existing fleet and host notes are judged as before. evidence-keygen defaults to the host level."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "Adding an agent key is a later pull request that lists its line in .st/evidence-keys."},
+  "recovery": {"status": "none", "detail": "Revert this change, or remove agent lines from .st/evidence-keys to revoke their notes."}
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The reconciler's full pass, which re-checks every settled item, runs every five minutes instead of every half hour, because some work is still reached only by a full pass",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "Incremental passes are unchanged. Work that only a full pass reaches, such as a loop timeout, an LLM gate's time limit, trust-prompt recovery, rendered files put back on disk, or an exec gate after a pending gate, happens within five minutes again instead of up to thirty. The profile still notes each full pass and each correction it makes."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swapping back to an older build restores its spacing: half an hour on builds since the half-hourly change, about a minute before it."}
+}

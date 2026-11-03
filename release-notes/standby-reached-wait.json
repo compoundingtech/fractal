@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The future-standby skip test waits for the occurrence's reached claim instead of a fixed 10 ms sleep, and follows the tick skip preselects when slow setup has passed the anchor",
+  "replay": {"status": "none", "detail": "Test-only change; no claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "No runtime, client, wire or harness change; only crates/fractal-reconcile/src/reconcile/tests/schedule_standby_parent.rs."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}

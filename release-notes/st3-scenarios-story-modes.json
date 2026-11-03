@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Require explicit scenario story modes and reviewable Storybook exemptions",
+  "replay": { "status": "none", "detail": "No deployed replay or runtime data change." },
+  "schema": { "status": "none", "detail": "No database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": { "status": "none", "detail": "Storybook authors must declare a nonempty slices mode or a reasoned exemption. Checks reject missing declarations, mode changes across metadata, and forbidden slice reads, including reads caught by error boundaries. Exempt entry files cannot transitively import marked scenario sources; primitives additionally cannot import fixture-named modules. Slice stories move to separate CSF files while keeping their Storybook identities. This development-only contract does not change deployed protocols." },
+  "downtime": { "status": "none", "detail": "No service interruption introduced." },
+  "manual": { "status": "none", "detail": "No deployed installation action required." },
+  "recovery": { "status": "none", "detail": "No database or runtime recovery change." }
+}

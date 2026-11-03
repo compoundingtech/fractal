@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A step state change written on this member now records the step's change time as its claim's acceptance time, the time a replay and every other member record, instead of the writer's clock reading taken just before the claim",
+  "replay": {"status": "none", "detail": "No replay at upgrade. A step row written before the change keeps its earlier time, a millisecond or so before the claim's, until its next state change or a replay."},
+  "schema": {"status": "none", "detail": "No table, column or file change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change. step_runs.updated_at_unix_ms is left out of the projection digest; activated_at_unix_ms was already normalized and is unchanged."},
+  "compatibility": {"status": "none", "detail": "No client, wire or CLI change. A local reader can see a step's updated time move forward by a millisecond or so, to the claim's time."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Our pull requests no longer run CI's heavy jobs: an enforced check with no valid signature for a listed opener's pull request fails at its gate with 'sign it with scripts/st-test --all --push origin'; on a branch that edits a protected file, a newer CI pass for the same inputs no longer hides our host's note",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."},
+  "compatibility": {"status": "none", "detail": "CI only. Pull requests from openers not listed in .st/evidence-signed-only.json, drafts, forks, merge groups and pushes run as before. The list and the gate are read at the base, so the change applies to pull requests based on a main that has it."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "Authors on the list sign before they push (scripts/st-test --all --push origin), as they already do."},
+  "recovery": {"status": "none", "detail": "No persistent state changes. Removing a login from the list restores CI runs for that opener."}
+}

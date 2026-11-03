@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Remove the obsolete eval audit and its index entry.",
+  "replay": {
+    "status": "none",
+    "detail": "Removes a dated duplicate eval audit and its only inbound link. The maintained eval inventory, executable evals and prompt boundaries are unchanged by this documentation deletion."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Removes a dated duplicate eval audit and its only inbound link. The maintained eval inventory, executable evals and prompt boundaries are unchanged by this documentation deletion."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Removes a dated duplicate eval audit and its only inbound link. The maintained eval inventory, executable evals and prompt boundaries are unchanged by this documentation deletion."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Removes a dated duplicate eval audit and its only inbound link. The maintained eval inventory, executable evals and prompt boundaries are unchanged by this documentation deletion."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Removes a dated duplicate eval audit and its only inbound link. The maintained eval inventory, executable evals and prompt boundaries are unchanged by this documentation deletion."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Removes a dated duplicate eval audit and its only inbound link. The maintained eval inventory, executable evals and prompt boundaries are unchanged by this documentation deletion."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Removes a dated duplicate eval audit and its only inbound link. The maintained eval inventory, executable evals and prompt boundaries are unchanged by this documentation deletion."
+  }
+}

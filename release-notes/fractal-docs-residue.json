@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use Fractal vocabulary and commands throughout active developer and client documentation",
+  "replay": {"status": "none", "detail": "Documentation only; no claim or replay changes."},
+  "schema": {"status": "none", "detail": "Wire names, protocol examples and generated schemas remain unchanged."},
+  "rules": {"status": "none", "detail": "No runtime or authorization rule changes."},
+  "compatibility": {"status": "none", "detail": "Installed aliases, environment variables, state paths, telemetry identities and historical records retain their existing spellings."},
+  "downtime": {"status": "none", "detail": "No deployment or migration is required."},
+  "manual": {"status": "changed", "detail": "Active guides use Fractal product prose, retain installed st/st3 command examples, and use the renamed SDK and iOS module paths. The terminal UI guides are now docs/fractal-and-ios.md and docs/fractal-terminal-tab.md; docs/st3 remains in place."},
+  "recovery": {"status": "none", "detail": "No runtime state changes; reverting the documentation needs no recovery procedure."}
+}

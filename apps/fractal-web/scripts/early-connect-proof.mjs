@@ -159,7 +159,7 @@ server.on('upgrade', (req, socket) => {
   const ordinal = connections.length - 1
   events.push('socket-opened')
   const accept = createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')
-  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: st3.client.collections.v0\r\n\r\n`)
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: fractal.client.collections.v0\r\n\r\n`)
   let pending = Buffer.alloc(0)
   socket.on('data', (chunk) => {
     pending = readFrames(Buffer.concat([pending, chunk]), (text) => {
@@ -235,7 +235,7 @@ expect(result !== undefined, 'the proof module never reported (subscribe never s
 expect(connections.length === 3, `expected initial, restored and reloaded sockets, saw ${connections.length}`)
 expect(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/.test(connections[0]?.traceparent ?? ''), 'upgrade URL lacks a valid traceparent')
 expect(connections.every((connection) => /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/.test(connection.traceparent ?? '')), 'a resumed upgrade lost W3C trace context')
-expect(connections[0]?.protocol === 'st3.client.collections.v0', 'upgrade lacks the collections subprotocol')
+expect(connections[0]?.protocol === 'fractal.client.collections.v0', 'upgrade lacks the collections subprotocol')
 expect(subscribes.length === 3, `expected one roster subscribe per initial/restore/reload, saw ${subscribes.length}`)
 expect(/^wf-early-[0-9a-f]{16}$/.test(subscribes[0]?.id ?? ''), 'early subscribe id is not the bounded early id')
 expect(subscribes[0]?.collection === 'agents' && subscribes[0]?.limit === 100, 'early subscribe is not the fleet roster window')

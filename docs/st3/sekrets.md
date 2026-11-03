@@ -73,8 +73,8 @@ The gateway checks the caller three ways, and the caller's own word counts for n
 3. **The chain.** The person registered that node key from a login session (`st sekrets
    enable`), and the statement's person must be the person the Unix user maps to.
 
-A process that is neither is refused as unidentified. A person's own terminal inside st (a seat's
-terminal, or a terminal st started) is in the service manager, so the person calls from a login
+A process that is neither is refused as unidentified. A person's own terminal inside Fractal (a seat's
+terminal, or a terminal Fractal started) is in the service manager, so the person calls from a login
 session.
 
 `st sekrets` finds the daemon as other st commands do: `--endpoint`, then `ST3_ENDPOINT`, then the
@@ -119,7 +119,7 @@ person's home.
 
 ## Authorized requests
 
-The st daemon, and st commands such as gates, call GitHub's API themselves. With a sekrets
+The Fractal daemon, and Fractal commands such as gates, call GitHub's API themselves. With a sekrets
 profile they do it without ever holding the token: each request goes to the gateway, which adds
 the profile's token and returns the response. It is one request and one response over the
 gateway socket, not a proxy.
@@ -141,7 +141,7 @@ gateway socket, not a proxy.
   login, read once and kept until a 401 says it changed.
 - Each request is logged by method, path and status, never with the token or the body.
 
-In Rust: `st3::sekrets::authorized::authorized_request(&config, "ada/daemon-gh", &request)`
+In Rust: `fractal_daemon::sekrets::authorized::authorized_request(&config, "ada/daemon-gh", &request)`
 returns the response or `Unavailable` (no gateway or no node key), `Refused` or `Transport`.
 
 ## The sandbox
@@ -203,9 +203,9 @@ st sekrets log --follow
 ```
 
 `st sekrets setup` prints the root script: it creates the `sekrets` user and its store, copies
-this st binary to `/usr/local/libexec/st-sekrets` owned by root, writes
+this Fractal binary to `/usr/local/libexec/st-sekrets` owned by root, writes
 `/etc/st-sekrets/gateway.toml` (Unix user to person, the tool path, the checkout roots) and
-installs and starts `st-sekrets.service`. Run it again after updating st to give the gateway the
+installs and starts `st-sekrets.service`. Run it again after updating Fractal to give the gateway the
 new binary. A seat's `gh` can be a one-line shim, `exec st sekrets -- gh "$@"`.
 
 Changes to profiles, grants and keys come only from the owning person in a login session. A seat

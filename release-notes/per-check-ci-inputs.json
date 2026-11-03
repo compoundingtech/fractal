@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A check's signature is voided only when main changes a protected CI file that check uses: each lane in .st/required-lanes.json can declare ci_inputs (plain paths, !excluded paths, a workflow job with everything it needs and the workflow's top-level blocks, or one JSON entry), and when main moved protected files since a pull request's branch point the gate keeps the head tree for a check whose ci_inputs are unchanged. linux-gate, typescript-client, fractal-web and rust-tests declare theirs; a change to the gate, verifier or signing scripts now voids only ci-script-tests and genie-freshness, whose own tests read them. lane-definition-closure --check fails a lane that reads a protected file its ci_inputs leave out, a lane is held to its own entry of the lane file rather than the whole file, fractal-test merges main in only when a check it signs would fall back, and .st/rust-test-inputs.json is no longer protected",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes; notes carry nothing new."},
+  "schema": {"status": "none", "detail": "The lane file gains an optional ci_inputs key per lane; a lane without it behaves as before."},
+  "rules": {"status": "changed", "detail": "When main moved protected files after a pull request's branch point, a check whose declared ci_inputs are the same at the branch point, the base and the current tip keeps the pull request's own tree (ci_inputs=kept on the decision line); before, every check fell back to the merge tree. An entry that names nothing at any of those revisions (a renamed job, a typo) counts as changed, and lane-definition-closure --check fails it. A lane's definition base is checked against that lane's own entry, not the whole lane file. .st/rust-test-inputs.json is no longer a protected path."},
+  "compatibility": {"status": "none", "detail": "A base whose gate or verifier predates ci_inputs, or a lane without them, keeps the earlier rule; fractal-test asks an older base gate once, without a check, as before."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the change; with no ci_inputs the gate falls back on any protected change, as before."}
+}

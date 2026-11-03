@@ -57,11 +57,41 @@ function WorkbenchStory({ scheme = 'dark', state = 'two', threadState = 'live', 
   </section>
 }
 const meta = {
-  title: 'Fractal UI/Workbench', component: WorkbenchStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', state: 'two', threadState: 'live', seed: 'running' },
+  excludeStories: ['scenarioExemptions'],
+  title: 'Fractal UI/Workbench', component: WorkbenchStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic host-owned layouts, resource maps, local command mutations, diff/terminal composition and persistence exercise the Workbench embedding contract.' }, layout: 'fullscreen' }, args: { scheme: 'dark', state: 'two', threadState: 'live', seed: 'running' },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, state: { options: ['one', 'two', 'three', 'dragging', 'nested', 'tabs'], control: 'select' }, threadState: { options: ['live', 'empty', 'loading', 'stale', 'failed', 'unavailable'], control: 'select' }, seed: { options: ['running', 'idle'], control: 'radio' }, persist: { table: { disable: true } }, workspaceId: { table: { disable: true } } },
   render: (args, { id }) => <main aria-label="Workbench"><WorkbenchStory key={`${id}-${args.scheme}-${args.state}-${args.seed}-${args.threadState}`} {...args} workspaceId={`kit-b-${id}-${args.scheme}-${args.state}${args.seed === 'idle' ? '-idle' : ''}-${args.threadState}`} /></main>,
 } satisfies Meta<typeof WorkbenchStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'AllStatesLight:contract-fixture',
+  'Dark:contract-fixture',
+  'DragToSplit:contract-fixture',
+  'DragToSplitSingleGroup:contract-fixture',
+  'Dragging:contract-fixture',
+  'Empty:contract-fixture',
+  'Failed:contract-fixture',
+  'HostToolReveal:contract-fixture',
+  'IdleSample:contract-fixture',
+  'KeyboardCloseAndSnapshot:contract-fixture',
+  'KeyboardSplitPreservesHost:contract-fixture',
+  'KeyboardTabsAndTerminal:contract-fixture',
+  'Light:contract-fixture',
+  'Loading:contract-fixture',
+  'NestedRatios:contract-fixture',
+  'OnePane:contract-fixture',
+  'OptionalSnapshotFields:contract-fixture',
+  'RendererOverride:contract-fixture',
+  'RunningQueueAndSteer:contract-fixture',
+  'SplitBelow:contract-fixture',
+  'Stale:contract-fixture',
+  'TerminalOpen:contract-fixture',
+  'ThreadTabs:contract-fixture',
+  'Unavailable:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const settle = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 export const Dark: Story = {}

@@ -69,6 +69,10 @@ class Parser(unittest.TestCase):
         self.assertEqual(len(items), 2)
         self.assertEqual(left, [])
 
+    def test_a_block_comment_between_pub_and_the_keyword_is_part_of_the_item(self):
+        src = "pub /* marker: x */ fn restore() { helper(); }\npub(crate) /* m */ const X: u8 = 1;\nfn helper() {}\n"
+        self.assertEqual([(i.kind, i.name, i.is_pub) for i in ri.parse(src)], [("fn", "restore", True), ("const", "X", True), ("fn", "helper", False)])
+
     def test_use_trees_round_trip_and_prune(self):
         text = "pub use limits::{AccountLimit, LIMITS_ACTOR, LimitsOutcome};"
         attrs, vis, paths = cc.use_paths(text)
@@ -196,9 +200,9 @@ class Cut(unittest.TestCase):
         self.assertNotIn("reports_over", low)
         self.assertIn("fn total_stays_with_the_store", low)
         # the helper both sides use is extracted once, into a module the lower crate shares
-        shared = (self.root / "crates/lowcrate/src/dom_tests_shared.rs").read_text()
+        shared = (self.root / "crates/lowcrate/src/dom/shared_tests.rs").read_text()
         self.assertIn("pub fn filled(n: i64) -> Store", shared)
-        self.assertNotIn("fn filled", low.replace("pub use crate::dom_tests_shared", ""))
+        self.assertNotIn("fn filled", low.replace("pub use crate::dom::shared_tests", ""))
         (self.root / "crates/highcrate/Cargo.toml").write_text(
             '[package]\nname = "highcrate"\nversion = "0.1.0"\nedition = "2024"\n[dependencies]\nlowcrate = { path = "../lowcrate", features = ["test-support"] }\n[features]\ntest-support = []\n')
         (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/lowcrate", "crates/highcrate"]\nresolver = "3"\n')

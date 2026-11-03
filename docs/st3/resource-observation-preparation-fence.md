@@ -108,8 +108,13 @@ REPLACE shape, not every possible custom trigger program.
 ## Store, snapshot and loan eligibility
 
 CoreStore::open opens one native writer, normalizes its opened filename, and
-constructs ReadPool from that same path. open_memory constructs one unique UUID
-shared-memory URI for both. Preparation rejects this mode before acquiring a
+constructs ReadPool from that same path. The test-only open_memory constructor
+now uses that same file-backed WAL path in an owned temporary directory. It uses
+/dev/shm when it has at least 2 GiB free and is executable, otherwise TMPDIR,
+following the memory_tempdir fixture rule. The writer thread, read pool and each
+read connection retain the directory until their last connection closes.
+open_shared_memory explicitly constructs a unique UUID shared-memory URI for
+tests of memory mode itself. Preparation rejects that mode before acquiring a
 reader or seed writer loan: its snapshot frontier reads sqlite_sequence and a
 shared-cache table read lock can reject an unrelated AUTOINCREMENT publication.
 The supported shared-memory store retains the unchanged canonical writer path;
@@ -125,16 +130,19 @@ performs BEGIN and a first current_index read before the input closure. It
 cannot join an old same-store request/pin because those were excluded on the
 same thread before seed. Its guard rolls back/releases on every exit, before
 validation is enqueued. TEMP objects could change name resolution differently
-on the writer and reader; the private path permits only the write_clock table
-and the retained heal_replay_base_order table used by canonical replay. Neither
-name shadows a preparation dependency. File-backed initial open runs that replay
-and retains its empty scratch table; rejecting it would disable the optimization.
-Eligibility compares the stored CREATE definitions with the two actual source
-schemas after collapsing whitespace, not names alone. The replay table must also
-be empty. Mismatched columns, extra columns, views, triggers, indexes, unknown
-names or retained replay rows select the old path. The [SQLite schema table](https://www.sqlite.org/schematab.html)
-describes stored CREATE text; the pinned bundled sqlite3EndTable implementation
-constructs it from the object-name token, omitting TEMP and IF NOT EXISTS.
+on the writer and reader; the private path permits the write_clock table,
+the retained heal_replay_base_order table used by canonical replay, and the
+two preparation_work_pending/dirty queue notifier triggers. None shadows a
+preparation dependency. The notifiers only signal the connection-owned Rust flag
+when durable preparation work is inserted; they do not read or change resource
+inputs. File-backed initial open runs replay and retains its empty scratch table.
+Eligibility compares stored CREATE definitions and object types with these exact
+native definitions after collapsing whitespace, not names alone. The replay table
+must also be empty. Mismatched columns, extra columns, views, other or altered
+triggers, indexes, unknown names or retained replay rows select the old path.
+The [SQLite schema table](https://www.sqlite.org/schematab.html) describes stored
+CREATE text; the pinned bundled SQLite implementation constructs it from the
+object-name token, omitting TEMP and IF NOT EXISTS.
 The catalog check and conditional scratch-emptiness query are additional SQL
 cost, not free metadata; later schema changes still invalidate the native cut.
 The file-backed/reopen control requires an actual fast observation, rejects each
@@ -191,7 +199,7 @@ roster-control output mechanism; the exact configuration delta requires Intake
 review before publication. No numeric result is available before that cohort.
 
 The 17 new complete control bodies live in
-`crates/st3/src/store/resource_preparation/tests.rs`; the four original negative
+`crates/fractal/src/store/resource_preparation/tests.rs`; the four original negative
 fence/attempt bodies remain in `resource_preparation_fence_tests.rs`. They cover
 quiet versus two injected unrelated writes/fallback, history-width 2 versus 64,
 ordinary REPLACE/trigger/FK/view/WITHOUT ROWID/delete/rollback, raw repair/order/
@@ -225,14 +233,19 @@ transfer; the first compile and all 21 controls remain UNRUN.
 
 The normal daemon opens `state_dir/claims.sqlite3` in `main.rs::run_up`
 through `Store::open` (the function's startup `open-store` phase). That constructor
-pairs `GraphStore::open` with a file-backed reader pool. `Store::open_memory` is
-also a public constructor; it pairs `GraphStore::open_memory` with its shared
-memory URI and `shared_memory=true`. `api::AppState` accepts an `Arc<Store>` and
-`api::router` does not constrain the constructor. An in-process daemon can thus
-use a shared-memory store; `tests/log_diet.rs::Daemon::start` does exactly that.
-This correction covers that mode in preparation itself. It does not change the
-log_diet fixture, workload, assertions or retry settings, or assert that every
-embedded daemon uses files.
+pairs `GraphStore::open` with a file-backed reader pool. `Store::open_memory`
+also uses a file-backed WAL store, with its scratch lifetime owned by the
+connections. On Linux it first uses TMPDIR when that directory is already on
+tmpfs, so run cleanup also reclaims scratch left by a process that exits without
+dropping its stores. Otherwise it selects executable /dev/shm with at least 2 GiB
+free, or the ordinary temporary directory. Normal file-backed initialization also
+starts the resource-reference backfill for downstream test-support binaries,
+matching Store::open; unit-test builds keep that worker disabled. Both it and `Store::open_shared_memory` are available only under
+`cfg(test)` or the `test-support` feature. The compile gate prevents production
+callers from depending on fixture constructors. Existing callers, including the
+replica in `tests/log_diet.rs::run_workload`, keep their `open_memory` calls and
+now exercise the normal WAL path. Intentional shared-memory preparation controls use
+`open_shared_memory`; their mode guard and canonical writer assertions remain.
 
 The new shared-memory check short-circuits before `readers.get`, before the seed
 writer loan and before `read_snapshot`. It produces the existing unusable

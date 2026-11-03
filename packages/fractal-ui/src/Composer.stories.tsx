@@ -119,9 +119,10 @@ function SingleComposer(args: ComposerArgs) {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Composer',
   component: SingleComposer,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Decided composer C2 · R3 · M2 · K1 over assistant-ui native composer state and React Aria TokenField. Native queue, structured mention/command serialization, image attachments, durable local drafts and explicit local fixture send outcomes; no network transport is claimed.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'editable composer and outbox state are host-owned local contracts that no world slice models' }, layout: 'fullscreen', docs: { description: { component: 'Decided composer C2 · R3 · M2 · K1 over assistant-ui native composer state and React Aria TokenField. Native queue, structured mention/command serialization, image attachments, durable local drafts and explicit local fixture send outcomes; no network transport is claimed.' } } },
   args: { scheme: 'dark', state: 'idle', ...decided, effort: 'supported' },
   argTypes: {
     scheme: { options: ['dark', 'light'], control: 'radio' },
@@ -134,6 +135,44 @@ const meta = {
   },
 } satisfies Meta<typeof SingleComposer>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'AllStatesLight:contract-fixture',
+  'DurableDraft:contract-fixture',
+  'EffortAllStates:contract-fixture',
+  'EffortSupported:contract-fixture',
+  'EffortUnknown:contract-fixture',
+  'EffortUnsupported:contract-fixture',
+  'FailedSendRestored:contract-fixture',
+  'FooterWidthBudgetMedium:contract-fixture',
+  'FooterWidthBudgetMediumLight:contract-fixture',
+  'FooterWidthBudgetNarrow:contract-fixture',
+  'FooterWidthBudgetNarrowLight:contract-fixture',
+  'FooterWidthBudgetWide:contract-fixture',
+  'FooterWidthBudgetWideLight:contract-fixture',
+  'Geometry:contract-fixture',
+  'Idle:contract-fixture',
+  'IdleLight:contract-fixture',
+  'ImageAttached:contract-fixture',
+  'ImeComposition:contract-fixture',
+  'KitLabelResize:contract-fixture',
+  'LayoutShapes:contract-fixture',
+  'MentionPopup:contract-fixture',
+  'MentionPopupLight:contract-fixture',
+  'OfflineDraft:contract-fixture',
+  'PlainImageAttachments:contract-fixture',
+  'PlainImageAttachmentsLight:contract-fixture',
+  'PlainTextAdapter:contract-fixture',
+  'QueuedTwice:contract-fixture',
+  'Running:contract-fixture',
+  'ShiftEnterNewline:contract-fixture',
+  'SlashCommands:contract-fixture',
+  'TargetTooltips:contract-fixture',
+  'TargetTooltipsLight:contract-fixture',
+  'TypingMultiLine:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 /** Non-interacting fixtures let the source geometry gate measure real composer state, before any play mutates it. */
@@ -172,12 +211,15 @@ export const Idle: Story = { tags: ['critical'],
     await expect(guidance?.textContent).toMatch(/@.*\//)
     await expect(field.getAttribute('aria-describedby')?.split(' ')).toContain(guidance?.id)
     const form = field.closest('form')!
-    // C2 stays a column slab even for one line; the container, not the textbox, owns the focus ring.
+    // C2 stays a column slab even for one line; textarea focus changes only the frame border.
     await expect(getComputedStyle(form).flexDirection).toBe('column')
+    const borderBeforeFocus = getComputedStyle(form).borderColor
     await userEvent.click(field)
     await expect(getComputedStyle(field).outlineStyle).toBe('none')
-    await expect(getComputedStyle(form).outlineStyle).toBe('solid')
+    await expect(getComputedStyle(form).outlineStyle).toBe('none')
+    await expect(getComputedStyle(form).borderColor).not.toBe(borderBeforeFocus)
     await userEvent.keyboard('Ship the composer')
+    await expect(getComputedStyle(form).outlineStyle).toBe('none')
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="composer-placeholder"]')).toBeNull())
     await expect(field.getAttribute('aria-describedby')?.split(' ')).not.toContain(guidance?.id)
     await userEvent.keyboard('{Enter}')
@@ -480,25 +522,27 @@ export const EffortAllStates: Story = {
   render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{effortFrames.map(frame => <ComposerFrame key={frame.id} policy={decided} state={frame.state} effort={frame.effort} frameId={`effort.${frame.id}`} />)}</div></Surface>,
 }
 
-const footerBudgetFrames = ([320, 360, 451] as const).flatMap(composerWidth =>
+const footerBudgetFrames = (composerWidth: 320 | 360 | 451) =>
   (['C1', 'C2', 'C3'] as const).flatMap(layout => (['K1', 'K2', 'K3'] as const).flatMap(target => (['R1', 'R2', 'R3'] as const).map(running => ({
     composerWidth, policy: { layout, target, running, mentions: 'M2' } satisfies ComposerPolicy, frameId: `footer-budget.${composerWidth}.${layout}.${target}.${running}`,
-  })))))
-/** The declared width is the real form width; every footer control stays inside its running composer. */
-export const FooterWidthBudget: Story = { tags: ['critical'],
+  }))))
+/** Each width owns the full policy matrix without mounting all 81 composers in one check. */
+const footerWidthBudget = (composerWidth: 320 | 360 | 451): Story => ({
   beforeEach: clearDrafts,
   args: { state: 'running', effort: 'supported' },
-  render: args => <Surface scheme={args.scheme} testId="composer-footer-width-budget"><div aria-label="Footer width budget previews" {...stylex.props(styles.budgetPreviews)}>{footerBudgetFrames.map(frame => <ComposerFrame key={frame.frameId} {...frame} state="running" effort="supported" />)}</div></Surface>,
+  render: args => <Surface scheme={args.scheme} testId={`composer-footer-width-budget-${composerWidth}`}><div aria-label={`${composerWidth}px footer width budget previews`} {...stylex.props(styles.budgetPreviews)}>{footerBudgetFrames(composerWidth).map(frame => <ComposerFrame key={frame.frameId} {...frame} state="running" effort="supported" />)}</div></Surface>,
   play: async ({ canvasElement }) => {
     await canvasElement.ownerDocument.fonts.ready
     let previousGeometry: number[] | undefined
     // Retry through React/ResizeObserver updates, then require two matching measurements.
     await waitFor(() => {
       const cards = [...canvasElement.querySelectorAll<HTMLElement>('[data-footer-budget-width]')]
-      expect(cards).toHaveLength(81)
+      expect(cards).toHaveLength(27)
       const keyOf = (card: HTMLElement) => `${card.dataset.footerBudgetWidth}.${card.dataset.footerBudgetLayout}.${card.dataset.footerBudgetTarget}.${card.dataset.footerBudgetRunning}`
+      expect(new Set(cards.map(keyOf)).size).toBe(27)
       const geometry: number[] = []
       for (const card of cards) {
+        expect(Number(card.dataset.footerBudgetWidth)).toBe(composerWidth)
         expect(card.querySelectorAll('[data-testid="kit-composer"]')).toHaveLength(1)
         const footers = card.querySelectorAll<HTMLElement>('[data-testid="composer-footer"]')
         expect(footers).toHaveLength(1)
@@ -527,13 +571,18 @@ export const FooterWidthBudget: Story = { tags: ['critical'],
       expect(geometry).toEqual(previous)
     }, { timeout: 10_000 })
   },
-}
-export const FooterWidthBudgetLight: Story = { ...FooterWidthBudget, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+})
+export const FooterWidthBudgetNarrow: Story = { ...footerWidthBudget(320), tags: ['critical'] }
+export const FooterWidthBudgetNarrowLight: Story = { ...FooterWidthBudgetNarrow, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+export const FooterWidthBudgetMedium: Story = { ...footerWidthBudget(360), tags: ['critical'] }
+export const FooterWidthBudgetMediumLight: Story = { ...FooterWidthBudgetMedium, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+export const FooterWidthBudgetWide: Story = { ...footerWidthBudget(451), tags: ['critical'] }
+export const FooterWidthBudgetWideLight: Story = { ...FooterWidthBudgetWide, args: { scheme: 'light', state: 'running', effort: 'supported' } }
 
-/** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab. */
+/** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab (the pending shape pick). */
 export const LayoutShapes: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
-  render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.geometryLane(768))}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
+  render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.shapeGallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.shapeLane)}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
   play: async ({ canvasElement }) => {
     const formOf = (layout: ComposerLayout) => canvasElement.querySelector<HTMLElement>(`[data-composer-frame="layout.${layout}"] form`)!
     await document.fonts.ready
@@ -550,7 +599,13 @@ export const LayoutShapes: Story = { tags: ['critical'],
     })
     await userEvent.click(within(formOf('C3')).getByRole('textbox'))
     await waitFor(() => expect(getComputedStyle(formOf('C3')).flexDirection).toBe('column'))
+    // C1 is the live layout: focus alone changes only the frame border, never its geometry.
+    const c1BeforeFocus = formOf('C1').getBoundingClientRect()
     await userEvent.click(within(formOf('C1')).getByRole('textbox'))
+    await expect(getComputedStyle(formOf('C1')).flexDirection).toBe('row')
+    await expect(getComputedStyle(formOf('C1')).outlineStyle).toBe('none')
+    await expect(formOf('C1').getBoundingClientRect().height).toBe(c1BeforeFocus.height)
+    await expect(formOf('C1').getBoundingClientRect().width).toBe(c1BeforeFocus.width)
     await userEvent.keyboard('one{Shift>}{Enter}{/Shift}two')
     await waitFor(() => expect(getComputedStyle(formOf('C1')).flexDirection).toBe('column'))
   },
@@ -588,6 +643,112 @@ export const KitLabelResize: Story = { tags: ['critical'],
     await expect(form.getBoundingClientRect().width).toBeCloseTo(width, 1)
   },
 }
+
+/** The live app's plain composer with host image attachments: paste or Attach adds images; at the host limit Attach stays but explains itself, and an excess or lost upload permission withholds Send with a described refusal. */
+function PlainImages({ scheme }: { readonly scheme: Scheme }) {
+  const [source] = React.useState(() => createComposerFixture('idle'))
+  const snapshot = React.useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot)
+  const [uploadGranted, setUploadGranted] = React.useState(true)
+  const adapter = snapshot.options.adapters!.attachments!
+  const options = { ...snapshot.options, adapters: { ...snapshot.options.adapters, attachments: {
+    accept: 'image/png,image/jpeg,image/gif,image/webp',
+    add: adapter.add.bind(adapter), remove: adapter.remove.bind(adapter), send: adapter.send.bind(adapter),
+  } } }
+  return <Surface scheme={scheme}><div {...stylex.props(styles.lane)}>
+    <button onClick={() => setUploadGranted(false)}>Revoke image upload</button>
+    <EmbraceRuntimeProvider options={options}><EmbraceComposer variant="C1" readingColumn conversationLabel="Image attachments" imageAttachments={{ max: 1, ...(uploadGranted ? {} : { disabledReason: 'You can no longer send images here.' }) }} /></EmbraceRuntimeProvider>
+    <div aria-label="Accepted fixture messages" role="log" {...stylex.props(styles.receipts)}>{snapshot.receipts.map((receipt, index) => <p key={index} {...stylex.props(styles.receipt)}>Attachments: {receipt.message.attachments?.map(attachment => attachment.name).join(', ')}</p>)}</div>
+  </div></Surface>
+}
+const pngFiles = (...names: string[]) => {
+  const data = new DataTransfer()
+  for (const name of names) data.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], name, { type: 'image/png' }))
+  return data
+}
+export const PlainImageAttachments: Story = { tags: ['critical'],
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Attachment limit and send probes require a local runtime with an image adapter and fixture receipts.' } },
+  render: args => <PlainImages scheme={args.scheme} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('button', { name: 'Attach image' })).toBeVisible()
+    // Native picker rejection, including its first file: no staged attachment is required for the live notice.
+    const originalClick = HTMLInputElement.prototype.click
+    HTMLInputElement.prototype.click = function () {
+      if (this.type !== 'file') return originalClick.call(this)
+      const files = new DataTransfer()
+      files.items.add(new File(['<svg/>'], 'picker.svg', { type: 'image/svg+xml' }))
+      Object.defineProperty(this, 'files', { configurable: true, value: files.files })
+      this.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    try { await userEvent.click(canvas.getByRole('button', { name: 'Attach image' })) }
+    finally { HTMLInputElement.prototype.click = originalClick }
+    const notice = canvas.getByTestId('composer-attachment-notice')
+    await waitFor(() => expect(notice).toHaveTextContent("SVG files can't be attached. Use PNG, JPEG, GIF or WebP."))
+    await expect(notice).toHaveAttribute('aria-live', 'polite')
+    await expect(canvas.queryByTestId('composer-attachments')).toBeNull()
+    const unsupportedPaste = new DataTransfer()
+    const pickerNotice = notice.querySelector('p')
+    unsupportedPaste.items.add(new File(['<svg/>'], 'pasted.svg', { type: 'image/svg+xml' }))
+    await userEvent.click(textbox(canvasElement))
+    await userEvent.paste(unsupportedPaste)
+    await waitFor(() => expect(notice.querySelector('p')).not.toBe(pickerNotice))
+    await expect(notice).toHaveTextContent("SVG files can't be attached. Use PNG, JPEG, GIF or WebP.")
+    await expect(canvas.queryByTestId('composer-attachments')).toBeNull()
+    const draft = 'Please review the attached layout.'
+    await userEvent.click(textbox(canvasElement))
+    await userEvent.type(textbox(canvasElement), draft)
+    await userEvent.paste(pngFiles('first.png', 'second.png'))
+    await waitFor(() => expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible())
+    // The tray takes its own row above the field at every width; the one-line pill would squeeze the draft beside it.
+    await settle()
+    const tray = canvasElement.querySelector<HTMLElement>('[data-testid="composer-attachments"]')!.getBoundingClientRect()
+    await expect(tray.bottom).toBeLessThanOrEqual(textbox(canvasElement).getBoundingClientRect().top + 1)
+    // Over the limit: the excess is named; Send stays focusable but blocked, described by the refusal.
+    const refusal = canvas.getByTestId('composer-send-refusal')
+    await expect(within(refusal).getByRole('status')).toHaveTextContent('Messages can include 1 image. Remove 1 to send.')
+    const send = canvas.getByRole('button', { name: 'Send' })
+    await expect(send).toBeEnabled()
+    await expect(send).toHaveAttribute('aria-disabled', 'true')
+    await expect(send).toHaveAccessibleDescription('Messages can include 1 image. Remove 1 to send.')
+    // Attach keeps its place, explains the limit and adds nothing.
+    const attach = canvas.getByRole('button', { name: 'Attach image' })
+    await expect(attach).toHaveAttribute('aria-disabled', 'true')
+    await expect(attach).toHaveAccessibleDescription('Messages can include 1 image.')
+    // A blocked press, by pointer or keyboard, never sends: it re-renders the refusal (re-announced, highlighted) and keeps the draft.
+    await userEvent.click(send)
+    await waitFor(() => expect(refusal.querySelector('[data-refusal-attempt="1"]')).not.toBeNull())
+    send.focus()
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(refusal.querySelector('[data-refusal-attempt="2"]')).not.toBeNull())
+    await expect(send).toHaveFocus()
+    await expect(receiptLog(canvasElement).children).toHaveLength(0)
+    await expect(textbox(canvasElement)).toHaveValue(draft)
+    // Remove is named for its file and reachable by keyboard.
+    canvas.getByRole('button', { name: 'Remove first.png' }).focus()
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(within(refusal).getByRole('status')).toBeEmptyDOMElement())
+    await expect(canvas.getByRole('button', { name: 'Attach image' })).toHaveAttribute('aria-disabled', 'true')
+    // Permission loss does not strand the remaining image: the refusal is count-aware with a one-step Remove.
+    await userEvent.click(canvas.getByRole('button', { name: 'Revoke image upload' }))
+    await waitFor(() => expect(within(refusal).getByRole('status')).toHaveTextContent('You can no longer send images here. Remove the image to send your text.'))
+    await expect(canvas.getByRole('button', { name: 'Send' })).toHaveAttribute('aria-disabled', 'true')
+    await expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible()
+    await expect(canvas.getByRole('button', { name: 'Attach image' })).toHaveAccessibleDescription('You can no longer send images here.')
+    await userEvent.click(textbox(canvasElement))
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(refusal.querySelector('[data-refusal-attempt="1"]')).not.toBeNull())
+    await expect(receiptLog(canvasElement).children).toHaveLength(0)
+    await expect(textbox(canvasElement)).toHaveValue(draft)
+    await userEvent.click(within(refusal).getByRole('button', { name: 'Remove image' }))
+    await waitFor(() => expect(canvasElement.querySelector('[data-testid="composer-attachments"]')).toBeNull())
+    await expect(textbox(canvasElement)).toHaveFocus()
+    await expect(textbox(canvasElement)).toHaveValue(draft)
+    await expect(canvas.getByRole('button', { name: 'Send' })).not.toHaveAttribute('aria-disabled', 'true')
+    await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(within(receiptLog(canvasElement)).getByText('Attachments:')).toBeVisible())
+  },
+}
+export const PlainImageAttachmentsLight: Story = { ...PlainImageAttachments, args: { scheme: 'light' } }
 
 /** Plain text adapter used by workbench thread panes: session-scoped draft, queue while running, explicit stop. */
 function PlainAdapter({ scheme }: { readonly scheme: Scheme }) {
@@ -637,6 +798,9 @@ const styles = stylex.create({
   fillFrameBody: { flexGrow: 1, justifyContent: 'flex-end' },
   narrow: { width: g.tooltipMax, minWidth: 0 },
   gallery: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl },
+  // Shapes are compared at one desktop lane; narrow viewports scroll instead of letting the footer cramp C1 into a slab.
+  shapeGallery: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: s.xl, maxWidth: '100%', overflowX: 'auto' },
+  shapeLane: { width: 768, flexShrink: 0 },
   budgetPreviews: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.md },
   budgetFrame: (width: number) => ({ width: `calc(${width}px + ${s.md} + ${s.md} + ${g.hairline} + ${g.hairline})`, boxSizing: 'border-box', flexShrink: 0, overflow: 'visible' }),
   budgetFrameBody: { overflow: 'visible' },

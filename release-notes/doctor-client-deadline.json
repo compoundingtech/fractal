@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "st3 doctor waits up to the server's 120 s doctor budget instead of failing at the 15 s ordinary request limit.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or projection change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Request and response formats are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Client-only deadline change; no daemon restart required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or manual action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing is persisted; the previous client can be restored freely."
+  }
+}

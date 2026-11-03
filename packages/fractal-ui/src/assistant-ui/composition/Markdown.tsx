@@ -19,6 +19,9 @@ import markdown from 'refractor/markdown'
 import css from 'refractor/css'
 import remarkGfm from 'remark-gfm'
 import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { Tooltip as CopyTooltip } from './Controls'
+import { Icon } from './Icons'
+import { useCopyFeedback } from './useCopyFeedback'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
 export type InlineReferenceRenderer = (path: string) => React.ReactNode | undefined
@@ -160,29 +163,18 @@ export function HighlightedSource({ code, language }: { code: string; language: 
   return nodes === undefined ? code : <>{nodes.map((node, index) => <SyntaxToken key={index} node={node} />)}</>
 }
 
-type CopyState = { tag: 'ready' } | { tag: 'copying' } | { tag: 'copied'; code: string } | { tag: 'failed' }
 const CodeBlock = React.memo(function CodeBlock({ code, language }: { code: string; language: string }) {
   const [wrap, setWrap] = React.useState(false)
-  const [copy, setCopy] = React.useState<CopyState>({ tag: 'ready' })
-  const copyCode = async () => {
-    setCopy({ tag: 'copying' })
-    try {
-      await navigator.clipboard.writeText(code)
-      setCopy({ tag: 'copied', code })
-    } catch {
-      setCopy({ tag: 'failed' })
-    }
-  }
-  const copiedCurrentCode = copy.tag === 'copied' && copy.code === code
-  const copyLabel = copy.tag === 'copying' ? 'Copying…' : copiedCurrentCode ? 'Copied' : 'Copy'
+  const { state: copy, copied: copiedCurrentCode, copy: copyCode, tooltip, announcement } = useCopyFeedback(code, () => navigator.clipboard.writeText(code))
   return <div data-testid="markdown-code-block" data-language={language || 'text'} data-wrap={wrap} data-copy-state={copy.tag} {...stylex.props(styles.codeBlock, React.useContext(InListItem) && styles.itemBlock)}>
     <div {...stylex.props(styles.codeToolbar)}>
       <span data-testid="markdown-code-language" {...stylex.props(styles.codeLanguage)}>{language || 'text'}</span>
       <Button aria-label="Wrap code" aria-pressed={wrap} onPress={() => setWrap(value => !value)} {...stylex.props(styles.codeButton, wrap && styles.codeButtonSelected)}>Wrap</Button>
-      <Button aria-label={`${copyLabel} code`} isDisabled={copy.tag === 'copying'} onPress={copyCode} {...stylex.props(styles.codeButton)}>{copyLabel}</Button>
+      {/* No isDisabled while copying: a disabled button drops keyboard focus; the hook already ignores repeat presses. */}
+      <CopyTooltip {...tooltip('Copy code')}><Button aria-label={copiedCurrentCode ? 'Copy code: Copied' : copy.tag === 'copying' ? 'Copy code: Copying…' : 'Copy code'} onPress={copyCode} {...stylex.props(styles.codeButton)}><Icon name={copiedCurrentCode ? 'check' : 'copy'} size={14} /><span>{copy.tag === 'copying' ? 'Copying…' : copiedCurrentCode ? 'Copied' : 'Copy'}</span></Button></CopyTooltip>
     </div>
     <pre data-testid="markdown-code" role="group" aria-label={`Code, ${language || 'text'}`} tabIndex={0} {...stylex.props(styles.codePre, wrap && styles.codeWrapped)}><code {...stylex.props(styles.codeText)}><HighlightedSource code={code} language={language} /></code></pre>
-    <span role="status" {...stylex.props(copy.tag === 'failed' && styles.copyStatus)}>{copy.tag === 'failed' ? 'Could not copy code. Check clipboard permissions and try again.' : <VisuallyHidden><span>{copiedCurrentCode ? 'Code copied.' : copy.tag === 'copied' ? 'Code has changed since the last copy.' : ''}</span></VisuallyHidden>}</span>
+    <span role="status" aria-live="polite" {...stylex.props(copy.tag === 'failed' && styles.copyStatus)}>{copy.tag === 'failed' ? 'Could not copy code. Check clipboard permissions and try again.' : <VisuallyHidden>{copy.tag === 'copied' && !copiedCurrentCode ? 'Code has changed since the last copy.' : announcement}</VisuallyHidden>}</span>
   </div>
 })
 
@@ -359,7 +351,7 @@ const styles = stylex.create({
   alignLeft: { textAlign: 'left' }, alignCenter: { textAlign: 'center' }, alignRight: { textAlign: 'right' },
   codeToolbar: { display: 'flex', alignItems: 'center', gap: s.xs, paddingInline: s.md, paddingBlock: s.xs, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   codeLanguage: { flexGrow: 1, minWidth: 0, overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fgMuted },
-  codeButton: { flexShrink: 0, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: textColor.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset }, ':disabled': { cursor: 'default', color: textColor.fgMuted } },
+  codeButton: { flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: s.xs, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: textColor.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   codeButtonSelected: { backgroundColor: surface.rowActive, borderColor: border.borderStrong, color: textColor.fg },
   codePre: { margin: 0, paddingBlock: s.md, paddingInline: s.lg, overflowX: 'auto', whiteSpace: 'pre', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   codeWrapped: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },

@@ -9,36 +9,56 @@ import { accentVars as accent, spaceVars as s, surfaceVars as surface, textVars 
 import { baselineTheme } from '../neutral-theme'
 import { lightTheme, type Scheme } from '../composition-theme'
 import { ThemePortal } from '../taste/ThemePortal'
+import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 const storyNow = Date.UTC(2026, 9, 8, 12, 0, 0)
-/** Fully reported synthetic identity; every optional fact the card can render is present. */
+/** Fully reported synthetic identity; every optional fact the card can render is present, including Claude's explicit (empty) subagent list. */
 const knownRow: Row = {
   ref: 'agent/sample', id: 'sample', title: 'Sample session', description: 'Reviews the selection model',
-  status: 'working', statusLabel: 'Working', host: 'host-1', harness: 'seat-1', model: 'glm-5',
+  status: 'working', statusLabel: 'Working', host: 'host-1', harness: 'claude', model: 'glm-5',
   statusSince: storyNow - 90_000, lastActivityAt: storyNow - 30_000, needsMe: true, unread: 2, freshness: 'live',
   usage: { _tag: 'Known', scope: '24h-root-and-subagents', usd: 1.84, tokens: 412_000 },
   duration: { _tag: 'Known', scope: '24h-activity-span', ms: 3_600_000 },
   lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 300_000 },
   branch: 'feat/rows', worktree: '~/rows',
   pullRequest: { ref: 'agent/sample/pr', title: 'Align row cohort', number: 42, state: 'open' },
+  subagentCount: 0, subagentObservation: { _tag: 'Reported' },
   children: [],
 }
-/** Same identity, nothing reported beyond title, status, host and counts; every optional fact is omitted. */
-const unreportedRow: Row = { ...knownRow, ref: 'agent/unreported', id: 'unreported', title: 'Unreported session', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, description: undefined, model: undefined, harness: undefined, pullRequest: undefined, branch: undefined, worktree: undefined, terminal: undefined, mission: undefined, statusSince: undefined, lastActivityAt: undefined }
-/** Synthetic cohort: every second row carries no last-turn fact, so its time slot renders empty while the shared metric track keeps every title aligned. */
+/** Same identity, nothing reported beyond title, status, host and counts; every optional fact is omitted, and without a known driver the missing subagent roster is conservatively not reported by the harness. */
+const unreportedRow: Row = { ...knownRow, ref: 'agent/unreported', id: 'unreported', title: 'Unreported session', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, description: undefined, model: undefined, harness: undefined, pullRequest: undefined, branch: undefined, worktree: undefined, terminal: undefined, mission: undefined, statusSince: undefined, lastActivityAt: undefined, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } }
+/** Child rows never carry their own subagent report on the wire, so each is explicitly not reported by its harness. */
+const childObservation = { subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } } as const satisfies Partial<Row>
+/**
+ * Synthetic cohort: every second row carries no last-turn fact, so its time slot renders empty while the shared metric
+ * track keeps every title aligned. The cohort also carries each subagent cause: Claude reports (zero), a running Codex
+ * session on an older daemon omits the field, an OpenCode session is not reported by its harness, a starting OMP
+ * session awaits its first report, and a child row is not reported by its harness.
+ */
 const cohortRows: readonly Row[] = [
   { ...knownRow, ref: 'agent/first', id: 'first', title: 'First session' },
-  { ...knownRow, ref: 'agent/second', id: 'second', title: 'Second session', lastTurn: { _tag: 'Unknown' }, needsMe: false, unread: 0 },
+  { ...knownRow, ref: 'agent/second', id: 'second', title: 'Second session', harness: 'codex', lastTurn: { _tag: 'Unknown' }, needsMe: false, unread: 0, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'DaemonVersion' } } },
   { ...knownRow, ref: 'agent/third', id: 'third', title: 'Third session', status: 'waiting', statusLabel: 'Needs you' },
-  { ...knownRow, ref: 'agent/fourth', id: 'fourth', title: 'Fourth session', lastTurn: { _tag: 'Unknown' }, usage: { _tag: 'Unknown' } },
-  { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session' },
-  { ...knownRow, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
+  { ...knownRow, ref: 'agent/fourth', id: 'fourth', title: 'Fourth session', harness: 'opencode', subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } }, lastTurn: { _tag: 'Unknown' }, usage: { _tag: 'Unknown' } },
+  { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session', harness: 'omp', status: 'pending', statusLabel: 'Pending', subagentObservation: { _tag: 'Unavailable' } },
+  { ...knownRow, ...childObservation, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
 ]
 /** Synthetic parent with two subagents, for collapsed and expanded child rows. */
-const parentRow: Row = { ...knownRow, ref: 'agent/parent', id: 'parent', title: 'Parent session', needsMe: false, children: [
-  { ...knownRow, ref: 'agent/parent/subagent/one', id: 'parent', parentRef: 'agent/parent', title: 'Subagent one', needsMe: undefined, children: [] },
-  { ...unreportedRow, ref: 'agent/parent/subagent/two', id: 'parent', parentRef: 'agent/parent', title: 'Subagent two', children: [] },
+const parentRow: Row = { ...knownRow, ref: 'agent/parent', id: 'parent', title: 'Parent session', needsMe: false, subagentCount: 2, children: [
+  { ...knownRow, ...childObservation, ref: 'agent/parent/subagent/one', id: 'parent', parentRef: 'agent/parent', title: 'Subagent one', needsMe: undefined, children: [] },
+  { ...unreportedRow, ...childObservation, ref: 'agent/parent/subagent/two', id: 'parent', parentRef: 'agent/parent', title: 'Subagent two', children: [] },
 ] }
+/** Phone fixtures: a title too long for the narrowed title track, and a desktop copy of the parent for the dense control. */
+const longRow: Row = { ...cohortRows[2]!, ref: 'agent/long', id: 'long', title: 'Long session title that has to truncate before the touch columns' }
+const desktopParentRow: Row = { ...parentRow, ref: 'agent/parent/desktop' }
+/** The exact subagent sentence each fixture's description carries just before its ID, by title: every cause appears. */
+const subagentFacts: Readonly<Record<string, string>> = {
+  'Sample session': 'Subagents: 0', 'Unreported session': 'Not reported by this harness',
+  'First session': 'Subagents: 0', 'Second session': 'Not reported by this daemon version', 'Third session': 'Subagents: 0',
+  'Fourth session': 'Not reported by this harness', 'Fifth session': 'Not reported yet', 'Check output': 'Not reported by this harness',
+  'Parent session': 'Subagents: 2', 'Subagent one': 'Not reported by this harness', 'Subagent two': 'Not reported by this harness',
+  [longRow.title]: 'Subagents: 0',
+}
 
 function CardPair({ row }: { readonly row: Row }) {
   return <div {...stylex.props(styles.spread)}>
@@ -51,7 +71,22 @@ function CardPair({ row }: { readonly row: Row }) {
 
 /** Hover intent opens after 150ms and closes after 300ms; a saturated strict host can stretch that past waitFor's 1s default. */
 const hoverSettleTimeout = 5_000
-const fixtureByRef = new Map<string, Row>([knownRow, unreportedRow, ...cohortRows, ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr1` })), ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr3` })), ...parentRow.children, parentRow].map(row => [row.ref, row]))
+
+/** Observe the whole intent window, rather than passing before the desktop's 150ms timer can fire. */
+async function assertNoPhoneHover(target: HTMLElement, phone: HTMLElement) {
+  await userEvent.hover(target)
+  target.focus()
+  const started = performance.now()
+  do {
+    await expect(document.querySelector('[role="tooltip"]')).toBeNull()
+    await expect(phone.querySelector('[data-row-action="open"]')).toBeNull()
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  } while (performance.now() - started < 200)
+  await expect(document.querySelector('[role="tooltip"]')).toBeNull()
+  await expect(phone.querySelector('[data-row-action="open"]')).toBeNull()
+  await expect(target).toHaveFocus()
+}
+const fixtureByRef = new Map<string, Row>([knownRow, unreportedRow, ...cohortRows, ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr1` })), ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr3` })), ...parentRow.children, parentRow, longRow, desktopParentRow].map(row => [row.ref, row]))
 
 /** The visible title is the exact name; the complete reported facts are the exact description, carried by a mounted hidden span rather than a native title or the unsupported aria-description. */
 async function assertRowNames(canvasElement: HTMLElement) {
@@ -73,6 +108,9 @@ async function assertRowNames(canvasElement: HTMLElement) {
     await expect(described).not.toBeNull()
     await expect(row.contains(described)).toBe(true)
     await expect(described!.textContent).toBe(sidebarRowDescription(fixture))
+    const subagentFact = subagentFacts[fixture.title]
+    await expect(subagentFact, `${fixture.title}: no expected subagent fact`).toBeDefined()
+    await expect(described!.textContent).toContain(`. ${subagentFact}. ID: ${fixture.ref}.`)
     await expect(row.parentElement!.querySelectorAll('[title]')).toHaveLength(0)
     await expect(row.parentElement!.querySelectorAll('[aria-description]')).toHaveLength(0)
   }
@@ -176,13 +214,45 @@ function QuickOpenCohort() {
   return <div data-frame-rows {...stylex.props(styles.list)}>{cohortRows.slice(0, 3).map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} actions={{ select }} onOpen={open} active={openedRef === row.ref} />)}</div>
 }
 
+/** Phone roster: the host provides `NarrowLayoutContext`, so each row gives its actions menu and subagent disclosure their own trailing 44px columns. The same rows without the context are the desktop control. */
+function PhoneRows() {
+  const [expanded, setExpanded] = React.useState(false)
+  const toggle = React.useCallback(() => setExpanded(value => !value), [])
+  const select = React.useCallback(() => {}, [])
+  const rows = [cohortRows[0]!, longRow, cohortRows[3]!]
+  return <div {...stylex.props(styles.spread)}>
+    <NarrowLayoutContext.Provider value={true}>
+      <div data-frame-rows data-phone-rows {...stylex.props(styles.list, styles.phoneList)}>
+        {rows.map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} actions={{ select }} />)}
+        <SidebarAgentRow item={parentRow} now={storyNow} actions={{ select }} treeExpanded={expanded} onToggleChildren={toggle} />
+      </div>
+    </NarrowLayoutContext.Provider>
+    <div data-frame-rows data-desktop-rows {...stylex.props(styles.list)}><SidebarAgentRow item={desktopParentRow} now={storyNow} actions={{ select }} onToggleChildren={toggle} /></div>
+  </div>
+}
+
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Sidebar/Agent Row',
   component: SidebarAgentRow,
   // label-content-name-mismatch is an experimental axe rule, so the strict a11y check enables it explicitly for every row story.
-  parameters: { layout: 'fullscreen', a11y: { config: { rules: [{ id: 'label-content-name-mismatch', enabled: true }] } }, docs: { description: { component: 'Baseline agent row: reported facts only. The hover card and reported details omit unreported fields instead of showing placeholders; hovering a row swaps the time slot for a quick Open action; rows without a reported time keep the shared metric track so titles stay aligned.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'controlled agent-row contracts: exact names, descriptions, geometry and interactions are asserted against module-local row fixtures' }, layout: 'fullscreen', a11y: { config: { rules: [{ id: 'label-content-name-mismatch', enabled: true }] } }, docs: { description: { component: 'Baseline agent row: reported facts only. The hover card and reported details omit unreported fields instead of showing placeholders; hovering a row swaps the time slot for a quick Open action; rows without a reported time keep the shared metric track so titles stay aligned.' } } },
 } satisfies Meta
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'DensitiesAndChildren:contract-fixture',
+  'FrozenWorkingVersusIdle:contract-fixture',
+  'HoverCardKnown:contract-fixture',
+  'HoverCardUnknown:contract-fixture',
+  'PhoneFocusNoHover:contract-fixture',
+  'PhoneTouchTargets:contract-fixture',
+  'QuickOpenAction:contract-fixture',
+  'ThemedOverlaysAndFocus:contract-fixture',
+  'TimeCohort:contract-fixture',
+]
 type Story = StoryObj
 export const HoverCardKnown: Story = { tags: ['critical'], name: 'Hover card · fully reported', render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /></main>, play: async ({ canvasElement }) => assertCompactCard(canvasElement) }
 export const HoverCardUnknown: Story = { tags: ['critical'], name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {
@@ -199,6 +269,24 @@ export const TimeCohort: Story = { tags: ['critical'], name: 'Time cohort · kno
   await expect(child.querySelector('[data-row-field="last-turn"]')).toBeNull()
   const titleLeft = rows[0]!.querySelector('[data-row-column="title-text"]')!.getBoundingClientRect().left
   for (const row of rows) await expect(Math.abs(row.querySelector('[data-row-column="title-text"]')!.getBoundingClientRect().left - titleLeft)).toBeLessThanOrEqual(1)
+} }
+/** Synthetic last-observed pair: same facts, one working and one idle, both from a stale observation. */
+const frozenRows: readonly Row[] = [
+  { ...unreportedRow, ref: 'agent/frozen-working', id: 'frozen-working', title: 'Frozen working session', status: 'working', statusLabel: 'Last verified · working', freshness: 'stale', needsMe: false, unread: 0 },
+  { ...unreportedRow, ref: 'agent/frozen-idle', id: 'frozen-idle', title: 'Frozen idle session', status: 'idle', statusLabel: 'Last verified · idle', freshness: 'stale', needsMe: false, unread: 0 },
+  { ...unreportedRow, ref: 'agent/frozen-stale', id: 'frozen-stale', title: 'Frozen stale session', status: 'stale', statusLabel: 'Stale observation', freshness: 'stale', needsMe: false, unread: 0 },
+]
+export const FrozenWorkingVersusIdle: Story = { tags: ['critical'], name: 'Frozen observation · working vs idle', render: () => <main {...stylex.props(styles.root)}><div {...stylex.props(styles.list)}>{frozenRows.map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} />)}</div></main>, play: async ({ canvasElement }) => {
+  const glyphs = [...canvasElement.querySelectorAll<HTMLElement>('[data-row-column="status"] [data-status]')]
+  await expect(glyphs.map(glyph => glyph.dataset.status)).toEqual(['working', 'idle', 'stale'])
+  for (const glyph of glyphs) await expect(glyph).toHaveAttribute('data-frozen', 'true')
+  // One muted tone: a frozen observation never reads as live and stale is never the danger red.
+  await expect(new Set(glyphs.map(glyph => getComputedStyle(glyph).color)).size).toBe(1)
+  // Nothing spins.
+  for (const svg of canvasElement.querySelectorAll('[data-row-column="status"] svg')) await expect(getComputedStyle(svg).animationName).toBe('none')
+  // Without color, shape tells working from idle: working keeps its static ring, idle is the plain disc.
+  const [working, idle] = glyphs.map(glyph => glyph.querySelector('svg')!)
+  await expect(working!.querySelectorAll('circle, path').length).toBeGreaterThan(idle!.querySelectorAll('circle, path').length)
 } }
 export const QuickOpenAction: Story = { tags: ['critical'], name: 'Row hover · quick Open', render: () => <main {...stylex.props(styles.root)}><QuickOpenCohort /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
@@ -243,6 +331,77 @@ export const DensitiesAndChildren: Story = { tags: ['critical'], name: 'Names an
   await assertRowNames(canvasElement)
   // The pointer rests on the row, so its hover card opens; the a11y check must see it open, not race its delay.
   await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1), { timeout: hoverSettleTimeout })
+} }
+export const PhoneTouchTargets: Story = { tags: ['critical'], name: 'Phone · 44px menu and disclosure columns', render: () => <main {...stylex.props(styles.root)}><PhoneRows /></main>, play: async ({ canvasElement }) => {
+  await document.fonts.ready
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+  const phone = canvasElement.querySelector<HTMLElement>('[data-phone-rows]')!
+  const rows = within(phone).getAllByTestId('taste-agent-row')
+  await expect(rows).toHaveLength(4)
+  for (const row of rows) {
+    await expect(row).toHaveAttribute('data-narrow', 'true')
+    const frame = row.getBoundingClientRect()
+    // SR-2 keeps its 48px height, status glyph and metric slot.
+    await expect(Math.abs(frame.height - 48)).toBeLessThanOrEqual(0.5)
+    await expect(row.querySelector('[data-row-column="status"]')!.getBoundingClientRect().width).toBeGreaterThan(0)
+    await expect(row.querySelector('[data-row-column="time"]')).not.toBeNull()
+    const open = row.querySelector<HTMLElement>(':scope > button')!.getBoundingClientRect()
+    const title = row.querySelector('[data-row-column="title-text"]')!.getBoundingClientRect()
+    const menuButton = row.querySelector<HTMLElement>('[data-agent-menu]')!
+    const menu = menuButton.getBoundingClientRect()
+    // Touch has no hover: the menu is visible, at least 44×44, inside the row and clear of the open target.
+    await expect(getComputedStyle(menuButton).opacity).toBe('1')
+    await expect(menu.width).toBeGreaterThanOrEqual(44)
+    await expect(menu.height).toBeGreaterThanOrEqual(44)
+    await expect(menu.right).toBeLessThanOrEqual(frame.right + 0.5)
+    await expect(menu.top).toBeGreaterThanOrEqual(frame.top - 0.5)
+    await expect(menu.bottom).toBeLessThanOrEqual(frame.bottom + 0.5)
+    await expect(menu.left).toBeGreaterThanOrEqual(open.right - 0.5)
+    await expect(title.right).toBeLessThanOrEqual(open.right + 0.5)
+    const disclosure = row.querySelector<HTMLElement>('[data-row-column="children"]')
+    if (disclosure !== null) {
+      const box = disclosure.getBoundingClientRect()
+      await expect(box.width).toBeGreaterThanOrEqual(44)
+      await expect(box.height).toBeGreaterThanOrEqual(44)
+      await expect(box.left).toBeGreaterThanOrEqual(open.right - 0.5)
+      await expect(box.right).toBeLessThanOrEqual(menu.left + 0.5)
+    }
+  }
+  // The long title truncates before the touch columns instead of pushing them out.
+  const longTitle = rows[1]!.querySelector<HTMLElement>('[data-row-column="title-text"]')!
+  await expect(longTitle.scrollWidth).toBeGreaterThan(longTitle.clientWidth)
+  // The disclosure expands and collapses from its 44px target; the nested rows keep the phone grid.
+  await assertNoPhoneHover(within(rows[3]!).getByRole('button', { name: 'Expand 2 subagents' }), phone)
+  await userEvent.click(within(rows[3]!).getByRole('button', { name: 'Expand 2 subagents' }))
+  await waitFor(() => expect(within(phone).getByRole('button', { name: 'Collapse 2 subagents' })).toHaveAttribute('aria-expanded', 'true'))
+  for (const child of within(phone).getAllByTestId('taste-agent-row').slice(4)) await expect(child.querySelector<HTMLElement>('[data-agent-menu]')!.getBoundingClientRect().width).toBeGreaterThanOrEqual(44)
+  await userEvent.click(within(phone).getByRole('button', { name: 'Collapse 2 subagents' }))
+  await waitFor(() => expect(within(phone).queryByRole('button', { name: 'Subagent two' })).toBeNull())
+  // A tap on the menu opens 44px items; Escape closes and returns focus to the trigger.
+  const trigger = within(rows[0]!).getByRole('button', { name: 'Actions for First session' })
+  await userEvent.click(trigger)
+  const items = await waitFor(() => { const found = document.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]'); expect(found.length).toBeGreaterThan(0); return found })
+  // The standard popover scales during entry; measure the settled touch geometry.
+  for (const item of items) await waitFor(() => expect(item.getBoundingClientRect().height).toBeGreaterThanOrEqual(44))
+  // A hover card the pointer left behind (the expanded row it just collapsed) closes on its own 300ms delay; the menu opening must leave none.
+  await waitFor(() => expect(document.querySelector('[role="tooltip"]')).toBeNull())
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
+  await waitFor(() => expect(document.activeElement).toBe(trigger))
+  await assertRowNames(canvasElement)
+  // Desktop control: without the context the menu and disclosure keep their dense geometry.
+  const desktop = within(canvasElement.querySelector<HTMLElement>('[data-desktop-rows]')!).getByTestId('taste-agent-row')
+  await expect(desktop).not.toHaveAttribute('data-narrow')
+  await expect(desktop.querySelector('[data-agent-menu]')!.getBoundingClientRect().width).toBeLessThan(44)
+  await expect(desktop.querySelector('[data-row-column="children"]')!.getBoundingClientRect().height).toBeLessThan(44)
+} }
+export const PhoneFocusNoHover: Story = { tags: ['critical'], name: 'Phone · disclosure focus never opens hover UI', render: PhoneTouchTargets.render, play: async ({ canvasElement }) => {
+  const phone = canvasElement.querySelector<HTMLElement>('[data-phone-rows]')!
+  const disclosure = within(phone).getByRole('button', { name: 'Expand 2 subagents' })
+  await assertNoPhoneHover(disclosure, phone)
+  await userEvent.unhover(disclosure)
+  disclosure.blur()
+  await assertRowNames(canvasElement)
 } }
 export const ThemedOverlaysAndFocus: StoryObj<{ scheme: Scheme }> = {
   name: 'Themed overlays · row menu and neutral focus',
@@ -290,6 +449,7 @@ const styles = stylex.create({
   root: { height: '100vh', minHeight: 0, overflowY: 'auto', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, display: 'flex', flexDirection: 'column', gap: s.xl },
   spread: { display: 'flex', alignItems: 'flex-start', flexWrap: 'wrap', gap: s.xl },
   list: { display: 'flex', flexDirection: 'column', gap: s.xs, width: g.specimenAside, minWidth: 0 },
+  phoneList: { width: 360, maxWidth: '100%' },
   aside: { width: g.specimenAside, maxWidth: '100%', minWidth: 0, boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.raised, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, boxShadow: elevation.popover },
   tokenProbe: { position: 'absolute', width: 0, height: 0, overflow: 'hidden', backgroundColor: surface.raised, color: ink.fgMuted, borderTopStyle: 'solid', borderTopWidth: 0, borderTopColor: accent.primary },
 })

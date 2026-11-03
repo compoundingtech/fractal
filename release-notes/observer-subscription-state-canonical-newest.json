@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Observer and subscription lists and details show the newest state claim in canonical order instead of the one this member happened to admit last, so every member shows the same state",
+  "replay": {"status": "none", "detail": "No graph replay; reads only."},
+  "schema": {"status": "none", "detail": "No schema change. The read uses the existing claims_subject_kind_accepted_index."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "The observer and subscription list and detail views, and the attention reader that already used canonical order, now agree. Where two members wrote states for the same observer or subscription, or a writer's clock went backward, a view can show a different state than before: the canonical newest, the same on every member. No wire, stored format or claim kind change."},
+  "downtime": {"status": "none", "detail": "None. A detail read now sorts the newest millisecond's state claims; a read at an older cut also passes the subject's newer states in the index."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting the build restores arrival-order reads; nothing stored changes."}
+}

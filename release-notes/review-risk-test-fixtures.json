@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Test fixtures no longer score as schema changes: the schema content rule in .st/risky-classes.json gets the same exclude list as the data-deletion rule (tests/ directories, tests.rs, *_tests.rs, *_test.rs), scripts/classify-risk reads an optional exclude on a content entry, and scripts/review-risk leaves out added and removed lines inside a trailing #[cfg(test)] mod tests block of a Rust file (the file still counts as changed and its lines still count towards the large-change total). Tests for both.",
+  "replay": {
+    "status": "none",
+    "detail": "scripts/classify-risk, scripts/review-risk and their tests, and .st/risky-classes.json (local review and change-impact tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "scripts/classify-risk, scripts/review-risk and their tests, and .st/risky-classes.json (local review and change-impact tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "scripts/classify-risk, scripts/review-risk and their tests, and .st/risky-classes.json (local review and change-impact tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "scripts/classify-risk, scripts/review-risk and their tests, and .st/risky-classes.json (local review and change-impact tooling) only; no protocol, schema, policy, workflow or note change. The same rules file picks which suites a change forces (docs/st3/change-impact.md): a CREATE TABLE added only in a test file or a trailing test module no longer forces the store and smallclaims suites by itself; a change to the non-test code in the same files still does."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "scripts/classify-risk, scripts/review-risk and their tests, and .st/risky-classes.json (local review and change-impact tooling) only; no protocol, schema, policy, workflow or note change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert; the rules go back to scoring test fixtures."
+  }
+}

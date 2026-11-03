@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A member with [trim] local = true trims its own due cut each day: observer.observed and resource.observed, by their audited retention rules, with no seal, verification or copy-proof. Off by default",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No table or claim schema change. Local cuts use the existing checkpoints, checkpoint_* and retired_* tables."},
+  "rules": {"status": "changed", "detail": "Local trim drops only LOCAL_TRIM_KINDS (observer.observed, resource.observed) by their existing audited rules; every other kind is kept. Shared checkpoint rules and their digest are unchanged."},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change. Deleted identities travel through the retired ledger as before."},
+  "downtime": {"status": "none", "detail": "None. A cut runs in the background, in chunks, on the existing trim pacing."},
+  "manual": {"status": "none", "detail": "No manual step. A stopped local trim alerts and is resumed with st replication checkpoint resume --reason TEXT, which an agent may run on such a member."},
+  "recovery": {"status": "none", "detail": "Remove the setting and restart: the member stops trimming locally. What it deleted stays retired."}
+}

@@ -4,7 +4,7 @@ import { checkoutLabel, randomName } from './launcher.ts';
 
 assert.equal(randomName(() => 0), 'amber-badger');
 assert.match(randomName(), /^[a-z]+-[a-z]+$/);
-// The same checkout label contract used by stui.
+// The same checkout label contract used by the Fractal terminal UI.
 const fixture = JSON.parse(readFileSync(new URL('../../fixtures/clients/agent-launch.json', import.meta.url), 'utf8'));
 assert.equal(checkoutLabel(fixture.checkout), fixture.checkout_label);
 assert.equal(checkoutLabel(), undefined);

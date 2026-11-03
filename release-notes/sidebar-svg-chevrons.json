@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "fractal-ui sidebar tree rows draw their disclosure chevron with the shared kit icon instead of a Unicode glyph, mirrored in right-to-left layouts",
+  "replay": { "status": "none", "detail": "No replay, backfill, stored data or transcript change." },
+  "schema": { "status": "none", "detail": "No tables, columns, indexes, triggers or published schema change." },
+  "rules": { "status": "none", "detail": "No transaction, reconcile, lifecycle or authority rule change." },
+  "compatibility": { "status": "none", "detail": "Only packages/fractal-ui rendering changes; no protocol, harness, CLI or peer change and no exported API change." },
+  "downtime": { "status": "none", "detail": "Ordinary rolling deployment; no conversion or additional startup work." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

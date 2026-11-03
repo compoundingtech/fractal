@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Diagnose same-host replication worker and daemon build skew at worker startup and in doctor. Stale process reports and missing identities warn without blocking replication.",
+  "replay": {"status": "none", "detail": "No replicated authority or projection changes."},
+  "schema": {"status": "none", "detail": "Worker identity is local diagnostic metadata, not replicated state."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordinated upgrade changes."},
+  "compatibility": {"status": "none", "detail": "Uses the existing health build.commit identity; older workers without reports are diagnosed as unknown."},
+  "downtime": {"status": "none", "detail": "Skew only warns and does not reject rolling deployments."},
+  "manual": {"status": "none", "detail": "No required operator action. Deploy matching daemon and worker builds when skew is reported."},
+  "recovery": {"status": "none", "detail": "No recovery or rollback behavior changes."}
+}
