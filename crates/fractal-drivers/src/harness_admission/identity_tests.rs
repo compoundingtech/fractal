@@ -33,6 +33,7 @@ fn resolver_selects_runtime_and_preserves_admission_hash() {
         identity,
         executable_identity_with(&binary, &|_| Ok(second.clone())).unwrap()
     );
+    executable_identity_recorded(&binary, &resolve, || SystemTime::now() + Duration::from_secs(2)).unwrap();
     let before = hashed_files();
     assert_eq!(identity, executable_identity_with(&binary, &resolve).unwrap());
     assert_eq!(before, hashed_files(), "cache hit must not stream files");
@@ -81,4 +82,23 @@ fn dependency_edits_retargets_and_metadata_invalidate_cache() {
     fs::write(&replacement, "#!/usr/bin/env runtime\nother").unwrap();
     assert_eq!(previous, identity());
     assert!(hashed_files() > before);
+}
+
+#[test]
+fn same_tick_same_size_writes_are_never_cached_as_settled() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("producer");
+    let tick = SystemTime::now() + Duration::from_secs(60);
+    let write = |contents| {
+        fs::write(&binary, contents).unwrap();
+        File::open(&binary).unwrap().set_times(fs::FileTimes::new().set_modified(tick)).unwrap();
+    };
+    write("first");
+    let first = executable_identity(&binary).unwrap();
+    let before = hashed_files();
+    write("other");
+    assert_eq!(fs::metadata(&binary).unwrap().modified().unwrap(), tick);
+    assert_ne!(first, executable_identity(&binary).unwrap());
+    assert!(hashed_files() > before);
+    assert!(!IDENTITY_CACHE.lock().unwrap().iter().any(|e| e.dependencies.iter().any(|d| d.path == binary)));
 }
