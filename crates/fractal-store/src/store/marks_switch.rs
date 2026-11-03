@@ -2,18 +2,23 @@
 //! lifecycle claims (db break-up step 4b-2).
 //!
 //! A mark never replicates. Another member learns of it only by asking this host on the
-//! seat-freshness relay, which a member does once it advertises `seat_freshness_reads` (4b-3; its
-//! build also reads the marks 4b-1 records). So this member writes marks only while every other
-//! member advertises that feature, read the strict way the standby barrier reads its own: the
-//! newest `daemon.started` of each current incarnation, any ambiguous membership counting as not
-//! ready, and no writer outside the membership. A member alone switches at once. The barrier is
-//! checked while the daemon runs ([`Store::refresh_marks_switch`]), cached in `meta`, and read by
-//! each writer in its own transaction ([`marks_switched_tx`]); a member that joins without the
-//! feature turns it off again, and writers return to claims from then on.
+//! seat-freshness relay. A member that advertises `seat_freshness_reads` (4b-3) asks it in
+//! delivery status, doctor and the mail-backlog check, but its message view and lists read only
+//! its own records, where another host's mark is missing and the mail would show as sent. So
+//! this member writes marks only while every other member advertises [`FEATURE`], which a build
+//! advertises once those reads ask the relay too (4b-4); no build does yet, so until then a
+//! member with others keeps claims. The barrier is read the strict way the standby barrier reads
+//! its own: the newest `daemon.started` of each current incarnation, any ambiguous membership
+//! counting as not ready, and no writer outside the membership. A member alone switches at once:
+//! no other member's view can be wrong. The barrier is checked while the daemon runs
+//! ([`Store::refresh_marks_switch`]), cached in `meta`, and read by each writer in its own
+//! transaction ([`marks_switched_tx`]); a member that joins without the feature turns it off
+//! again, and writers return to claims from then on.
 use super::*;
 
-/// The `daemon.started` feature every other member advertises before this one records marks.
-pub const FEATURE: &str = "seat_freshness_reads";
+/// The `daemon.started` feature every other member advertises before this one records marks: its
+/// message view and lists ask a seat's host for the seat's marks.
+pub const FEATURE: &str = "message_view_reads";
 
 const WRITER_TABLES: [(&str, &str); 3] = [
     ("replica_envelopes", "writer"), ("batches", "origin"), ("checkpoint_envelopes", "writer"),
@@ -25,8 +30,8 @@ fn writer_seek(table: &str, column: &str) -> String {
 /// Whether `member`'s newest own `daemon.started` at or after `start` advertises [`FEATURE`].
 fn advertises(connection: &Connection, member: &str, start: u64) -> Result<bool> {
     let advertised: Option<Option<bool>> = connection
-        .query_row(/* sqlite-large-value: allow-for-now lv-he99ecbc33cee owner=fractal_store::store::marks_switch TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT json_extract(claims.body,'$.fields.features.seat_freshness_reads')=1
+        .query_row(/* sqlite-large-value: allow-for-now lv-h68c3476e60b3 owner=fractal_store::store::marks_switch TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT json_extract(claims.body,'$.fields.features.message_view_reads')=1
              FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
                AND batches.replica_sequence>=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
@@ -141,7 +146,7 @@ mod tests {
         // A configured peer this member has not heard start yet, as before a first sync.
         let (switched, blockers) = Store::open_memory("alder").unwrap().refresh_marks_switch(&["birch".to_owned()]).unwrap();
         assert!(!switched);
-        assert_eq!(blockers, ["birch: exchanges with this member outside its fleet membership and has not advertised seat_freshness_reads=1"]);
+        assert_eq!(blockers, ["birch: exchanges with this member outside its fleet membership and has not advertised message_view_reads=1"]);
 
         let store = Store::open_memory("alder").unwrap();
         let anchor = enable(&store);
@@ -158,7 +163,7 @@ mod tests {
         sync(&peer, &store);
         let (switched, blockers) = store.refresh_marks_switch(&[]).unwrap();
         assert!(!switched);
-        assert_eq!(blockers, ["host/birch: has not advertised seat_freshness_reads=1"]);
+        assert_eq!(blockers, ["host/birch: has not advertised message_view_reads=1"]);
         // Another origin cannot speak for the member.
         claim(&store, "daemon/birch", "daemon.started", None, json!({"status": "running", "features": {FEATURE: 1}}));
         assert!(!store.refresh_marks_switch(&[]).unwrap().0);

@@ -7888,7 +7888,9 @@ fn message_marks_check(state: &AppState) -> DoctorCheck {
     let message = match (switched, blockers) {
         (Ok(true), _) => "on: this member records its own seats' delivery, read and close as local marks".to_owned(),
         (Ok(false), Ok(blockers)) if blockers.is_empty() => "off: every member is ready; marks turn on at the next check".to_owned(),
-        (Ok(false), Ok(blockers)) => format!("off: lifecycle claims until every member reads marks ({})", blockers.join("; ")),
+        (Ok(false), Ok(blockers)) => format!(
+            "off: lifecycle claims until every other member advertises {}=1, whose message view and lists ask a seat's host for its marks ({})",
+            crate::store::marks_switch::FEATURE, blockers.join("; ")),
         (Err(error), _) | (_, Err(error)) => {
             return DoctorCheck { name: "message-marks".into(), status: "warn".into(), message: format!("{error:#}") };
         }

@@ -6747,11 +6747,23 @@ async fn reads_seat_freshness(node: &Node) -> bool {
     })
 }
 
+/// Whether `node`'s own start advertises message view reads: a release whose message view and
+/// lists ask a seat's host for its marks (db break-up 4b-4), so a member of this build records
+/// them beside it.
+async fn reads_message_views(node: &Node) -> bool {
+    node.claims().await.iter().any(|claim| {
+        claim["subject"] == format!("daemon/{}", node.name) && claim["kind"] == "daemon.started"
+            && claim.pointer("/body/fields/features/message_view_reads").and_then(Value::as_i64) == Some(1)
+    })
+}
+
 /// A member of the previous release beside a member of this build that hosts a seat. A release
-/// without seat-freshness reads (v0.3.24 and earlier) keeps this build writing lifecycle claims,
-/// which it reads as it always has. A release with them (v0.3.25 on) lets this build record the
-/// seat's delivery and read as marks, which never replicate: the release asks the seat's host
-/// over the relay and reads the seat's read from its answer (db break-up 4b-2, marks_switch).
+/// without message view reads (v0.3.25 and earlier) keeps this build writing lifecycle claims,
+/// which it reads everywhere as it always has: a release with only seat-freshness reads (v0.3.25)
+/// would ask the seat's host in its delivery status but show the seat's read mail as sent in its
+/// message view and lists. A release with them lets this build record the seat's delivery and
+/// read as marks, which never replicate: the release asks the seat's host over the relay, in its
+/// delivery status and its message view alike (db break-up 4b-2, marks_switch).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
@@ -6774,7 +6786,7 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
     for node in [&mut o, &mut n1] {
         node.start().await;
     }
-    let release_reads_marks = reads_seat_freshness(&o).await;
+    let release_reads_marks = reads_message_views(&o).await;
     let marks = || {
         let marks = doctor_check(&n1, "message-marks");
         marks["message"].as_str().unwrap().to_owned()
@@ -6786,7 +6798,9 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
             async move { on }
         }).await;
     } else {
-        assert!(marks().starts_with("off:"), "{}", marks());
+        let off = marks();
+        assert!(off.starts_with("off: lifecycle claims until every other member advertises message_view_reads=1"), "{off}");
+        assert!(off.contains("o: exchanges with this member outside its fleet membership and has not advertised message_view_reads=1"), "{off}");
     }
     let declaration = root.path().join("new-host-seat.kdl");
     fs::write(&declaration, format!(
@@ -6835,11 +6849,10 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
             !o.claims().await.iter().any(|claim| claim["subject"] == subject && claim["kind"] == "message.read"),
             "a mark replicated as a claim"
         );
-        // The message view does not ask the relay: it reads this member's own records, which
-        // hold no mark of another host's seat, as the release note says.
-        let view: Value = o.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
-        assert_eq!(view["status"], "sent", "{view}");
     }
+    // The message view reads the seat's read too: from the claim, or by asking the seat's host.
+    let view: Value = o.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(view["status"], "read", "{view}");
 }
 
 /// A seat's conversation and `conversations wait` across the previous release and this build, on

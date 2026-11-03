@@ -1899,7 +1899,7 @@ fn doctor_shows_whether_marks_are_on_and_what_holds_them_off() {
     assert!(!state.store.refresh_marks_switch(&state.configured_peers).unwrap().0);
     let held = marks(&state);
     assert_eq!(held.status, "pass");
-    assert!(held.message.starts_with("off: lifecycle claims until every member reads marks"), "{held:?}");
+    assert!(held.message.starts_with("off: lifecycle claims until every other member advertises message_view_reads=1"), "{held:?}");
     assert!(held.message.contains("birch: exchanges with this member outside its fleet membership"), "{held:?}");
 }
 
