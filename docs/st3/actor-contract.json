@@ -66,6 +66,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st agents burst": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st agents handoff ready": {
         "actor": "optional",
         "accepts_person": true,
