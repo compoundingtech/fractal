@@ -610,6 +610,22 @@ enum FleetCommand {
         #[command(subcommand)]
         command: FleetTransportsCommand,
     },
+    /// Let this member start, restart and retire its agents without peers it cannot reach. With
+    /// `wait_for_peers_after_start` on, a member waits after each start to catch up with a peer
+    /// before acting on where its agents run; this releases the named peers for the current daemon
+    /// start only. Run it on the member.
+    AdmitWithout {
+        /// A peer this member stops waiting for. Repeat it for several.
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
+        /// Why the member may go on without them.
+        #[arg(long)]
+        reason: String,
+        /// The person or agent applying it.
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+        #[arg(long = "as")]
+        actor: String,
+    },
     /// Show this node, the fleet's members, and open invites.
     Status,
     /// Wait for this node's first sync to end: until it holds the same claims as the peer it
@@ -6955,6 +6971,64 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
     }
 }
 
+/// Audit the operation projection on a blocking thread. The audit reads in pages of at most
+/// 128 rows, each in its own short read snapshot, so it never holds one snapshot for its whole
+/// run and never delays a WAL restart for long. The store keeps the result for doctor.
+async fn audit_operations(store: &Arc<Store>) -> anyhow::Result<Vec<String>> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("operations.audit", || {
+        store.operation_projection_drift()
+    }))
+    .await
+    .unwrap_or_else(|error| Err(anyhow::anyhow!("the operation audit stopped: {error}")))
+}
+
+/// Count the envelopes this node admitted before it knew their writer's key or end, on a blocking
+/// thread, in pages that each take their own short read snapshot. The store keeps the count for
+/// doctor; a failure is kept there too, and doctor reports it.
+async fn count_fleet_residue(store: &Arc<Store>) {
+    let counting = store.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("fleet.admission_residue", || {
+        counting.audit_fleet_admission_residue()
+    }))
+    .await
+    {
+        store.fleet_residue_stopped(format!("the count stopped: {error}"));
+    }
+}
+
+/// Repair what an audit found, and say whether anything changed.
+async fn repair_operation_drift(store: &Arc<Store>, audit: anyhow::Result<Vec<String>>) -> bool {
+    let drift = match audit {
+        Ok(drift) if drift.is_empty() => return false,
+        Ok(drift) => drift,
+        Err(error) => {
+            stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
+            return false;
+        }
+    };
+    let store = store.clone();
+    match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("operations.repair_drift", || {
+        store.repair_operation_projection_drift_from_audit(&drift)
+    }))
+    .await
+    {
+        Ok(Ok(true)) => {
+            stderr_message("st3", format_args!("rebuilt an operation projection that drifted"));
+            true
+        }
+        Ok(Ok(false)) => false,
+        Ok(Err(error)) => {
+            stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
+            false
+        }
+        Err(error) => {
+            stderr_message("st3", format_args!("operation projection check stopped: {error}"));
+            false
+        }
+    }
+}
+
 async fn run_up(args: UpArgs) -> Result<()> {
     let worker_observer = fractal_daemon::api::worker_observer(args.replication_worker_pid)?;
     let started_at = Instant::now();
@@ -7018,6 +7092,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fractal_daemon::otel::Unit::Daemon,
         Some(if state_identity.is_ok() { &config.node } else { &configured_node }),
     );
+    if config.logging.stderr_warnings && fractal_daemon::telemetry::stderr_warnings() {
+        stderr_message("st3", format_args!("[logging] stderr_warnings: WARN and ERROR lines go to stderr"));
+    }
     if fractal_daemon::otel::metrics_enabled() {
         fractal_daemon::reconcile::init_metrics();
     }
@@ -7179,7 +7256,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok())}),
             ),
@@ -7279,7 +7356,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
         config.unlaned_seat.clone(),
-    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
@@ -7293,7 +7370,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // The policy reads `[limits]` again on every pass, so an edit applies without a restart.
     fractal_daemon::config::set_daemon_config(args_config.as_deref());
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.enforce", enforce_account_limits(store.clone(), config.limits.clone(), reconciler)));
-    recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
+    // Five seconds finds gaps between short readers without polling on every write.
+    recycle_idle_wal(store.path.clone(), Arc::downgrade(&store), Duration::from_secs(5));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
@@ -7361,32 +7439,50 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .await;
         }
     }));
-    // The first diagnostic report and delayed repair share one operation audit. Later reports
-    // audit current state independently; no request waits for this startup report.
+    // Doctor reports the envelopes admitted before this node knew better from this count, made
+    // at startup and then every period, and again when doctor finds membership moved since.
+    // The first count waits 30 s, so it does not run beside the startup operation audit, unless
+    // doctor asks for it sooner. Counts doctor asks for come at most once a minute, however
+    // often doctor runs while fleet rows replicate.
+    {
+        let store = store.clone();
+        tokio::spawn(fractal_daemon::task_cpu::account("fleet.admission_residue", async move {
+            let mut wait = Duration::from_secs(30);
+            let mut counted: Option<tokio::time::Instant> = None;
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    () = store.fleet_residue_wanted.notified() => {
+                        if let Some(counted) = counted {
+                            tokio::time::sleep_until(counted + Duration::from_secs(60)).await;
+                        }
+                    }
+                }
+                count_fleet_residue(&store).await;
+                counted = Some(tokio::time::Instant::now());
+                wait = fractal_daemon::store::OPERATION_AUDIT_PERIOD;
+            }
+        }));
+    }
+    // The first diagnostic report and delayed repair share one operation audit. After it the
+    // daemon audits again every period, and after any repair, so doctor reports a recent audit
+    // instead of reading every operation itself. No request waits for an audit.
     if let Some(audit) = fractal_daemon::api::start_operation_report(&state) {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("operations.repair_drift", async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            let drift = match audit.await {
-                Ok(Ok(drift)) => drift,
-                Ok(Err(error)) => {
-                    stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
-                    return;
-                }
-                Err(error) => {
-                    stderr_message("st3", format_args!("operation projection check stopped: {error}"));
-                    return;
-                }
+            let mut audit = match audit.await {
+                Ok(audit) => audit,
+                Err(error) => Err(anyhow::anyhow!("the startup audit stopped: {error}")),
             };
-            match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("operations.repair_drift", || {
-                store.repair_operation_projection_drift_from_audit(&drift)
-            }))
-            .await
-            {
-                Ok(Ok(true)) => stderr_message("st3", format_args!("rebuilt an operation projection that drifted")),
-                Ok(Ok(false)) => {}
-                Ok(Err(error)) => stderr_message("st3", format_args!("operation projection check failed: {error:#}")),
-                Err(error) => stderr_message("st3", format_args!("operation projection check stopped: {error}")),
+            loop {
+                if repair_operation_drift(&store, audit).await {
+                    // Audit once more at once, so doctor reports what the repair left; anything
+                    // still drifted waits for the next period's repair.
+                    let _ = audit_operations(&store).await;
+                }
+                tokio::time::sleep(fractal_daemon::store::OPERATION_AUDIT_PERIOD).await;
+                audit = audit_operations(&store).await;
             }
         }));
     }
@@ -8501,11 +8597,12 @@ async fn fabric_route(
         .with_context(|| {
             format!("`{owner}` advertises no Fabric node, and no Fabric peer of this machine has its name")
         })?;
+    let protocol = fractal_daemon::terminal_fabric::owner_protocol(&view.members, owner, &peer, &fleet_id);
     Ok((
         fractal_daemon::terminal_fabric::FabricTarget {
             fabric,
             peer,
-            protocol: fractal_daemon::terminal_fabric::protocol(&fleet_id),
+            protocol,
         },
         fractal_daemon::terminal_fabric::RouteRequest::new(runtime_id, subject, incarnation),
     ))
@@ -11699,6 +11796,16 @@ fn render_performance(view: &Value) -> String {
                 row["cause"].as_str().unwrap_or("?")
             );
         }
+    }
+    if let Some(count) = view["wal_escalations"]["count"].as_u64() {
+        let last = &view["wal_escalations"]["last"];
+        let _ = write!(out, "WAL ESCALATIONS  {count} since start");
+        if let Some(age) = last["age_ms"].as_u64() {
+            let held = last["held_ms"].as_u64().map_or_else(|| "did not take the writer".to_owned(), |ms| format!("held the writer {ms} ms"));
+            let restarted = if last["restarted"].as_bool() == Some(true) { "restarted" } else { "did not restart" };
+            let _ = write!(out, " · last {}s ago at {} frames, {held}, {restarted}", age / 1000, last["frames"]);
+        }
+        let _ = writeln!(out);
     }
     if let Some(note) = view["query_time_note"].as_str() {
         let _ = writeln!(out, "{note}");
@@ -17920,9 +18027,15 @@ fn write_driver_log(subject: &str, line: &str) -> Result<()> {
     fractal_daemon::client::write_driver_log(subject, line)
 }
 
+/// Renew each claim this incarnation holds. The caller runs only while its provider does, so
+/// the driver is the proof that `incarnation` is live; the daemon's own check, which judges the
+/// claim's incarnation by its runtime records, guards the renewal itself. Asking the daemon for
+/// the seat's current harness first would let a record another host made of its own old runtime
+/// stop a live seat's renewals (#4743).
 async fn renew_claimed_work(
     client: &Client,
     subject: &str,
+    incarnation: &str,
     minute: u64,
     retry: &mut fractal_daemon::client::DriverRetry,
 ) -> Result<()> {
@@ -17930,27 +18043,10 @@ async fn renew_claimed_work(
         .get(&format!("/v1/work?actor={}&view=renewal", urlencoding::encode(subject)))
         .await?;
     update_renewal_retry_lease(retry, &work, subject, current_unix_ms()?);
-    // Most resident seats hold no work. Only a held claim needs the status reduction
-    // that proves its harness incarnation is still live before renewing the lease.
-    if !work.iter().any(|step| step.work_claim_is_held_by(subject)) {
-        return Ok(());
-    }
-    let status: StatusResponse = client
-        .get(&format!(
-            "/v1/status?subject={}&harness_only=true",
-            urlencoding::encode(subject)
-        ))
-        .await?;
-    let harness = status
-        .subjects
-        .iter()
-        .find(|candidate| candidate.subject == subject)
-        .and_then(|candidate| candidate.harness.as_ref());
     let mut failure = None;
-    for step in work
-        .into_iter()
-        .filter(|step| work_claim_has_active_harness(step, subject, harness))
-    {
+    for step in work.into_iter().filter(|step| {
+        step.work_claim_is_held_by(subject) && step.claim_incarnation.as_deref() == Some(incarnation)
+    }) {
         // Nothing here reads the answer, so ask for the lease view: the step's row alone.
         let renewed: Result<StepRunView> = client
             .post(
@@ -18032,15 +18128,6 @@ async fn claim_has_driver(
         .find(|candidate| candidate.subject == subject)
         .and_then(|candidate| candidate.harness.as_ref());
     Some(claim_has_active_harness(Some(incarnation), harness))
-}
-
-fn work_claim_has_active_harness(
-    step: &StepRunView,
-    subject: &str,
-    harness: Option<&CurrentHarnessView>,
-) -> bool {
-    step.work_claim_is_held_by(subject)
-        && claim_has_active_harness(step.claim_incarnation.as_deref(), harness)
 }
 
 fn claim_has_active_harness(incarnation: Option<&str>, harness: Option<&CurrentHarnessView>) -> bool {
@@ -20017,11 +20104,13 @@ mod wal_pin_tracker_tests;
 #[cfg(test)]
 mod wal_checkpoint_reporting_tests;
 
+#[cfg(test)]
+mod wal_escalation_tests;
+
 /// Page copying runs off the writer queue; TRUNCATE joins it before taking SQLite's writer
 /// lock. Recycling has no SQLite busy wait for readers; it can wait its FIFO turn.
-fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
-    // Five seconds finds gaps between short readers without polling on every write.
-    const WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+/// A WAL that keeps growing past `WalEscalation::frames` is restarted (`Store::recycle_wal`).
+fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>, interval: Duration) {
     const WAL_CHECKPOINT_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
     // Backfill can take tens of seconds even with a zero busy timeout. A detached native
@@ -20038,13 +20127,14 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
             };
             let mut connection = None;
             let mut last_error_log: Option<Instant> = None;
-            let mut retry_interval = WAL_CHECKPOINT_INTERVAL;
             let mut ordinary_outcomes = WalCheckpointLogBucket::default();
             let mut abnormal_outcomes = WalCheckpointLogBucket::default();
             let mut pin = WalPinTracker::default();
+            let mut growth = smallclaims::store::wal_escalation::WalGrowth::default();
+            let mut retry_interval = interval;
             loop {
                 std::thread::sleep(retry_interval);
-                retry_interval = WAL_CHECKPOINT_INTERVAL;
+                retry_interval = interval;
                 let started = Instant::now();
                 let trace_started = std::time::SystemTime::now();
                 // A weak reference does not keep the Store alive between attempts at shutdown.
@@ -20058,14 +20148,23 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                         None => rusqlite::Connection::open(&path)
                             .context("open WAL checkpoint connection")?,
                     };
-                    let result = store.checkpoint_idle_wal_report(&connection);
+                    let result = store.recycle_wal(&connection, &mut growth);
                     Ok::<_, anyhow::Error>((connection, result))
                     })
                 }));
                 let result = match attempt {
                     Ok(Ok((returned, result))) => {
                         connection = Some(returned);
-                        result.context("recycle idle WAL")
+                        result.context("recycle idle WAL").map(|(report, restart)| {
+                            if let Some(restart) = restart {
+                                stderr_message("st3", format_args!("WAL checkpoint escalated to a restart {}", json!({
+                                    "frames": restart.frames, "restarted": restart.recycled,
+                                    "copy_ms": restart.passive_ms, "writer_wait_ms": restart.writer_wait_ms,
+                                    "held_ms": restart.truncate_ms,
+                                })));
+                            }
+                            report
+                        })
                     }
                     Ok(Err(error)) => Err(error),
                     Err(_) => {
@@ -20193,12 +20292,13 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
         let worker = store.clone();
         // Ok(Some(fault)): the job stopped on a fault already persisted, which it must not rewrap.
         let result = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
-            let initial = worker.signature_migration()?;
+            let state = || fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_state", || worker.signature_migration());
+            let initial = state()?;
             let mut phase = initial.phase.clone();
             if !initial.done() && initial.fault.is_none() { stderr_message("st3", format_args!("signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description())); }
             loop {
                 let page_started = std::time::Instant::now();
-                let report = worker.advance_signature_migration()?;
+                let report = fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_page", || worker.advance_signature_migration())?;
                 if report.phase != phase {
                     stderr_message("st3", format_args!("signature bootstrap phase {}: {}", report.phase,report.progress_description()));
                     phase = report.phase.clone();
@@ -20207,31 +20307,32 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                     return Ok(Some(fault));
                 }
                 if report.phase == "judging" {
-                    worker.advance_signature_judgment()?;
+                    fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_judgment", || worker.advance_signature_judgment())?;
                 }
                 // Finite cursor work, not a readiness poll. Yield CPU as well as the writer:
                 // each page gets an equally long quiet interval (at most 50% worker duty).
                 let page_elapsed = page_started.elapsed();
                 std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
-                if worker.signature_migration()?.done() {
-                    let complete = worker.signature_migration()?;
+                if state()?.done() {
+                    let complete = state()?;
                     if !initial.done() { stderr_message("st3", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
                     loop {
                         let retired_started = std::time::Instant::now();
-                        if !worker.retire_legacy_signature_page()? { break; }
+                        if !fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_retire", || worker.retire_legacy_signature_page())? { break; }
                         std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
                     }
                     // A resume or a trust-root change can leave a large verdict backlog. Ordinary
                     // passes take only a slice of it; this job drains the rest at the same duty.
                     // Each seal hands its claims here too, so a drain of a few verdicts is
                     // ordinary work: only a backlog worth reporting is logged.
-                    if worker.verdicts_pending()? {
+                    let pending = || fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_verdicts_pending", || worker.verdicts_pending());
+                    if pending()? {
                         let drain_started = std::time::Instant::now();
                         let mut judged = 0;
-                        while worker.verdicts_pending()? {
+                        while pending()? {
                             let loan_started = std::time::Instant::now();
-                            judged += worker.advance_signature_judgment()?;
-                            if let Some(fault) = worker.signature_migration()?.fault { return Ok(Some(fault)); }
+                            judged += fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_judgment", || worker.advance_signature_judgment())?;
+                            if let Some(fault) = state()?.fault { return Ok(Some(fault)); }
                             std::thread::sleep(loan_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
                         }
                         if judged >= SIGNATURE_BACKLOG_REPORTED || drain_started.elapsed() >= Duration::from_secs(5) {
@@ -20426,7 +20527,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
         loop {
             receiver.borrow_and_update();
             let read_store = store.clone();
-            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("publication.evidence_ready", || read_store.publication_evidence_ready())).await
+            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("publication.evidence_ready", || read_store.publication_evidence_ready())).await
             {
                 Ok(Ok(true)) => {
                     if receiver.changed().await.is_err() {
@@ -20435,7 +20536,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 }
                 Ok(Ok(false)) => {
                     let page_store = store.clone();
-                    match page_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("publication.advance_evidence", || {
+                    match page_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("publication.advance_evidence", || {
                         page_store.advance_publication_evidence()
                     }))
                     .await
@@ -20502,7 +20603,7 @@ async fn expire_completed_responses(
         changed.borrow_and_update();
         let read_store = store.clone();
         let deadline =
-            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
+            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
                 Ok(Ok(deadline)) => deadline,
                 Ok(Err(error)) if maintenance_contention(&error) => {
                     stderr_message("st3", format_args!("response expiry read contention; retrying in {retry:?}: {error:#}"));
@@ -20537,7 +20638,7 @@ async fn expire_completed_responses(
             continue;
         }
         let clock_store = store.clone();
-        let clock_limit = match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.response_expiry_clock", || {
+        let clock_limit = match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_clock", || {
             clock_store.idempotency_clock_limit()
         }))
         .await

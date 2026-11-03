@@ -89,6 +89,31 @@ fn default_st_socket() -> Result<PathBuf> {
     .join("st3.sock"))
 }
 
+fn default_state_dir(home: &Path) -> Result<PathBuf> {
+    let legacy = home.join(".local/state/st-fabric-adapter");
+    let renamed = home.join(".local/state/fractal-fabric-adapter");
+    // Retain the existing authority; never combine two independently populated homes.
+    let populated = |path: &Path| -> Result<bool> {
+        match std::fs::read_dir(path) {
+            Ok(mut entries) => Ok(entries.next().transpose()?.is_some()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    };
+    let legacy_populated = populated(&legacy)?;
+    let renamed_populated = populated(&renamed)?;
+    ensure!(
+        !(legacy_populated && renamed_populated),
+        "conflicting adapter state in {} and {}; pass --state-dir explicitly",
+        legacy.display(), renamed.display()
+    );
+    Ok(if renamed_populated || (!legacy.try_exists()? && renamed.try_exists()?) {
+        renamed
+    } else {
+        legacy
+    })
+}
+
 /// Durable before any external mutation, including ownership discovery on first use.
 fn save(path: &Path, value: &impl Serialize) -> Result<()> {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
@@ -266,7 +291,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let state = match args.state_dir {
         Some(path) => path,
-        None => home()?.join(".local/state/st-fabric-adapter"),
+        None => default_state_dir(&home()?)?,
     };
     if args.status {
         let status: Status = serde_json::from_slice(
@@ -336,6 +361,26 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_home_reads_both_names_and_refuses_conflicting_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join(".local/state/st-fabric-adapter");
+        let renamed = root.path().join(".local/state/fractal-fabric-adapter");
+        assert_eq!(default_state_dir(root.path()).unwrap(), legacy);
+        std::fs::create_dir_all(&renamed).unwrap();
+        assert_eq!(default_state_dir(root.path()).unwrap(), renamed);
+        for path in [&legacy, &renamed] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        assert_eq!(default_state_dir(root.path()).unwrap(), legacy);
+        std::fs::write(renamed.join("owners.json"), b"[\"fleet\"]").unwrap();
+        assert_eq!(default_state_dir(root.path()).unwrap(), renamed);
+        std::fs::write(legacy.join("owners.json"), b"[\"fleet\"]").unwrap();
+        assert!(default_state_dir(root.path()).is_err());
+        std::fs::remove_file(renamed.join("owners.json")).unwrap();
+        assert_eq!(default_state_dir(root.path()).unwrap(), legacy);
+    }
 
     pub(crate) fn envelope(value: serde_json::Value) -> serde_json::Value {
         serde_json::to_value(smallclaims::sync::PeerResponse::new("fixture", 127, value)).unwrap()

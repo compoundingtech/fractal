@@ -15,11 +15,9 @@
 //!   requires the parent to be `0700` first, one names its lock by suffixing a foreign config
 //!   path), and absorbing the disagreement here would hide it rather than resolve it.
 //! * [`open`] and [`FileLock::hold`] stay split, because the window *between* the open and the
-//!   `flock` is load-bearing: [`crate::catalog_lock`] writes its contention checkpoints there, and
-//!   [`crate::resource_profile`] proves the opened lock is a regular file there.
+//!   `flock` is load-bearing: [`crate::catalog_lock`] writes its contention checkpoints there.
 //!
-//! The defaults are [`crate::resource_profile`]'s publication lock, the one site that was already
-//! correct on every axis, so they are house style rather than invention: `O_RDWR` (a path that
+//! The defaults preserve the established publication-lock flags: `O_RDWR` (a path that
 //! cannot be opened for write is not usable as this tree's lock file, and a shared lock is still
 //! taken on a writable descriptor), `O_NOFOLLOW` so a symlink planted at the lock path cannot
 //! redirect the lock domain to a file its planter also holds, `O_CLOEXEC` — which Rust's

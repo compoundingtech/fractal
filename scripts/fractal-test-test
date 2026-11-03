@@ -14,6 +14,7 @@ import time
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import socket
 import subprocess
@@ -318,10 +319,45 @@ class TreeOrphansTest(unittest.TestCase):
         self.process(101, cwd='/', argv=['tail', '-f', str(self.tree / 'log')])
         with mock.patch.object(st_test.os, 'pidfd_open') as opened, \
                 mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
+            started = time.monotonic()
             with self.assertRaisesRegex(st_test.Failure, r'argv-only.*101.*tail.*refusing'):
-                st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc)
+                st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=0.6)
+            self.assertGreaterEqual(time.monotonic() - started, 0.5)  # it stayed through the settle: still refused
         opened.assert_not_called()
         sent.assert_not_called()
+
+    def test_an_argv_only_reference_that_ends_within_the_settle_does_not_refuse_the_tree(self):
+        entry = self.process(101, cwd='/', argv=['cat', str(self.tree / 'log')])
+        slept = []
+
+        def sleep(seconds):  # the reference exits while the tree waits for it
+            slept.append(seconds)
+            shutil.rmtree(entry, ignore_errors=True)
+        with mock.patch.object(st_test.time, 'sleep', side_effect=sleep), \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
+            st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=30)
+        self.assertEqual(len(slept), 1)
+        sent.assert_not_called()
+
+    def test_another_st_test_sizing_the_tree_is_no_reference_and_costs_no_wait(self):
+        self.process(200, cwd='/', argv=[sys.executable, '/var/tmp/st-test-base-x/st-test', '--push', 'origin'])
+        self.process(201, cwd='/', argv=['du', '-sk', '--', str(self.tree)], ppid=200)
+        self.process(202, cwd='/', argv=['du', '-sk', str(self.tree / 'target')], ppid=200)
+        self.process(206, cwd='/', argv=[sys.executable, '/srv/fractal/scripts/fractal-test', '--all'])
+        self.process(207, cwd='/', argv=['du', '-sk', '--', str(self.tree)], ppid=206)
+        with mock.patch.object(st_test.time, 'sleep') as slept, \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent:
+            st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=30)
+        slept.assert_not_called()
+        sent.assert_not_called()
+        # The same du from anything but an st-test, or any other command from one, is a reference as before.
+        for pid, argv, ppid in ((203, ['du', '-sk', '--', str(self.tree)], 1), (204, ['du', '-s', str(self.tree)], 200),
+                                (205, ['rm', '-rf', '--', str(self.tree)], 200)):
+            with self.subTest(argv=argv, ppid=ppid):
+                entry = self.process(pid, cwd='/', argv=argv, ppid=ppid)
+                with self.assertRaisesRegex(st_test.Failure, rf'argv-only.*{pid}'):
+                    st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=0)
+                shutil.rmtree(entry)
 
     def test_termination_escalates_only_survivors_and_refuses_dirty_tree(self):
         for exits_on in (st_test.signal.SIGTERM, st_test.signal.SIGKILL, 'chdir', None):
@@ -667,6 +703,75 @@ class StTest(unittest.TestCase):
                     if (event := json.loads(line)).get('event') == 'child_start']
         self.assertTrue(any('receive-pack' in ' '.join(argv) for argv in children), children)
         self.assertFalse(any('maintenance' in argv or 'gc' in argv for argv in children), children)
+
+    def install_release_impact(self):
+        """A stand-in upgrade-impact check on main: it fails unless the merge it is given has the base as first parent and adds a
+        release-notes/*.json, and it imports its module from beside it, as scripts/check-release-impact does."""
+        (self.work / 'scripts/check-release-impact').write_text(
+            'import argparse, sys\nfrom release_notes import check\nparser = argparse.ArgumentParser()\n'
+            "for name in ('--repo', '--base', '--source'):\n    parser.add_argument(name)\n"
+            'args = parser.parse_args()\nsys.exit(check(args.repo, args.base, args.source))\n')
+        (self.work / 'scripts/release_notes.py').write_text(
+            'import subprocess, sys\n\ndef git(repo, *args):\n'
+            "    return subprocess.run(['git', *args], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()\n\n"
+            'def check(repo, base, source):\n'
+            "    if git(repo, 'rev-parse', source + '^1') != base:\n"
+            "        print('upgrade impact: the base is not the first parent', file=sys.stderr)\n        return 1\n"
+            "    if not git(repo, 'diff', '--name-only', '--diff-filter=A', base, source, '--', 'release-notes/'):\n"
+            "        print(f'upgrade impact: {source}: add a uniquely named release-notes/NAME.json for this PR', file=sys.stderr)\n        return 1\n"
+            '    return 0\n')
+        git(self.work, 'checkout', '-q', 'main')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'upgrade-impact')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        git(self.work, 'merge', '-q', 'main')
+
+    def test_a_branch_without_a_release_note_stops_the_whole_suite_before_it_runs_and_its_status_warns(self):
+        self.install_release_impact()
+        self.commit('b.txt', 'two')
+        code, out, err = self.run_st_test('--check', 'demo')  # demo is the whole suite here
+        self.assertIsInstance(code, str)
+        self.assertIn('the upgrade-impact check CI runs fails on the merge of this branch with origin/main', code)
+        self.assertIn('the merge: add a uniquely named release-notes/NAME.json', code)
+        self.assertIn('To fix: add release-notes/NAME.json', code)
+        self.assertEqual(self.statements(), [])
+        # Only the whole suite refuses: a run of some of its checks does not ask.
+        with mock.patch.dict(st_test.LOCAL, {'other': ['sh', '-c', 'exit 1']}):
+            self.assertIsInstance(self.run_st_test()[0], str)
+            self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.assertEqual(len(self.statements()), 1)
+        # A warning in --status, which leaves its exit code alone: the pre-push hook refuses on 3, and seats push work in progress.
+        code, out, err = self.run_st_test('--status')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'upgrade-impact +warning: no note +the upgrade-impact check')
+        (self.work / 'release-notes').mkdir()
+        self.commit('release-notes/b.json', '{}\n')
+        code, out, err = self.run_st_test('--status')
+        self.assertRegex(out, r'upgrade-impact +checked +the merge with the base has its release note')
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(len(self.statements()), 2)
+
+    def test_the_merge_is_checked_by_its_own_copy_and_a_branch_with_nothing_of_its_own_is_not_asked(self):
+        self.install_release_impact()
+        self.assertNotIn('upgrade-impact', self.run_st_test('--status')[1])  # feature holds main and nothing more: nothing to ask
+        # The branch's own copy, not main's: what CI runs is the merge's scripts/check-release-impact.
+        (self.work / 'scripts/release_notes.py').write_text('def check(repo, base, source):\n    return 0\n')
+        git(self.work, 'commit', '-q', '-am', 'a check that passes everything')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+
+    def test_with_keep_the_web_lane_keeps_its_scratch_and_the_run_names_it(self):
+        self.commit('b.txt', 'two')
+        web = ['sh', '-c', 'mkdir -p "$TMPDIR/web.1" && printf "%s\\n" "$TMPDIR/web.1" >> "$CI_LOCAL_KEEP"']
+        with mock.patch.dict(st_test.LOCAL, {st_test.WEB: web}), mock.patch.object(st_test, 'web_unchanged', return_value=None):
+            code, out, err = self.run_st_test('--check', st_test.WEB, '--keep')
+            kept = re.search(r"kept fractal-web's scratch (\S+) too", err)
+            self.assertTrue(kept, err)
+            self.assertTrue(Path(kept[1]).is_dir())
+            shutil.rmtree(Path(kept[1]).parent)
+            code, out, err = self.run_st_test('--check', st_test.WEB, '--rerun')
+            self.assertNotIn("fractal-web's scratch", err)  # without --keep nothing asks the lane to keep it
 
     def commit(self, name, content, branch=None):
         if branch:
@@ -1014,6 +1119,23 @@ class StTest(unittest.TestCase):
         self.assertFalse([s for s in self.statements() if 'clippy_base_sha' in s['predicate']['observed']['inputs']
                           and s['subject'][0]['digest']['gitTree'] == git(self.work, 'rev-parse', 'HEAD^{tree}')])
 
+    def test_a_base_ref_another_fetch_moves_during_the_run_does_not_change_the_verdict_and_is_reported(self):
+        # Another seat's fetch in the same clone moves origin/main while the check runs, to a base whose key list no longer trusts this
+        # signer. The note was signed for the base the run fetched, and is judged there (#4755: judged at the moved ref, it read wrong_input).
+        self.commit('b.txt', 'two')
+        base = git(self.work, 'rev-parse', 'origin/main')
+        index = self.home / 'moved-index'
+        env_index = dict(GIT_ENV, GIT_INDEX_FILE=str(index))
+        subprocess.run(['git', '-C', str(self.work), 'read-tree', base], env=env_index, check=True)
+        blob = git(self.work, 'hash-object', '-w', '--stdin', stdin=b'')
+        subprocess.run(['git', '-C', str(self.work), 'update-index', '--cacheinfo', f'100644,{blob},.st/evidence-keys'], env=env_index, check=True)
+        tree = subprocess.run(['git', '-C', str(self.work), 'write-tree'], env=env_index, check=True, capture_output=True).stdout.decode().strip()
+        moved = git(self.work, 'commit-tree', tree, '-p', base, '-m', 'a base that trusts no key')
+        code, out, err = self.run_st_test('--check', 'demo', command=['git', '-C', str(self.work), 'update-ref', 'refs/remotes/origin/main', moved])
+        self.assertEqual(git(self.work, 'rev-parse', 'origin/main'), moved)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f'base moved since signing: origin/main is at {moved[:12]} now; these notes are for {base[:12]}', out)
+
     def test_untracked_and_ignored_files_in_the_checkout_cannot_change_the_result(self):
         self.commit('b.txt', 'two')
         (self.work / 'stray.txt').write_text('untracked')
@@ -1284,6 +1406,261 @@ class StTest(unittest.TestCase):
             times = dict(line.split() for line in marks.read_text().splitlines())
             self.assertGreater(float(times['light-start']), float(times['build-end']))  # one after another, in the listed order
             self.assertNotIn('----- fractal-test:', out)
+
+    def web_lanes(self, run, serial=False):
+        """Exercise the real orchestration and ledger; replace only the measured subprocesses with controlled checks."""
+        self.commit('b.txt', 'two')
+        shim = self.home / '.local/bin/cargo'
+        shim.parent.mkdir(parents=True)
+        shim.write_text('#!/bin/sh\nexit 99\n')  # captured by run below, never a real host slot
+        shim.chmod(0o755)
+        with mock.patch.dict(st_test.LOCAL, {'demo': ['true'], st_test.WEB: ['true'], 'light': ['true']}, clear=True), \
+                mock.patch.object(st_test, 'BUILDS', frozenset({'demo', st_test.WEB})), \
+                mock.patch.object(st_test, 'run_limited', side_effect=run):
+            result = self.run_st_test(extra_env={'ST_EVIDENCE_SERIAL': '1' if serial else '0'})
+        record = json.loads((self.home / '.local/state/st-test/runs.jsonl').read_text().splitlines()[-1])
+        return result, record
+
+    def test_web_runs_concurrently_with_the_build_lane_and_light_checks(self):
+        build, web, light = threading.Event(), threading.Event(), threading.Event()
+        overlap = []
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name == 'demo':
+                build.set()
+                overlap.append(web.wait(5) and light.wait(5))
+            elif name == st_test.WEB:
+                overlap.append(build.wait(5))
+                web.set()
+            else:
+                light.set()
+            return 0
+
+        (code, out, err), record = self.web_lanes(run)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(overlap, [True, True])
+        self.assertTrue(record['parallel'])
+        self.assertEqual([row['name'] for row in record['rows']], ['setup', 'demo', st_test.WEB, 'light'])
+
+    def test_serial_web_keeps_check_order_and_still_holds_one_stage_slot(self):
+        commands = []
+
+        def run(argv, limit, **options):
+            commands.append((argv[argv.index('--check') + 1], argv, options.get('kill_group', False)))
+            return 0
+
+        (code, out, err), record = self.web_lanes(run, serial=True)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual([name for name, *_ in commands], ['demo', st_test.WEB, 'light'])
+        self.assertFalse(record['parallel'])
+        self.assertNotIn('----- fractal-test:', out)
+        web = commands[1][1]
+        self.assertEqual(web.count('--stage-slot'), 1)
+        self.assertIn('BUILD_ADMISSION_HELD=1', web)
+        self.assertNotIn('--stage-slot', commands[0][1])  # Rust's detached guardian must never inherit the web slot
+        self.assertEqual([group for _, _, group in commands], [False, True, False])
+
+    def test_web_and_client_installs_and_dependency_readers_share_the_worktree_lock(self):
+        self.commit('b.txt', 'two')
+        marks = Path(self.tmp.name) / 'pnpm-events'
+        fixture = Path(self.tmp.name) / 'pnpm-fixture.py'
+        fixture.write_text(textwrap.dedent('''\
+            from pathlib import Path
+            import sys, time
+            owner, events = sys.argv[1:]
+            modules = Path('node_modules')
+            modules.mkdir(exist_ok=True)
+            def mark(phase):
+                with open(events, 'a') as stream:
+                    stream.write(owner + ' ' + phase + '\\n')
+            mark('install-start')
+            (modules / 'dependency').write_text(owner)
+            time.sleep(0.1)
+            mark('install-end')
+            # Releasing an install-only lock here would let the other installer replace our dependency during its use.
+            mark('reader-start')
+            time.sleep(0.1)
+            assert (modules / 'dependency').read_text() == owner, 'dependency replaced under its reader'
+            mark('reader-end')
+        '''))
+        attempts, commands = threading.Barrier(2), []
+        original_lock = st_test.node_workspace_lock
+
+        @contextlib.contextmanager
+        def simultaneous_installs(directory):
+            attempts.wait(5)  # both lanes attempt the same fixture installation before either takes the real file lock
+            with original_lock(directory):
+                yield
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            commands.append(name)
+            if name not in ('typescript-client', st_test.WEB):
+                return 0
+            return subprocess.run([sys.executable, str(fixture), name, str(marks)], cwd=options['cwd'],
+                                  stdout=options.get('stdout'), stderr=subprocess.STDOUT).returncode
+
+        with mock.patch.dict(st_test.LOCAL, {'typescript-client': ['true'], 'demo': ['true'], st_test.WEB: ['true']}, clear=True), \
+                mock.patch.object(st_test, 'BUILDS', frozenset({'demo', st_test.WEB})), \
+                mock.patch.object(st_test, 'node_workspace_lock', side_effect=simultaneous_installs), \
+                mock.patch.object(st_test, 'run_limited', side_effect=run):
+            code, out, err = self.run_st_test()
+        self.assertEqual(code, 0, out + err)
+        self.assertCountEqual(commands, ['typescript-client', 'demo', st_test.WEB])
+        events = [line.split() for line in marks.read_text().splitlines()]
+        self.assertEqual([phase for _, phase in events], ['install-start', 'install-end', 'reader-start', 'reader-end'] * 2)
+        self.assertEqual(len({owner for owner, _ in events[:4]}), 1)
+        self.assertEqual(len({owner for owner, _ in events[4:]}), 1)
+        self.assertNotEqual(events[0][0], events[4][0])
+        self.assertFalse((self.work / 'st-test-pnpm.lock').exists(), 'lock stays outside the checked tree')
+
+    def test_a_crashed_web_lane_is_a_failed_check_in_the_summary_and_ledger(self):
+        def run(argv, limit, **options):
+            if argv[argv.index('--check') + 1] == st_test.WEB:
+                raise RuntimeError('web lane broke')
+            return 0
+
+        (code, out, err), record = self.web_lanes(run)
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'fractal-web +FAILED \(RuntimeError\).*web lane broke')
+        self.assertEqual(record['exit'], 1)
+        self.assertEqual(next(row['result'] for row in record['rows'] if row['name'] == st_test.WEB), 'FAILED (RuntimeError)')
+
+    def test_a_web_thread_that_exits_without_a_result_fails_the_check(self):
+        def run(argv, limit, **options):
+            if argv[argv.index('--check') + 1] == st_test.WEB:
+                raise SystemExit(7)
+            return 0
+
+        (code, out, err), record = self.web_lanes(run)
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'fractal-web +FAILED \(lane exited\)')
+        self.assertEqual(record['exit'], 1)
+
+    def test_the_web_wrapper_holds_one_counted_slot_until_the_check_exits_and_releases_on_failure(self):
+        shim = self.home / '.local/bin/cargo'
+        shim.parent.mkdir(parents=True)
+        shim.write_text('#!/usr/bin/env bash\nset -eu\n'
+                        'test "$1" = --stage-slot; test "$2" = fractal-web; test "$3" = --\n'
+                        'shift 3\nexec flock "$CI_WEB_SLOT_TEST_LOCK" "$@"\n')
+        shim.chmod(0o755)
+        lock = Path(self.tmp.name) / 'heavy0'
+        # A second heavy compile cannot start while the wrapped command runs. A failed check must still give the slot back.
+        check = ['sh', '-c', 'test "$BUILD_ADMISSION_HELD" = 1 || exit 8; '
+                 'if flock -n "$CI_WEB_SLOT_TEST_LOCK" true; then exit 9; fi; exit 7']
+        with mock.patch.dict(os.environ, HOME=str(self.home)):
+            command = st_test.web_slot(check)
+        ran = subprocess.run(command, env=dict(GIT_ENV, CI_WEB_SLOT_TEST_LOCK=str(lock)), capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 7, ran.stderr)
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
+
+    def test_a_timed_out_web_stage_stops_its_children_before_releasing_the_slot(self):
+        lock = Path(self.tmp.name) / 'heavy0'
+        marker = Path(self.tmp.name) / 'child-survived'
+        # A slot supervisor and a delayed child: killing just the supervisor would release the slot with work still running.
+        command = ['flock', str(lock), 'sh', '-c', f'(sleep 2; touch {shlex.quote(str(marker))}) & wait']
+        code = st_test.run_limited(command, st_test.Limit(0.2), kill_group=True, stdout=subprocess.DEVNULL)
+        self.assertEqual(code, 124)
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
+        time.sleep(2.2)
+        self.assertFalse(marker.exists(), 'the web child must stop when its slot supervisor times out')
+
+    def test_web_output_and_wrapper_diagnostics_follow_the_build_without_interleaving(self):
+        printed = threading.Event()
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name == st_test.WEB:
+                print('WEB-PAYLOAD', file=options.get('stdout') or sys.stdout, flush=True)
+                printed.set()
+            elif name == 'demo':
+                print('BUILD-BEGIN', flush=True)
+                printed.wait(5)
+                print('BUILD-END', flush=True)
+            return 0
+
+        (code, out, err), _ = self.web_lanes(run)
+        self.assertEqual(code, 0, out + err)
+        header = out.index('----- fractal-test: fractal-web output -----')
+        self.assertLess(out.index('BUILD-BEGIN'), out.index('BUILD-END'))
+        self.assertLess(out.index('BUILD-END'), header)
+        self.assertLess(header, out.index('WEB-PAYLOAD'))
+        self.assertLess(header, out.index('evidence-wrap argv:', header))
+        self.assertNotIn('--check fractal-web', err)
+
+    def interrupted_web(self, during_join=False):
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        self.addCleanup(os.close, write)
+        lock = Path(self.tmp.name) / 'web-slot'
+        state = {}
+        real_run, real_join = st_test.run_limited, st_test.join_lanes
+        script = ('import fcntl, os, subprocess; '
+                  f'slot=open({str(lock)!r}, "w"); fcntl.flock(slot, fcntl.LOCK_EX); '
+                  'child=subprocess.Popen(["sleep", "30"]); '
+                  f'os.write({write}, (str(child.pid)+"\\n").encode()); child.wait()')
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name == st_test.WEB:
+                return real_run([sys.executable, '-c', script], st_test.Limit(8), kill_group=True,
+                                groups=options.get('groups'), pass_fds=(write,), stdout=options.get('stdout'))
+            if name == 'demo':
+                self.assertTrue(select.select([read], [], [], 5)[0], 'web child did not start')
+                state['child'] = int(os.read(read, 64).strip())
+                if not during_join:
+                    state['interrupted'] = time.monotonic()
+                    raise KeyboardInterrupt()
+            return 0
+
+        def join(lanes):
+            if during_join and 'interrupted' not in state:
+                state['interrupted'] = time.monotonic()
+                raise SystemExit(143)
+            return real_join(lanes)
+
+        with mock.patch.object(st_test, 'join_lanes', join), self.assertRaises(SystemExit if during_join else KeyboardInterrupt):
+            self.web_lanes(run)
+        self.assertLess(time.monotonic() - state['interrupted'], 4, 'cleanup waited for the web time limit')
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0, 'web slot was not released')
+        stat = Path('/proc', str(state['child']), 'stat')
+        if stat.exists():
+            self.assertEqual(stat.read_text().rsplit(')', 1)[1].split()[0], 'Z', 'web child survived interruption')
+
+    def test_interrupting_the_build_cancels_web_before_joining_and_releases_its_slot(self):
+        self.interrupted_web()
+
+    def test_interrupting_the_join_cancels_web_and_releases_its_slot(self):
+        self.interrupted_web(during_join=True)
+
+    def test_a_web_group_started_after_cancellation_is_stopped_too(self):
+        groups = st_test.ProcessGroups()
+        groups.cancel()
+        started = time.monotonic()
+        code = st_test.run_limited(['sleep', '30'], st_test.Limit(8), kill_group=True, groups=groups)
+        self.assertNotEqual(code, 0)
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(groups.processes, set())
+
+    def test_hup_at_the_entry_point_unwinds_python_cleanup(self):
+        marker = Path(self.tmp.name) / 'hup-cleanup'
+        source = f'''import runpy, signal, sys
+sys.argv = [{str(ROOT / 'scripts/st-test')!r}, '--list']
+try:
+    runpy.run_path(sys.argv[0], run_name='__main__')
+except SystemExit as error:
+    if error.code:
+        raise
+try:
+    signal.raise_signal(signal.SIGHUP)
+finally:
+    open({str(marker)!r}, 'w').write('unwound')
+'''
+        done = subprocess.run([sys.executable, '-c', source], cwd=self.work, capture_output=True, text=True,
+                              env=dict(GIT_ENV, HOME=str(self.home), **{st_test.REEXEC: 'test'}))
+        self.assertEqual(done.returncode, 129, done.stderr)
+        self.assertEqual(marker.read_text(), 'unwound')
 
     def test_a_check_that_builds_uses_its_trees_kept_target_and_another_does_not(self):
         self.commit('b.txt', 'two')
@@ -2735,6 +3112,23 @@ class StTest(unittest.TestCase):
         path = path or self.home / '.local/state/st-test/runs.jsonl'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def test_candidate_measurements_name_the_head_but_a_real_base_copy_is_not_a_candidate(self):
+        self.commit('b.txt', 'two')
+        head = git(self.work, 'rev-parse', 'HEAD')
+        base = git(self.work, 'rev-parse', 'origin/main')
+        code, out, err = self.run_st_test('--out', str(Path(self.tmp.name) / 'exports'), extra_env={st_test.REEXEC: base})
+        self.assertEqual(code, 0, out + err)
+        candidate, = self.runs()
+        self.assertEqual(candidate['candidate'], head)
+        self.assertEqual(self.statements(), [])
+        base_copy = Path(self.tmp.name) / 'st-test-base-example/st-test'
+        base_copy.parent.mkdir()
+        shutil.copyfile(st_test.__file__, base_copy)
+        with mock.patch.object(st_test, '__file__', str(base_copy)):
+            code, out, err = self.run_st_test(extra_env={st_test.REEXEC: base})
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('candidate', self.runs()[-1])
+
     def test_every_run_appends_one_json_line_with_its_times_and_a_named_check_is_not_a_full_run(self):
         self.commit('b.txt', 'two')
         code, out, err = self.run_st_test()
@@ -2816,6 +3210,12 @@ class StTest(unittest.TestCase):
         self.assertEqual(st_test.ci_local_stages(log), [{'name': 'fleet-compat', 'start': '2026-10-23T10:11:00Z', 'end': '2026-10-23T10:12:00Z',
                                                          'seconds': 60, 'exit': 1, 'queue_waits': 3, 'queue_s': 12}])
         self.assertEqual(st_test.ci_local_stages(Path(self.tmp.name) / 'missing.log'), [])
+        # The setup row as ci-local prints it since its admission waits are counted: no exit, a queue.
+        row = subprocess.run(['printf', 'ci-local:   %s\n', subprocess.run(['printf', '%-26s %s  %s  %6ss  queue: %s waits, %ss', 'setup', '2026-11-02T03:57:46Z',
+                              '2026-11-02T04:02:20Z', '274', '2', '232'], capture_output=True, text=True).stdout], capture_output=True, text=True).stdout
+        log.write_text(row)
+        self.assertEqual(st_test.ci_local_stages(log), [{'name': 'setup', 'start': '2026-11-02T03:57:46Z', 'end': '2026-11-02T04:02:20Z',
+                                                         'seconds': 274, 'exit': None, 'queue_waits': 2, 'queue_s': 232}])
 
     def test_a_check_that_runs_ci_local_still_prints_as_it_goes_and_its_stages_and_warmth_are_recorded(self):
         self.commit('b.txt', 'two')
@@ -3194,6 +3594,74 @@ class PoolQueue(unittest.TestCase):
             order = [name for _, _, name in st_test.tree_queue(queue, now)]
         self.assertEqual(order, [names['overdue-3-older'], names['overdue-50'], names['overdue-12-newest'], names['p0-young'], names['young-50']])
 
+    def test_a_last_ticket_never_ages_or_goes_overdue(self):
+        """ST_TEST_POOL_RANK=last (the queue signer's seed): after every other ticket however long it has waited, and by arrival among the last."""
+        queue = Path(self.tmp.name) / 'queue-last'
+        queue.mkdir()
+        live = os.getpid()
+        now = 10_000_000 * 10**9
+        names = {'last-old': f'999.{now - 5 * 3600 * 10**9:019d}.{live}',   # five hours: past the maximum wait, still last
+                 'young-50': f'050.{now - 60 * 10**9:019d}.{live}',
+                 'fresh-50': f'050.{now:019d}.{live}',
+                 'last-new': f'999.{now - 10**9:019d}.{live}'}
+        for name in names.values():
+            (queue / name).touch()
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):
+            order = [name for _, _, name in st_test.tree_queue(queue, now)]
+        self.assertEqual(order, [names['young-50'], names['fresh-50'], names['last-old'], names['last-new']])
+
+    def test_a_last_waiter_leaves_a_free_tree_to_a_waiting_ticket_past_the_fallback(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        seat = queue / f'050.{time.time_ns():019d}.{os.getpid()}'
+        seat.write_text(f'rules {st_test.QUEUE_RULES}\n')  # a seat's live ticket whose waiter has not taken the free tree yet
+        got = []
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0), contextlib.redirect_stderr(io.StringIO()):
+            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=st_test.POOL_LAST_RANK)))
+            last.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])                                           # an ordinary waiter would try one now (the fallback)
+            seat.unlink()
+            last.join(5)
+        self.assertEqual(got[0][0], 0)
+        got[0][1].close()
+
+    def test_a_last_waiter_takes_a_tree_only_while_another_is_free(self):
+        """Factory, 2026-11-01: one tree is always left for a seat that comes during the seed's run."""
+        self.root.mkdir(parents=True)
+        holder = open(self.root / 'tree-1.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)                                     # tree-1 in use: tree-0 is the only free one of two
+        got = []
+        with contextlib.redirect_stderr(io.StringIO()) as told:
+            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=st_test.POOL_LAST_RANK)))
+            last.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])
+            self.assertTrue(st_test.another_tree_free(self.root, 2, 1))         # the waiter's probe let tree-0 go again
+            holder.close()                                                      # two free now
+            last.join(5)
+        self.assertIn('leaves it to a seat', told.getvalue())
+        self.assertIn(got[0][0], (0, 1))
+        got[0][1].close()
+
+    def test_a_last_waiter_takes_a_tree_at_once_with_two_free(self):
+        got = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 3, rank=st_test.POOL_LAST_RANK)))
+            last.start()
+            last.join(5)
+        self.assertEqual(got[0][0], 0)
+        got[0][1].close()
+
+    def test_the_pool_rank_is_last_only_when_asked(self):
+        with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL_RANK': 'last'}, clear=True):
+            self.assertEqual(st_test.pool_rank(), st_test.POOL_LAST_RANK)
+        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), mock.patch.object(st_test, 'priority_rank', return_value=12):
+            self.assertEqual(st_test.pool_rank(), 12)
+        with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL_RANK': '3'}, clear=True):
+            with self.assertRaises(st_test.Failure):
+                st_test.pool_rank()                                             # a rank is the host's priority file's, not the caller's
+
     def test_a_ticket_whose_pid_was_reused_by_a_younger_process_is_dropped(self):
         queue = self.root / 'queue'
         queue.mkdir(parents=True)
@@ -3346,6 +3814,10 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(st_test.queued_seconds(log), 160)                      # the union of the waits, as before
         self.assertEqual(st_test.blocked_seconds(log, []), 160)                 # no stage times: every wait counts
         self.assertEqual(st_test.blocked_seconds(Path(self.tmp.name) / 'missing', stages), 0)
+        # The setup's admission waits (ci-local writes them as setup's) are blocked time too, and waiting, not running, for the time limit.
+        log.write_text(log.read_text() + f'wait {t0 - 50} setup\nslot {t0 - 20} setup\n')
+        self.assertEqual(st_test.blocked_seconds(log, stages), 130)
+        self.assertEqual(st_test.queued_seconds(log), 190)
 
     def test_an_interrupted_waiter_leaves_no_ticket(self):
         self.root.mkdir(parents=True)
