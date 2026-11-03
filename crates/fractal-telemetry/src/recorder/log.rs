@@ -419,7 +419,7 @@ mod tests {
                 scope.spawn(move || {
                     barrier.wait();
                     for _ in 0..8 {
-                        count_drop_with(path, LOCK_WAIT).unwrap();
+                        count_drop_with(path, DROP_WAIT).unwrap();
                     }
                 });
             }
