@@ -1,10 +1,9 @@
-//! Controlled pi launch with a session-owned presence lease.
+//! Native pi launch and adoption with session-owned observed records.
 //!
-//! pi has no MCP and no app-server: its integration point is an extension loaded into the
-//! interactive process, and that extension reaches st2 by spawning `st2 driver pi-channel`. The
-//! launch body itself is shared with omp — the family's other extension-driven harness — in
-//! [`crate::pi_family_session`]; what lives here is what is genuinely pi's: its extension asset,
-//! its channel variable names, and the release its harness-context arithmetic was measured on.
+//! The pi extension spawns this binary's channel. The native driver supplies explicit paths and
+//! ownership, and the outer provider wrapper records terminal state when the provider exits.
+//! Launch mechanics are shared with omp in [`crate::pi_family_session`]; this module supplies
+//! pi's extension asset, channel environment names, and measured context-producer release.
 
 use anyhow::Result;
 
