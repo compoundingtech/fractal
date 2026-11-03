@@ -50201,7 +50201,7 @@ mission "draining" state="ready" revision-cutover="when-idle" {
         seat.work(&promoted, "claim", "seat-choice-claim").unwrap();
         assert!(
             !seat_chooses_between_runs(SEAT, &work(&seat)),
-            "a held seat is not woken, so its order is not read"
+            "only one ready run remains, so order cannot change the head"
         );
         seat.work(&promoted, "complete", "seat-choice-complete")
             .unwrap();
