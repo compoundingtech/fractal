@@ -613,7 +613,7 @@ fn install_with_claude(marketplace: &Path) -> Result<()> {
 
 fn install_fractal_with_claude(marketplace: &Path) -> Result<()> {
     // Check before any marketplace/plugin side effects: install itself enables user scope.
-    let disable_help = Command::new("claude")
+    let disable_help = Command::new(claude_program())
         .args(["plugin", "disable", "--help"])
         .output()
         .context("check Claude plugin disable support")?;
@@ -741,8 +741,23 @@ fn claude_json<const N: usize>(args: [&str; N]) -> Result<Value> {
         .with_context(|| format!("decoding `claude {}` output", args.join(" ")))
 }
 
+/// The Claude executable this process runs plugin commands with: the provider's own once a
+/// driver has resolved it (`claude_session`), so the plugin check and the provider can never
+/// disagree about which Claude they mean; else `claude` on this process's PATH.
+static CLAUDE_PROGRAM: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Use `program` for this process's Claude plugin commands. The first call wins: one driver
+/// process launches one provider.
+pub fn use_claude_program(program: PathBuf) {
+    let _ = CLAUDE_PROGRAM.set(program);
+}
+
+fn claude_program() -> &'static Path {
+    CLAUDE_PROGRAM.get().map_or(Path::new("claude"), PathBuf::as_path)
+}
+
 fn claude_output(args: &[&str]) -> Result<Output> {
-    let output = Command::new("claude")
+    let output = Command::new(claude_program())
         .args(args)
         .output()
         .with_context(|| format!("running `claude {}`", args.join(" ")))?;
@@ -758,7 +773,7 @@ fn claude_output(args: &[&str]) -> Result<Output> {
 }
 
 fn run_claude(args: &[&str]) -> Result<()> {
-    let status = Command::new("claude")
+    let status = Command::new(claude_program())
         .args(args)
         .status()
         .with_context(|| format!("running `claude {}`", args.join(" ")))?;
