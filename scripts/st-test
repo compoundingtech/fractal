@@ -2795,9 +2795,9 @@ def wait_group_exit(pgid, seconds=GROUP_EXIT_SECONDS, proc='/proc', reap=None):
 
 def kill_limited(process, group=False):
     if group:
-        process._st_group_kill_started = True
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
+        process._st_group_kill_started = True
         wait_group_exit(process.pid, reap=process.poll)
     else:
         process.kill()

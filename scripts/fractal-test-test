@@ -1770,6 +1770,16 @@ while True:
                 st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
         self.assertEqual(drained.call_count, 1, 'a second signal must not reset the cleanup bound')
 
+    def test_an_interrupt_before_sigkill_still_signals_and_drains_the_group(self):
+        with mock.patch.object(st_test.subprocess, 'Popen') as started, \
+                mock.patch.object(st_test.os, 'killpg', side_effect=[KeyboardInterrupt(), None]) as killed, \
+                mock.patch.object(st_test, 'wait_group_exit') as drained:
+            started.return_value.__exit__.return_value = False
+            with self.assertRaises(KeyboardInterrupt):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
+        self.assertEqual(killed.call_count, 2, 'the interrupted first SIGKILL must still be sent')
+        self.assertEqual(drained.call_count, 1)
+
     def test_failed_cancellation_of_a_late_group_discards_its_registration(self):
         groups = st_test.ProcessGroups()
         groups.cancel()
