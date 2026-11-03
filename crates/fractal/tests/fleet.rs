@@ -6298,6 +6298,8 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
     let mut o = Node::new(root.path(), "o");
     o.binary = old.clone();
     o.start().await;
+    // A release with seat-freshness reads (v0.3.25 on) also reads marks and their backups (4b-1).
+    let release_reads_marks = reads_seat_freshness(&o).await;
     let send = |node: &Node, key: &str| {
         let client = node.client();
         let key = key.to_owned();
@@ -6365,7 +6367,8 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
         "a mark wrote a lifecycle claim"
     );
 
-    // A backup with marks is version 4; the release refuses it, naming the version.
+    // A backup with marks is version 4: a release that reads marks restores it, and an older one
+    // refuses it, naming the version.
     let archive = root.path().join("marks.jsonl");
     let created = o.command(&["backup", "create", archive.to_str().unwrap()]).output().unwrap();
     assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
@@ -6378,20 +6381,26 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
         .output()
         .unwrap();
     o.binary = PathBuf::from(st3());
-    assert!(!refused.status.success());
-    let error = String::from_utf8_lossy(&refused.stderr);
-    assert!(error.contains("unsupported claim backup format/version"), "{error}");
-    assert!(!target.exists());
+    if release_reads_marks {
+        assert!(refused.status.success(), "{}", String::from_utf8_lossy(&refused.stderr));
+        assert!(target.exists());
+    } else {
+        assert!(!refused.status.success());
+        let error = String::from_utf8_lossy(&refused.stderr);
+        assert!(error.contains("unsupported claim backup format/version"), "{error}");
+        assert!(!target.exists());
+    }
 
-    // Roll back: the release runs on this store and reads its own claims. A mark is this build's
-    // record only, so the release sees that message as sent, as the release note says.
+    // Roll back: the release runs on this store. One that reads marks sees the marked message as
+    // read; an older one reads its own claims only, and sees it as sent, as the release note says.
     o.stop();
     o.binary = old;
     o.start().await;
-    assert_eq!(state(&listed(&o).await), ["read", "sent", "sent"]);
+    let marked = if release_reads_marks { "read" } else { "sent" };
+    assert_eq!(state(&listed(&o).await), ["read", marked, "sent"]);
     read(&o, &third, "rolled-back-read").await;
     let fourth = send(&o, "rolled-back-send").await;
-    assert_eq!(state(&listed(&o).await), ["read", "sent", "read", "sent"]);
+    assert_eq!(state(&listed(&o).await), ["read", marked, "read", "sent"]);
 
     // Upgrade again: the mark still counts beside every claim either build wrote.
     o.stop();
@@ -6810,14 +6819,15 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
     }
     let claimed = n1.claims().await.iter().any(|claim| claim["subject"] == subject && claim["kind"] == "message.read");
     assert_eq!(claimed, !release_reads_marks, "the seat's read was a claim: {claimed}");
-    // The release reads the seat's read: from the claim it replicates, or from the seat's host.
+    // The release's delivery status (what `st conversations status` reads) reports the seat's
+    // read: from the claim it replicates, or by asking the seat's host on the relay.
     let deadline = std::time::Instant::now() + Duration::from_secs(90);
     loop {
-        let read: Result<Value, _> = o.client().get(&format!("/v1/messages/read/{subject}")).await;
-        if read.as_ref().is_ok_and(|message| message["status"] == "read") {
+        let status: Result<Value, _> = o.client().get(&format!("/v1/messages/delivery/{subject}")).await;
+        if status.as_ref().is_ok_and(|status| status["delivery"]["state"] == "read" && status["delivery"]["phase"] == "read") {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "the release did not read the seat's read: {read:?}");
+        assert!(std::time::Instant::now() < deadline, "the release did not read the seat's read: {status:?}");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     if release_reads_marks {
@@ -6825,6 +6835,10 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
             !o.claims().await.iter().any(|claim| claim["subject"] == subject && claim["kind"] == "message.read"),
             "a mark replicated as a claim"
         );
+        // The message view does not ask the relay: it reads this member's own records, which
+        // hold no mark of another host's seat, as the release note says.
+        let view: Value = o.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+        assert_eq!(view["status"], "sent", "{view}");
     }
 }
 
