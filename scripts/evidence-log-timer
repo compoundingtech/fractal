@@ -24,7 +24,7 @@ trap 'rm -rf "$tools"' EXIT
 repo=$(cd "$repo" && pwd)
 git init -q --bare "$tools/main.git"
 bootstrap_git() {
-  GIT_OBJECT_DIRECTORY="$repo/objects" git --git-dir="$tools/main.git" -c core.hooksPath=/dev/null -c core.fsync=objects,reference \
+  GIT_OBJECT_DIRECTORY="$repo/objects" git -C "$repo" --git-dir="$tools/main.git" -c core.hooksPath=/dev/null -c core.fsync=objects,reference \
     -c maintenance.auto=false -c gc.auto=0 "$@"
 }
 if main=$(git -C "$repo" rev-parse --verify refs/remotes/origin/main 2>/dev/null); then

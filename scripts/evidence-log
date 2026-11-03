@@ -335,7 +335,8 @@ def prepare_log(repo, remote, published, log_keys):
         git(fresh, 'init', '-q', '--bare')
         url = git(repo, 'remote', 'get-url', remote, check=False)
         source = url.stdout.decode().strip() if url.returncode == 0 else remote
-        git(fresh, 'fetch', '--no-tags', '-q', source, f'{LOG}:{LOG}')
+        # Keep relative file remotes relative to the publisher, while isolating refs and objects in the fresh Git directory.
+        git(repo, f'--git-dir={fresh}', 'fetch', '--no-tags', '-q', source, f'{LOG}:{LOG}')
         fetched = refs(fresh, LOG).get(LOG)
         if fetched != published or not log_signed(fresh, published, log_keys) or not readable_log(fresh, published):
             raise Refused('the published log is unreadable, changed, or not signed by a key in --log-keys: refusing repair')

@@ -249,6 +249,15 @@ sys.exit(log.main(sys.argv[1:]))
         self.assertEqual(self.pull('--publish')[0], 1)
         self.assertEqual(self.host_git('rev-parse', log.LOG), first)
 
+    def test_repair_keeps_relative_file_remotes_relative_to_the_publisher(self):
+        self.record()
+        self.host_git('remote', 'set-url', 'origin', '../github.git')
+        first = self.pull('--publish')[1]['head']
+        self.truncate(first)
+        code, result, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+
     def test_repair_refuses_a_trusted_published_head_from_an_unrelated_chain(self):
         self.record()
         first = self.pull('--publish')[1]['head']
@@ -471,7 +480,7 @@ sys.exit(log.main(sys.argv[1:]))
         (config / 'signer.json').write_text(json.dumps(self.signer))
         (config / 'log-keys').write_text(self.log_keys.read_text())
         env = dict({k: v for k, v in os.environ.items() if not k.startswith('GIT_')}, EVIDENCE_LOG_STATE=str(self.f.root / 'state'),
-                   EVIDENCE_LOG_REMOTE=str(self.remote), EVIDENCE_LOG_CONFIG=str(config), EVIDENCE_LOG_FLAGS='--publish')
+                   EVIDENCE_LOG_REMOTE='../../github.git', EVIDENCE_LOG_CONFIG=str(config), EVIDENCE_LOG_FLAGS='--publish')
         done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
         result = json.loads(done.stdout)
