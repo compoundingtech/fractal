@@ -1851,6 +1851,96 @@ version 2
 }
 
 #[test]
+fn mission_preview_keeps_one_snapshot_when_a_run_is_published() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        Store::open(&directory.path().join("claims.sqlite3"), "birch").unwrap(),
+    );
+    let mission = publish_mission(
+        &store,
+        r#"version 2
+mission "example/onboarding" state="ready" {
+  concurrent-runs max=1
+  goal "Keep one onboarding run active."
+  step "work" { goal "Wait for the person." }
+}"#,
+        "onboarding-definition",
+    );
+    let source = format!(
+        concat!(
+            "version 2\nmission-run \"example/onboarding\" {{\n",
+            "  mission \"mission/example/onboarding@{}\"\n",
+            "  workspace {:?}\n  requester \"person/alex\"\n}}\n",
+        ),
+        mission.revision,
+        directory.path(),
+    );
+    let intent = parse_intent(&source, "birch").unwrap();
+    let before = store.index().unwrap();
+    let (writer_store, writer_intent, writer_source) = (store.clone(), intent.clone(), source.clone());
+    fractal_store::store::missions::MISSION_AFTER_RUN_LOOKUP.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            // Commit after the preview read that the named run was absent. A separate
+            // thread writes while the preview's read transaction, if any, remains open.
+            std::thread::spawn(move || {
+                let preview = writer_store
+                    .mission(&writer_intent, IntentInput {
+                        kdl: writer_source,
+                        source_name: None,
+                    })
+                    .unwrap();
+                assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+                writer_store
+                    .apply(&writer_intent, &preview.subject_tokens, "concurrent-onboarding")
+                    .unwrap();
+            })
+            .join()
+            .unwrap();
+        }));
+    });
+    let preview = store
+        .mission(&intent, IntentInput {
+            kdl: source.clone(),
+            source_name: None,
+        })
+        .unwrap();
+    assert!(
+        store.index().unwrap() > before,
+        "the concurrent publication committed"
+    );
+    assert_eq!(preview.store_index, before);
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    assert!(preview.subject_tokens["mission-run/example/onboarding"].is_empty());
+    assert!(preview.predicted_actions.iter().any(|action| {
+        action.subject == "mission-run/example/onboarding" && action.action == "start-mission-run"
+    }));
+
+    let current = store
+        .mission(&intent, IntentInput {
+            kdl: source.clone(),
+            source_name: None,
+        })
+        .unwrap();
+    assert!(current.blockers.is_empty(), "the existing run is idempotent");
+    assert!(
+        !current.predicted_actions.iter().any(|action| action.action == "start-mission-run")
+    );
+    let other = source.replace(
+        "mission-run \"example/onboarding\"", "mission-run \"example/another\"",
+    );
+    let other_intent = parse_intent(&other, "birch").unwrap();
+    let blocked = store
+        .mission(&other_intent, IntentInput {
+            kdl: other,
+            source_name: None,
+        })
+        .unwrap();
+    assert!(
+        blocked.blockers.iter().any(|message| message.contains("active run limit"))
+    );
+}
+
+#[test]
 fn mission_run_capacity_uses_the_strictest_active_revision() {
     let store = Store::open_memory("node").unwrap();
     let first = publish_mission(
