@@ -521,7 +521,7 @@ impl Runtime for FractalRuntime {
 
     fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), St3Error> {
         projectors::run_hooks(projectors::FLUSH, transaction).map_err(internal)?;
-        reapply_local_work_lease_renewals_tx(transaction)
+        holds::stage("lease-renewals", || reapply_local_work_lease_renewals_tx(transaction))
     }
 
     fn rebuild_deferred(&self, transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {

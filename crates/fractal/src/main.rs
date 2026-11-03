@@ -610,6 +610,22 @@ enum FleetCommand {
         #[command(subcommand)]
         command: FleetTransportsCommand,
     },
+    /// Let this member start, restart and retire its agents without peers it cannot reach. With
+    /// `wait_for_peers_after_start` on, a member waits after each start to catch up with a peer
+    /// before acting on where its agents run; this releases the named peers for the current daemon
+    /// start only. Run it on the member.
+    AdmitWithout {
+        /// A peer this member stops waiting for. Repeat it for several.
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
+        /// Why the member may go on without them.
+        #[arg(long)]
+        reason: String,
+        /// The person or agent applying it.
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+        #[arg(long = "as")]
+        actor: String,
+    },
     /// Show this node, the fleet's members, and open invites.
     Status,
     /// Wait for this node's first sync to end: until it holds the same claims as the peer it
@@ -7240,7 +7256,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok())}),
             ),
@@ -7340,7 +7356,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
         config.unlaned_seat.clone(),
-    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
@@ -18011,9 +18027,15 @@ fn write_driver_log(subject: &str, line: &str) -> Result<()> {
     fractal_daemon::client::write_driver_log(subject, line)
 }
 
+/// Renew each claim this incarnation holds. The caller runs only while its provider does, so
+/// the driver is the proof that `incarnation` is live; the daemon's own check, which judges the
+/// claim's incarnation by its runtime records, guards the renewal itself. Asking the daemon for
+/// the seat's current harness first would let a record another host made of its own old runtime
+/// stop a live seat's renewals (#4743).
 async fn renew_claimed_work(
     client: &Client,
     subject: &str,
+    incarnation: &str,
     minute: u64,
     retry: &mut fractal_daemon::client::DriverRetry,
 ) -> Result<()> {
@@ -18021,27 +18043,10 @@ async fn renew_claimed_work(
         .get(&format!("/v1/work?actor={}&view=renewal", urlencoding::encode(subject)))
         .await?;
     update_renewal_retry_lease(retry, &work, subject, current_unix_ms()?);
-    // Most resident seats hold no work. Only a held claim needs the status reduction
-    // that proves its harness incarnation is still live before renewing the lease.
-    if !work.iter().any(|step| step.work_claim_is_held_by(subject)) {
-        return Ok(());
-    }
-    let status: StatusResponse = client
-        .get(&format!(
-            "/v1/status?subject={}&harness_only=true",
-            urlencoding::encode(subject)
-        ))
-        .await?;
-    let harness = status
-        .subjects
-        .iter()
-        .find(|candidate| candidate.subject == subject)
-        .and_then(|candidate| candidate.harness.as_ref());
     let mut failure = None;
-    for step in work
-        .into_iter()
-        .filter(|step| work_claim_has_active_harness(step, subject, harness))
-    {
+    for step in work.into_iter().filter(|step| {
+        step.work_claim_is_held_by(subject) && step.claim_incarnation.as_deref() == Some(incarnation)
+    }) {
         // Nothing here reads the answer, so ask for the lease view: the step's row alone.
         let renewed: Result<StepRunView> = client
             .post(
@@ -18123,15 +18128,6 @@ async fn claim_has_driver(
         .find(|candidate| candidate.subject == subject)
         .and_then(|candidate| candidate.harness.as_ref());
     Some(claim_has_active_harness(Some(incarnation), harness))
-}
-
-fn work_claim_has_active_harness(
-    step: &StepRunView,
-    subject: &str,
-    harness: Option<&CurrentHarnessView>,
-) -> bool {
-    step.work_claim_is_held_by(subject)
-        && claim_has_active_harness(step.claim_incarnation.as_deref(), harness)
 }
 
 fn claim_has_active_harness(incarnation: Option<&str>, harness: Option<&CurrentHarnessView>) -> bool {

@@ -139,6 +139,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "POST /v1/fleet/admission-override",
+        "an operator's rare release of a waiting member; it reads this member's peers and its newest daemon.started claim and appends one claim, none of which grows with claim history; placement_handoff::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override covers the real route through the CLI",
+    ),
+    (
         "GET /v1/fleet/anchor",
         "one fleet metadata key lookup, independent of claim history; fleet::rename_proofs_export_over_cli_and_verify_without_daemon_or_config covers the real public API read through the CLI",
     ),
@@ -370,6 +374,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "POST /v1/internal/seat-freshness",
         "records a peer's seat freshness push in memory: one declarations read, no write",
+    ),
+    (
+        "POST /v1/internal/seat-freshness/reads",
+        "answers a peer's read about this node's seats: one declarations read and at most 512 messages' marks, no write",
     ),
     // Planning sessions and evals start harnesses.
     ("POST /v1/launches", "starts a planning harness"),
