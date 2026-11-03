@@ -289,8 +289,8 @@ fn matching_units(id: &str, units: &[ManagerUnit]) -> Result<Vec<String>> {
 
 #[cfg(target_os = "linux")]
 fn runtime_unit_matches(unit: &str, safe: &str) -> bool {
-    if let Some(identity) = crate::priority::server_identity(unit) {
-        return identity == safe;
+    if crate::priority::server_identity(unit) == Some(safe) {
+        return true;
     }
     ["st3-work", "st3"].iter().any(|product| {
         crate::isolate::scope_identity(product, unit).is_some_and(|identity| {
@@ -547,6 +547,35 @@ mod tests {
         assert!(matching_units("repo.worker", &units).unwrap().is_empty());
         assert_eq!(matching_units("repo.worker-2", &units).unwrap().len(), 2);
         assert!(runtime_unit_matches(&crate::scope_unit("st3", &format!("repo.worker-{operation}")), "repo.worker"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn server_prefixed_runtime_work_scope_is_still_a_candidate() {
+        let id = "pty-server-repo.worker";
+        let unit = crate::scope_unit("st3", id);
+        let units = [ManagerUnit { unit: unit.clone(), load: "loaded".into(),
+            active: "active".into(), sub: "running".into() }];
+        assert_eq!(matching_units(id, &units).unwrap(), vec![unit.clone()]);
+        let root = tempfile::tempdir().unwrap();
+        let process = root.path().join("123");
+        std::fs::create_dir(&process).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        std::fs::write(process.join("status"), format!("Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n")).unwrap();
+        std::fs::write(process.join("stat"), "123 (producer) S 1 2 3").unwrap();
+        std::fs::write(process.join("cgroup"), format!("0::/user.slice/{unit}\n")).unwrap();
+        std::fs::write(process.join("environ"), b"FRACTAL_START_OPERATION=op\0").unwrap();
+        let scopes = BTreeSet::from([crate::scope_unit("st3", id)]);
+        assert!(!scopes.contains(&unit));
+        let mut evidence = closed();
+        evidence.operation_pids = operation_processes_in(root.path(), uid, "op", id, &scopes).unwrap();
+        assert_eq!(evidence.operation_pids, vec![123]);
+        assert!(!positive(&evidence));
+        std::fs::remove_file(process.join("environ")).unwrap();
+        std::fs::create_dir(process.join("environ")).unwrap();
+        let error = operation_processes_in(root.path(), uid, "op", id, &scopes).unwrap_err();
+        let refusal = error.downcast_ref::<LegacyStartProofUnavailable>().unwrap();
+        assert_eq!((refusal.stage, refusal.pid), ("proc-environ", Some(123)));
     }
 
     #[cfg(target_os = "linux")]
