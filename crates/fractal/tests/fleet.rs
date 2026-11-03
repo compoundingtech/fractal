@@ -7146,10 +7146,11 @@ async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
     } else {
         // Pre-plugin releases have no `gh pr`; read their full snapshot through their API.
         let snapshots: Value = elder.client().get(
-            "/v1/claims?subject=resource/github/fixture/app/pull-request/12&kind=resource.observed&limit=500",
+            "/v1/claims?subject=resource/github/fixture/app/pull-request/12&limit=500",
         ).await.unwrap();
         let snapshot = snapshots["claims"].as_array().unwrap().iter().find(|claim| {
-            claim.pointer("/body/fields/facts/head_sha") == Some(&json!("c".repeat(40)))
+            claim["kind"] == "resource.observed"
+                && claim.pointer("/body/fields/facts/head_sha") == Some(&json!("c".repeat(40)))
         }).expect("the previous release serves its head-c snapshot");
         assert_eq!(snapshot["body"]["fields"]["facts"]["title"], "Copper proof", "{snapshot}");
     }
