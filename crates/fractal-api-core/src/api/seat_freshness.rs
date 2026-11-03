@@ -9,6 +9,7 @@
 use super::*;
 use crate::api::client_v0::validation;
 use crate::peer::{ClientRelay, ReceivedSeatFreshness, SEAT_FRESHNESS_FEATURE, SeatFreshnessAck, SeatFreshnessPush, SeatHeard};
+use crate::peer::{MessageMarksAnswer, MessageMarksAnswers, ReceivedSeatFreshnessRead, RelayedMark, SeatFreshnessRead};
 use crate::store::RelayedFreshness;
 
 /// After a commit wakes the pusher, how long it gathers further commits before one round.
@@ -51,6 +52,58 @@ pub async fn seat_freshness(
         let recorded = seats.iter().map(|(agent, _, _)| agent.clone()).collect();
         store.extension::<RelayedFreshness>().record(seats);
         Ok(SeatFreshnessAck { recorded })
+    })
+    .await
+    .map(Json)
+}
+
+/// Answer a peer's read about this node's seats, through its replication worker, which
+/// authenticated `from`. Only the marks of seats this node's declarations place on it are
+/// answered: a member speaks for its own seats.
+pub async fn seat_freshness_read(
+    State(state): State<AppState>,
+    Json(received): Json<ReceivedSeatFreshnessRead>,
+) -> Result<Json<Value>, ApiError> {
+    received
+        .read
+        .validate()
+        .map_err(|error| validation(format!("{error:#}")))?;
+    let store = state.store.clone();
+    blocking_store(move || {
+        let hosted = store
+            .desired_subjects()?
+            .into_iter()
+            .filter(|desired| {
+                desired
+                    .member
+                    .as_ref()
+                    .is_some_and(|member| member.host == store.origin())
+            })
+            .map(|desired| desired.subject)
+            .collect::<BTreeSet<_>>();
+        match received.read {
+            SeatFreshnessRead::MessageMarks { messages } => {
+                let answers = crate::store::message_marks::host_marks(&store, &messages, &hosted)?;
+                let messages = messages
+                    .into_iter()
+                    .zip(answers)
+                    .map(|(subject, (held, marks))| MessageMarksAnswer {
+                        subject,
+                        held,
+                        marks: marks
+                            .into_iter()
+                            .map(|mark| RelayedMark {
+                                kind: mark.kind,
+                                consumer: mark.consumer,
+                                recorded_at_unix_ms: mark.recorded_at_unix_ms,
+                                receipt: mark.receipt,
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                Ok(serde_json::to_value(MessageMarksAnswers { messages })?)
+            }
+        }
     })
     .await
     .map(Json)

@@ -144,6 +144,79 @@ pub fn recorded_at(connection: &Connection, message: &str, kinds: &[&str], consu
     Ok(at.and_then(|at| u128::try_from(at).ok()))
 }
 
+/// One mark as the consumer's host answers it to another member.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostMark {
+    pub kind: String,
+    pub consumer: String,
+    pub recorded_at_unix_ms: u64,
+    pub receipt: String,
+}
+
+/// For each of `messages`: whether this member holds it, and the marks of `consumers` it
+/// recorded, a graph message's from `local_message_marks` and a stream item's from the messages
+/// shard's `stream_lifecycle`. What another member asks this host on the seat-freshness relay.
+pub fn host_marks(
+    store: &Store,
+    messages: &[String],
+    consumers: &BTreeSet<String>,
+) -> Result<Vec<(bool, Vec<HostMark>)>> {
+    let mut answers = Vec::with_capacity(messages.len());
+    for message in messages {
+        let connection = store.readers.get();
+        let held: bool = connection
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)")?
+            .query_row(/* sqlite-large-value: allow-for-now lv-he19a16a9018a owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
+        if held {
+            let marks = connection
+                .prepare_cached(
+                    "SELECT kind, consumer, recorded_at_unix_ms, receipt FROM local_message_marks WHERE message=?1",
+                )?
+                .query_map([message], |row| {
+                    Ok(HostMark {
+                        kind: row.get(0)?,
+                        consumer: row.get(1)?,
+                        recorded_at_unix_ms: row.get::<_, i64>(2)?.max(0) as u64,
+                        receipt: row.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|mark| consumers.contains(&mark.consumer))
+                .collect();
+            answers.push((true, marks));
+            continue;
+        }
+        drop(connection);
+        match super::messages_shard::lifecycle_marks(store, message)? {
+            Some(records) => {
+                let marks = records
+                    .into_iter()
+                    .filter(|(_, actor, _)| consumers.contains(actor))
+                    .map(|(kind, consumer, recorded_at_unix_ms)| {
+                        let receipt = super::messages_shard::lifecycle_receipt(
+                            &store.origin,
+                            message,
+                            &kind,
+                            Some(&consumer),
+                            &BTreeMap::new(),
+                        );
+                        HostMark {
+                            kind,
+                            consumer,
+                            recorded_at_unix_ms,
+                            receipt: receipt.id,
+                        }
+                    })
+                    .collect();
+                answers.push((true, marks));
+            }
+            None => answers.push((false, Vec::new())),
+        }
+    }
+    Ok(answers)
+}
+
 /// A status rank: sent, staged, delivered, read, closed.
 pub fn rank(status: &str) -> u8 {
     match status {
