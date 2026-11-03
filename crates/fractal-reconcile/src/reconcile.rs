@@ -6020,7 +6020,44 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             Vec::new()
         };
-        let next_wake = next_work_wake_for_agent(agent, &work, &run_order);
+        // Queue changes must reach a seat even while `work wait` keeps its claim.
+        // The last durable automatic wake records the head already announced;
+        // using its subject in the key also permits returning to an earlier head.
+        let steps = work.iter().map(crate::seat_queue::SeatStep::from).collect::<Vec<_>>();
+        let selection = crate::seat_queue::select(agent, &steps, &run_order);
+        let last_wake = messages.iter().filter(|message| {
+            !message.tags.iter().any(|tag| tag == "st3-wake-source:manual")
+                && work_message_target(message)
+                    .is_some_and(|(_, _, _, key)| key == incarnation_key)
+        }).max_by_key(|message| message.created_index);
+        if let Some(head) = selection.next()
+            && let Some(step) = work.iter().find(|step| step.subject == head)
+            && (last_wake.is_some() || !selection.held.is_empty())
+            && !last_wake.is_some_and(|message| {
+                work_message_target(message).is_some_and(|(subject, attempt, epoch, _)| {
+                    subject == head && attempt == step.attempt && epoch == step.readiness_epoch
+                })
+            })
+        {
+            if defers_inherited_work_wake(step, &work, harness.as_ref()) {
+                return Ok(());
+            }
+            if let Some(member) = member
+                && !self.prepare_fresh_context(agent, incarnation, step, member)?
+            {
+                return Ok(());
+            }
+            append_work_wake_message(
+                &self.store, step, agent, incarnation, 1, "queue-head", "daemon/runtime",
+                "the first eligible queue entry changed",
+                format!("st3-queue-head:{agent}:{incarnation_key}:{}:{head}:{}:{}",
+                    last_wake.map_or("initial", |message| message.subject.as_str()),
+                    step.attempt, step.readiness_epoch),
+            )?;
+            self.signal_changed();
+            return Ok(());
+        }
+        let next_wake = selection.wake();
         for step in work
             .iter()
             .filter(|step| Some(step.subject.as_str()) == next_wake)
@@ -19927,17 +19964,14 @@ fn deadline_sleep_ms(deadline: u128, now: u128, quiet_pass_started: Option<u128>
     }
 }
 
-/// True when the seat holds nothing and has ready work in more than one run.
-/// Only then can its run order change what it takes next.
+/// True when the seat has ready work in more than one run.
+/// Run order selects its next head even while another claim occupies the seat.
 fn seat_chooses_between_runs(agent: &str, work: &[StepRunView]) -> bool {
     let steps = work
         .iter()
         .map(crate::seat_queue::SeatStep::from)
         .collect::<Vec<_>>();
     let selection = crate::seat_queue::select(agent, &steps, &[]);
-    if !selection.held.is_empty() {
-        return false;
-    }
     let mut runs = steps
         .iter()
         .filter(|step| selection.ready.contains(&step.subject))
@@ -49608,6 +49642,64 @@ mission "gated" state="ready" {
     }
 
     #[test]
+    fn seat_queue_head_move_wakes_a_held_seat_once() {
+        let seat = SeatQueueFixture::new();
+        let first = seat.start("queued", "head-held");
+        let second = seat.start("queued", "head-second");
+        let third = seat.start("queued", "head-third");
+        let held = SeatQueueFixture::step(&first, "work");
+        seat.work(&held, "claim", "head-claim").unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        let before = seat.store.messages(Some(SEAT), true).unwrap().len();
+        seat.move_run(&third.subject, "top", None, "person/operator", "head-top").unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        let promoted = SeatQueueFixture::step(&third, "work");
+        assert!(seat.woken().contains(&promoted));
+        assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), before + 1);
+        // A different move that leaves the eligible head unchanged sends nothing.
+        seat.move_run(&second.subject, "bottom", None, "person/operator", "head-bottom").unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), before + 1);
+        assert_eq!(seat.store.step_run(&held).unwrap().unwrap().status, "claimed");
+        // Returning to an already announced head is a new change, not a replay.
+        seat.move_run(&second.subject, "top", None, "person/operator", "head-return").unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), before + 2);
+    }
+
+    #[test]
+    fn seat_queue_head_new_run_wakes_a_held_seat_once() {
+        let seat = SeatQueueFixture::new();
+        let first = seat.start("queued", "head-new-held");
+        let held = SeatQueueFixture::step(&first, "work");
+        seat.work(&held, "claim", "head-new-claim").unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        let before = seat.store.messages(Some(SEAT), true).unwrap().len();
+        let second = seat.start("queued", "head-new");
+        assert!(seat.woken().contains(&SeatQueueFixture::step(&second, "work")));
+        seat.reconciler.reconcile_once().unwrap();
+        assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), before + 1);
+    }
+
+    #[test]
+    fn seat_queue_head_readied_run_wakes_a_held_seat_once() {
+        let seat = SeatQueueFixture::new();
+        let gated = seat.start("gated", "head-ready-gated");
+        let first = seat.start("queued", "head-ready-held");
+        let held = SeatQueueFixture::step(&first, "work");
+        seat.work(&held, "claim", "head-ready-claim").unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        let before = seat.store.messages(Some(SEAT), true).unwrap().len();
+        let prepare = SeatQueueFixture::step(&gated, "prepare");
+        seat.store.set_step_state(&prepare, "completed", None).unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        assert!(seat.woken().contains(&SeatQueueFixture::step(&gated, "work")));
+        seat.reconciler.reconcile_once().unwrap();
+        assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), before + 1);
+    }
+
+    #[test]
     fn seat_queue_keeps_three_runs_in_start_order_by_default() {
         let seat = SeatQueueFixture::new();
         let first = seat.start("queued", "seat-order-first");
@@ -49760,8 +49852,8 @@ mission "gated" state="ready" {
         assert_eq!(queue.runs[0].run, second.subject);
         assert_eq!(queue.runs[1].state, "claimed");
         assert_eq!(seat.next().as_deref(), Some(queued.as_str()));
-        assert_eq!(seat.wake(), None, "a held seat is not woken for other work");
-        assert!(!seat.woken().contains(&queued));
+        assert_eq!(seat.wake(), None, "a held seat still cannot claim other work");
+        assert!(seat.woken().contains(&queued), "the changed head wakes the held seat");
         assert_eq!(
             seat.work(&queued, "claim", "seat-held-second-claim")
                 .unwrap_err()
