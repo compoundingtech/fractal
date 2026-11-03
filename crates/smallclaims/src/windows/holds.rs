@@ -560,8 +560,9 @@ pub fn covered(unit: &'static str, count: usize) {
     });
 }
 
-/// Stages a lend keeps; a later stage adds to `other`, the last.
-const STAGES_KEPT: usize = 16;
+/// Stages a lend keeps; a later stage adds to `other`, the last. A replicated projection pass
+/// has 19: its own five, a flush hook each, the lease reapply, health, commit and release.
+const STAGES_KEPT: usize = 24;
 
 /// The aggregates one stage of a staged lend rebuilt, and the claims they replayed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1100,9 +1101,10 @@ mod tests {
 
     #[test]
     fn a_staged_lend_keeps_a_bounded_set_of_stages_and_stops_at_its_end() {
-        const NAMES: [&str; 20] = [
+        const NAMES: [&str; 28] = [
             "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s12", "s13",
-            "s14", "s15", "s16", "s17", "s18", "s19",
+            "s14", "s15", "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23", "s24", "s25",
+            "s26", "s27",
         ];
         let mut clock = StageClock::default();
         for name in NAMES {
@@ -1115,7 +1117,7 @@ mod tests {
             ("other", Duration::from_millis(folded))
         );
         let total = clock.spent.iter().map(|(_, spent)| *spent).sum::<Duration>();
-        assert_eq!(total, Duration::from_millis(20));
+        assert_eq!(total, Duration::from_millis(28));
         // A stage entered after the writer closed the clock is not counted.
         let stages = Stages::begin();
         stages.enter("begin");
