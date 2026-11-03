@@ -1842,6 +1842,7 @@ async fn admit_without(
     actor: String,
     json_output: bool,
 ) -> Result<()> {
+    reject_foreign_agent_actor(&actor)?;
     let claim: fractal_daemon::model::ClaimRecord = Client::new(endpoint.clone())
         .post(
             "/v1/fleet/admission-override",

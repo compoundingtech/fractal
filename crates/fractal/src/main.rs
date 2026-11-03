@@ -2813,6 +2813,11 @@ enum AgentsCommand {
     /// Print the systemd slice of one agent's lane, as this daemon names it (docs/st3/seat-lanes.md).
     /// It names where the lane is when the agent has one; the cgroup tree shows whether it exists.
     Lane { subject: String },
+    /// Raise one agent's lane for a command's run and hold it while standard input stays open
+    /// (docs/st3/seat-lanes.md, "Bursts"). Prints one line per answer: `waiting REASON` as the reason
+    /// changes, then `granted CORES MEMORY`; or `none WHY` when the agent holds no lane here, or
+    /// `refused WHY` for a burst that can never fit. Closing standard input gives it back.
+    Burst(AgentBurstArgs),
     /// Write or read the handoff an agent leaves for the session that follows it.
     Handoff {
         #[command(subcommand)]
@@ -3657,6 +3662,27 @@ struct AgentResumeArgs {
     /// How long to wait for the agent to resume its native session.
     #[arg(long, default_value = "10m")]
     timeout: String,
+}
+
+#[derive(Args)]
+struct AgentBurstArgs {
+    /// Exact agent subject or its identity without the `agent/` prefix.
+    #[arg(value_parser = parse_agent_start_identity)]
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: true })))]
+    subject: String,
+    /// The lane's cores while the burst holds.
+    #[arg(long)]
+    cores: u32,
+    /// The lane's memory while the burst holds, such as 24G.
+    #[arg(long)]
+    memory: String,
+    /// What asks, shown while it waits and holds.
+    #[arg(long, default_value = "a command")]
+    reason: String,
+    /// The agent itself: only an agent asks for its own lane's burst.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_parser = parse_agent_actor)]
+    actor: String,
 }
 
 #[derive(Args)]
@@ -6165,6 +6191,7 @@ fn guard_mutating_cli_actor(
     }
     let actor = match command {
         Command::Apply(args) => Some(args.actor.as_str()),
+        Command::Fleet { command: FleetCommand::AdmitWithout { actor, .. } } => Some(actor.as_str()),
         Command::Missions { command } => match command {
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
             MissionViewCommand::Publish(args) => Some(args.actor.as_str()),
@@ -6971,6 +6998,64 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
     }
 }
 
+/// Audit the operation projection on a blocking thread. The audit reads in pages of at most
+/// 128 rows, each in its own short read snapshot, so it never holds one snapshot for its whole
+/// run and never delays a WAL restart for long. The store keeps the result for doctor.
+async fn audit_operations(store: &Arc<Store>) -> anyhow::Result<Vec<String>> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("operations.audit", || {
+        store.operation_projection_drift()
+    }))
+    .await
+    .unwrap_or_else(|error| Err(anyhow::anyhow!("the operation audit stopped: {error}")))
+}
+
+/// Count the envelopes this node admitted before it knew their writer's key or end, on a blocking
+/// thread, in pages that each take their own short read snapshot. The store keeps the count for
+/// doctor; a failure is kept there too, and doctor reports it.
+async fn count_fleet_residue(store: &Arc<Store>) {
+    let counting = store.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("fleet.admission_residue", || {
+        counting.audit_fleet_admission_residue()
+    }))
+    .await
+    {
+        store.fleet_residue_stopped(format!("the count stopped: {error}"));
+    }
+}
+
+/// Repair what an audit found, and say whether anything changed.
+async fn repair_operation_drift(store: &Arc<Store>, audit: anyhow::Result<Vec<String>>) -> bool {
+    let drift = match audit {
+        Ok(drift) if drift.is_empty() => return false,
+        Ok(drift) => drift,
+        Err(error) => {
+            stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
+            return false;
+        }
+    };
+    let store = store.clone();
+    match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("operations.repair_drift", || {
+        store.repair_operation_projection_drift_from_audit(&drift)
+    }))
+    .await
+    {
+        Ok(Ok(true)) => {
+            stderr_message("st3", format_args!("rebuilt an operation projection that drifted"));
+            true
+        }
+        Ok(Ok(false)) => false,
+        Ok(Err(error)) => {
+            stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
+            false
+        }
+        Err(error) => {
+            stderr_message("st3", format_args!("operation projection check stopped: {error}"));
+            false
+        }
+    }
+}
+
 async fn run_up(args: UpArgs) -> Result<()> {
     let worker_observer = fractal_daemon::api::worker_observer(args.replication_worker_pid)?;
     let started_at = Instant::now();
@@ -7381,32 +7466,50 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .await;
         }
     }));
-    // The first diagnostic report and delayed repair share one operation audit. Later reports
-    // audit current state independently; no request waits for this startup report.
+    // Doctor reports the envelopes admitted before this node knew better from this count, made
+    // at startup and then every period, and again when doctor finds membership moved since.
+    // The first count waits 30 s, so it does not run beside the startup operation audit, unless
+    // doctor asks for it sooner. Counts doctor asks for come at most once a minute, however
+    // often doctor runs while fleet rows replicate.
+    {
+        let store = store.clone();
+        tokio::spawn(fractal_daemon::task_cpu::account("fleet.admission_residue", async move {
+            let mut wait = Duration::from_secs(30);
+            let mut counted: Option<tokio::time::Instant> = None;
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    () = store.fleet_residue_wanted.notified() => {
+                        if let Some(counted) = counted {
+                            tokio::time::sleep_until(counted + Duration::from_secs(60)).await;
+                        }
+                    }
+                }
+                count_fleet_residue(&store).await;
+                counted = Some(tokio::time::Instant::now());
+                wait = fractal_daemon::store::OPERATION_AUDIT_PERIOD;
+            }
+        }));
+    }
+    // The first diagnostic report and delayed repair share one operation audit. After it the
+    // daemon audits again every period, and after any repair, so doctor reports a recent audit
+    // instead of reading every operation itself. No request waits for an audit.
     if let Some(audit) = fractal_daemon::api::start_operation_report(&state) {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("operations.repair_drift", async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            let drift = match audit.await {
-                Ok(Ok(drift)) => drift,
-                Ok(Err(error)) => {
-                    stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
-                    return;
-                }
-                Err(error) => {
-                    stderr_message("st3", format_args!("operation projection check stopped: {error}"));
-                    return;
-                }
+            let mut audit = match audit.await {
+                Ok(audit) => audit,
+                Err(error) => Err(anyhow::anyhow!("the startup audit stopped: {error}")),
             };
-            match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("operations.repair_drift", || {
-                store.repair_operation_projection_drift_from_audit(&drift)
-            }))
-            .await
-            {
-                Ok(Ok(true)) => stderr_message("st3", format_args!("rebuilt an operation projection that drifted")),
-                Ok(Ok(false)) => {}
-                Ok(Err(error)) => stderr_message("st3", format_args!("operation projection check failed: {error:#}")),
-                Err(error) => stderr_message("st3", format_args!("operation projection check stopped: {error}")),
+            loop {
+                if repair_operation_drift(&store, audit).await {
+                    // Audit once more at once, so doctor reports what the repair left; anything
+                    // still drifted waits for the next period's repair.
+                    let _ = audit_operations(&store).await;
+                }
+                tokio::time::sleep(fractal_daemon::store::OPERATION_AUDIT_PERIOD).await;
+                audit = audit_operations(&store).await;
             }
         }));
     }
@@ -11731,6 +11834,10 @@ fn render_performance(view: &Value) -> String {
         }
         let _ = writeln!(out);
     }
+    if let Some(lapsed) = view["lane_bursts"]["dropped_by_lease"].as_u64() {
+        let _ = writeln!(out, "LANE BURSTS  {} held · {} waiting · {lapsed} dropped by lease since start",
+            view["lane_bursts"]["held"], view["lane_bursts"]["waiting"]);
+    }
     if let Some(note) = view["query_time_note"].as_str() {
         let _ = writeln!(out, "{note}");
     }
@@ -15594,6 +15701,15 @@ fn parse_queue_move_actor(actor: &str) -> std::result::Result<String, String> {
         parse_person_subject(actor)
     };
     parsed.map_err(|_| "a queue move needs a complete `person/NAME` or `agent/PATH` subject".into())
+}
+
+/// An explicit `agent/PATH` subject, for a command only an agent runs for itself.
+fn parse_agent_actor(actor: &str) -> std::result::Result<String, String> {
+    if actor.strip_prefix("agent/").is_some_and(|name| !name.is_empty() && !name.ends_with('/')) {
+        Ok(actor.to_owned())
+    } else {
+        Err("only an agent acts here: give its explicit `agent/PATH` subject".into())
+    }
 }
 
 fn parse_publication_actor(actor: &str) -> std::result::Result<String, String> {
