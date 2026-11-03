@@ -258,6 +258,30 @@ sys.exit(log.main(sys.argv[1:]))
         self.assertEqual(code, 0, error)
         self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
 
+    def test_repair_uses_the_same_relative_log_key_file_as_normal_extension(self):
+        self.record()
+        (self.host / 'relative-log-keys').write_text(self.log_keys.read_text())
+        self.assertEqual(self.pull('--publish', '--log-keys', 'relative-log-keys')[0], 0)
+        code, result, error = self.pull('--publish', '--log-keys', 'relative-log-keys')
+        self.assertEqual(code, 0, error)
+        first = result['head']
+        self.truncate(first)
+        code, result, error = self.pull('--publish', '--log-keys', 'relative-log-keys')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+
+    def test_repair_honors_the_publishers_revocations_before_moving_any_objects(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        (self.host / 'revoked-log-key').write_text(self.log_key.with_suffix('.pub').read_text())
+        self.host_git('config', 'gpg.ssh.revocationFile', 'revoked-log-key')
+        self.assertEqual(self.pull('--publish')[0], 1, 'normal extension refuses the revoked key')
+        self.truncate(first)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 1, error)
+        self.assertIn('not signed by a key in --log-keys', error)
+        self.assertFalse((self.host / 'evidence-log.broken-objects').exists(), 'the isolated verifier must honor the same revocation')
+
     def test_repair_restores_a_truncated_blob_whose_header_still_reads(self):
         self.record()
         first = self.pull('--publish')[1]['head']

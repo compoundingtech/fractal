@@ -202,8 +202,19 @@ def commit(repo, tree, parent, message, signer, now):
     return git(repo, 'hash-object', '-t', 'commit', '-w', '--stdin', stdin=signed.encode()).stdout.decode().strip()
 
 
-def log_signed(repo, oid, log_keys):
-    shown = git(repo, 'show', '-s', '--format=%G?%x00%GS', oid, config=[f'gpg.ssh.allowedSignersFile={log_keys}'], check=False)
+def log_signed(repo, oid, log_keys, git_dir=None):
+    where = [f'--git-dir={git_dir}'] if git_dir else []
+    config = []
+    if git_dir:
+        # An isolated object store must retain the publisher's effective verification policy, including revocations.
+        settings = git(repo, 'config', '--null', '--get-regexp', r'^gpg\.').stdout.decode().split('\0')
+        for setting in filter(None, settings):
+            key, separator, value = setting.partition('\n')
+            if not separator:
+                raise Refused('cannot read the publisher\'s signature verification configuration')
+            config.append(f'{key}={value}')
+    shown = git(repo, *where, 'show', '-s', '--format=%G?%x00%GS', oid,
+                config=[*config, f'gpg.ssh.allowedSignersFile={log_keys}'], check=False)
     status, _, principal = shown.stdout.decode().strip('\n').partition('\0')
     return status == 'G' and principal.startswith('log/')
 
@@ -346,7 +357,7 @@ def prepare_log(repo, remote, published, log_keys):
         # Keep relative file remotes relative to the publisher, while isolating refs and objects in the fresh Git directory.
         git(repo, f'--git-dir={fresh}', 'fetch', '--no-tags', '-q', source, f'{LOG}:{LOG}')
         fetched = refs(fresh, LOG).get(LOG)
-        if fetched != published or not log_signed(fresh, published, log_keys) or not readable_log(fresh, published):
+        if fetched != published or not log_signed(repo, published, log_keys, git_dir=fresh) or not readable_log(fresh, published):
             raise Refused('the published log is unreadable, changed, or not signed by a key in --log-keys: refusing repair')
         if git(fresh, 'merge-base', '--is-ancestor', head, published, check=False).returncode != 0:
             raise Refused('the published log does not continue the damaged local head: refusing repair')

@@ -355,8 +355,9 @@ Before other fetches, the publisher checks chain connectivity and streams the cu
 unreadable bodies as well as empty objects. Historical blob bodies are not rescanned on every heartbeat. An unreadable
 local view is repaired from a trusted published continuation in an isolated repository. Repair scans full objects once
 to identify damaged loose files, including blobs whose headers still read. The published head must verify against the
-existing `--log-keys`, and contain the exact damaged local
-head in its ancestry. Broken loose objects are retained under `evidence-log.broken-objects`; no published head,
+existing `--log-keys`, using the publisher's working directory and effective signature verification settings, including
+revocations, and contain the exact damaged local head in its ancestry. Broken loose objects are retained under
+`evidence-log.broken-objects`; no published head,
 an untrusted head, or a chain that cannot prove it continues the damaged local head is an alarm (exit 1).
 An unpublished damaged head requires operator recovery. Empty copies are not automatically seeded. The timer sets
 `core.fsync=objects,reference` on existing and new log repositories with Git's default fsync method.
