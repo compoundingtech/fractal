@@ -37,6 +37,8 @@ use crate::sqlite::{
 };
 
 mod admitted;
+#[cfg(any(test, feature = "test-support"))]
+mod temporary;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
 mod proof;
@@ -974,7 +976,8 @@ impl Store {
     /// Open the store at `path`, creating it when it does not exist, with `runtime`'s tables
     /// and projections beside the graph's.
     pub fn open(path: &Path, origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
-        Self::open_with(path, origin.into(), runtime, None, true, |_| {})
+        Self::open_with(path, origin.into(), runtime, None, true, |_| {},
+            #[cfg(any(test, feature = "test-support"))] None)
     }
 
     /// Open only through an admitted, locked directory, without recreating it.
@@ -984,7 +987,8 @@ impl Store {
         runtime: Arc<dyn Runtime>,
     ) -> Result<Self> {
         let path = admitted.database_path().to_path_buf();
-        Self::open_with(&path, origin.into(), runtime, Some(admitted), true, |_| {})
+        Self::open_with(&path, origin.into(), runtime, Some(admitted), true, |_| {},
+            #[cfg(any(test, feature = "test-support"))] None)
     }
 
     /// [`Self::open`] with the initialization of a fresh database committed the way it was
@@ -999,7 +1003,7 @@ impl Store {
         defer_fresh_durability: bool,
         prepare: impl FnOnce(&Connection),
     ) -> Result<Self> {
-        Self::open_with(path, origin.into(), runtime, None, defer_fresh_durability, prepare)
+        Self::open_with(path, origin.into(), runtime, None, defer_fresh_durability, prepare, None)
     }
 
     fn open_with(
@@ -1009,6 +1013,8 @@ impl Store {
         admitted: Option<Arc<AdmittedStore>>,
         defer_fresh_durability: bool,
         prepare: impl FnOnce(&Connection),
+        #[cfg(any(test, feature = "test-support"))]
+        temporary_directory: Option<Arc<tempfile::TempDir>>,
     ) -> Result<Self> {
         if admitted.is_none() && let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -1069,7 +1075,10 @@ impl Store {
         let readers = if let Some(admitted) = &admitted {
             ReadPool::new_admitted(admitted.clone())?
         } else {
-            ReadPool::new(&path, false)?
+            #[cfg(any(test, feature = "test-support"))]
+            { ReadPool::new_temporary(&path, temporary_directory)? }
+            #[cfg(not(any(test, feature = "test-support")))]
+            { ReadPool::new(&path, false)? }
         };
         let mut store = Self::from_connection(
             connection, readers, origin, path, false, runtime,
@@ -1078,10 +1087,20 @@ impl Store {
         Ok(store)
     }
 
-    /// Open a new store in shared memory, as tests and short-lived tools use.
-    /// Shared-cache read/write contention returns `SQLITE_LOCKED` immediately;
-    /// concurrent server tests should use the file-backed [`Self::open`] instead.
+    /// Open an isolated temporary WAL store through the normal file-backed path.
+    /// Readers and the writer keep its directory until their last connection closes.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_memory(origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
+        let directory = Arc::new(temporary::directory()?);
+        Self::open_with(&directory.path().join("graph.db"), origin.into(), runtime,
+            None, true, |_| {}, Some(directory.clone()))
+    }
+
+    /// Open SQLite's shared-cache memory mode for tests of that mode itself.
+    /// Shared-cache read/write contention returns `SQLITE_LOCKED` immediately;
+    /// ordinary fixtures should use [`Self::open_memory`] instead.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_shared_memory(origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
         let origin = origin.into();
         let uri = PathBuf::from(format!(
             "file:st3-{}?mode=memory&cache=shared",
@@ -1110,11 +1129,12 @@ impl Store {
 
     /// Check and migrate the schema, then create the graph's tables, the runtime's, and the
     /// triggers that keep digests current.
+    #[cfg(any(test, feature = "test-support"))]
     fn create_schema(connection: &Connection, runtime: &dyn Runtime) -> Result<()> {
         Self::create_schema_with(connection, runtime, false).map(|_| ())
     }
 
-    /// [`Self::create_schema`], returning whether the database began empty. With
+    /// Check and migrate the graph and runtime schema, returning whether the database began empty. With
     /// `defer_fresh_durability`, a fresh database's initialization commits at
     /// synchronous=NORMAL after the core schema: in WAL mode that is corruption-safe and
     /// skips the fsync on each of its many small commits. The caller sets FULL again
@@ -1182,6 +1202,7 @@ impl Store {
         } else {
             runtime.create_schema(connection)?;
         }
+        replica_record::recover_publication_pending_collision(connection)?;
         // Reassigning user_version dirties the database header even when it is unchanged.
         // Upgrade once, then let ordinary reopens avoid that write and its durable commit.
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1254,11 +1275,17 @@ impl Store {
                 connection, committed_index.clone(), runtime.writer_observer(), admitted,
             )?
         } else {
+            #[cfg(any(test, feature = "test-support"))]
+            { WriterConnection::new_temporary(connection, committed_index.clone(),
+                runtime.writer_observer(), readers.temporary_directory())? }
+            #[cfg(not(any(test, feature = "test-support")))]
+            {
             match runtime.writer_observer() {
                 Some(observer) => WriterConnection::new_with_observer(
                     connection, committed_index.clone(), observer,
                 )?,
                 None => WriterConnection::new(connection, committed_index.clone()),
+            }
             }
         };
         let finalizing_runtime = runtime.clone();
@@ -2806,34 +2833,53 @@ impl Store {
 
     /// Envelopes this node admitted before it knew that their writer is keyed or that their
     /// incarnation had ended. Admission decisions are not revisited, so these stay admitted;
-    /// `st3 doctor` reports them.
+    /// `st3 doctor` reports them. It reads every validated envelope, 2.6 million on a 56 GB
+    /// store, so the daemon runs it off the request path: in pages of [`RESIDUE_PAGE`]
+    /// envelopes, each its own short read snapshot, so it never holds the WAL back for long.
     pub fn fleet_admission_residue(&self) -> Result<Vec<FleetAdmissionResidue>> {
-        let connection = self.readers.get();
-        let membership = fleet_membership_tx(&connection)?;
+        self.fleet_admission_residue_paged(RESIDUE_PAGE)
+    }
+
+    /// [`Self::fleet_admission_residue`] in pages of at most `page` envelopes.
+    pub fn fleet_admission_residue_paged(&self, page: usize) -> Result<Vec<FleetAdmissionResidue>> {
+        let membership = fleet_membership_tx(&self.readers.get())?;
         let writers = membership
             .incarnations()
             .map(|incarnation| incarnation.name.clone())
             .filter(|writer| *writer != self.origin)
             .collect::<BTreeSet<_>>();
-        let mut statement = connection.prepare(
-            "SELECT envelopes.sequence,
-                    (SELECT group_concat(member_key, ' ') FROM replica_envelope_signatures AS signatures
-                     WHERE signatures.writer=envelopes.writer
-                       AND signatures.sequence=envelopes.sequence
-                       AND signatures.envelope_hash=envelopes.envelope_hash)
-             FROM replica_envelopes AS envelopes
-             WHERE envelopes.writer=?1 AND envelopes.receipt_state='validated'",
-        )?;
         let mut residue = Vec::new();
         for writer in writers {
             let mut beyond = 0;
             let mut unsigned = 0;
-            let rows = statement
-                .query_map([&writer], |row| {
-                    Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            for (sequence, signers) in rows {
+            // Each page ends its statement, and so its read snapshot, before the next begins.
+            let mut read = |at_least: u64, through: Option<u64>| -> Result<Vec<(u64, Option<String>)>> {
+                let connection = self.readers.get();
+                let rows = connection
+                    .prepare_cached(
+                        "SELECT envelopes.sequence,
+                                (SELECT group_concat(member_key, ' ') FROM replica_envelope_signatures AS signatures
+                                 WHERE signatures.writer=envelopes.writer
+                                   AND signatures.sequence=envelopes.sequence
+                                   AND signatures.envelope_hash=envelopes.envelope_hash)
+                         FROM replica_envelopes AS envelopes
+                         WHERE envelopes.receipt_state='validated' AND envelopes.writer=?1
+                           AND envelopes.sequence>=?2 AND envelopes.sequence<=?3
+                         ORDER BY envelopes.sequence LIMIT ?4",
+                    )?
+                    .query_map(
+                        params![
+                            &writer,
+                            at_least as i64,
+                            through.map_or(i64::MAX, |through| through as i64),
+                            if through.is_some() { -1 } else { page as i64 },
+                        ],
+                        |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            };
+            visit_sequence_pages(page, &mut read, &mut |sequence, signers| {
                 match membership.window(&writer, sequence) {
                     crate::fleet::Window::Legacy => {}
                     crate::fleet::Window::Fenced => beyond += 1,
@@ -2848,7 +2894,7 @@ impl Store {
                         }
                     }
                 }
-            }
+            })?;
             for (reason, envelopes) in [
                 ("admitted-beyond-high-water", beyond),
                 ("admitted-unsigned", unsigned),
@@ -2863,6 +2909,72 @@ impl Store {
             }
         }
         Ok(residue)
+    }
+}
+
+/// How many envelopes one page of the admission residue reads.
+pub const RESIDUE_PAGE: usize = 4096;
+
+/// Visit every row once, in sequence order, reading at most `page` rows at a time:
+/// `read(at_least, None)` returns up to `page` rows from that sequence on, and
+/// `read(sequence, Some(sequence))` every row at one sequence. Two rows can share a sequence and
+/// a page can end inside one, so a full page's last sequence is read again whole, on its own.
+fn visit_sequence_pages<T>(
+    page: usize,
+    read: &mut dyn FnMut(u64, Option<u64>) -> Result<Vec<(u64, T)>>,
+    visit: &mut dyn FnMut(u64, T),
+) -> Result<()> {
+    let mut next = 0_u64;
+    loop {
+        let mut rows = read(next, None)?;
+        let Some(&(last, _)) = rows.last() else { return Ok(()) };
+        let full = rows.len() >= page;
+        if full {
+            rows.retain(|row| row.0 < last);
+            rows.extend(read(last, Some(last))?);
+        }
+        for (sequence, row) in rows {
+            visit(sequence, row);
+        }
+        if !full {
+            return Ok(());
+        }
+        next = last + 1;
+    }
+}
+
+#[cfg(test)]
+mod sequence_page_tests {
+    use super::*;
+
+    /// Every row is visited once and in order, whatever the page size, when rows share a sequence
+    /// across a page's end, and when more rows share one sequence than a page holds.
+    #[test]
+    fn every_row_is_visited_once_when_pages_end_inside_a_shared_sequence() {
+        let rows = [1, 2, 2, 3, 3, 3, 3, 3, 4, 6, 6, 7]
+            .into_iter()
+            .enumerate()
+            .map(|(n, sequence)| (sequence, n))
+            .collect::<Vec<_>>();
+        for page in 1..=rows.len() + 1 {
+            let mut reads = 0;
+            let mut read = |at_least: u64, through: Option<u64>| -> Result<Vec<(u64, usize)>> {
+                reads += 1;
+                let mut found = rows
+                    .iter()
+                    .copied()
+                    .filter(|row| row.0 >= at_least && through.is_none_or(|through| row.0 <= through))
+                    .collect::<Vec<_>>();
+                if through.is_none() {
+                    found.truncate(page);
+                }
+                Ok(found)
+            };
+            let mut seen = Vec::new();
+            visit_sequence_pages(page, &mut read, &mut |sequence, n| seen.push((sequence, n))).unwrap();
+            assert_eq!(seen, rows, "page {page}");
+            assert!(reads <= 2 * rows.len() + 1, "page {page}: {reads} reads");
+        }
     }
 }
 

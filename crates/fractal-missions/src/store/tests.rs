@@ -6695,10 +6695,14 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     );
     assert!(!connection.is_autocommit());
     connection
-        .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-ha3efb3788a3d owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "ROLLBACK; PRAGMA query_only=OFF; DROP INDEX claims_incarnation_accepted_index",
-        )
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hb47d29970c26 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK")
         .unwrap();
+    drop(connection);
+    // File-backed readers are read-only; schema mutation belongs to the writer.
+    store.connection.write()
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h734b678e7a1c owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_incarnation_accepted_index")
+        .unwrap();
+    let connection = store.readers.get();
     assert!(agent_working_since_at(&connection, agent, "inc-1", ids[5].store_index).is_err());
     assert!(connection.is_autocommit());
     connection
@@ -6707,7 +6711,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     assert!(agent_working_since_at(&connection, agent, "inc-1", ids[5].store_index).is_err());
     assert!(!connection.is_autocommit());
     connection
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h0334b131dc24 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hf4fcb241adf1 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK")
         .unwrap();
 }
 
@@ -6819,7 +6823,7 @@ fn a_planning_rebuild_leaves_the_operations_alone() {
         .unwrap();
     // A planning write rebuilds the planning tables only: it must not re-derive operations
     // (241,000 rows, 19 s on a real store).
-    store.rebuild_planning_projection().unwrap();
+    store.rebuild_planning_projection("example").unwrap();
     assert_eq!(count(&store), 0);
     // The full rebuild does, which is what the planning path used to run on every write.
     store.rebuild_claim_projections().unwrap();
