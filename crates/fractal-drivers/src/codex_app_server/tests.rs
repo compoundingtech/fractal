@@ -1,4 +1,5 @@
 use super::*;
+use crate::status;
 
 #[test]
 fn launch_diagnostic_retains_only_current_attempt_last_twenty_lines() {
@@ -1129,8 +1130,10 @@ fn captured_delivery_frames_carrying_no_token_count_publish_no_record() {
 
 fn delivery_config(root: &Path) -> CodexDeliveryConfig {
     let agent_dir = root.join("agents/h/worker");
+    let gate = crate::session_control::DeliveryGate::default();
+    gate.update(false, Duration::from_secs(3600));
     CodexDeliveryConfig {
-        control: crate::session_control::SessionControl::Catalog,
+        control: crate::session_control::SessionControl::Graph(gate),
         catalog_root: root.to_path_buf(),
         inbox: message::inbox_dir(&agent_dir),
         agent_dir,
@@ -1341,8 +1344,8 @@ fn pump_publishes_observations_and_stops_heartbeating_on_evidence_loss() {
     assert_eq!(observed.state, Activity::Active);
     assert_eq!(observed.harness.as_deref(), Some("codex"));
 
-    // An indeterminate projection writes nothing and stops the heartbeat: the presence
-    // refresh still runs, but the record's bytes stay untouched and age toward unknown.
+    // An indeterminate projection writes nothing and stops the heartbeat: the due
+    // heartbeat leaves the record untouched so it ages toward unknown.
     delivery.observe_harness(&CodexObservedState::Held {
         reason: CodexHoldReason::NotLoaded,
         turn_id: None,
@@ -1350,8 +1353,8 @@ fn pump_publishes_observations_and_stops_heartbeating_on_evidence_loss() {
     let before = fs::read(&record_path).unwrap();
     delivery.refresh_if_due().unwrap();
     assert!(
-        status::read_state(&status::status_path(&agent_dir)) != status::State::Offline,
-        "presence refresh must still run"
+        !status::status_path(&agent_dir).exists(),
+        "native control writes no status lease"
     );
     assert_eq!(
         fs::read(&record_path).unwrap(),
@@ -1596,7 +1599,7 @@ fn delivery_hold_release_and_expiry_each_admit_one_offer() {
 }
 
 #[test]
-fn review_compaction_and_dnd_hold_the_unread_fifo_head() {
+fn review_compaction_and_graph_hold_the_unread_fifo_head() {
     let tmp = tempfile::tempdir().unwrap();
     let config = delivery_config(tmp.path());
     let filename =
@@ -1611,7 +1614,8 @@ fn review_compaction_and_dnd_hold_the_unread_fifo_head() {
         assert!(config.inbox.join(&filename).is_file());
     }
 
-    status::set_state(&status::status_path(&config.agent_dir), status::State::Dnd).unwrap();
+    let crate::session_control::SessionControl::Graph(gate) = &config.control;
+    gate.update(true, Duration::from_secs(3600));
     delivery.next_inbox_refresh = Instant::now();
     assert_eq!(
         delivery
@@ -1904,7 +1908,7 @@ fn selected_model_capacity_is_retryable_in_the_same_codex_session() {
 }
 
 #[test]
-fn idle_session_refreshes_stale_presence_without_inbox_activity() {
+fn idle_native_session_leaves_stale_catalog_presence_untouched() {
     let tmp = tempfile::tempdir().unwrap();
     let config = delivery_config(tmp.path());
     let presence = status::status_path(&config.agent_dir);
@@ -1916,14 +1920,16 @@ fn idle_session_refreshes_stale_presence_without_inbox_activity() {
         .unwrap();
     assert_eq!(status::read_state(&presence), status::State::Unknown);
 
+    let before = std::fs::read(&presence).unwrap();
+    let modified = std::fs::metadata(&presence).unwrap().modified().unwrap();
     let mut delivery = inbox_delivery(tmp.path(), config);
     delivery.refresh_if_due().unwrap();
 
-    assert_eq!(status::read_state(&presence), status::State::Available);
-    assert!(
-        std::fs::read_to_string(&presence)
-            .unwrap()
-            .contains("\nv1 ")
+    assert_eq!(status::read_state(&presence), status::State::Unknown);
+    assert_eq!(std::fs::read(&presence).unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(&presence).unwrap().modified().unwrap(),
+        modified
     );
     assert!(delivery.head.is_none());
 }
