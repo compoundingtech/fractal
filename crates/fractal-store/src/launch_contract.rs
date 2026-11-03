@@ -1,6 +1,5 @@
 //! Launch-time evidence, independent of publication and restart policy.
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
@@ -34,21 +33,6 @@ impl Contract {
     }
 }
 
-/// Hash executable bytes, not a mutable symlink or a version label.
-pub fn executable_digest(path: &Path) -> Result<String> {
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("read launch executable {}", path.display()))?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0; 65536];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&buffer[..count]);
-    }
-    Ok(hex::encode(hash.finalize()))
-}
 
 /// Resolve prompt bytes with the same planner that materializes the declaration.
 /// Only digests leave this boundary; prompts and tool configuration can contain secrets.
@@ -143,8 +127,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("provider");
         std::fs::write(&executable, "before").unwrap();
-        let old = executable_digest(&executable).unwrap();
+        let old = fractal_drivers::harness_admission::executable_identity(&executable).unwrap();
         std::fs::write(&executable, "after").unwrap();
-        assert_ne!(old, executable_digest(&executable).unwrap());
+        assert_ne!(old, fractal_drivers::harness_admission::executable_identity(&executable).unwrap());
     }
 }
