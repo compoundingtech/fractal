@@ -46,11 +46,13 @@ pub const MESSAGE_OFFSETS_FEATURE: &str = "message_offsets";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Relayed {
     /// The host's seats' marks of the message, those the host is declared to hold. `held` is
-    /// false when the host does not hold the message at all.
+    /// false when the host does not hold the message at all. `latest` is the newest of those
+    /// marks: its receipt and when the host recorded it.
     Answered {
         host: String,
         held: bool,
         status: Option<&'static str>,
+        latest: Option<(String, u64)>,
     },
     /// The host did not answer: the reason, naming it.
     Unknown { host: String, reason: String },
@@ -205,6 +207,17 @@ fn seats_on(store: &Store, host: &str) -> anyhow::Result<BTreeSet<String>> {
         .collect())
 }
 
+/// The newest of `answer`'s marks of seats this member places on the host: its receipt and when
+/// it was recorded.
+fn latest_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<(String, u64)> {
+    answer
+        .marks
+        .iter()
+        .filter(|mark| seats.contains(&mark.consumer))
+        .max_by_key(|mark| mark.recorded_at_unix_ms)
+        .map(|mark| (mark.receipt.clone(), mark.recorded_at_unix_ms))
+}
+
 /// How far `answer`'s marks took the message, keeping only those of seats this member places on
 /// `host`: a host speaks for its own seats.
 fn status_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<&'static str> {
@@ -345,6 +358,7 @@ fn settle(
                         host,
                         held: answer.held,
                         status: status_of(&answer, on_host),
+                        latest: latest_of(&answer, on_host),
                     },
                     Err(reason) => Relayed::Unknown {
                         host,

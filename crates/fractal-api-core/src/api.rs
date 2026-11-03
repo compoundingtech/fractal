@@ -4715,8 +4715,11 @@ fn client_message_resource(
 /// Take the answers of the hosts that keep these messages' receipts into their client resources
 /// (db break-up step 4b). `state` is the further of this member's records and the host's
 /// answer, `status_from` names the host and whether it answered, `delivery` reads what it said,
-/// and a message its host closed is history, as a message this member closed is. Every message
-/// is kept, so a page's cursor and size hold. `views` are the messages, each with its sent time.
+/// and a message its host closed is history, as a message this member closed is. A host's mark
+/// newer than this member's records is the resource's `revision` and `updated_at`, as this
+/// member's own mark would be, so a client that keeps resources by revision sees it move. Every
+/// message is kept, so a page's cursor and size hold. `views` are the messages, each with its
+/// sent time.
 pub async fn relay_client_messages<'a>(
     state: &AppState,
     items: impl IntoIterator<Item = &'a mut Value>,
@@ -4737,9 +4740,24 @@ pub async fn relay_client_messages<'a>(
             };
             message_reads::take_in(&mut message, answer);
             let delivery = message_delivery_for(&store, &message, sent_at, now, Some(answer))?;
-            patches.insert(message.subject.clone(), json!({
+            let mut patch = json!({
                 "state": message.status, "status_from": message.status_from, "delivery": delivery,
-            }));
+            });
+            if let message_reads::Relayed::Answered { latest: Some((receipt, at)), .. } = answer {
+                let claimed = store
+                    .claims_for(&message.subject, None)?
+                    .last()
+                    .map(|claim| claim.accepted_at_unix_ms)
+                    .unwrap_or_default();
+                let marked = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
+                    .map(|(_, at)| at)
+                    .unwrap_or_default();
+                if u128::from(*at) >= claimed.max(marked) {
+                    patch["revision"] = json!(receipt);
+                    patch["updated_at"] = json!(client_timestamp(u128::from(*at)));
+                }
+            }
+            patches.insert(message.subject.clone(), patch);
         }
         Ok(patches)
     })
@@ -4748,8 +4766,10 @@ pub async fn relay_client_messages<'a>(
         let Some(patch) = item.get("id").and_then(Value::as_str).and_then(|id| patches.get(id)) else {
             continue;
         };
-        for field in ["state", "status_from", "delivery"] {
-            item[field] = patch[field].clone();
+        for field in ["state", "status_from", "delivery", "revision", "updated_at"] {
+            if let Some(value) = patch.get(field) {
+                item[field] = value.clone();
+            }
         }
         if patch["state"] == "closed" {
             item["operational"] = json!({ "layer": "history", "actionable": false, "reasons": ["closed"] });

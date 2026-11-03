@@ -296,8 +296,16 @@ async fn a_viewer_reads_a_relay_hosts_seat_from_it_and_unknown_when_it_does_not_
         Some(&Relayed::Answered {
             host: OWNER.into(),
             held: true,
-            status: Some("read")
+            status: Some("read"),
+            latest: answered.get(&message.subject).and_then(|relayed| match relayed {
+                Relayed::Answered { latest, .. } => latest.clone(),
+                Relayed::Unknown { .. } => None,
+            }),
         })
+    );
+    assert!(
+        matches!(answered.get(&message.subject), Some(Relayed::Answered { latest: Some((receipt, _)), .. }) if receipt.starts_with("offset-receipt/")),
+        "the newest of the seat's marks: {answered:?}"
     );
     let socket = serve(root.path(), state.clone()).await;
     let client = crate::client::Client::unix(&socket);
@@ -762,6 +770,10 @@ async fn views_and_lists_read_a_relay_hosts_seat_from_it() {
     assert_eq!(read["status_from"], json!({"host": OWNER, "state": "answered"}));
     assert_eq!(read["delivery"]["phase"], "read", "{read}");
     assert_eq!(read["operational"]["layer"], "current");
+    assert!(
+        read["revision"].as_str().unwrap().starts_with("offset-receipt/"),
+        "the host's newest mark is the resource's revision, so a client sees it move: {read}"
+    );
     let closed = resource("message/00000000000000c2");
     assert_eq!(closed["state"], "closed");
     assert_eq!(closed["operational"], json!({"layer": "history", "actionable": false, "reasons": ["closed"]}));
