@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn fleet_admit_without_binds_mutating_actor_to_harness() {
+    for actor in ["agent/own", "agent/peer", "person/operator"] {
+        let cli = Cli::try_parse_from([
+            "fractal", "fleet", "admit-without", "--peer", "peer",
+            "--reason", "peer unavailable", "--as", actor,
+        ]).unwrap();
+        assert_eq!(
+            guard_mutating_cli_actor(&cli.command, Some("agent/own"), None).is_ok(),
+            actor == "agent/own",
+            "{actor}",
+        );
+        assert!(guard_mutating_cli_actor(&cli.command, None, None).is_ok());
+    }
+}
+
+#[test]
 fn alias_deprecation_uses_argv0_basename_and_exact_suppression() {
     use std::ffi::OsStr;
     for (path, expected) in [

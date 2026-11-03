@@ -550,6 +550,35 @@ fn the_audit_completes_with_a_continuously_appending_writer() {
     assert!(store.operation_projection_drift().unwrap().is_empty());
 }
 
+/// The daemon's periodic audit never holds one read snapshot across pages: between any two
+/// pages a WAL checkpoint can restart the log, so a long audit does not hold the WAL back.
+#[test]
+fn a_wal_restart_completes_between_every_page_of_the_audit() {
+    let directory = tempfile::tempdir().unwrap();
+    let EdgeStore { store, .. } = edge_store(&directory.path().join("state.sqlite3"));
+    let mut pages = 0;
+    let drift = store
+        .operation_projection_drift_with_observer(&mut |_| {
+            let (busy, _, _): (i64, i64, i64) = store
+                .connection
+                .write()
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .unwrap();
+            assert_eq!(busy, 0, "page {pages} still held a read snapshot");
+            pages += 1;
+        })
+        .unwrap();
+    assert!(pages > 4, "{pages} pages");
+    assert!(drift.is_empty(), "{drift:?}");
+    // The daemon's audit keeps its result for doctor, which never audits inline.
+    assert!(store.last_operation_audit().is_none());
+    assert!(store.operation_projection_drift().unwrap().is_empty());
+    let audit = store.last_operation_audit().unwrap();
+    assert_eq!(audit.result.unwrap(), Vec::<String>::new());
+}
+
 /// A semantic position within the fixed fixture, independent of how many snapshots a
 /// cooperative time yield splits its rows across. No point depends on a probe scan.
 #[derive(Clone, Copy, Debug)]
