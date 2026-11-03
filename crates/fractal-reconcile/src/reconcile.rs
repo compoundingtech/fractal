@@ -6026,7 +6026,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let steps = work.iter().map(crate::seat_queue::SeatStep::from).collect::<Vec<_>>();
         let selection = crate::seat_queue::select(agent, &steps, &run_order);
         let last_wake = messages.iter().filter(|message| {
-            !message.tags.iter().any(|tag| tag == "st3-wake-source:manual")
+            !crate::silent::message_tag_values(
+                message.tags.iter().map(String::as_str), "wake-source:",
+            ).any(|source| source == "manual")
                 && work_message_target(message)
                     .is_some_and(|(_, _, _, key)| key == incarnation_key)
         }).max_by_key(|message| message.created_index);
@@ -49705,6 +49707,35 @@ mission "fresh" state="ready" {
         assert!(seat.woken().contains(&SeatQueueFixture::step(&gated, "work")));
         seat.reconciler.reconcile_once().unwrap();
         assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), before + 1);
+    }
+
+    #[test]
+    fn seat_queue_head_ignores_legacy_prefixed_manual_wakes() {
+        let seat = SeatQueueFixture::new();
+        let first = seat.start("queued", "legacy-manual-held");
+        let held = SeatQueueFixture::step(&first, "work");
+        seat.work(&held, "claim", "legacy-manual-claim").unwrap();
+        seat.start("queued", "legacy-manual-head");
+        let third = seat.start("queued", "legacy-manual-other");
+        let step = seat.store.step_run(&SeatQueueFixture::step(&third, "work")).unwrap().unwrap();
+        seat.store.append_claim(&ClaimInput {
+            subject: "message/manual-queue-wake".into(), kind: "message.sent".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!("daemon/runtime")), ("to".into(), json!(SEAT)),
+                ("content".into(), json!("Manual wake")), ("status".into(), json!("sent")),
+                ("tags".into(), json!([
+                    format!("fractal-work:{}@{}@{}@{}", step.subject, step.attempt,
+                        step.readiness_epoch, harness_incarnation_key("seat-one")),
+                    "fractal-wake-source:manual",
+                ])),
+            ]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some("legacy-manual-queue-wake".into()),
+        }).unwrap();
+        let before = seat.store.messages(Some(SEAT), true).unwrap().len();
+        seat.reconciler.reconcile_once().unwrap();
+        assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), before);
     }
 
     #[test]
