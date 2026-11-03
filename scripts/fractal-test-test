@@ -1409,7 +1409,7 @@ class StTest(unittest.TestCase):
             self.assertGreater(float(times['light-start']), float(times['build-end']))  # one after another, in the listed order
             self.assertNotIn('----- fractal-test:', out)
 
-    def web_lanes(self, run, serial=False):
+    def web_lanes(self, run, serial=False, ledger=True):
         """Exercise the real orchestration and ledger; replace only the measured subprocesses with controlled checks."""
         self.commit('b.txt', 'two')
         shim = self.home / '.local/bin/cargo'
@@ -1420,6 +1420,8 @@ class StTest(unittest.TestCase):
                 mock.patch.object(st_test, 'BUILDS', frozenset({'demo', st_test.WEB})), \
                 mock.patch.object(st_test, 'run_limited', side_effect=run):
             result = self.run_st_test(extra_env={'ST_EVIDENCE_SERIAL': '1' if serial else '0'})
+        if not ledger:
+            return result, None
         record = json.loads((self.home / '.local/state/st-test/runs.jsonl').read_text().splitlines()[-1])
         return result, record
 
@@ -1665,6 +1667,36 @@ while True:
                 st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
         self.assertEqual(killed.call_count, 1, 'an expired cleanup bound must not start again')
 
+    def test_a_signal_during_group_drain_does_not_start_another_drain(self):
+        with mock.patch.object(st_test.subprocess, 'Popen') as started, \
+                mock.patch.object(st_test.os, 'killpg'), \
+                mock.patch.object(st_test, 'wait_group_exit', side_effect=KeyboardInterrupt()) as drained:
+            started.return_value.__exit__.return_value = False
+            with self.assertRaises(KeyboardInterrupt):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
+        self.assertEqual(drained.call_count, 1, 'a second signal must not reset the cleanup bound')
+
+    def test_failed_cancellation_of_a_late_group_discards_its_registration(self):
+        groups = st_test.ProcessGroups()
+        groups.cancel()
+        with mock.patch.object(st_test.subprocess, 'Popen'), \
+                mock.patch.object(st_test, 'kill_limited', side_effect=st_test.GroupExitFailure('cleanup incomplete')) as killed:
+            with self.assertRaises(st_test.GroupExitFailure):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True, groups=groups)
+        self.assertEqual(groups.processes, set())
+        self.assertEqual(killed.call_count, 1)
+
+    def test_cancellation_attempts_every_group_before_raising_a_drain_failure(self):
+        groups = st_test.ProcessGroups()
+        processes = {mock.Mock(), mock.Mock()}
+        for process in processes:
+            groups.add(process)
+        with mock.patch.object(st_test, 'kill_limited', side_effect=[st_test.GroupExitFailure('cleanup incomplete'), None]) as killed:
+            with self.assertRaises(st_test.GroupExitFailure):
+                groups.cancel()
+        self.assertEqual({call.args[0] for call in killed.call_args_list}, processes)
+        self.assertTrue(groups.cancelled)
+
     def test_group_drain_waits_on_proc_when_the_kernel_has_no_pidfds(self):
         proc = Path(self.tmp.name) / 'old-kernel-proc'
         (proc / '123').mkdir(parents=True)
@@ -1789,6 +1821,40 @@ while True:
 
     def test_interrupting_the_join_cancels_web_and_releases_its_slot(self):
         self.interrupted_web(during_join=True)
+
+    def test_failed_group_cancellation_still_joins_every_lane_before_unwinding(self):
+        ready = {name: threading.Event() for name in (st_test.WEB, 'light')}
+        finish = threading.Event()
+        joins = []
+        real_join = st_test.join_lanes
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name in ready:
+                ready[name].set()
+                finish.wait(5)
+            else:
+                self.assertTrue(all(event.wait(5) for event in ready.values()), 'background lanes did not start')
+            return 0
+
+        def join(lanes):
+            joins.append(tuple(lanes))
+            if len(joins) == 1:
+                raise SystemExit(143)
+            finish.set()
+            real_join(lanes)
+
+        try:
+            with mock.patch.object(st_test, 'join_lanes', join), \
+                    mock.patch.object(st_test.ProcessGroups, 'cancel', side_effect=st_test.GroupExitFailure('cleanup incomplete')):
+                (code, out, err), _ = self.web_lanes(run, ledger=False)
+            self.assertEqual(code, 'failure: cleanup incomplete', out + err)
+            self.assertEqual(len(joins), 2, 'a failed cancellation skipped joining the lanes')
+            self.assertTrue(all(not thread.is_alive() for thread, _ in joins[-1]), 'a lane escaped cleanup')
+        finally:
+            finish.set()
+            if joins:
+                real_join(joins[0])
 
     def test_a_web_group_started_after_cancellation_is_stopped_too(self):
         groups = st_test.ProcessGroups()

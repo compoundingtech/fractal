@@ -2689,6 +2689,7 @@ def wait_group_exit(pgid, seconds=GROUP_EXIT_SECONDS, proc='/proc', reap=None):
 
 def kill_limited(process, group=False):
     if group:
+        process._st_group_kill_started = True
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
         wait_group_exit(process.pid, reap=process.poll)
@@ -2718,8 +2719,15 @@ class ProcessGroups:
         with self.lock:
             self.cancelled = True
             processes = tuple(self.processes)
+        failure = None
         for process in processes:
-            kill_limited(process, group=True)
+            try:
+                kill_limited(process, group=True)
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+        if failure is not None:
+            raise failure
 
 
 def join_lanes(lanes):
@@ -2759,14 +2767,17 @@ def run_limited(argv, limit, kill_group=False, groups=None, **options):
     if kill_group:
         options['start_new_session'] = True
     with subprocess.Popen(argv, **options) as process:
-        if kill_group and groups is not None:
-            groups.add(process)
+        process._st_group_kill_started = False
         try:
+            if kill_group and groups is not None:
+                groups.add(process)
             return wait_limited(process, limit, group=kill_group)
         except GroupExitFailure:
             raise
         except BaseException:
-            kill_limited(process, kill_group)
+            # A second signal during the drain must not restart its ten-second bound.
+            if not kill_group or not process._st_group_kill_started:
+                kill_limited(process, kill_group)
             raise
         finally:
             if kill_group and groups is not None:
@@ -3307,8 +3318,10 @@ def run_main(argv, cleanup):
                         try:
                             join_lanes(started_threads)  # never release the clean tree while a background lane still uses it
                         except BaseException:  # an interrupt can also arrive while the foreground waits for web
-                            web_groups.cancel()
-                            join_lanes(started_threads)
+                            try:
+                                web_groups.cancel()
+                            finally:
+                                join_lanes(started_threads)
                             raise
                     for name in background:
                         results.setdefault(name, ((name, 'FAILED (lane exited)', 0, 'lane exited without a result'), True, False))
