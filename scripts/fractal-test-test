@@ -1268,6 +1268,49 @@ class StTest(unittest.TestCase):
         self.assertIn('FAILED (3)', out)
         self.assertNotIn('covered by', out)
 
+    def test_typescript_exit_127_reports_the_shell_without_retrying_or_masking_the_failure(self):
+        calls = []
+
+        def run(argv, limit, **options):
+            calls.append(argv)
+            report = Path(options['env']['CI_WEB_SHELL_DIAGNOSTICS'])
+            report.write_text('shellHook=started status=0\nPATH=/fixture/tools\ncommand -v pnpm: <not found>\n')
+            return subprocess.run(['sh', '-c', 'exit 127'], cwd=options['cwd'], env=options['env']).returncode
+
+        with mock.patch.dict(st_test.LOCAL, {'typescript-client': ['true']}, clear=True), \
+                mock.patch.object(st_test, 'run_limited', side_effect=run):
+            code, out, err = self.run_st_test('--check', 'typescript-client')
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('FAILED (127)', out)
+        self.assertIn('caller environment before nix develop', err)
+        self.assertIn('BASH_ENV=', err)
+        self.assertIn('web shell hook environment (before child Bash startup)', err)
+        self.assertIn('shellHook=started', err)
+        self.assertNotIn('shellHook=finished', err)
+        self.assertIn('command -v pnpm: <not found>', err)
+
+    def test_typescript_other_exits_do_not_print_shell_diagnostics(self):
+        for status in (0, 3):
+            with self.subTest(status=status), \
+                    mock.patch.dict(st_test.LOCAL, {'typescript-client': ['true']}, clear=True), \
+                    mock.patch.object(st_test, 'run_limited', return_value=status):
+                code, out, err = self.run_st_test('--check', 'typescript-client')
+                self.assertEqual(code, int(status != 0), out + err)
+                self.assertNotIn('caller environment', err)
+
+    def test_typescript_diagnostics_allow_an_absent_or_partial_hook_report(self):
+        report = Path(self.tmp.name) / 'shell-report'
+        output = io.StringIO()
+        st_test.typescript_shell_diagnostics(report, {}, output)
+        self.assertIn('hook not observed:', output.getvalue())
+        report.write_bytes(b'shellHook=started\n' + b'x' * 20000 + b'\xff')
+        output = io.StringIO()
+        st_test.typescript_shell_diagnostics(report, {}, output)
+        self.assertIn('shellHook=started', output.getvalue())
+        self.assertIn('[hook report truncated at 16 KiB]', output.getvalue())
+        self.assertLess(len(output.getvalue()), 17000)
+
     def test_a_tree_with_a_megarepo_lock_gets_its_members_before_its_checks_run(self):
         self.commit('.gitignore', '/repos/\n')
         self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
