@@ -493,8 +493,8 @@ The gate covers Fractal and the code Fractal uses. The `ci` profile's `default-f
 - the current workspace crates: Fractal, its daemon/domain/client packages, Fractal TUI,
   fractal-runtime, fractal-drivers, and the shared and resource-provider libraries.
 
-The default filter leaves out the retained fractal-drivers `catalog*`, `resync` and
-`resource_profile_supervisor` library modules. Daily-only and performance groups keep
+The default filter leaves out the retained fractal-drivers `catalog*` library modules.
+Daily-only and performance groups keep
 their separate lanes. Clippy still checks the whole workspace. List the selection
 with `bash scripts/ci-nextest list`.
 
