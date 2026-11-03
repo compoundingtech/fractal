@@ -418,7 +418,7 @@ fn person_admission_exception_is_local_reversible_and_never_spawns_the_producer(
     std::fs::write(&producer, format!("#!/bin/sh\nprintf called > '{}'\nexit 1\n", marker.display())).unwrap();
     std::fs::set_permissions(&producer, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |action: &str, agent: bool| {
-        let mut command = std::process::Command::new(test_bin!("fractal"));
+        let mut command = std::process::Command::new(test_bin!("fractal-unstamped"));
         command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
             .arg("--json").args(["admission", action, "omp", "--binary"])
             .arg(&producer).arg("--state-dir").arg(root.path().join("state"));
@@ -479,6 +479,50 @@ async fn agent_lane_cli_prints_the_slice_the_runtime_gives_the_seat() {
     assert!(json.get("sccache_server_uds").is_some(), "{json}");
     let missing = run_cli_human(&socket, &["agents", "lane", "garden/nobody"]).await;
     assert!(!missing.status.success(), "{missing:?}");
+    server.abort();
+}
+
+async fn serve_for_test(socket: &Path, router: axum::Router) -> tokio::task::JoinHandle<()> {
+    let server_socket = socket.to_path_buf();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, router).await.unwrap();
+    });
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    server
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_burst_cli_answers_none_where_the_agent_holds_no_lane_and_only_the_agent_asks() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let state = test_state(root.path());
+    let source = "version 2\nagent \"garden/builder\" { workspace \"/work/builder\"; command \"true\"; capacity cores=2 memory=\"4G\" }\n";
+    let intent = fractal_daemon::graph::parse_intent(source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, source).unwrap();
+    let server = serve_for_test(&socket, fractal_daemon::api::router(state)).await;
+    let burst = |actor: &'static str| ["agents", "burst", "garden/builder", "--cores", "8", "--memory", "24G", "--reason", "st-test", "--as", actor];
+    // The holder's protocol (scripts/st-test lane_burst): one line, and a host without lanes holds none.
+    let none = run_cli_human(&socket, &burst("agent/garden/builder")).await;
+    assert!(none.status.success(), "{none:?}");
+    assert_eq!(String::from_utf8_lossy(&none.stdout), "none lanes are off on this host\n");
+    let other = run_cli_human(&socket, &burst("agent/garden/other")).await;
+    assert!(!other.status.success(), "{other:?}");
+    assert!(String::from_utf8_lossy(&other.stderr).contains("only agent/garden/builder asks for its own lane burst"), "{other:?}");
+    let person = run_cli_human(&socket, &burst("person/operator")).await;
+    assert!(!person.status.success(), "{person:?}");
+    assert!(String::from_utf8_lossy(&person.stderr).contains("only an agent acts here"), "{person:?}");
+    server.abort();
+    // A daemon from before bursts has no route: an empty 404, which the holder reads as none.
+    let older = root.path().join("older.sock");
+    let server = serve_for_test(&older, axum::Router::new()).await;
+    let none = run_cli_human(&older, &burst("agent/garden/builder")).await;
+    assert!(none.status.success(), "{none:?}");
+    assert_eq!(String::from_utf8_lossy(&none.stdout), "none this host's daemon has no lane bursts\n");
     server.abort();
 }
 

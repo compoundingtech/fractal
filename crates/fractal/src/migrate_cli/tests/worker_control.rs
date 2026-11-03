@@ -17,6 +17,62 @@ fn rename_unit(unit: &mut Unit, name: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn home_manager_macos_worker(fixture: &mut Fixture) -> Result<(Unit, Unit, PathBuf)> {
+    fixture.use_home_manager()?;
+    fs::write(fixture.layout.directories[0].0.join("config.toml"), b"node = \"test\"\n")?;
+    let legacy = fixture.manager.services.legacy.iter_mut().find(|unit| unit.name.contains("replication")).unwrap();
+    rename_unit(legacy, "org.nix-community.home.smalltalk-replication")?;
+    // Home Manager owns the immutable backing; retirement removes only its user link.
+    let backing = fixture.root.path().join("immutable-worker.plist");
+    fs::rename(&legacy.file, &backing)?;
+    symlink(&backing, &legacy.file)?;
+    let old = legacy.clone();
+    let target = fixture.manager.services.target.iter().find(|unit| unit.name.contains("replication")).unwrap().clone();
+    Ok((old, target, backing))
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn home_manager_macos_replication_stops_retires_and_replays_committed_journal() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let (old, new, backing) = home_manager_macos_worker(&mut fixture)?;
+    let bytes = fs::read(&backing)?;
+    let inode = fs::metadata(dropins(&old.file))?.ino();
+    fixture.run(false, false).await?;
+    assert!(!old.file.exists());
+    assert_eq!(fs::read(&backing)?, bytes);
+    assert_eq!(fs::metadata(dropins(&new.file))?.ino(), inode);
+    assert!(!dropins(&old.file).exists());
+    assert!(fixture.manager.events.contains(&format!("enable:{}:false", old.name)));
+    assert!(fixture.manager.events.contains(&format!("stop:{}", old.name)));
+    assert!(fixture.manager.events.contains(&format!("start:{}", new.name)));
+    let journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
+    validate_journal(&fixture.layout, &journal, &fixture.manager.services)?;
+    fixture.run(false, false).await?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn home_manager_macos_replication_is_restored_after_api_probe_failure() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let (old, new, backing) = home_manager_macos_worker(&mut fixture)?;
+    let before = fixture.snapshot()?;
+    fixture.manager.probe_failure = true;
+    let error = fixture.run(false, false).await.unwrap_err();
+    assert!(format!("{error:#}").contains("legacy paths and services restored"));
+    assert_eq!(fixture.snapshot()?, before);
+    assert_eq!(fs::read_link(&old.file)?, backing);
+    assert!(fixture.manager.events.contains(&format!("stop:{}", old.name)));
+    assert!(fixture.manager.events.contains(&format!("start:{}", old.name)));
+    assert!(fixture.manager.events.contains(&format!("enable:{}:true", old.name)));
+    assert!(!fixture.manager.unit_mut(&new.name)?.running);
+    assert!(fixture.manager.unit_mut(&old.name)?.running);
+    assert!(fixture.manager.unit_mut(&old.name)?.enabled);
+    Ok(())
+}
+
 #[tokio::test]
 async fn smalltalk_replication_dropins_stop_and_retire_with_the_worker() -> Result<()> {
     let mut fixture = Fixture::new()?;

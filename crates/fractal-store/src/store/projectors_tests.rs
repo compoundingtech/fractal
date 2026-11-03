@@ -135,3 +135,25 @@ fn ordered_membership_is_registered_last_in_every_phase_that_projects_it() {
         ["full-replay/ordered-membership", "full-replay/flush"]
     );
 }
+
+/// A replicated projection pass charges each flush hook, and the lease-renewal reapply after them,
+/// to its own stage of the writer lend, so a long hold names the domain that caught up in it. The
+/// staged lends are kept process-wide; CI runs each test in its own process (nextest).
+#[test]
+fn a_projection_pass_stages_each_flush_hook_by_name() {
+    use crate::store::glasses_tests_shared_delivery::{input, sync};
+    let source = crate::store::Store::open_memory("example-source").unwrap();
+    let target = crate::store::Store::open_memory("example-target").unwrap();
+    source.append_claim(&input(1, "example")).unwrap();
+    sync(&source, &target);
+    let staged = smallclaims::windows::holds::recent_staged();
+    let stages = staged
+        .iter()
+        .rev()
+        .map(|(stages, _)| stages.iter().map(|(stage, _)| *stage).collect::<Vec<_>>())
+        .find(|stages| stages.contains(&"incremental"))
+        .unwrap_or_else(|| panic!("no staged projection lend: {staged:?}"));
+    for stage in names(projectors::FLUSH).into_iter().chain(["lease-renewals", "commit"]) {
+        assert!(stages.contains(&stage), "{stage} in {stages:?}");
+    }
+}

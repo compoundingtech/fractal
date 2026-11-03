@@ -21,6 +21,9 @@ pub const MAX_EVAL_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 /// The diagnostic code of a call Claude's auto mode classifier denied.
 pub const PERMISSION_DENIED_CODE: &str = "permission-denied";
 pub const PLACEMENT_SOURCE_OFFLINE_KIND: &str = "agent.placement.source-offline";
+/// Lets one member, for its current daemon start only, act on its seats' placement without
+/// waiting for the named peers it cannot reach (docs/st3/replication.md, "After a start").
+pub const MEMBER_ADMISSION_OVERRIDE_KIND: &str = "member.admission-override";
 /// The former owners and declarations which can acknowledge their latest departure.
 /// Walk causal predecessors, never receiver-local indexes or receipt timestamps.
 pub struct PlacementFence {
@@ -2332,6 +2335,23 @@ pub struct MessageView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_grant_id: Option<String>,
     pub created_index: u64,
+    /// Who said how far the message got, when its recipient's seat runs on another host that keeps
+    /// the seat's receipts (db break-up step 4b): that host answered, and `status` is the further
+    /// of its answer and this member's own records, or it did not, and `status` is only this
+    /// member's own. Absent when this member's own records are the whole answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_from: Option<StatusFrom>,
+}
+
+/// The host a message's status was asked of, and whether it answered.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StatusFrom {
+    pub host: String,
+    /// `answered`, or `unknown` when the host did not answer.
+    pub state: String,
+    /// Why the host's answer is unknown, with `unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A definitive first-send refusal. Transport loss remains MessageSendUnconfirmed.

@@ -183,9 +183,19 @@ pub fn run_controlled_paths_with_primary_ownership(
     let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
     let claude_argv =
         managed_claude_argv(crate::access::AccessMode::from_environment()?, &workspace, claude_argv);
+    // One Claude for the plugin check and the provider: resolved once, on this seat's own PATH.
+    let claude_argv = resolve_claude_program(claude_argv)?;
+    // Only Claude itself: a declaration may start its provider argv with a wrapper.
+    if Path::new(&claude_argv[0]).file_name().is_some_and(|name| name == "claude") {
+        crate::claude_channel::use_claude_program(PathBuf::from(&claude_argv[0]));
+    }
     let claude_argv = prepare_fractal_channel_argv(&paths.root, &identity, claude_argv)?;
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
         .with_context(|| format!("admitting Claude driver workspace {}", workspace.display()))?;
+    note_channel_launch(|launch| {
+        launch.project_st_server = project_declares_st_server(&workspace);
+        launch.launched_at_ms = Some(crate::message::now_ms());
+    });
     install_signal_handler();
     let observer = SessionObserver::new_claude_with_primary_ownership(&paths.agent_dir, &identity, &runtime_id, primary_ownership)?;
     let mut env = vec![
@@ -248,6 +258,61 @@ pub fn usage_observation_warning(agent_dir: &Path, incarnation: &str) -> Option<
     crate::claude_usage::warning(agent_dir, incarnation)
 }
 
+/// What this driver process chose when it launched Claude's channel, for the cause the
+/// attachment diagnostic names when the channel does not come up (#4789). A driver process
+/// launches one provider.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelLaunch {
+    /// `approved-plugin`, `plugin-development-consent` (the plugin without its policy) or
+    /// `inline-development` (no usable plugin: Claude's development channel, with its consent).
+    pub route: String,
+    /// Why the approved plugin could not be used, when it could not.
+    pub plugin_check_error: Option<String>,
+    /// How long the plugin check took.
+    pub plugin_check_ms: u64,
+    /// When Claude was launched (Unix ms), after the check and the workspace's admission.
+    pub launched_at_ms: Option<u64>,
+    /// Whether the workspace's `.mcp.json` declares its own project server named `st`, which
+    /// pretrust approves beside the channel.
+    pub project_st_server: bool,
+}
+
+static CHANNEL_LAUNCH: std::sync::Mutex<Option<ChannelLaunch>> = std::sync::Mutex::new(None);
+
+/// The channel launch this driver process recorded, if it launched Claude.
+pub fn channel_launch() -> Option<ChannelLaunch> {
+    CHANNEL_LAUNCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+fn note_channel_launch(change: impl FnOnce(&mut ChannelLaunch)) {
+    let mut launch = CHANNEL_LAUNCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    change(launch.get_or_insert_with(ChannelLaunch::default));
+}
+
+/// `argv` with its Claude executable resolved on this process's PATH (the seat's environment),
+/// so the provider and the plugin check run the same Claude. A path is kept as it is.
+fn resolve_claude_program(mut argv: Vec<String>) -> Result<Vec<String>> {
+    let program = argv.first().context("the Claude provider argv is empty")?;
+    if !program.contains('/') {
+        // The PATH entry as it is, not its symlink's target: Claude reads its own install from it.
+        use std::os::unix::fs::PermissionsExt as _;
+        let resolved = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|root| root.join(program))
+            .find(|candidate| candidate.is_file()
+                && candidate.metadata().is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0))
+            .with_context(|| format!("resolving the Claude executable `{program}` on this seat's PATH"))?;
+        argv[0] = resolved.to_string_lossy().into_owned();
+    }
+    Ok(argv)
+}
+
+/// Whether `workspace`'s `.mcp.json` declares a project MCP server named `st`.
+fn project_declares_st_server(workspace: &Path) -> bool {
+    fs::read(workspace.join(".mcp.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|config| config["mcpServers"].get("st").is_some())
+}
+
 fn requires_st2_channel(argv: &[String]) -> bool {
     argv.windows(2)
         .any(|pair| pair[0] == "--channels" && pair[1] == crate::claude_channel::CHANNEL)
@@ -267,13 +332,26 @@ fn prepare_fractal_channel_argv(
     if !requires_fractal_channel(&argv) {
         return Ok(argv);
     }
-    match crate::claude_channel::verify_fractal_plugin() {
+    let checking = std::time::Instant::now();
+    let checked = crate::claude_channel::verify_fractal_plugin();
+    let plugin_check_ms = u64::try_from(checking.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match checked {
         Ok(()) => {
             let approved = crate::claude_channel::fractal_policy_available();
+            note_channel_launch(|launch| {
+                launch.route = if approved { "approved-plugin" } else { "plugin-development-consent" }.into();
+                launch.plugin_check_ms = plugin_check_ms;
+            });
             let argv = select_fractal_channel_plugin(argv, true)?;
             Ok(fractal_plugin_admission_argv(argv, approved))
         }
         Err(error) => {
+            // Visible in the attachment diagnostic's cause, not only on a screen Claude repaints.
+            note_channel_launch(|launch| {
+                launch.route = "inline-development".into();
+                launch.plugin_check_error = Some(format!("{error:#}"));
+                launch.plugin_check_ms = plugin_check_ms;
+            });
             eprintln!(
                 "warning: the approved st3 Claude channel plugin is unavailable: {error:#}\n\
                  warning: using Claude's interactive st3 development channel"
@@ -2235,6 +2313,27 @@ fn provider_auth_edge(event: &str, payload: &serde_json::Value) -> Option<Provid
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_claude_program_is_resolved_once_on_this_path_and_a_path_is_kept() {
+        let resolved = resolve_claude_program(vec!["sh".into(), "--flag".into()]).unwrap();
+        assert!(resolved[0].starts_with('/') && resolved[0].ends_with("/sh"), "the PATH entry, not its target: {resolved:?}");
+        assert_eq!(resolved[1], "--flag");
+        let kept = resolve_claude_program(vec!["/opt/claude/bin/claude".into()]).unwrap();
+        assert_eq!(kept, ["/opt/claude/bin/claude"]);
+        let missing = resolve_claude_program(vec!["no-such-claude-on-path".into()]).unwrap_err();
+        assert!(format!("{missing:#}").contains("resolving the Claude executable `no-such-claude-on-path` on this seat's PATH"), "{missing:#}");
+    }
+
+    #[test]
+    fn a_workspace_declaring_its_own_st_server_is_noted() {
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(!project_declares_st_server(workspace.path()));
+        fs::write(workspace.path().join(".mcp.json"), r#"{"mcpServers": {"other": {"command": "x"}}}"#).unwrap();
+        assert!(!project_declares_st_server(workspace.path()));
+        fs::write(workspace.path().join(".mcp.json"), r#"{"mcpServers": {"st": {"command": "/Volumes/gone/st"}}}"#).unwrap();
+        assert!(project_declares_st_server(workspace.path()));
+    }
     use std::fs;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
@@ -3087,7 +3186,7 @@ mod tests {
     }
 
     /// The measured grant-path sequence from the DQ-H1 capture (2026-08-23, Claude Code 2.1.237,
-    /// `docs/vrs/05-harness-state/.experiments/2026-08-23-claude-batched-permission.md`): in a
+    /// [historical capture](https://github.com/compoundingtech/fractal/blob/bb51bdcb0cd549b06c298d81c1907a7fd35f0c83/docs/vrs/05-harness-state/.experiments/2026-08-23-claude-batched-permission.md)): in a
     /// two-call batch where the first call needs permission, execution serializes around the open
     /// prompt, so the event after `PermissionRequest` is the granted call's own `PostToolUse` and
     /// the exit rule clears `blocked` at exactly the right moment. Replayed verbatim so a future

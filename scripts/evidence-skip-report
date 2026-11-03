@@ -14,11 +14,17 @@ check of each run is counted once, as:
               an author is not listed, the branch is too far behind) and no note covered it: a pushed head's note could not count
   not_signed  no note covered the tree (outcome no_note; for rust-tests, a crate without a note) although the pull request leaves the lane
               alone: it was pushed unsigned
+  shadow_unsigned  the same, for a check whose skip is not turned on at the run's base (enforce is not true in the skip policy): the
+              check runs whether it is signed or not, so nothing was lost; counted apart so a shadow check does not read as an unsigned push
   failed      a note covered the tree but recorded a failure (reason check_failed)
   protected   a trusted note covered it but the pull request changes a file that decides skipping (the gate, verifier, policy, keys...)
   sampled     a trusted note covered it and the run was sampled to run anyway (one in five)
   shadow      a trusted note covered it but the check's skip is not turned on (enforce false)
   other       any other reason (the outcome and reason are kept)
+
+Apart from the suite, it counts the window's release-surface pull request runs: release-fractal.yml's pull_request runs (real release
+builds, started for a pull request that touches the workflow's paths, ready_for_review included), with the minutes their jobs took,
+every attempt's, and how many of those were on macOS runners. It is a cost line only; it changes no count above.
 
 The not_signed pull requests are listed with their branch and, when a pre-push receipts file (--receipts, JSON lines with `branch` and
 `agent`, as scripts/evidence-prepush writes) names the branch, the seat that pushed it. Prints JSON, or a short table with --markdown.
@@ -39,10 +45,11 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
 LANES = '.st/required-lanes.json'
+POLICY = '.st/evidence-skip-policy.json'
 _loader = importlib.machinery.SourceFileLoader('evidence_flip_ready', str(Path(__file__).resolve().parent / 'evidence-flip-ready'))
 flip = importlib.util.module_from_spec(importlib.util.spec_from_loader(_loader.name, _loader))
 _loader.exec_module(flip)
-CATEGORIES = ('skipped', 'lane_edit', 'merge_tree', 'not_signed', 'failed', 'protected', 'sampled', 'shadow', 'other')
+CATEGORIES = ('skipped', 'lane_edit', 'merge_tree', 'not_signed', 'failed', 'protected', 'sampled', 'shadow', 'shadow_unsigned', 'other')
 
 
 def lanes_at(root, base, runner, cache):
@@ -63,6 +70,22 @@ def lanes_at(root, base, runner, cache):
     lanes = {name: list(lane.get('definition_paths') or []) for name, lane in (data.get('lanes') or data).items()}
     cache[base] = lanes
     return cache[base]
+
+
+def enforced_at(root, base, runner, cache, check):
+    """Whether the skip policy at the run's base turns skipping on for `check` (enforce true). True when the policy cannot be read or does
+    not name the check: an unreadable base never hides an unsigned push."""
+    if base not in cache:
+        revision = base or 'origin/main'
+        try:
+            path = flip.config_path(root, POLICY, revision, runner)
+            cache[base] = json.loads(flip.git(root, 'show', f'{revision}:{path}', runner=runner)).get('checks')
+        except (RuntimeError, ValueError, AttributeError):
+            cache[base] = None
+    checks = cache[base]
+    if not isinstance(checks, dict) or not isinstance(checks.get(check), dict):
+        return True
+    return checks[check].get('enforce') is True
 
 
 def touches(files, paths):
@@ -126,13 +149,35 @@ def seats(receipts):
     return found
 
 
+RELEASE_WORKFLOW = 'release-fractal.yml'
+
+
+def release_surface(github, since, until, actors):
+    """The window's completed release-fractal.yml pull_request runs (by creation, of the --actor accounts), their pull requests, and the
+    minutes their jobs ran (every attempt's, skipped jobs aside), with the macOS runners' share: what release builds on pull requests cost."""
+    runs = [run for run in flip.pr_runs(github, since, until, workflow=RELEASE_WORKFLOW) if run.get('status') == 'completed'
+            and (not actors or ((run.get('actor') or {}).get('login') in actors))]
+    minutes, macos, prs = 0.0, 0.0, set()
+    for run in runs:
+        prs.update(pull['number'] for pull in run.get('pull_requests') or [] if pull.get('number'))
+        for job in github.items(f'repos/{github.repo}/actions/runs/{run["id"]}/jobs?per_page=100&filter=all', 'jobs'):
+            started, completed = flip.parse_time(job.get('started_at')), flip.parse_time(job.get('completed_at'))
+            if job.get('conclusion') == 'skipped' or not started or not completed:
+                continue
+            spent = max(0.0, (completed - started).total_seconds() / 60)
+            minutes += spent
+            if any('macos' in label for label in job.get('labels') or []):
+                macos += spent
+    return {'workflow': RELEASE_WORKFLOW, 'runs': len(runs), 'minutes': round(minutes, 1), 'macos_minutes': round(macos, 1), 'prs': sorted(prs)}
+
+
 def report(github, root, runner, since, until, actors, receipts):
     runs = [run for run in flip.pr_runs(github, since, until) if run.get('status') == 'completed'
             and (not actors or ((run.get('actor') or {}).get('login') in actors))]
     counts = collections.defaultdict(collections.Counter)
     others = collections.defaultdict(collections.Counter)
     unsigned = {}
-    lane_cache, file_cache = {}, {}
+    lane_cache, file_cache, policy_cache = {}, {}, {}
     for run in runs:
         jobs = github.items(f'repos/{github.repo}/actions/runs/{run["id"]}/jobs?per_page=100&filter=latest', 'jobs')
         number, branch = None, run.get('head_branch')
@@ -151,6 +196,8 @@ def report(github, root, runner, since, until, actors, receipts):
                 lanes = lanes_at(root, fields.get('base'), runner, lane_cache)
                 lane_edit = bool(number) and check in lanes and touches(pr_files(github, number, file_cache), lanes[check])
             category = classify(fields, lane_edit)
+            if category == 'not_signed' and not enforced_at(root, fields.get('base'), runner, policy_cache, check):
+                category = 'shadow_unsigned'
             counts[check][category] += 1
             if category == 'other':
                 others[check][f'{fields.get("outcome")}:{(fields.get("reason") or "")[:40]}'] += 1
@@ -163,20 +210,27 @@ def report(github, root, runner, since, until, actors, receipts):
                'checks': sorted(entry['checks']), 'runs': len(entry['runs'])} for entry in sorted(unsigned.values(), key=lambda e: e['pr'])]
     return {'window': {'since': flip.iso(since), 'until': flip.iso(until)}, 'actors': sorted(actors), 'runs': len(runs),
             'checks': {check: {category: counts[check][category] for category in CATEGORIES} for check in sorted(counts)},
-            'other_reasons': {check: dict(others[check]) for check in sorted(others)}, 'not_signed': listed}
+            'other_reasons': {check: dict(others[check]) for check in sorted(others)}, 'not_signed': listed,
+            'release_surface': release_surface(github, since, until, actors)}
 
 
 def markdown(result):
     lines = [f"**Our pull request runs**, {result['window']['since']} .. {result['window']['until']}: {result['runs']} runs"
              + (f" (accounts: {', '.join(result['actors'])})" if result['actors'] else ''), '',
-             '| check | skipped | ran: lane edit | ran: merge tree | ran: not signed | ran: failed | ran: protected file | ran: sampled | ran: shadow | ran: other |',
-             '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
+             '| check | skipped | ran: lane edit | ran: merge tree | ran: not signed | ran: failed | ran: protected file | ran: sampled | ran: shadow '
+             '| ran: shadow, unsigned | ran: other |',
+             '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
     for check, row in result['checks'].items():
         lines.append(f"| {check} | " + ' | '.join(str(row[category]) for category in CATEGORIES) + ' |')
     if result['not_signed']:
         lines += ['', 'Not signed (pushed without a covering note, lane untouched):', '']
         lines += [f"- #{entry['pr']} `{entry['branch']}`, seat {entry['seat']}: {', '.join(entry['checks'])} ({entry['runs']} run(s))"
                   for entry in result['not_signed']]
+    release = result.get('release_surface')
+    if release:
+        lines += ['', f"**Release-surface PR runs** ({release['workflow']} on pull_request, real release builds): {release['runs']} runs, "
+                  f"{release['minutes']:g} job minutes ({release['macos_minutes']:g} on macOS)"
+                  + (f": {', '.join(f'#{number}' for number in release['prs'])}" if release['prs'] else '')]
     return '\n'.join(lines) + '\n'
 
 

@@ -2,7 +2,8 @@
 """The perf slot: one performance load run at a time on a host, others wait in line.
 
 Run `scripts/ci-perf-slot --help` for what it is and how to use it. `scripts/ci-perf load` takes
-the slot by itself on hetz2 outside CI, so a builder does not have to remember to.
+the slot by itself outside CI on a host marked by ~/.config/fractal/perf-slot, so a builder does not
+have to remember to.
 """
 import argparse
 import contextlib
@@ -30,7 +31,8 @@ and for which branch.
   scripts/ci-perf-slot [--timeout 90m] [--for TEXT] -- COMMAND...   take the slot, run COMMAND
   scripts/ci-perf-slot --status                                     who holds it, who waits
 
-On hetz2, `scripts/ci-perf load` does this itself (outside CI), so measure a change with:
+On a host with the marker file ~/.config/fractal/perf-slot, `scripts/ci-perf load` does this itself
+(outside CI), so measure a change with:
 
   nix develop .#perf -c bash scripts/ci-perf load
 

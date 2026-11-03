@@ -143,7 +143,7 @@ def main(argv):
         assert refused.returncode != 0 and b'source_inputs' in refused.stderr, refused.stderr.decode()
         print('passed: a record that signs its source_inputs is also indexed under that key, and the key must be a tree id')
 
-        # A host that preloads a library into every process (hetz2: jemalloc) still signs: the caller's loader and
+        # A host that preloads a library into every process (jemalloc, on one build host) still signs: the caller's loader and
         # interpreter variables reach the command, never the signer, and the signer itself still refuses them.
         (tmp / 'empty-lib').mkdir()
         (tmp / 'empty-py').mkdir()

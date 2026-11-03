@@ -38,13 +38,26 @@ A claim kind of `local` retention (`st schema show KIND`) is an observation that
 that made it reads. The daemon records it in `local_observations` instead of the claim log. It gets
 no batch, no envelope and no digest, so it never replicates and trimming it never changes what a
 peer holds. Every node computes the same graph from the same admitted claims. The daemon trims
-the table at startup and hourly: rows older than `[observations] retention` (default `7d`, at
-least `1h`) and rows beyond `max_per_subject_kind` (default 20,000) go. The newest row of each
-subject and kind stays. An older build that still writes such a kind as a claim replicates it as
+the table hourly, starting 10 to 15 minutes after it starts, when its seats have reconnected: rows
+older than `[observations] retention` (default `7d`, at least `1h`) and rows beyond
+`max_per_subject_kind` (default 20,000) go. The newest row of each subject and kind stays. A
+reader finds the rows that are due, and the writer deletes at most 500 of them per statement,
+checking each again; each pass logs one line with the rows it deleted, the free pages it gave
+back and its longest writer hold. Searching inside the writer's statement held the writer for
+20 seconds on a 57 GB member right after a restart (#4610). An older build that still writes such a kind as a claim replicates it as
 before, and readers merge those claims with the local rows. `daemon.diagnostic` is local: no
 control logic reads it, so a daemon's diagnostics (reconcile failures, kill survivors, checkpoint
 proof and trim failures) stay in its local log, and its OpenTelemetry logs carry them when a
 collector is configured. `/v1/claims` and `st trace show` list only those older builds wrote.
+A consumer's delivery, read or close of a message may be a local mark instead of a
+lifecycle claim (`local_message_marks`): like a local observation it never replicates and is
+outside every digest. A reader takes a message's lifecycle claims or its marks, whichever is
+further along. Marks maintain the member-local projections (idle and unread mail, coordination
+holds, client selectors) by trigger, in their own transaction; the shared `message_index` never
+takes one, so its readers also ask for a closed mark. The hourly trim removes a mark a further-
+along record stands in for once it is seven days old, and the marks of a message the member no
+longer holds. A mark has no graph index, so a read at an earlier `through` still shows a message's
+current marks; only its claims are cut at that index.
 `harness.diagnostic` is split by code (`local_codes` in retention.toml): its observability codes
 are local in the same way, and the seat's conversation timeline on its own node still shows them.
 Its control codes stay claims.
@@ -303,6 +316,9 @@ order from the same admitted claims.
 | `local_latest_slots` | Local | Local latest-retention publication slots and pending local observation pointers. |
 | `claims_stored` | Local | Claims stored here per kind and writing node and their body bytes, counted on insert and never lowered by deletes; not replicated, in no digest, not in backups. |
 | `local_limit_stops` | Local | Seats this node's limits policy stopped, once per account and weekly window. |
+| `local_message_marks` | Local | A consumer's delivery, read and close of a graph message recorded on this member instead of as a lifecycle claim. Never replicated, in no digest; carried by version 4 backups; the hourly trim removes superseded marks after seven days. |
+| `local_message_staged` | Local | A seat's native transport staging a graph message, recorded on this member instead of a `message.staged` claim. Read today; written once a release that reads it exists (`message_marks::RECORDS_STAGED`), since a release reading marks but not stagings would offer the mail again after a rollback. Never replicated, in no digest, not backed up (a restored staging is in flight again); the hourly trim removes it seven days after a later lifecycle supersedes it. |
+| `local_message_mark_events` | Local | One row per mark or staging written, read by mailbox wakes and changes the way they read lifecycle claims. Never replicated, in no digest, not backed up; the hourly trim keeps the newest 16,384. |
 | `local_mailbox_argv_bindings` | Local | Launch-argv binding evidence for native mailbox ownership. |
 | `local_mailbox_bindings` | Local | Stable binding request tokens mapped to daemon-allocated epochs. Lost acknowledgements retry the same binding; retired tokens cannot allocate a successor. Excluded from replicated projection digests. |
 | `local_mailbox_leases` | Local | Authenticated native custody for each subject/component, including exact runtime/provider/session/sequence, process birth, token/epoch and revocation. Retained across daemon restart; excluded from replicated projection digests. |

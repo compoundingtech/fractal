@@ -12,6 +12,16 @@ pub struct Controller {
     dirty: Arc<AtomicBool>,
     checked: Mutex<Option<u64>>,
     _watcher: Option<notify::RecommendedWatcher>,
+    /// What admission by fit reads of this host; none where lanes are off.
+    pub lanes: Option<LaneHost>,
+}
+
+/// The room a host gives lanes, and how to read what its seats outside lanes hold
+/// (docs/st3/seat-lanes.md, "Admission by fit").
+#[derive(Clone, Copy)]
+pub struct LaneHost {
+    pub room: fractal_runtime::Capacity,
+    pub outside: fn() -> Option<u64>,
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
@@ -43,7 +53,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 queue: false, observed_at: None,
             };
         }
-        self.seat_admission = Controller { config, status, dirty, checked: Mutex::new(None), _watcher: watcher };
+        self.seat_admission = Controller {
+            config, status, dirty, checked: Mutex::new(None), _watcher: watcher, lanes: self.seat_admission.lanes,
+        };
         self
     }
 

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """scripts/ci-sparse-tree: only the declared inputs are copied, as one commit; a bad declaration is an error."""
+import ast
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,6 +10,8 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+import shutil
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / 'scripts/ci-sparse-tree'
@@ -55,6 +60,82 @@ class SparseTree(unittest.TestCase):
         self.assertEqual(count, '1')
         status = subprocess.run(['git', '-C', str(sparse), 'status', '--porcelain'], capture_output=True, text=True, check=True).stdout
         self.assertEqual(status, '')
+
+    def receipt_identity(self, repo):
+        script = ROOT / 'scripts/ci-perf-slot-test'
+        parsed = ast.parse(script.read_text())
+        definitions = ast.Module([node for node in parsed.body if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef))], [])
+        scope = {}
+        exec(compile(definitions, str(script), 'exec'), scope)
+        def git(*args, raw=False):
+            value = subprocess.check_output(['git', '-C', str(repo), *args], text=not raw, env=GIT_ENV)
+            return value if raw else value.strip()
+        return scope['source_identity'](git)
+
+    def test_origin_identity_survives_sparse_copy_without_trusting_a_tracked_lookalike(self):
+        (self.repo / 'ci-sparse-origin.json').write_text('{"origin_head":"forged"}')
+        self.policy(['scripts', 'ci-sparse-origin.json'])
+        subprocess.run(['git', '-C', str(self.repo), 'add', '-A'], check=True, env=GIT_ENV)
+        subprocess.run(['git', '-C', str(self.repo), 'commit', '-qm', 'tracked lookalike'], check=True, env=GIT_ENV)
+        origin = self.receipt_identity(self.repo)
+        self.assertEqual(origin['source_head'], origin['origin_head'])
+        self.assertEqual(self.run_tool().returncode, 0)
+        sparse = Path(self.tmp.name) / 'sparse'
+        identity = self.receipt_identity(sparse)
+        self.assertEqual(identity['origin_head'], origin['origin_head'])
+        self.assertEqual(identity['origin_tree'], origin['origin_tree'])
+        self.assertNotEqual(identity['sparse_head'], identity['origin_head'])
+        self.assertEqual(identity['source_head'], identity['sparse_head'])
+        metadata = sparse / '.git/ci-sparse-origin.json'
+        recorded = json.loads(metadata.read_text())
+        self.assertEqual(recorded.pop('version'), 2)
+        self.assertEqual(recorded, {key: value for key, value in identity.items() if key != 'source_head'})
+        recorded['version'] = 2
+        self.assertEqual(subprocess.check_output(['git', '-C', str(sparse), 'status', '--porcelain'], text=True), '')
+        prior = subprocess.check_output(['git', '-C', str(self.repo), 'rev-parse', 'HEAD^'], text=True).strip()
+        prior_commit = subprocess.check_output(['git', '-C', str(self.repo), 'cat-file', 'commit', prior])
+        replacement = dict(origin_head=prior, origin_tree=prior_commit.split(b'\n', 1)[0][5:].decode(),
+                           origin_commit=base64.b64encode(prior_commit).decode())
+        for update in ({'sparse_head': '0' * 40}, {'origin_head': '0' * 40}, {'origin_tree': '0' * 40},
+                       {'sparse_tree': '0' * 40}, {'paths': ['other']}, {'paths_sha256': '0' * 64},
+                       {'origin_commit': 'YmFk'}, {'sparse_commit': 'YmFk'}, replacement,
+                       {'paths': ['other'], 'paths_sha256': hashlib.sha256(b'["other"]').hexdigest()}):
+            metadata.write_text(json.dumps(dict(recorded, **update)))
+            with self.assertRaises(ValueError):
+                self.receipt_identity(sparse)
+        metadata.write_text('{')
+        with self.assertRaises(json.JSONDecodeError):
+            self.receipt_identity(sparse)
+        metadata.write_text(json.dumps(recorded))
+        shutil.rmtree(self.repo)
+        self.assertEqual(self.receipt_identity(sparse), identity)
+        metadata.unlink()
+        with self.assertRaises(ValueError):
+            self.receipt_identity(sparse)
+
+    def test_origin_metadata_refuses_symlinks_writable_files_and_wrong_owners(self):
+        self.assertEqual(self.run_tool().returncode, 0)
+        sparse = Path(self.tmp.name) / 'sparse'
+        metadata = sparse / '.git/ci-sparse-origin.json'
+        saved = metadata.read_text()
+        target = sparse / 'lookalike'
+        target.write_text(saved)
+        metadata.unlink()
+        metadata.symlink_to(target)
+        with self.assertRaises(OSError):
+            self.receipt_identity(sparse)
+        metadata.unlink()
+        metadata.write_text(saved)
+        metadata.chmod(0o666)
+        with self.assertRaises(ValueError):
+            self.receipt_identity(sparse)
+        metadata.chmod(0o600)
+        with patch.object(os, 'geteuid', return_value=os.geteuid() + 1), self.assertRaises(ValueError):
+            self.receipt_identity(sparse)
+        metadata.unlink()
+        metadata.mkdir()
+        with self.assertRaises(OSError):
+            self.receipt_identity(sparse)
 
     def test_an_untracked_file_is_never_copied(self):
         (self.repo / 'scripts/untracked').write_text('x')
