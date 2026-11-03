@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Browse terminal workspace tab strips with the mouse wheel without changing the active tab",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or recovery behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Each split keeps a transient tab-strip view offset; workspace data is unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or coordinated upgrade changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Existing workspace layouts remain compatible. Wheel events over a tab strip browse whole tabs; wheel events elsewhere keep their existing meaning."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup work or expected interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator actions or configuration changes. Wheel over a tab strip to browse it; selecting another tab reveals it if needed."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes or new swap-back restrictions."
+  }
+}

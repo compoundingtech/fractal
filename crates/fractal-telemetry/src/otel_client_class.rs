@@ -111,7 +111,11 @@ impl ClientClass {
             || contains_ascii_ci(name, b"relay")
         {
             ClientClass::Peer
-        } else if starts_with_ascii_ci(name, b"stui") {
+        } else if starts_with_ascii_ci(name, b"stui")
+            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+            || starts_with_ascii_ci(name, b"fractal-tui")
+        // LIVE-MIGRATION END
+        {
             ClientClass::Stui
         } else if starts_with_ascii_ci(name, b"smalltalk-") {
             ClientClass::App
@@ -336,6 +340,16 @@ mod tests {
             ClientClass::from_header(Some("stui 0.1.0+a0c135e3")),
             ClientClass::Stui
         );
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        for name in [
+            "fractal-tui",
+            "fractal-tui 0.1.0+a0c135e3",
+            " FRACTAL-TUI dev ",
+        ] {
+            assert_eq!(ClientClass::from_header(Some(name)), ClientClass::Stui);
+        }
+        assert_eq!(ClientClass::Stui.as_str(), "stui");
+        // LIVE-MIGRATION END
         // st3/src/main.rs:4482.
         assert_eq!(
             ClientClass::from_header(Some("st 25.11.0+ab12cd3")),

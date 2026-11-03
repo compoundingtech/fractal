@@ -191,6 +191,18 @@ pub trait Runtime: Send + Sync {
         Ok(())
     }
 
+    /// Rebuild derived state that a trim's deletes deferred, until `budget` is spent, and say
+    /// whether any is left. A trim calls it in paced transactions after each run, so a runtime
+    /// can refold each subject a trim touched once instead of once per deleted claim.
+    fn rebuild_deferred(&self, _transaction: &Transaction<'_>, _budget: std::time::Duration) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Whether a trim's deletes left anything for `rebuild_deferred`, read without the writer.
+    fn deferred_pending(&self, _connection: &Connection) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Projections changed beneath whatever the runtime keeps in memory about them.
     fn forget_views(&self);
 
@@ -202,6 +214,16 @@ pub trait Runtime: Send + Sync {
     /// projects in chunks, and refolds once the backlog is in rather than after every chunk.
     fn projection_advanced(&self, caught_up: bool) {
         let _ = caught_up;
+        self.forget_views();
+    }
+
+    /// A paced trim deleted a chunk of claims and goes on. The chunk did not change the graph
+    /// (each chunk checks), and the claims kept answer every reader as the whole log does, so
+    /// what the views hold still answers: refold soon, but keep serving. The trim forgets the
+    /// views once when its run stops. By default, as for any other change beneath the views. A
+    /// runtime whose published lists take seconds to fold from nothing overrides it, so a trim
+    /// that commits a chunk every fraction of a second does not restart every fold.
+    fn claims_trimmed(&self) {
         self.forget_views();
     }
 

@@ -215,20 +215,41 @@ pub struct Inbox {
     seen: HashSet<String>,
     waiting: Vec<(Request, Instant)>,
     read_at: Option<Instant>,
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    alternate: Option<Box<Inbox>>,
+    // LIVE-MIGRATION END
 }
 
 impl Inbox {
     pub fn new(dir: Option<PathBuf>) -> Self {
         Self {
-            dir,
             seen: HashSet::new(),
             waiting: Vec::new(),
             read_at: None,
+            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+            alternate: dir.as_ref().and_then(|path| {
+                let parent = path.parent()?;
+                if parent.file_name()? != "stui" {
+                    return None;
+                }
+                let target = parent.with_file_name("tui").join(path.file_name()?);
+                Some(Box::new(Self::new(Some(target))))
+            }),
+            // LIVE-MIGRATION END
+            dir,
         }
     }
 
     /// Read new requests, at most every few hundred milliseconds.
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     pub fn read(&mut self) {
+        self.read_source();
+        if let Some(alternate) = &mut self.alternate {
+            alternate.read_source();
+        }
+    }
+    // LIVE-MIGRATION END
+    fn read_source(&mut self) {
         let Some(dir) = self.dir.clone() else { return };
         if self.read_at.is_some_and(|at| at.elapsed() < EVERY) {
             return;
@@ -293,20 +314,28 @@ impl Inbox {
 
     /// The requests waiting, oldest first, for the caller to open or leave.
     pub fn waiting(&self) -> impl Iterator<Item = &(Request, Instant)> {
-        self.waiting.iter()
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        self.waiting
+            .iter()
+            .chain(self.alternate.iter().flat_map(|inbox| inbox.waiting.iter()))
+        // LIVE-MIGRATION END
     }
 
     /// Whether a waiting request names a mission: the missions window is followed lazily, so the
     /// interface must follow it to know whether the mission exists.
     pub fn wants_missions(&self) -> bool {
-        self.waiting
-            .iter()
+        self.waiting()
             .any(|(request, _)| matches!(pane_for(&request.subject), Ok(Pane::Mission(_))))
     }
 
     /// Make a waiting request look as if it had waited `by` already.
     #[cfg(test)]
     pub fn waiting_since_for_test(&mut self, id: &str, by: Duration) {
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        if let Some(alternate) = &mut self.alternate {
+            alternate.waiting_since_for_test(id, by);
+        }
+        // LIVE-MIGRATION END
         for (request, since) in &mut self.waiting {
             if request.id == id {
                 *since = Instant::now()
@@ -318,6 +347,15 @@ impl Inbox {
 
     /// Answer a request and take it off the queue.
     pub fn answer(&mut self, id: &str, answer: &Answer) {
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        if !self.waiting.iter().any(|(request, _)| request.id == id)
+            && let Some(alternate) = &mut self.alternate
+            && alternate.waiting().any(|(request, _)| request.id == id)
+        {
+            alternate.answer(id, answer);
+            return;
+        }
+        // LIVE-MIGRATION END
         self.waiting.retain(|(request, _)| request.id != id);
         let Some(dir) = self.dir.as_deref() else {
             return;
@@ -380,10 +418,41 @@ mod tests {
         assert!(pane(&format!("agent/{}", "a".repeat(MAX_SUBJECT))).is_err());
     }
 
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     #[test]
     fn a_request_is_read_once_answered_and_collected() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = private(root.path());
+        for family in ["stui", "tui"] {
+            let root = tempfile::tempdir().unwrap();
+            let old = private(&root.path().join("stui"));
+            let source = private(&root.path().join(family));
+            request_round_trip(source, old);
+        }
+    }
+
+    #[test]
+    fn each_queue_has_its_own_scan_bound() {
+        for stale_family in ["stui", "tui"] {
+            let root = tempfile::tempdir().unwrap();
+            let old = private(&root.path().join("stui"));
+            let new = private(&root.path().join("tui"));
+            let (stale, active) = if stale_family == "stui" {
+                (&old, &new)
+            } else {
+                (&new, &old)
+            };
+            for index in 0..=MAX_FILES {
+                fs::write(
+                    stale.join(format!("{index:04}.json")),
+                    br#"{"version":1,"subject":"agent/stale","at_unix_ms":0}"#,
+                )
+                .unwrap();
+            }
+            request_round_trip(active.clone(), old);
+        }
+    }
+    // LIVE-MIGRATION END
+
+    fn request_round_trip(dir: PathBuf, reader: PathBuf) {
         let id = enqueue(
             &dir,
             "agent/garden/worker",
@@ -401,7 +470,7 @@ mod tests {
                 == 0
         );
 
-        let mut inbox = Inbox::new(Some(dir.clone()));
+        let mut inbox = Inbox::new(Some(reader.clone()));
         inbox.read();
         let waiting = inbox
             .waiting()
@@ -421,6 +490,9 @@ mod tests {
         inbox.answer(&id, &Answer::Opened { focused: false });
         assert_eq!(inbox.waiting().count(), 0);
         assert!(!dir.join(format!("{id}.json")).exists());
+        let mut restarted = Inbox::new(Some(reader));
+        restarted.read();
+        assert_eq!(restarted.waiting().count(), 0);
         assert_eq!(
             wait(&dir, &id, Duration::from_secs(1)),
             Some(Answer::Opened { focused: false })

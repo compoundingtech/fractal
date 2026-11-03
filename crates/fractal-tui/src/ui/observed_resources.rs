@@ -142,6 +142,7 @@ mod socket_tests {
             fractal_daemon::store::Store::open(&root.path().join("graph.db"), "resource-read-test").unwrap(),
         );
         let state = fractal_daemon::api::AppState {
+            seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify: Arc::new(tokio::sync::Notify::new()),

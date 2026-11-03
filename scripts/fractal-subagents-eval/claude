@@ -233,7 +233,10 @@ signal.signal(signal.SIGHUP, stop)
 start_session("startup")
 # Hooks alone do not make a healthy Claude seat: keep the real MCP channel initialized
 # throughout this eval so automatic channel recovery does not replace its parent harness.
-server = mcp.get("mcpServers", {}).get("st3")
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+servers = mcp.get("mcpServers", {})
+server = servers["st3"] if "st3" in servers else servers.get("fractal")
+# LIVE-MIGRATION END
 if not server:
     raise RuntimeError("the subagent stand-in requires the st3 MCP channel")
 channel = subprocess.Popen([server["command"], *server.get("args", [])], stdin=subprocess.PIPE,

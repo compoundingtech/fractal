@@ -99,6 +99,8 @@ pub enum ErrorCode {
     IdentityUnknown,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
+    RetireRevisionMismatch,
+    RetireIncarnationMismatch,
     InvalidCustodySuccessor,
     CustodyPending,
     AttentionMigrated,
@@ -892,6 +894,9 @@ pub struct MailBacklog {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SloList {
     pub as_of_unix_ms: u64,
+    /// Where a person reads the exported observation history, when the daemon is configured with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel_ui_url: Option<String>,
     pub rows: Vec<SloRow>,
 }
 /// One objective (a target with windows and an error budget) or one budget (an allowance that
@@ -908,10 +913,22 @@ pub struct SloRow {
     pub window: String,
     pub remaining_percent: Option<f64>,
     pub status: String,
+    /// How urgent the row is: `red`, `green`, `yellow` or `quiet`; a client treats any other word as `quiet`. Absent from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
     #[serde(default)]
     pub resets_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub measured_at_unix_ms: Option<u64>,
+    /// A budget's projected use when it resets, at the rate of its recent past (at most 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast_used_percent: Option<f64>,
+    /// How many minutes of recent readings the forecast was fitted to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast_basis_minutes: Option<u64>,
+    /// When the allowance runs out at that rate; present only when that is before it resets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_out_at_unix_ms: Option<u64>,
     pub explain: String,
 }
 /// What was left of one objective or budget across a period, in equal steps. A step holds its
@@ -2987,6 +3004,9 @@ pub struct TimelineContentBody {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_id: Option<String>,
+    /// A mailbox message's content names its message, as its message entry does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
 }
@@ -4368,6 +4388,8 @@ pub struct AgentRetireParameters {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub successor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

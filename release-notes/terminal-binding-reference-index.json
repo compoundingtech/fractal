@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Index the maintained native terminal-binding reference.",
+  "replay": {"status": "none", "detail": "Documentation link only."},
+  "schema": {"status": "none", "detail": "No stored schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or retention rule changes."},
+  "compatibility": {"status": "none", "detail": "No CLI, wire or runtime behavior changes."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No required manual step."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}

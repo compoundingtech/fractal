@@ -328,6 +328,7 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
     let runtime = runtime();
     let socket = root.path().join("api.sock");
     let state = fractal_daemon::api::AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),

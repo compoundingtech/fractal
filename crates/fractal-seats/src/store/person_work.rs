@@ -1849,7 +1849,7 @@ mission "writer-load" state="ready" {
 
                 let start = Instant::now();
                 for n in 0..10 {
-                    target.append_claim(&ClaimInput {
+                    target.append_as_older_build_for_test(&ClaimInput {
                         subject: "daemon/birch".into(), kind: "daemon.diagnostic".into(), actor: None,
                         fields: serde_json::from_value(json!({"severity":"warning","code":"live","reason":format!("claim {n}")})).unwrap(),
                         evidence: vec![], expected_subject: None, idempotency_key: None,

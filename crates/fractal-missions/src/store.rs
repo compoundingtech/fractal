@@ -332,6 +332,28 @@ const REPOSITORY_COLLECTIONS: [(&str, &str, &str); 2] = [
 /// The most mentions one item resource keeps, newest first.
 const ITEM_MENTIONS: usize = 50;
 
+/// The pull requests and issues one look at the repository resource `repository` saw, as a
+/// recording would lay each over `prior` (its known facts, if any): each item's subject, kind
+/// and facts. The GitHub plugin refills its mirror from a look it records nowhere else.
+pub fn repository_item_facts(
+    repository: &str,
+    facts: &Value,
+    prior: &mut dyn FnMut(&str) -> Option<Value>,
+) -> Vec<(String, &'static str, serde_json::Map<String, Value>)> {
+    let mut items = Vec::new();
+    for (field, segment, kind) in REPOSITORY_COLLECTIONS {
+        for item in facts.get(field).and_then(Value::as_array).into_iter().flatten() {
+            let Some(number) = item.get("number").and_then(Value::as_u64) else {
+                continue;
+            };
+            let subject = format!("{repository}/{segment}/{number}");
+            let known = prior(&subject);
+            items.push((subject, kind, item_facts(repository, field, number, known.as_ref(), item)));
+        }
+    }
+    items
+}
+
 /// What an item resource records after one sighting: its prior facts with every fact the
 /// sighting read laid over them. A listing names the head commit `head`; the resource calls it
 /// `head_sha`. A fact the sighting read as null is gone, except an unknown head. Only an open

@@ -20,6 +20,7 @@ fn request(node: &str) -> JoinRequest {
 fn journal() -> Journal {
     Journal {
         fleet: "fleet".into(),
+        owner: None,
         creation: "creation".into(),
         deadline: 600,
         attempt: Some("attempt".into()),
@@ -64,6 +65,29 @@ fn receive(ack: Option<u64>) -> Value {
 #[test]
 fn permit_and_reciprocal_policy_grants_are_client_only() {
     assert_eq!(grants("fleet"), json!(["st3/fleet/fleet", "st3-client-v0"]));
+}
+
+#[test]
+fn recovered_pairing_owner_is_exact_and_legacy_journals_keep_their_owner() {
+    let old = serde_json::to_value(journal()).unwrap();
+    assert!(old.get("owner").is_none());
+    let mut recovered: Journal = serde_json::from_value(old).unwrap();
+    assert_eq!(journal_owner(&recovered).unwrap(), "st/fleet/fleet");
+    for owner in ["st/fleet/fleet", "fractal/fleet/fleet"] {
+        recovered.owner = Some(owner.into());
+        assert_eq!(journal_owner(&recovered).unwrap(), owner);
+    }
+    recovered.owner = Some("fractal/fleet/other".into());
+    assert!(journal_owner(&recovered).is_err());
+}
+
+#[tokio::test]
+async fn renamed_permit_cannot_confirm_or_install_grants() {
+    let mut journal = journal();
+    journal.owner = Some(format!("{}fleet", super::super::reconcile::RENAMED_OWNER_PREFIX));
+    assert!(finish_confirmation(Path::new("absent.sock"), Path::new("absent.json"),
+        &mut journal, json!({"operation":"confirm"})).await.unwrap_err()
+        .to_string().contains("remains pending"));
 }
 
 #[test]
@@ -203,9 +227,12 @@ async fn acknowledged_happy_path_confirms_exact_atomic_selectors() {
                 assert_eq!(admission["request"]["node_id"], "node");
             }
             let body = if index == 0 {
-                answer_body.clone()
+                serde_json::to_vec(&crate::tests::envelope(
+                    serde_json::from_slice(&answer_body).unwrap(),
+                ))
+                .unwrap()
             } else {
-                serde_json::to_vec(&json!({"fleet_id":"fleet","own_member_key":"sponsor-key","persistence_error":null,"members":[],"membership":{"anchor":"anchor","legacy_removed":[],"members":[{"name":"joining","member_key":"member-key","node_id":"node","state":"current","mode":"listening","endpoints":[],"start":1}]}})).unwrap()
+                serde_json::to_vec(&crate::tests::envelope(json!({"fleet_id":"fleet","own_member_key":"sponsor-key","persistence_error":null,"members":[],"membership":{"anchor":"anchor","legacy_removed":[],"members":[{"name":"joining","member_key":"member-key","node_id":"node","state":"current","mode":"listening","endpoints":[],"start":1}]}}))).unwrap()
             };
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

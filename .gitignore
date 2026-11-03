@@ -43,6 +43,7 @@ packages/fractal-sdk/node_modules/
 
 # Derived from apps/fractal-web/.changelog/ by scripts/changelog-registry.mjs; never committed (it would conflict).
 /apps/fractal-web/.changelog/registry.generated.ts
+/apps/fractal-web/.changelog/registry.generated.ts.*.tmp
 
 # Local Alchemy cache/state metadata; remote Cloudflare state is authoritative.
 /infra/storybook/.alchemy/

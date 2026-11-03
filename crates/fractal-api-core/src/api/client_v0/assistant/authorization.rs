@@ -67,9 +67,23 @@ pub struct ReadPayload {
     pub expires_at_unix_ms: u64,
     pub nonce: String,
 }
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+/// Absent on deployed proofs; select the exact domain before signature verification.
+#[derive(Default, Deserialize)]
+pub enum ReadDomain {
+    #[default]
+    #[serde(rename = "st3.scg-read.v1")]
+    St3,
+    #[serde(rename = "fractal.scg-read.v1")]
+    Fractal,
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadAuthorization {
+    #[serde(default)]
+    pub domain: ReadDomain,
     pub payload: ReadPayload,
     pub signature: String,
 }
@@ -223,7 +237,16 @@ pub fn verify(state: &AppState, session: &ClientSession, path: &str, parameters:
     }
     let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&authorization.signature)
         .map_err(|_| forbidden("read proof signature is malformed"))?;
-    let message = signing_bytes(payload)?;
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let message = match authorization.domain {
+        ReadDomain::St3 => signing_bytes(payload)?,
+        ReadDomain::Fractal => {
+            let canonical = canonical_json_text(&serde_json::to_value(payload).map_err(ApiError::internal)?)
+                .map_err(ApiError::internal)?;
+            format!("fractal.scg-read.v1\n{canonical}")
+        }
+    };
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519,key(&trust.attestor_public_key)?)
         .verify(message.as_bytes(),&signature).map_err(|_| forbidden("read proof is not signed by the pinned approval attestor"))?;
     let mut nonce_hash = Sha256::new();

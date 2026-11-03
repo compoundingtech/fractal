@@ -30,6 +30,8 @@ pub struct Inputs {
     pub subscription_states: BTreeMap<String, (bool, &'static str, bool)>,
     pub changed: bool,
     pub should_record: bool,
+    /// Record each item's change as `vcs.item.state` alone (see [`crate::model::MirroredPrior`]).
+    pub compact: bool,
 }
 
 pub struct Observation<'a> {
@@ -39,8 +41,11 @@ pub struct Observation<'a> {
     pub resource: &'a str,
     pub facts: &'a Value,
     pub subscriptions: &'a [(String, SubscriptionSpec)],
+    /// The poller's mirror for a GitHub repository, when it has a filled one.
+    pub mirrored: Option<&'a crate::model::MirroredPrior>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn inputs(
     transaction: &Connection,
     observer: &str,
@@ -49,10 +54,11 @@ pub fn inputs(
     resource: &str,
     facts: &Value,
     subscriptions: &[(String, SubscriptionSpec)],
+    mirrored: Option<&crate::model::MirroredPrior>,
 ) -> Result<Inputs, St3Error> {
     fractal_store::store::completion_state::flush(transaction).map_err(internal)?;
     read_inputs(transaction, Observation {
-        observer, desired_revision, attempt, resource, facts, subscriptions,
+        observer, desired_revision, attempt, resource, facts, subscriptions, mirrored,
     })
 }
 
@@ -61,7 +67,7 @@ pub fn read_inputs(
     transaction: &Connection,
     observation: Observation<'_>,
 ) -> Result<Inputs, St3Error> {
-    let Observation { observer, desired_revision, attempt, resource, facts, subscriptions } = observation;
+    let Observation { observer, desired_revision, attempt, resource, facts, subscriptions, mirrored } = observation;
     let mut active_subscriptions = Vec::new();
     for (subject, expected) in subscriptions {
         let Some(desired) = current_desired_row_tx(transaction, subject).map_err(internal)? else {
@@ -136,19 +142,50 @@ pub fn read_inputs(
     let repository_changed_fields = changed_fields.iter().cloned().collect::<Vec<_>>();
     let mut recorded_items = HashMap::new();
     for (field, segment, _) in REPOSITORY_COLLECTIONS {
-        for number in current_object
+        for item in current_object
             .get(field)
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|item| item.get("number").and_then(Value::as_u64))
         {
+            let Some(number) = item.get("number").and_then(Value::as_u64) else {
+                continue;
+            };
             let subject = format!("{resource}/{segment}/{number}");
             let observation =
                 fractal_store::store::resources::preparation_observation(transaction, &subject)
                     .map_err(internal)?;
-            let recorded = observation.actual
-                .and_then(|actual| actual.get("facts").cloned());
+            let graph = observation.actual.and_then(|actual| actual.get("facts").cloned());
+            // The graph is exact for every compact fact and every fact a wake or a delivery reads:
+            // each change to one is recorded, whatever the mode. A look's prior takes those from
+            // the graph, so a mirror that missed a look cannot make a delivered comment new again.
+            let exact = |mut base: serde_json::Map<String, Value>, graph: &Value| {
+                for name in fractal_schema::github_plugin::COMPACT_FACTS.iter()
+                    .chain(fractal_schema::github_plugin::DELIVERY_FACTS)
+                {
+                    match graph.get(*name) {
+                        Some(value) => base.insert((*name).into(), value.clone()),
+                        None => base.remove(*name),
+                    };
+                }
+                if let Some(execution) = graph.pointer("/required_checks/execution")
+                    && let Some(required) = base.get_mut("required_checks").and_then(Value::as_object_mut)
+                {
+                    required.insert("execution".into(), execution.clone());
+                }
+                Value::Object(base)
+            };
+            let recorded = match (mirrored.and_then(|mirrored| mirrored.items.get(&subject)), graph) {
+                // The mirror supplies what compact mode no longer records, such as the title.
+                (Some(Value::Object(mirror)), Some(graph)) => Some(exact(mirror.clone(), &graph)),
+                (Some(mirror), None) => Some(mirror.clone()),
+                // Without the mirror, after compact-only changes, take the rest as this look found
+                // it: the facts that drifted are a baseline and deliver nothing.
+                (_, Some(graph)) if fractal_store::store::resources::compact_newer(transaction, &subject).map_err(internal)? => {
+                    Some(exact(super::item_facts(resource, field, number, Some(&graph), item), &graph))
+                }
+                (_, graph) => graph,
+            };
             let observed_at = observation.observed_at;
             recorded_items.insert(subject, recorded.map(|facts| (facts, observed_at)));
         }
@@ -159,7 +196,7 @@ pub fn read_inputs(
             resource,
             field,
             previous.as_ref(),
-            &facts,
+            facts,
             &mut |subject| {
                 recorded_items
                     .get(subject)
@@ -237,5 +274,6 @@ pub fn read_inputs(
         subscription_states,
         changed,
         should_record,
+        compact: mirrored.is_some_and(|mirrored| mirrored.compact),
     })
 }

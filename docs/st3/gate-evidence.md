@@ -26,18 +26,21 @@ same bridge; a selected list that cannot be read or decoded refuses hosted
 execution. GC likewise resolves and prefetches main's selected `rust-test-inputs.json`
 before computing the per-crate keys it must retain.
 
-For keyed Clippy, the workflow source/generated `linux-clippy` environment and
-`scripts/ci-clippy-keyed` use `CI_KEYED_CLIPPY_POLICY=auto:.st/evidence-skip-policy.json`:
-the keyed caller supplies the policy path, and the stage resolves its checkout
-layout at execution time under this migration ARN. The linux-gate/rust-tests
+For keyed Clippy, the workflow source/generated `linux-clippy` environment
+uses `CI_KEYED_CLIPPY_POLICY=auto:.st/evidence-skip-policy.json`: the keyed
+caller supplies the policy path, and the stage resolves its checkout layout at
+execution time under this migration ARN. Locally, `scripts/ci-clippy-result`
+(linux-clippy's recorded command) resolves the same path the same way after
+the stage. The linux-gate/rust-tests
 static script closures contain no policy-file literal. This does not imply
 hosted dependency isolation: as on main, the hosted linux-clippy job still
 supplies the policy via `CI_KEYED_CLIPPY_POLICY` and feeds linux-gate. An explicit
 policy path remains explicit; malformed or unreadable preferred configuration
 never selects the legacy file. The generated workflow environment is a bridge
 site documented here because its comments come from generator output.
-The newly keyed `linux-fleet-compat` workflow and `scripts/ci-fleet-compat-keyed`
-use the same `auto:` bridge through `CI_KEYED_FLEET_COMPAT_POLICY`. Both keyed
+The newly keyed `linux-fleet-compat` workflow uses the same `auto:` bridge
+through `CI_KEYED_FLEET_COMPAT_POLICY`, and `scripts/ci-fleet-compat-result`,
+its local note's command, the same missing-only choice as `scripts/ci-clippy-result`. Both keyed
 stages share the argument-based missing-only resolver; their existing hosted
 policy dependencies are retained, not introduced by the directory migration.
 
@@ -333,6 +336,13 @@ pull never extends a head that list does not sign. The signer starts without the
 any process running as the account that runs the timer, until a `st sekrets` profile holds it. The log is shadow only
 until then: nothing skips or refuses on it. Moving the key behind sekrets changes `signer.json` alone, not this file;
 replacing the key is a change of `.st/evidence-log-key`, which the gate protects (a change to it never skips).
+
+**One publisher at a time.** A publish (pull or gc) is a fast-forward of the head that run fetched, leased on it
+(`--force-with-lease`), so a host whose chain does not continue the published one (a second publisher, or a copy that was
+not seeded) publishes nothing and exits 1 with `publish_refused`. It never overwrites the other host's heads. A copy that
+was refused recovers by seeding from the published head (`git fetch origin +refs/evidence-log/main:refs/evidence-log/main`),
+so its chain continues rather than starting again. Without that seed, a pull on an empty copy starts a new chain that it
+cannot publish.
 
 Measured 2026-10-21 against this repository: the first pull (an empty copy) accepted 4,928 records in 548 s, most of it
 checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
@@ -1141,10 +1151,10 @@ the head, so a retry behaves the same; the gate prints `decision=run` with a rea
 (`doc/fleet/factory/nix-evidence/rust-test-declared-inputs`, a textual scan of what the Rust sources name) plus what the other
 members of the aggregate read: the whole of `.github` (workflows, the clippy and fleet-compat baselines) and `scripts` (the stage
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
-`docs/st2`, `docs/st3` and `docs/vrs`, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
+`docs/st3` and the retained `docs/vrs` migration reference, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
 on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the Fractal crate), `evals` (the example and graph tests read `evals/fractal`),
-`claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st2` (`tests/invariants.rs` includes
-`docs/st2/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
+`claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st3` (`crates/fractal/tests/invariants.rs` includes
+`docs/st3/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
 `include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an
 artifact name, and `upgrade-impact`, which reads the fragments, always runs. The one file under `apps` the Rust tests read at run time is declared by name
 (`apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf`, opened by a test in `crates/fractal-daemon/src/attach_image.rs`). The scan misses paths a test builds at run time, so
@@ -1165,8 +1175,7 @@ the detector matches lies outside the declared list.
 (`scripts/check-public-repo`, formerly called from `tests/public_repo.rs`) and the retired-name check (`scripts/check-native-names`, formerly
 `tests/native_only.rs::tracked_product_surface_contains_only_native_names`). Run inside the Linux gate they would see a page under `apps`, `packages` or
 `release-notes` that the declared inputs leave out, so a skip by input key could hide their failure. `scripts/ci-genie-freshness` runs both; that check's
-key is the whole tree, so it runs for every tree the Linux gate skips. `tests/vrs_ledger.rs` reads only `docs/vrs`, `src`, `tests` and `crates`, all
-declared. A policy test (`test_no_rust_source_lints_the_whole_tree`) fails when a Rust source lists the whole tree with `git ls-files` or calls one of
+key is the whole tree, so it runs for every tree the Linux gate skips. The retired root package's VRS-ledger test was removed with that package. A policy test (`test_no_rust_source_lints_the_whole_tree`) fails when a Rust source lists the whole tree with `git ls-files` or calls one of
 those scripts. The aggregate `linux-gate` note signs its input key like a stage note (its job has no `PROJECT_BASE_SHA`, so
 `ci-evidence-signing` takes the same base from the event payload), which is what publishes `refs/notes/evidence-input/linux-gate/...`. The skip decision is taken once per stage group
 before the partitions (`needs.evidence-gate-linux-gate.outputs.skip` on the shards, clippy and fleet-compat), so the four shards
@@ -1697,7 +1706,7 @@ untracked and ignored files except the inputs that cost minutes to fetch again (
 and `target/compat-baselines/`), and its tracked files must equal the commit (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
 fingerprints and sccache's absolute-path keys stay valid and a second run is warm. `ST_TEST_TREES` sets the pool size (default: the
 host's heavy slots plus one, counted as the cargo shim counts them: `CARGO_HEAVY_SLOTS`, else `~/.config/cargo-heavy-slots`, else 1; `off`
-runs in a fresh throwaway worktree as before) and `ST_TEST_POOL` its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`) by the cargo shim's caller (`ST_AGENT`, else `CARGO_PRIORITY_CALLER`), aged like the shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. The pool size is read again on every pass while a run waits, so a tree added when the host's heavy slots grow is taken at once. A ticket is dropped when its process is gone, or when its pid now names a process that started after the ticket was taken (a reused pid keeps no place). Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. A run whose checks build nothing (`ci-script-tests`, `typescript-client` or `genie-freshness` on their own: none is in `BUILDS`)
+runs in a fresh throwaway worktree as before) and `ST_TEST_POOL` its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`) by the cargo shim's caller (`ST_AGENT`, else `CARGO_PRIORITY_CALLER`), aged like the shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. `ST_TEST_POOL_RANK=last` puts a run last in the pool: its ticket (rank 999, `POOL_LAST_RANK`) never ages and is never overdue, and its waiter never tries a tree that another ticket waits for, so it takes a tree only while no other run waits. It also takes a tree only while another tree is free, which it leaves to a seat that comes during its run (in a pool of one tree it never runs). The queue signer's seed runs this way (2026-11-01: on one build host it had held 18% of the pool's tree-hours in a day). The pool size is read again on every pass while a run waits, so a tree added when the host's heavy slots grow is taken at once. A ticket is dropped when its process is gone, or when its pid now names a process that started after the ticket was taken (a reused pid keeps no place). Every waiter follows main's current rules for the queue. A ticket holds the version of the rules its copy of `st-test` follows (`rules N`, `QUEUE_RULES`), and a waiter defers only to tickets of its own rules or newer: an older copy's ticket, or one with no version, gets no deference, and the tree's flock decides between them, so a waiter left on old rules cannot stall the new ones. While a run waits for a tree, it fetches the base every ten minutes (`QUEUE_FOLLOW_SECONDS`), and when the base's own `scripts/st-test` (never a branch's) is no longer the copy it runs, it unwinds and executes that copy in the same process: the same pid, so the newer copy takes the ticket over (`ST_TEST_HANDOVER_TICKET`) and with it the run's place, its start and its name in the host's admission order. It never does so once it holds a tree, so one copy runs every check of a run and signs it; what a note names (the base's evidence-wrap, evidence-sign and evidence-verify, the tree, the lane) is unchanged. On 2026-10-30 a run that started before the two-hour rule merged kept the older copy it started with and waited 13.2 h: the new waiters deferred to its overdue ticket while it deferred to their rank-3 ones. Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. A run whose checks build nothing (`ci-script-tests`, `typescript-client` or `genie-freshness` on their own: none is in `BUILDS`)
 takes a throwaway worktree too, since what a pool tree keeps is a warm cargo target, so it never waits behind building runs for a tree. Each check that is not one of those builds runs with `BUILD_ADMISSION_CLASS=light`, so the nix wrapper starts its `nix develop` shell as a light start rather than waiting in build admission as a heavy one (as the pre-sign worker starts `.#web` and `.#genie`); a building check never gets it, even when the caller set it. **Slot first:** a tree held while its run waits for a build slot is a tree nobody can use (2026-10-28: on one build host the slowest run waited
 42,265 s for a tree while linux-gate in the held trees waited 1,000-2,400 s at a time for a build slot), and a tree cannot be given back while a
 check is at work in it. So the best ticket takes a free tree only when a build started now would get a heavy slot at once: more of the shim's
@@ -1708,14 +1717,19 @@ starves no run. A host without the shim's slots, or a gate that cannot be read, 
 `tree_wait_s` (the wait for its tree), `tree_slot_wait_s` (the part of it with a tree free, waiting for a slot), `tree_held_s` and
 `tree_blocked_s`: the time the build lane held the tree and built nothing, `tree_pre_start_s` before `ci-local` started (admission and the dev
 shell) plus `tree_slot_blocked_s` with every running `ci-local` stage waiting for a build slot (one stage's wait while another builds is not
-counted). **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
+counted). A run that builds asks for its seat's lane burst before any of this (docs/st3/seat-lanes.md, "Bursts"), and its record has `burst`
+(the size held, or null with `burst_none` saying why) and `burst_wait_s`, the wait for it; a handover gives the burst back and the newer copy
+asks again. **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
 the slot keeps its path (`tree-N` and `target-N`, so cargo's ids for the workspace crates, which contain the path, still match), and when the tree
 there was last registered by another clone it is re-registered as a worktree of the clone now running (its notes land in that clone) while the inputs
 the cleaning keeps (members, installed dependencies, compat baselines) move across by rename. The run still signs only what it built and tested in
 its own exact tree: the tree is reset to the commit and cleaned every run, whoever used the slot before. A slot has one writer: its lease (an
 `flock` on `tree-N.lock`) ends with the run that held it, but not always with what that run started. On 2026-10-28 a seat restart killed a run
 during its checkout of `tree-2`, and the next five runs given the tree failed on the `index.lock` git left. So a free slot whose tree still has
-a process at work in it (read from `/proc`) is busy: it is skipped, named once per waiter, until those processes end. A leftover `index.lock`
+a process at work in it (read from `/proc`) is busy: it is skipped, named once per waiter, until those processes end. **Never name a pool path in
+a command's arguments** (`du`, `find` or `ls` under `~/.cache/st-test/pools/`) on a host where runs may be waiting: a process whose argv names a
+tree counts as a reference to it, and the run given that tree fails rather than signal a process it did not start (2026-11-01: a `du` over the
+pool directories failed a run). Read pool use from `df`, a slot's `tree-N.size`, or the runs' own summaries. A leftover `index.lock`
 is removed before the checkout, and logged, only when no process is left in the tree. With one still there, the run fails rather than
 sharing the tree. The pool cap (`ST_TEST_POOL_MAX_GB`)
 evicts whole slots, least recently used first, the old per-clone layout included. When that tree has a
@@ -1801,6 +1815,15 @@ tree already held, `fractal-test` removes the least recently used trees and thei
 (`~/.cache/st-test`) fits, never one in use, and says on stderr what it removed. The per-target guard (below) stays. A run can exceed the cap by its own growth (one run's tests, clippy and fleet-compat builds end near 60 GB with incremental
 compilation, which the checks now turn off as CI does), so size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus about 60. Where cargo's
 `build-dir` points elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`), the intermediates live there, not in the pool, and the cap does not count them.
+A run's `TMPDIR` (and `TMP` and `TEMP`), for `fractal-test` itself and every check it starts, is a directory of its own on disk,
+`/var/tmp/st-test.XXXXXXXX` (in `ST_TEST_TMP` when set), removed when the run ends (`--keep` keeps it and says where; no later run removes
+a kept one). A host's `/tmp` can be a small tmpfs that swaps, and `nix develop -c` never removes the `nix-shell.*` directory it makes its
+command's `TMPDIR`, so every check left one there, with whatever its tests wrote (about 370 a day on one build host, 2026-10-30), as did
+evidence-wrap's key file. The run holds an flock on its directory while it lives: a killed run's directory is removed by the next run, once
+it is ten minutes old and nobody holds its lock (only `st-test.*` directories this account owns are judged). It is not under `~/.cache`
+because tests bind Unix sockets a few levels below a `nix-shell.XXXXXX` in it, and a socket path is limited to 108 bytes: under
+`~/.cache/st-test/tmp/XXXXXXXX` the Watchman socket of `scripts/ci-local-web-test` took 114. `scripts/ci-local` and `scripts/ci-local-web`
+still give their stages a `TMPDIR` of their own (below).
 `scripts/ci-local` (what the Linux gate stages run through) measures and prints every time: the setup before the stages, each stage's start,
 end and seconds, and the time it spent waiting in the build admission queue (the shim's `cargo: waiting in order` / `got build slot` lines
 get a UTC stamp, and the waits are counted and added up per stage), in a table at the end. Each stage's output is also kept in
@@ -1956,6 +1979,24 @@ as to CI's aggregate note; its host and agent levels admit it for `pull_request`
 `scripts/ci-fractal-web-changes` whether any web input changed since HEAD's merge base with the base: when none did, CI does not run the
 lane, so `--status` reads `not relevant` (covered) and a run skips it, neither a failure nor a note.
 
+Locally, web runs in its own thread alongside the Rust build lane and the serial light-check lane. On a build host it holds one
+counted heavy cargo stage slot for its whole run, including the dev shell; the kit plays inherit that admission and take no second
+place. Rust checks keep their per-command admission because their detached test guardian cannot inherit a held stage slot. Web and
+light output is buffered and printed after the build lane, and a background lane that exits without a result fails its checks.
+On timeout or interruption the web process group is killed together with its slot supervisor before the lane is joined; HUP and
+TERM unwind through the same cleanup. A cancelled run also stops a web process that starts during cancellation. Hosts with a cargo
+admission shim must support `--stage-slot`; an unsupported shim fails the check. The web changelog registry writer's generated
+`registry.generated.ts` and its atomic `.tmp` siblings are ignored so they cannot transiently dirty the shared tree for another lane.
+Web and `typescript-client` hold the same per-worktree file lock for their entire check, including every install and dependency
+reader: their different HOME and store settings can otherwise replace the shared `node_modules` while tests use it. The parent
+runner holds the lock in Git's worktree metadata, and web acquires it before taking a heavy slot. Rust and the other light checks
+remain concurrent. `ST_EVIDENCE_SERIAL=1` restores the listed check order, with web still holding its stage slot.
+
+An explicitly authorized candidate-runner measurement uses `--out` in a disposable directory, never `--push`; its exported packs are
+deleted after measurement. When `ST_TEST_REEXEC` is set outside a base copy's `st-test-base-*` directory, the ledger records the tested
+head as `candidate`. `scripts/fractal-test-report` lists those runs separately and excludes them from every SLO figure. Normal signing
+continues to execute the accepted base's runner.
+
 **Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
 is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory,
 `/dev/shm/cl.XXXXXX` when `/dev/shm` has 20 GiB free and `/var/tmp/cl.XXXXXX` on disk otherwise (`CI_LOCAL_TMP_ROOT` names another root;
@@ -1981,7 +2022,7 @@ carry; run by hand, `ci-local` fetches main itself and never trusts a local ref,
 `evidence-wrap --input NAME=VALUE` adds is recorded the same way; it refuses the names it sets itself. Each stage is the `scripts/ci-linux` stage as its CI job runs it, after building and
 installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
 and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
-since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST2_OTELITE_BIN`, `ST3_OTELITE_BIN` and
+since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST3_OTELITE_BIN` and
 `FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's Fractal state, harness
 configuration or credentials, and no PATH entry inside the account's Fractal state stays. Kept from the account: the cargo and
 rustup homes (the dependency cache), `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues, and the
@@ -2060,7 +2101,8 @@ runs `fractal-test --seed COMMIT` on each new tip of main, which signs and pushe
 whose key has none yet, so a pull request branched from main reuses them; most merges move a handful of crates, one that moves the lane
 all of them. Main's code is merged code, the code every run on the host already builds under a pull request, so no author rule applies.
 It starts on the same terms as `sign`, and not while another `fractal-test --seed` runs on the host (that tick is skipped; the next tries
-again); its nextest takes the build slots through the admission shim like any `fractal-test` build. A tip is seeded once whatever the outcome
+again); its nextest takes the build slots through the admission shim like any `fractal-test` build, and it waits for a pool tree last
+(`ST_TEST_POOL_RANK=last`, above): a seat's run waiting for a tree always goes first. A tip is seeded once whatever the outcome
 (the next merge's seed covers what one left missing), except that a seed load stopped before its tests started (waiting for a build
 slot, or building; nextest's `Starting N tests` line is the boundary) tries the same tip again on the next tick, up to six tries, until
 a newer merge replaces it. Each try appends a line to `seeds.jsonl` (wait from the merge to the start, seconds, the try number, whether

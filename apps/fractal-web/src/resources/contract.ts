@@ -154,13 +154,25 @@ const kindGlobMatches = ({
   return glob.endsWith('*') ? kind.startsWith(glob.slice(0, -1)) : kind === glob
 }
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+const sameSchemaName = ({ a, b }: { readonly a: string; readonly b: string }): boolean => {
+  if (a === b) return true
+  const left = parseSchemaId(`${a}@1`)
+  const right = parseSchemaId(`${b}@1`)
+  return left !== undefined && right !== undefined &&
+    left.family === right.family && left.kind === right.kind
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+
 /** Does `manifest` claim this header at its own level, ignoring version? */
 const claims = ({ manifest, header }: ManifestHeader): boolean => {
   const parsed = parseSchemaId(header.schema)
   const match = manifest.match
   switch (match.level) {
     case 'exact':
-      return parsed?.name === match.schema
+      // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+      return parsed !== undefined && sameSchemaName({ a: parsed.name, b: match.schema })
+      // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
     case 'family':
       return (
         header.family === match.family && kindGlobMatches({ glob: match.kind, kind: parsed?.kind })
@@ -225,7 +237,9 @@ const overlaps = ({ a, b }: { readonly a: RendererMatch; readonly b: RendererMat
     case 'exact':
       return (
         b.level === 'exact' &&
-        a.schema === b.schema &&
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        sameSchemaName({ a: a.schema, b: b.schema }) &&
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
         a.majors.min <= b.majors.max &&
         b.majors.min <= a.majors.max
       )

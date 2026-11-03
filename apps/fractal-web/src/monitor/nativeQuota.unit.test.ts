@@ -35,6 +35,21 @@ describe('native usage.period quota presentation', () => {
         .toMatchObject({ _tag: 'failed', failure: { kind: 'incompatible' } })
     }
   })
+  it('accepts only the two usage.period provenance spellings without relaxing ledger checks', () => {
+    for (const sourceSchema of ['st3.client.v0/usage.period', 'fractal.client.v0/usage.period']) {
+      expect(decodeQuota({ ...quotaEnvelope(), sourceSchema })._tag).toBe('ok')
+      expect(decodeQuota({ ...quotaEnvelope(), accounts: [{ ...quotaEnvelope().accounts[0], ledgerAccountId: undefined }], sourceSchema })._tag).toBe('incompatible')
+    }
+    for (const sourceSchema of ['smalltalk.client.v0/usage.period', 'fractal.client.v1/usage.period', 'fractal.client.v0/usage.other']) {
+      expect(decodeQuota({ ...quotaEnvelope(), sourceSchema })._tag).toBe('incompatible')
+    }
+  })
+  it('keeps locally emitted provenance in the old spelling for either input spelling', () => {
+    for (const api_version of ['st3.client.v0', 'fractal.client.v0']) {
+      expect(projectNativeQuota({ ...envelope(), api_version }, NOW))
+        .toMatchObject({ _tag: 'ok', value: { sourceSchema: 'st3.client.v0/usage.period' } })
+    }
+  })
   it('preserves native percentages including reported zero, identity and original measurement', () => {
     const row = account(envelope())
     expect(row.accountId).toBe(reading.account_ref)

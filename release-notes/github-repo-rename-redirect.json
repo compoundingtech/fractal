@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "GitHub writes follow same-origin repository rename redirects without losing their method or body.",
+  "replay": { "status": "none", "detail": "No replay. Existing watch declarations, cursors, deadlines and event deduplication remain unchanged." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Wire shapes are unchanged. Mutation requests now follow HTTP 301, 307 and 308 within the same API origin, preserving method and body. Redirects are admitted individually; cross-origin redirects remain rejected." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

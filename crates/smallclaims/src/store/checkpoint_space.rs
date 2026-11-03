@@ -18,6 +18,24 @@ const GIB: u128 = 1024 * 1024 * 1024;
 pub const CHECKPOINT_SPACE_GATE_VERSION: u32 = 2;
 const LIVE_FLOOR: u128 = 8 * GIB;
 const REACTION_MARGIN: u128 = 256 * 1024 * 1024;
+/// A scoped capture stages only the envelopes holding its kinds' claims and what judging them
+/// reads, so it is charged the snapshot image scaled by those kinds' share of the store's claims,
+/// times this margin, at least `SCOPED_STAGING_FLOOR` and at most the image. A staged claim takes
+/// far fewer bytes than a live one (about 1.4 KiB against 17 KiB on a 53 GB member), and the
+/// capture checks space before each page, so a share that undercounts is stopped, not overrun.
+const SCOPED_STAGING_MARGIN: u128 = 2;
+const SCOPED_STAGING_FLOOR: u128 = GIB;
+
+/// The staging allowance a capture is charged: the whole snapshot image, or for a scoped one,
+/// its share (`scoped` of `total` claims) as above.
+fn capture_staging(snapshot_logical: u128, share: Option<(u128, u128)>) -> u128 {
+    match share {
+        Some((scoped, total)) if total > 0 => (snapshot_logical.saturating_mul(scoped).saturating_mul(SCOPED_STAGING_MARGIN) / total)
+            .max(SCOPED_STAGING_FLOOR)
+            .min(snapshot_logical),
+        _ => snapshot_logical,
+    }
+}
 // The six temporary tables created by `checkpoint::prove`. Measure their empty database
 // in SQLite itself rather than fitting a minimum to a small-store failure.
 const PROOF_SCHEMA: &str =
@@ -415,6 +433,16 @@ impl SpaceGuard {
     /// Admit before creating the scratch directory. `capture` includes one extra database-size
     /// allowance for its staging file; a proof is admitted again after staging exists.
     pub(super) fn admit(live: &Path, scratch: &Path, capture: bool) -> Result<Self> {
+        Self::admit_with(live, scratch, capture, None)
+    }
+
+    /// `admit` for a capture scoped to kinds holding `share` (`scoped` of `total` claims): its
+    /// staging allowance is that share of the image (`capture_staging`).
+    pub(super) fn admit_scoped_capture(live: &Path, scratch: &Path, share: (u128, u128)) -> Result<Self> {
+        Self::admit_with(live, scratch, true, Some(share))
+    }
+
+    fn admit_with(live: &Path, scratch: &Path, capture: bool, share: Option<(u128, u128)>) -> Result<Self> {
         let (
             live_allocated,
             live_length,
@@ -517,7 +545,7 @@ impl SpaceGuard {
         } else {
             0
         };
-        let staging = if capture { snapshot_logical } else { 0 };
+        let staging = if capture { capture_staging(snapshot_logical, share) } else { 0 };
         let minimum = if capture {
             staging.checked_add(fixed)
         } else {
@@ -1043,6 +1071,17 @@ mod tests {
             .to_string();
         assert!(error.contains("refused before allocation"), "{error}");
         assert_eq!(fs::read(&capture).unwrap(), b"committed-cursor");
+    }
+
+    #[test]
+    fn a_scoped_capture_is_charged_its_share_of_the_image_with_a_margin() {
+        let image = 100 * GIB;
+        assert_eq!(capture_staging(image, None), image, "a whole capture stages the image");
+        assert_eq!(capture_staging(image, Some((15, 100))), 30 * GIB);
+        assert_eq!(capture_staging(image, Some((1, 1_000_000))), SCOPED_STAGING_FLOOR);
+        assert_eq!(capture_staging(image, Some((90, 100))), image, "never more than the image");
+        assert_eq!(capture_staging(GIB / 2, Some((1, 100))), GIB / 2, "nor more than a small image");
+        assert_eq!(capture_staging(image, Some((0, 0))), image, "an empty count is not trusted");
     }
 
     #[test]

@@ -1094,3 +1094,16 @@ test('an ask resolved at its deadline decodes, and what the decoder from before 
         ...withDefault, answer: { ...withDefault.answer, outcome: 'timed_out' },
     }));
 });
+
+test('a later daemon adding a tone word does not fail the objectives and budgets read', async () => {
+    const [, Rich] = await modules;
+    const row = { id: 'anthropic-weekly', kind: 'budget', about: 'a', target: '100% per week', current: '94% used', window: 'weekly',
+        remaining_percent: 6, status: 'met', explain: 'e' };
+    const wire = { as_of_unix_ms: 1793008800000, rows: [{ ...row, tone: 'red' }, { ...row, id: 'later', tone: 'blue' }, { ...row, id: 'older' }] };
+    // Strict decoding too: tone is a string with four documented words, not a closed set.
+    for (const mode of ['strict', 'tolerant']) {
+        const list = Rich.decodeUnknownSync(Rich.SloList, mode)(wire);
+        assert.deepEqual(list.rows.map(found => found.tone), ['red', 'blue', undefined]);
+        assert.equal(list.rows.length, 3);
+    }
+});

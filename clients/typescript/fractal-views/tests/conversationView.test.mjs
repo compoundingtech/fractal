@@ -110,6 +110,26 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.deepEqual(delivered.map(entry => [entry.body.kind, entry.body.delivered]), [['mail', true]]);
 }
 
+// Two messages that tie in order put both headers before both contents. Content that names its
+// message pairs with that header; content from an older Fractal still pairs with the one before it.
+{
+  const entry = (id, sequence, type, body) => ({ id, sequence, revision: 1, timestamp: '2026-10-01T10:00:00Z', role: 'user', type, final: true, body });
+  const header = (id, from) => entry(`h-${id}`, 6, 'message', { message_id: `message/${id}`, from, to: 'agent/example/harbor/keeper', title: id });
+  const content = (id, named) => entry(`c-${id}`, 7, 'content', { media_type: 'text/plain', text: `${id} text`, ...(named ? { message_id: `message/${id}` } : {}) });
+  const mail = timeline => conversationEntries(timeline, new Map()).map(shown => [shown.id, shown.body.kind, shown.body.subject, shown.body.text]);
+  assert.deepEqual(mail([header('one', 'agent/example/birch'), header('two', 'agent/example/cedar'), content('one', true), content('two', true)]), [
+    ['message/one', 'mail', 'one', 'one text'],
+    ['message/two', 'mail', 'two', 'two text'],
+  ]);
+  // A header another entry separates from its content still pairs by name.
+  assert.deepEqual(mail([header('one', 'agent/example/birch'), entry('s', 6, 'status', { status: 'running' }), content('one', true)]), [
+    ['message/one', 'mail', 'one', 'one text'],
+  ]);
+  assert.deepEqual(mail([header('one', 'agent/example/birch'), content('one', false)]), [['message/one', 'mail', 'one', 'one text']]);
+  // A header pairs once, however it paired.
+  assert.deepEqual(mail([header('one', 'agent/example/birch'), content('one', false), content('one', true)]).map(([, kind]) => kind), ['mail', 'user']);
+}
+
 // A message spoken and transcribed carries Fractal's `dictated` tag; the app marks it.
 {
   const spoken = (tags) => conversationEntries([

@@ -30,6 +30,12 @@ JUDGES = [
 SEAT_STEPS = ["alpha/draft", "alpha/publish", "bravo/work", "charlie/work"]
 
 
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+def work_tag(tags):
+    return next((tag for prefix in ("st3-work:", "fractal-work:") for tag in tags if tag.startswith(prefix)), "")
+# LIVE-MIGRATION END
+
+
 def bullet(text):
     """Print one list item wrapped at 100 columns, as the other reports are."""
     print(textwrap.fill(text, 100, initial_indent="- ", subsequent_indent="  ",
@@ -240,8 +246,8 @@ def main():
     direct = [c for c in sent if str(fields(c).get("from", "")).startswith("agent/")]
     woken, duplicates = [], []
     for message in work_messages:
-        tag = next((t for t in fields(message).get("tags", []) if t.startswith("st3-work:")), "")
-        work = tag.removeprefix("st3-work:").split("@")[0]
+        tag = work_tag(fields(message).get("tags", []))
+        work = tag.partition(":")[2].split("@")[0]
         name = step_names.get(work, work)
         if tag in [w[1] for w in woken]:
             duplicates.append(name)

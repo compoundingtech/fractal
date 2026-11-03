@@ -221,6 +221,41 @@ describe('closed envelope renderer bindings', () => {
     expect(plan._tag).toBe('Render')
     expect(renderToStaticMarkup(plan.view)).toBe('<p>COUNTER:4.0</p>')
   })
+  it('resolves exact renderers for either namespace without matching another family or kind', () => {
+    for (const schema of ['st3.resource:counter@1', 'fractal.resource:counter@1']) {
+      const plan = registry.plan({
+        envelope: { ...envelope, schema, data: { count: '4', title: 'counter' } },
+        representation: 'detail',
+        density: 'regular',
+        host: { live: false, actions: false },
+      })
+      expect(plan.renderer.manifest.id).toBe('exact')
+      expect(renderToStaticMarkup(plan.view)).toBe('<p>COUNTER:4.0</p>')
+    }
+    for (const schema of ['fractal.agent:counter@1', 'fractal.resource:other@1', 'fractal.resource:counter@2']) {
+      const plan = registry.plan({
+        envelope: { ...envelope, schema, data: { count: '4', title: 'counter' } },
+        representation: 'detail',
+        density: 'regular',
+        host: { live: false, actions: false },
+      })
+      expect(plan.renderer.manifest.id).toBe('fallback')
+    }
+  })
+  it('refuses exact registrations that overlap through the namespace alias', () => {
+    const exact = (schema: string, id: string): RegisteredRenderer<string> => ({
+      ...generic,
+      manifest: {
+        ...generic.manifest,
+        id,
+        match: { level: 'exact', schema, majors: { min: 1, max: 1 } },
+      },
+    })
+    expect(() => makeRegistry({
+      generic,
+      renderers: [exact('st3.resource:counter', 'old'), exact('fractal.resource:counter', 'new')],
+    })).toThrow('both claim')
+  })
   it('decodes rejected data through the fallback schema before rendering its diagnostic', () => {
     const plan = registry.plan({
       envelope,

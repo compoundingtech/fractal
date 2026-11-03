@@ -59,6 +59,7 @@ impl Harness {
         store.start_attention_list_refresher().unwrap();
         store.start_agent_roster_refresher().unwrap();
         let state = AppState {
+            seat_admission: Default::default(),
             owning_person: Some(OWNER.into()), store,
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0).0,

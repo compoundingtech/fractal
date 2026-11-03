@@ -425,6 +425,8 @@ struct Record {
     support: Support,
     observed_at: u64,
     recovery: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt: Option<Box<crate::harness_admission::AttemptDiagnostic>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,6 +439,7 @@ pub struct Failure {
     pub support: Support,
     pub observed_at: u64,
     pub evidence_age_ms: u64,
+    pub attempt: Option<Box<crate::harness_admission::AttemptDiagnostic>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -602,6 +605,7 @@ fn read_at(raw: &[u8], now: u64) -> Observed {
         support: record.support,
         observed_at: record.observed_at,
         evidence_age_ms: now.saturating_sub(record.observed_at),
+        attempt: record.attempt,
     })
 }
 
@@ -664,16 +668,25 @@ impl Publisher {
     }
 
     pub fn publish(&mut self, stage: Stage, reason: Reason, source: Source) {
+        self.publish_admission(stage, reason, source, None);
+    }
+
+    pub(crate) fn publish_admission(
+        &mut self,
+        stage: Stage,
+        reason: Reason,
+        source: Source,
+        attempt: Option<Box<crate::harness_admission::AttemptDiagnostic>>,
+    ) {
         let Some(index) = stage.index() else {
             return;
         };
         if reason.stage() != stage || !reason.accepts_source(source) {
             return;
         }
-        if self.failures[index]
-            .as_ref()
-            .is_some_and(|failure| failure.reason == reason && failure.source == source)
-        {
+        if self.failures[index].as_ref().is_some_and(|failure| {
+            failure.reason == reason && failure.source == source && failure.attempt == attempt
+        }) {
             return;
         }
         let record = Record {
@@ -686,6 +699,7 @@ impl Publisher {
             support: self.support,
             observed_at: now_ms(),
             recovery: RECOVERY.to_string(),
+            attempt,
         };
         self.failures[index] = Some(record);
         crate::metrics::record_driver_diagnostic(
@@ -1316,6 +1330,7 @@ mod tests {
             support: Support::Supported,
             observed_at: 100,
             recovery: RECOVERY.to_owned(),
+            attempt: None,
         };
         let path = agent.join("driver-diagnostic");
         atomic_json(&path, &record).unwrap();
@@ -1368,6 +1383,7 @@ mod tests {
             support: Support::Supported,
             observed_at: 100,
             recovery: RECOVERY.to_owned(),
+            attempt: None,
         };
 
         // Write and traverse, but not read: staging and renaming still work, opening the

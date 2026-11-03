@@ -54,7 +54,8 @@ observer "github/acme/demo/pull/1" {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(marker, "1");
+        // Version 2 also marks subjects of `vcs.item.state` (the GitHub plugin store).
+        assert_eq!(marker, "2");
         for name in [
             "resource_observations_insert",
             "resource_observations_delete",

@@ -13,9 +13,7 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension as _, params};
 use serde_json::{Value, json};
 
-/// How many of a thread's newest observations a merge-queue check reads at most. A thread is
-/// observed only when it changes.
-const THREAD_SCAN: u32 = 400;
+use crate::github_watch::THREAD_SCAN;
 
 const QUEUE_EXIT_SQL: &str = "SELECT json_extract(body, '$.fields.facts'), accepted_at_unix_ms,
              CASE WHEN json_extract(body, '$.fields.attribution_only') IN (1,'true') THEN 1 ELSE 0 END
@@ -23,6 +21,18 @@ const QUEUE_EXIT_SQL: &str = "SELECT json_extract(body, '$.fields.facts'), accep
              WHERE subject=?1 AND kind='resource.observed'
              ORDER BY length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC,store_index DESC
              LIMIT ?2";
+
+/// A thread's newest compact states, which a poller from step 3b of the plugin store writes on
+/// change instead of observations. Their fields are the compact facts.
+const QUEUE_EXIT_STATE_SQL: &str = "SELECT json_extract(body, '$.fields'), accepted_at_unix_ms, store_index
+             FROM claims INDEXED BY claims_subject_kind_accepted_index
+             WHERE subject=?1 AND kind='vcs.item.state'
+             ORDER BY length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC,store_index DESC
+             LIMIT ?2";
+
+/// When a thread's `merge-queue-left` events were written: one subject per exit.
+const QUEUE_EXIT_EVENT_SQL: &str = "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_subject_kind_accepted_index
+             WHERE subject>=?1 AND subject<?2 AND kind='github.event'";
 
 // Each mailbox alias contributes at most one row; the aggregate never sorts retained wakes.
 const LAST_WAKE_SQL: &str = "SELECT MAX(sent_at) FROM (
@@ -157,40 +167,64 @@ impl IdleHoldsStore for Store {
         smallclaims::touched::note_read(|| item.clone());
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfeb913b593a6 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ QUEUE_EXIT_SQL)?;
-        let mut rows = statement.query_map(params![item, THREAD_SCAN], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, bool>(2)?,
-            ))
-        })?;
-        // Newest first: while the thread is out of the queue, the oldest such observation is when
-        // it left; the one before that must have it queued.
-        let mut left = None::<u128>;
-        let mut examined = 0;
-        for row in &mut rows {
-            examined += 1;
-            let (facts, at, attribution_only) = row?;
-            if attribution_only {
-                continue;
-            }
-            let facts = facts
-                .map(|facts| serde_json::from_str::<Value>(&facts))
+        // Each row: facts, accepted time, attribution only, and store index for ties.
+        let mut history = statement
+            .query_map(params![item, THREAD_SCAN], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    None::<i64>,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // A thread a poller describes in compact state: its states are the same history.
+        let mut states = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbc1c39e02c9b owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ QUEUE_EXIT_STATE_SQL)?;
+        let compact = states
+            .query_map(params![item, THREAD_SCAN], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?, false, Some(row.get::<_, i64>(2)?)))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !compact.is_empty() {
+            history.extend(compact);
+            // Newest first; at one time a compact state, written from the same look, comes first.
+            history.sort_by(|left, right| {
+                let at = |row: &(Option<String>, String, bool, Option<i64>)| row.1.parse::<u128>().unwrap_or_default();
+                at(right).cmp(&at(left)).then_with(|| right.3.cmp(&left.3))
+            });
+            history.truncate(THREAD_SCAN as usize);
+        }
+        // A `merge-queue-left` event says when the thread left, once it is open outside the queue.
+        let exited = fractal_schema::github_plugin::event_subject(&item, "merge-queue-left")
+            .map(|subject| -> Result<Option<u128>> {
+                let upper = format!("{subject}0");
+                let mut events = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h13f5ed40c752 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ QUEUE_EXIT_EVENT_SQL)?;
+                let times = events
+                    .query_map(params![subject, upper], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(times.iter().filter_map(|at| at.parse::<u128>().ok()).max())
+            })
+            .transpose()?
+            .flatten();
+        if let Some(exited) = exited {
+            let current = history
+                .iter()
+                .find(|(_, _, attribution_only, _)| !attribution_only)
+                .and_then(|(facts, ..)| facts.as_deref().map(serde_json::from_str::<Value>))
                 .transpose()?
                 .unwrap_or(Value::Null);
-            let at = at.parse::<u128>().unwrap_or_default();
-            if left.is_none() && !github_watch::open_outside_merge_queue(&facts) {
-                return Ok(None);
-            }
-            if github_watch::in_merge_queue(&facts) {
-                return Ok(left.filter(|left| *left > after_unix_ms));
-            }
-            if !github_watch::open_outside_merge_queue(&facts) || at <= after_unix_ms {
-                return Ok(None);
-            }
-            left = Some(at);
+            return Ok((github_watch::open_outside_merge_queue(&current) && exited > after_unix_ms)
+                .then_some(exited));
         }
-        if examined == THREAD_SCAN {
+        let examined = history.len();
+        let rows = history.into_iter().map(|(facts, at, attribution_only, _)| -> Result<_> {
+            let facts = facts.map(|facts| serde_json::from_str::<Value>(&facts)).transpose()?.unwrap_or(Value::Null);
+            Ok((facts, at.parse::<u128>().unwrap_or_default(), attribution_only))
+        });
+        if let Some(left) = github_watch::merge_queue_exit(rows, after_unix_ms)? {
+            return Ok(left);
+        }
+        if examined == THREAD_SCAN as usize {
             tracing::warn!(%item, limit=THREAD_SCAN, "idle nudge queue-exit history is unknown: bounded observation window exhausted");
         }
         Ok(None)
@@ -333,5 +367,49 @@ mod tests {
         store.connection.write().execute("UPDATE claims SET body=?1,accepted_at_unix_ms='2' WHERE id='fixture-pr-1'", [json!({"fields":{"facts":{"state":"open","merge_queue":null},"attribution_only":"invalid"}}).to_string()]).unwrap();
         let thread = ThreadRef::parse("acme/garden#12").unwrap();
         assert_eq!(store.thread_left_merge_queue(&thread, 0).unwrap(), Some(2));
+    }
+
+    fn append(store: &Store, subject: &str, kind: &str, fields: Value) -> u128 {
+        let claim = store.append_claim(&crate::model::ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: None,
+            fields: fields.as_object().unwrap().clone().into_iter().collect(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        store.readers.get().query_row(
+            "SELECT accepted_at_unix_ms FROM claims WHERE id=?1", [&claim.id], |row| row.get::<_, String>(0),
+        ).unwrap().parse().unwrap()
+    }
+
+    fn compact(facts: Value) -> Value {
+        Value::Object(fractal_schema::github_plugin::compact_item_state(
+            "vcs.pull-request", "observer/github/acme/garden", facts.as_object().unwrap(),
+        ).unwrap())
+    }
+
+    /// A thread a newer poller describes in compact state, or names a `merge-queue-left` event
+    /// for, reads when it left the queue as one an older poller observes in full.
+    #[test]
+    fn a_queue_exit_reads_compact_states_and_the_exit_event() {
+        let store = Store::open_memory("node").unwrap();
+        let thread = ThreadRef::parse("acme/garden#12").unwrap();
+        let item = "resource/github/acme/garden/pull-request/12";
+        append(&store, item, "resource.observed", json!({"kind": "vcs.pull-request",
+            "facts": {"state": "open", "merge_queue": {"state": "QUEUED", "position": 1}}}));
+        let left = append(&store, item, "vcs.item.state", compact(json!({"state": "open", "head_sha": "a"})));
+        append(&store, item, "vcs.item.state", compact(json!({"state": "open", "head_sha": "b"})));
+        assert_eq!(store.thread_left_merge_queue(&thread, 0).unwrap(), Some(left));
+
+        let event = append(&store, "github-event/github/acme/garden/pull-request/12/merge-queue-left/2", "github.event", json!({
+            "version": 1, "item": item, "event": "merge-queue-left", "observer": "observer/github/acme/garden",
+            "at": "2026-10-30T12:00:00.000Z"}));
+        assert_eq!(store.thread_left_merge_queue(&thread, 0).unwrap(), Some(event), "the newest exit event");
+        assert_eq!(store.thread_left_merge_queue(&thread, event).unwrap(), None);
+        append(&store, item, "vcs.item.state", compact(json!({"state": "closed", "merged": true})));
+        assert_eq!(store.thread_left_merge_queue(&thread, 0).unwrap(), None, "a merged thread did not stall");
     }
 }

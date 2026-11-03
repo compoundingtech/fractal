@@ -278,8 +278,10 @@ pub fn begin(build: &str) -> (Run, Option<String>) {
             None,
         );
     };
-    let _ = std::fs::create_dir_all(&directory);
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     let note = left_without_exiting(&directory, std::process::id(), now_unix());
+    // LIVE-MIGRATION END
+    let _ = std::fs::create_dir_all(&directory);
     let file = directory.join(format!("{}.json", std::process::id()));
     let mark = Mark {
         pid: std::process::id(),
@@ -300,6 +302,11 @@ pub fn begin(build: &str) -> (Run, Option<String>) {
 }
 
 fn left_without_exiting(directory: &Path, own: u32, now: u64) -> Option<String> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let read_directory = fractal_client::product_dirs::tui_read_path(directory);
+    let consume = read_directory.as_ref() == directory;
+    let directory = read_directory.as_ref();
+    // LIVE-MIGRATION END
     let mut newest: Option<Mark> = None;
     for entry in std::fs::read_dir(directory).ok()?.flatten() {
         let path = entry.path();
@@ -313,7 +320,7 @@ fn left_without_exiting(directory: &Path, own: u32, now: u64) -> Option<String> 
             continue;
         }
         // Only the process that successfully consumes a stale marker counts it.
-        if std::fs::remove_file(&path).is_ok() && !mark.panicked {
+        if consume && std::fs::remove_file(&path).is_ok() && !mark.panicked {
             super::slo::METRICS.add("silent_exits", 1);
         }
         if newest

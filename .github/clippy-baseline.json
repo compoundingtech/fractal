@@ -10,13 +10,8 @@
       "clippy::collapsible_if": 5,
       "clippy::items_after_test_module": 2,
       "clippy::needless_borrow": 2,
-      "clippy::too_many_arguments": 12,
-      "clippy::useless_format": 1,
-      "clippy::while_let_loop": 1
-    },
-    "fractal-legacy-runner": {
-      "clippy::obfuscated_if_else": 1,
-      "clippy::too_many_arguments": 2
+      "clippy::too_many_arguments": 9,
+      "clippy::useless_format": 1
     },
     "fractal": {
       "clippy::collapsible_if": 4,
@@ -50,8 +45,7 @@
     },
     "fractal-missions": {
       "clippy::cloned_ref_to_slice_refs": 1,
-      "clippy::collapsible_if": 3,
-      "clippy::needless_borrow": 1
+      "clippy::collapsible_if": 3
     },
     "fractal-reconcile": {
       "clippy::collapsible_if": 3,

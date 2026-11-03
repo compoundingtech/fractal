@@ -150,6 +150,33 @@ class Review(unittest.TestCase):
         done, verdict = self.review()
         self.assertEqual(verdict["risk"]["final"], "high")
 
+    def test_a_medium_change_in_a_risky_area_says_it_needs_a_factory_read_in_the_verdict_and_on_stderr(self):
+        self.write(".github/workflows/x.yml", "name: x\n")
+        self.commit("workflow")
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["risk"]["final"], "medium")
+        self.assertTrue(verdict["risk"]["needs_factory_read"])
+        self.assertEqual([entry["area"] for entry in verdict["risk"]["deterministic"]["factory_read"]], ["ci-and-signing-stages"])
+        self.assertIn("medium risk, needs Factory read (ci-and-signing-stages)", done.stderr)
+
+    def test_an_ordinary_change_carries_no_factory_read_flag_set(self):
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["risk"]["deterministic"]["factory_read"], [])
+        self.assertFalse(verdict["risk"]["needs_factory_read"])
+        self.assertNotIn("Factory read", done.stderr)
+
+    def test_a_base_whose_floor_reports_no_areas_gets_a_verdict_without_the_fields_its_schema_does_not_know(self):
+        self.git("checkout", "-q", "main")
+        self.write("scripts/review-risk", "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'level': 'low', 'reasons': [], 'changed_files': 1, 'changed_lines': 1}))\n")
+        self.commit("an older floor")
+        self.git("checkout", "-q", "change")
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("factory_read", verdict["risk"]["deterministic"])
+        self.assertNotIn("needs_factory_read", verdict["risk"])
+
     def test_a_verdict_that_does_not_validate_is_not_written(self):
         self.say(answer(findings=[{"severity": "blocking", "file": "src/a.txt", "line": 1, "reason": "r", "fix": "f"}]))
         done, verdict = self.review()

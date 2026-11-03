@@ -258,6 +258,8 @@ pub struct DaemonUnreachable {
     starting: bool,
     full_replay: bool,
     socket_os_error: Option<i32>,
+    /// Refused, and no daemon holds this socket's readiness lock.
+    abandoned: bool,
 }
 
 impl DaemonUnreachable {
@@ -270,6 +272,7 @@ impl DaemonUnreachable {
             starting: false,
             full_replay: false,
             socket_os_error: None,
+            abandoned: false,
         }
     }
 
@@ -282,6 +285,7 @@ impl DaemonUnreachable {
             starting: false,
             full_replay: false,
             socket_os_error: None,
+            abandoned: false,
         }
     }
 
@@ -312,9 +316,21 @@ impl DaemonUnreachable {
             std::io::ErrorKind::ConnectionRefused => "connection refused".to_owned(),
             _ => error.to_string(),
         };
+        let abandoned = error.kind() == std::io::ErrorKind::ConnectionRefused
+            && crate::startup::abandoned(Path::new(&endpoint));
         let mut outage = Self::connect(endpoint, reason);
         outage.socket_os_error = error.raw_os_error();
+        outage.abandoned = abandoned;
         outage
+    }
+
+    /// Where an abandoned socket may have gone: a daemon started with `--socket` elsewhere.
+    fn elsewhere(&self) -> &'static str {
+        if self.abandoned {
+            "; no daemon holds this socket now, so the daemon may also be listening on another socket (name it with `socket` in config.toml or ST3_ENDPOINT)"
+        } else {
+            ""
+        }
     }
 
     fn after(mut self, waited: Duration) -> Self {
@@ -357,8 +373,8 @@ impl DaemonUnreachable {
         }
         match self.phase {
             OutagePhase::Connect => format!(
-                "the st daemon at {} is not reachable ({}); it may be restarting",
-                self.endpoint, self.reason
+                "the st daemon at {} is not reachable ({}); it may be restarting{}",
+                self.endpoint, self.reason, self.elsewhere()
             ),
             OutagePhase::Response => format!(
                 "the st daemon at {} closed the connection before it answered ({}); it may be restarting, and the request may or may not have been applied",
@@ -377,8 +393,8 @@ impl fmt::Display for DaemonUnreachable {
         match self.phase {
             OutagePhase::Connect => write!(
                 formatter,
-                "the st daemon at {} was not reachable for {seconds}s ({}); it may be restarting or stopped. Nothing was sent; run the command again once the daemon is back",
-                self.endpoint, self.reason
+                "the st daemon at {} was not reachable for {seconds}s ({}); it may be restarting or stopped{}. Nothing was sent; run the command again once the daemon is back",
+                self.endpoint, self.reason, self.elsewhere()
             ),
             OutagePhase::Response => write!(
                 formatter,
@@ -1056,6 +1072,14 @@ pub fn is_missing_route(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.status == 404)
 }
 
+/// Exactly the answer a daemon without the route gives: Axum's 404 with no body. A 404 that says
+/// anything, malformed or not, is an answer from a route that exists.
+pub fn is_absent_route(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<UnexpectedResponse>()
+        .is_some_and(|error| error.status == 404 && error.empty)
+}
+
 /// The HTTP status an API call failed with, including an answer without an error body.
 pub fn http_status(error: &anyhow::Error) -> Option<u16> {
     error
@@ -1135,6 +1159,8 @@ impl std::error::Error for ApiResponseError {}
 struct UnexpectedResponse {
     status: u16,
     body: String,
+    /// Whether the answer had no bytes at all; `body` is trimmed for display.
+    empty: bool,
 }
 
 impl fmt::Display for UnexpectedResponse {
@@ -1715,6 +1741,7 @@ fn api_error(status: u16, bytes: &[u8]) -> anyhow::Error {
     UnexpectedResponse {
         status,
         body: String::from_utf8_lossy(bytes).trim().to_owned(),
+        empty: bytes.is_empty(),
     }
     .into()
 }
@@ -2068,6 +2095,30 @@ mod tests {
         assert!(outage.local_connect_defect());
         assert!(!outage.starting);
         assert!(outage.summary().contains("inspect the socket path"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_socket_no_daemon_holds_says_the_daemon_may_listen_elsewhere() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("st3.sock");
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        let refused = std::io::Error::from_raw_os_error(libc::ECONNREFUSED);
+        let outage = || DaemonUnreachable::connect_io(socket.display().to_string(), &refused);
+        // No daemon ever observed startup here: refused, as before.
+        assert!(!outage().summary().contains("another socket"), "{}", outage().summary());
+        {
+            let startup = crate::startup::Startup::begin(&socket).unwrap();
+            startup.serving();
+            // A daemon holds it: a restart or a slow accept, not a socket left behind.
+            assert!(!outage().summary().contains("another socket"), "{}", outage().summary());
+        }
+        // That daemon has exited and nothing holds the socket.
+        let summary = outage().summary();
+        assert!(summary.contains("it may be restarting; no daemon holds this socket now"), "{summary}");
+        assert!(summary.contains("`socket` in config.toml or ST3_ENDPOINT"), "{summary}");
+        let waited = outage().after(Duration::from_secs(30)).to_string();
+        assert!(waited.contains("restarting or stopped; no daemon holds this socket now"), "{waited}");
     }
 
     #[cfg(target_os = "linux")]
@@ -3012,4 +3063,23 @@ mod tests {
             "a session the registry did not name must receive nothing"
         );
     }
+}
+
+#[cfg(test)]
+mod absent_route_tests {
+    use super::*;
+
+    /// Only Axum's empty 404 says a route is absent; a 404 with any body comes from a route that
+    /// exists, and another status is not about routes.
+    #[test]
+    fn only_an_empty_404_is_an_absent_route() {
+        // Through the decoder that builds the error from the answer's bytes.
+        let answer = |status, body: &[u8]| api_error(status, body);
+        assert!(is_absent_route(&answer(404, b"")));
+        assert!(!is_absent_route(&answer(404, b"not json")));
+        assert!(!is_absent_route(&answer(404, b"  \n")), "a body of whitespace is still a body");
+        assert!(!is_absent_route(&answer(500, b"")));
+        assert!(!is_absent_route(&anyhow::anyhow!("another failure")));
+    }
+
 }

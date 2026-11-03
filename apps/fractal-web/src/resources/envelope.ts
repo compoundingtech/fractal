@@ -37,7 +37,9 @@ export const Family = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]*$/u)
   identifier: 'Family',
 })
 
-const schemaIdPattern = /^st3\.([a-z][a-z0-9-]*)(?::([a-z0-9][a-z0-9.-]*))?@([1-9]\d*)$/u
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+const schemaIdPattern = /^(?:st3|fractal)\.([a-z][a-z0-9-]*)(?::([a-z0-9][a-z0-9.-]*))?@([1-9]\d*)$/u
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 
 /**
  * Schema id: `st3.<family>[:<kind>]@<major>`. The kind segment exists only for families whose

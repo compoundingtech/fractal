@@ -255,6 +255,7 @@ mission "orchid" state="ready" {
     .unwrap();
     store.apply_internal(&intent, "cli-output-fixture").unwrap();
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),

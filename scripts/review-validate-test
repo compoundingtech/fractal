@@ -137,6 +137,27 @@ class ReviewValidate(unittest.TestCase):
         verdict["risk"]["final"] = "high"
         self.assertEqual(self.run_validate(verdict).returncode, 0)
 
+    def test_the_factory_read_flag_is_the_final_medium_with_an_area_and_nothing_else(self):
+        area = [{"area": "concurrency", "paths": ["crates/a.rs"], "lines": []}]
+        verdict = good()
+        verdict["risk"]["deterministic"].update(level="medium", factory_read=area)
+        verdict["risk"].update(final="medium", needs_factory_read=True)
+        verdict["risk"]["llm"]["level"] = "low"
+        self.assertEqual(self.run_validate(verdict).returncode, 0, self.run_validate(verdict).stderr)
+        verdict["risk"]["needs_factory_read"] = False
+        self.refused(verdict, "risk.needs_factory_read")
+        verdict["risk"].update(final="high", needs_factory_read=True)
+        verdict["risk"]["llm"]["level"] = "high"
+        self.refused(verdict, "risk.needs_factory_read")
+        plain = good()
+        plain["risk"]["deterministic"]["factory_read"] = []
+        plain["risk"]["needs_factory_read"] = False
+        self.assertEqual(self.run_validate(plain).returncode, 0)
+        malformed = good()
+        malformed["risk"]["deterministic"]["factory_read"] = [{"area": "x"}]
+        self.refused(malformed, "factory_read")
+        self.assertEqual(self.run_validate(good()).returncode, 0)
+
     def test_the_deterministic_level_cannot_be_lower_than_its_own_reasons(self):
         verdict = good()
         verdict["risk"]["deterministic"]["reasons"][0]["level"] = "high"

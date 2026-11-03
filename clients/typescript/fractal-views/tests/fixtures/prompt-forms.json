@@ -12,7 +12,7 @@
         { "answer": "deny", "label": "No, and ask again next time", "enter": false }
       ],
       "mark": 0,
-      "elsewhere": "Claude's other choices are in its terminal (Ctrl+])."
+      "elsewhere": "Claude's other choices are in its terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane)."
     }
   },
   {
@@ -28,7 +28,7 @@
         { "answer": "deny", "label": "No", "enter": false }
       ],
       "mark": 0,
-      "elsewhere": "Claude's other choices are in its terminal (Ctrl+])."
+      "elsewhere": "Claude's other choices are in its terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane)."
     }
   },
   {
@@ -41,7 +41,7 @@
       "question": "Do you want to proceed?",
       "options": [{ "answer": "deny", "label": "No", "enter": false }],
       "mark": null,
-      "elsewhere": "Claude's other choices are in its terminal (Ctrl+])."
+      "elsewhere": "Claude's other choices are in its terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane)."
     }
   },
   {
@@ -57,7 +57,7 @@
         { "answer": "deny", "label": "No", "enter": false }
       ],
       "mark": 0,
-      "elsewhere": "Claude's other choices are in its terminal (Ctrl+])."
+      "elsewhere": "Claude's other choices are in its terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane)."
     }
   },
   {
@@ -73,7 +73,7 @@
         { "answer": "deny", "label": "No, keep planning", "enter": false }
       ],
       "mark": 0,
-      "elsewhere": "Claude's other choices are in its terminal (Ctrl+])."
+      "elsewhere": "Claude's other choices are in its terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane)."
     }
   },
   {
@@ -125,7 +125,7 @@
         { "answer": "deny", "label": "No", "enter": false }
       ],
       "mark": 0,
-      "elsewhere": "Codex's other choices are in its terminal (Ctrl+])."
+      "elsewhere": "Codex's other choices are in its terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane)."
     }
   },
   {

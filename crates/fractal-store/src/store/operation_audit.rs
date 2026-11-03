@@ -12,6 +12,7 @@
 //! The 100 ms snapshot target is cooperative, not a hard transaction deadline; caller
 //! cancellation remains active during the growing work allowance.
 use super::*;
+use smallclaims::operation_metadata::OperationMetadata;
 use std::time::{Duration, Instant};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 

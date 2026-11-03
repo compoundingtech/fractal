@@ -636,6 +636,79 @@ version 2
     assert_eq!(error.to_string(), "subject filters need a sender filter");
 }
 
+/// A filtered page lists the graph's matches and then the stream's, one page at a time across
+/// the boundary, and its sender, recipient and title filters leave out a stream item as they
+/// leave out a graph message.
+#[test]
+fn a_filtered_page_goes_on_from_the_graph_into_the_stream() {
+    let root = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+    let shard = fractal_store::store::messages_shard::open(&store, root.path()).unwrap();
+    let message = |subject: &str, from: &str, to: &str, title: &str| ClaimInput {
+        subject: subject.into(),
+        kind: "message.sent".into(),
+        actor: Some(from.into()),
+        fields: serde_json::from_value(json!({
+            "from": from, "to": to, "title": title, "content": subject, "status": "sent"
+        }))
+        .unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    store.append_claim(&message("message/00000000000000a1", "agent/birch", "agent/cedar", "Plan: one")).unwrap();
+    store.append_claim(&message("message/00000000000000a2", "agent/other", "agent/cedar", "Plan: other")).unwrap();
+    for (subject, from, to, title) in [
+        ("message/00000000000000b1", "agent/birch", "agent/cedar", "Plan: two"),
+        ("message/00000000000000b2", "agent/other", "agent/cedar", "Plan: three"),
+        ("message/00000000000000b3", "agent/birch", "agent/cedar", "Notes"),
+        ("message/00000000000000b4", "agent/birch", "agent/elm", "Plan: four"),
+        ("message/00000000000000b5", "agent/birch", "agent/cedar", "Plan: five"),
+    ] {
+        shard.append_claim(&message(subject, from, to, title)).unwrap();
+    }
+    let through = store.index().unwrap();
+    let listing = |to: Option<&str>, title: Option<&str>, prefix: Option<&str>, limit: usize| {
+        let (mut after, mut listed) = (None, Vec::new());
+        loop {
+            let (page, next) = store
+                .messages_page_filtered(to, Some("agent/birch"), title, prefix, false, after, through, limit)
+                .unwrap();
+            assert!(page.len() <= limit);
+            listed.extend(page.into_iter().map(|message| message.subject));
+            match next {
+                Some(next) => after = Some(next),
+                None => return listed,
+            }
+        }
+    };
+    assert_eq!(
+        listing(Some("agent/cedar"), None, Some("Plan:"), 1),
+        ["message/00000000000000a1", "message/00000000000000b1", "message/00000000000000b5"]
+    );
+    assert_eq!(
+        listing(None, None, None, 2),
+        [
+            "message/00000000000000a1",
+            "message/00000000000000b1",
+            "message/00000000000000b3",
+            "message/00000000000000b4",
+            "message/00000000000000b5",
+        ]
+    );
+    assert_eq!(listing(None, Some("Plan: two"), None, 1), ["message/00000000000000b1"]);
+    // A page the graph's matches fill ends there; the next one starts the stream.
+    let (page, next) = store
+        .messages_page_filtered(Some("agent/cedar"), Some("agent/birch"), None, None, false, None, through, 1)
+        .unwrap();
+    assert_eq!(page[0].subject, "message/00000000000000a1");
+    let (page, _) = store
+        .messages_page_filtered(Some("agent/cedar"), Some("agent/birch"), None, None, false, next, through, 1)
+        .unwrap();
+    assert_eq!(page[0].subject, "message/00000000000000b1");
+    assert!(page[0].created_index > fractal_store::store::messages_shard::STREAM_INDEX_BASE);
+}
+
 mod actual_purity_tests {
     use super::*;
 

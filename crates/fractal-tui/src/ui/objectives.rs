@@ -14,9 +14,8 @@ use super::view::{Load, World};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use fractal_client::{SloHistory, SloRow};
+use fractal_ui_model::slo::{NEARLY_SPENT, Tone};
 
-/// A budget with this little left (percent) reads as nearly spent.
-pub const NEARLY_SPENT: f64 = 10.0;
 
 /// The longest span a chart covers, in hours: st keeps seven days of readings.
 pub const CHART_HOURS: u64 = 168;
@@ -39,20 +38,19 @@ pub fn slo_id(id: &str) -> Option<&str> {
 
 /// Whether a row needs the person: an objective is missed, or a budget is nearly spent.
 pub fn is_red(row: &SloRow) -> bool {
-    row.status == "missed"
-        || row.kind == "budget"
-            && row.remaining_percent.is_some_and(|left| left <= NEARLY_SPENT)
+    tone(row) == Tone::Red
+}
+
+fn tone(row: &SloRow) -> Tone {
+    fractal_ui_model::slo::tone(&row.kind, &row.status, row.remaining_percent)
 }
 
 fn color(row: &SloRow) -> ratatui::style::Color {
-    if is_red(row) {
-        theme::RED
-    } else {
-        match row.status.as_str() {
-            "met" => theme::GREEN,
-            "stale" => theme::YELLOW,
-            _ => theme::OVERLAY1,
-        }
+    match tone(row) {
+        Tone::Red => theme::RED,
+        Tone::Green => theme::GREEN,
+        Tone::Yellow => theme::YELLOW,
+        Tone::Quiet => theme::OVERLAY1,
     }
 }
 
@@ -63,6 +61,30 @@ fn span(text: impl Into<String>, style: Style) -> Span<'static> {
 fn left(row: &SloRow) -> String {
     row.remaining_percent
         .map_or_else(|| "no data".into(), |left| format!("{left:.0}% left"))
+}
+
+/// A budget's forecast: in full for the detail, in a few characters for the narrow list, and
+/// whether it runs out ahead of its reset. `None` for a row the daemon had too little history to
+/// forecast.
+struct Forecast {
+    long: String,
+    short: String,
+    runs_out: bool,
+}
+
+fn forecast(row: &SloRow) -> Option<Forecast> {
+    match (row.runs_out_at_unix_ms, row.forecast_used_percent) {
+        (Some(at), _) => {
+            let in_ = span_of(at.saturating_sub(now_ms()));
+            Some(Forecast { long: format!("runs out in {in_}, before it resets"), short: format!("out in {in_}"), runs_out: true })
+        }
+        (None, Some(used)) => Some(Forecast {
+            long: format!("{used:.0}% used by the reset"),
+            short: format!("{used:.0}% by reset"),
+            runs_out: false,
+        }),
+        (None, None) => None,
+    }
 }
 
 /// The list's objectives and budgets, a header each, appended beside the accounts. A read still
@@ -115,13 +137,21 @@ pub fn list(world: &World, items: &mut Vec<Item>, ids: &mut Vec<String>) {
                     span(name, theme::bold()),
                 ],
                 right: vec![span(left(row), theme::strong(color))],
-                second: vec![span(
-                    format!(
-                        "   {} · target {} · {}",
-                        row.current, row.target, row.window
-                    ),
-                    if is_red(row) { theme::fg(theme::RED) } else { theme::dim() },
-                )],
+                // A budget's target is always its whole allowance, so a forecast takes that place:
+                // the list is narrow and the end of the line is cut first.
+                second: match forecast(row) {
+                    Some(forecast) => vec![
+                        span(format!("   {} · ", row.current), if is_red(row) { theme::fg(theme::RED) } else { theme::dim() }),
+                        span(forecast.short, if forecast.runs_out { theme::fg(theme::YELLOW) } else { theme::dim() }),
+                    ],
+                    None => vec![span(
+                        format!(
+                            "   {} · target {} · {}",
+                            row.current, row.target, row.window
+                        ),
+                        if is_red(row) { theme::fg(theme::RED) } else { theme::dim() },
+                    )],
+                },
                 children: Vec::new(),
             });
             ids.push(id_of(row));
@@ -191,6 +221,15 @@ pub fn detail(world: &World, id: &str, hours: u64, width: usize) -> Doc {
             theme::text(),
         );
     }
+    if let Some(forecast) = forecast(row) {
+        let basis = row.forecast_basis_minutes.map_or(String::new(), |minutes| format!(" (from the last {})", span_of(minutes * 60_000)));
+        doc.field(
+            "forecast",
+            &format!("{}{basis}", forecast.long),
+            width,
+            if forecast.runs_out { theme::fg(theme::YELLOW) } else { theme::text() },
+        );
+    }
     if let Some(at) = row.measured_at_unix_ms {
         doc.field(
             "measured",
@@ -200,6 +239,9 @@ pub fn detail(world: &World, id: &str, hours: u64, width: usize) -> Doc {
         );
     }
     doc.field("explain", &row.explain, width, theme::text());
+    if let Some(url) = &world.slo_otel_url {
+        doc.field("history", url, width, theme::text());
+    }
     doc.blank();
     let hours = hours.min(CHART_HOURS);
     let what = if row.kind == "budget" {
@@ -367,6 +409,10 @@ mod tests {
             remaining_percent: left,
             status: status.into(),
             resets_at_unix_ms: None,
+            tone: None,
+            forecast_used_percent: None,
+            forecast_basis_minutes: None,
+            runs_out_at_unix_ms: None,
             measured_at_unix_ms: None,
             explain: "explain".into(),
         }
@@ -374,6 +420,21 @@ mod tests {
 
     fn history(samples: u64, steps: Vec<Option<f64>>) -> SloHistory {
         SloHistory { id: "example".into(), since_ms: 0, until_ms: 3_600_000, samples, steps }
+    }
+
+    #[test]
+    fn a_forecast_says_when_a_budget_runs_out_or_how_much_will_be_used_by_its_reset() {
+        let mut budget = row("budget", "met", Some(40.0));
+        assert!(forecast(&budget).is_none(), "a budget with no forecast says nothing");
+        budget.forecast_used_percent = Some(72.4);
+        let steady = forecast(&budget).unwrap();
+        assert_eq!((steady.long.as_str(), steady.short.as_str(), steady.runs_out), ("72% used by the reset", "72% by reset", false));
+        budget.forecast_used_percent = Some(100.0);
+        budget.runs_out_at_unix_ms = Some(now_ms() + 3 * 3_600_000 + 5_000);
+        let running_out = forecast(&budget).unwrap();
+        assert_eq!(running_out.long, "runs out in 3h, before it resets");
+        assert_eq!(running_out.short, "out in 3h");
+        assert!(running_out.runs_out);
     }
 
     #[test]
