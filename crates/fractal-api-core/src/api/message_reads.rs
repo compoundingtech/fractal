@@ -419,7 +419,8 @@ pub fn asks_for<'a>(
     messages: impl IntoIterator<Item = &'a MessageView>,
 ) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
     let mut asks = BTreeMap::<String, Vec<String>>::new();
-    // Messages to one recipient, of one kind, share a host.
+    // Messages to one recipient, of one kind, share a host: the key names every input of
+    // `relay_host` besides the store, and must keep doing so.
     let mut hosts = HashMap::<(String, bool), Option<String>>::new();
     for message in messages {
         let kind = (
