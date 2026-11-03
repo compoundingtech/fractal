@@ -20,9 +20,10 @@ export async function tooltipFor(anchor: HTMLElement, name: string): Promise<HTM
 
 /**
  * Observe the final history commit. History advances one batch per animation frame, so a stall is the configured
- * async deadline passing while the page renders frames and no turn is added: two frames, one to run a batch and
- * the next to show its commit. A browser that renders no frames gives the viewport no chance to advance (a loaded
- * host can pause its compositor for a second while page timers still run), so the deadline waits for those frames.
+ * async deadline passing with no new turn, then two more frames with none: one to run a batch and the next to show
+ * its commit. A browser that renders no frames gives the viewport no chance to advance (a loaded host can pause its
+ * compositor for a second while page timers still run), so the deadline waits for those frames. Frames from before
+ * the deadline do not count, so a pause that outlasts it still leaves the first frame after it to commit a batch.
  */
 export async function committedTranscriptHistory(canvasElement: HTMLElement, expectedTurns: number, abortSignal: AbortSignal): Promise<HTMLElement> {
   const canvas = within(canvasElement)
@@ -43,7 +44,7 @@ export async function committedTranscriptHistory(canvasElement: HTMLElement, exp
         expired = false
         frames = 0
         window.clearTimeout(deadline)
-        deadline = window.setTimeout(() => { expired = true; stalled() }, timeout)
+        deadline = window.setTimeout(() => { expired = true; frames = 0 }, timeout)
       }
       const countFrame = () => {
         frames++

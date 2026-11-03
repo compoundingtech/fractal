@@ -46,6 +46,17 @@ test('a browser that renders no frames past the deadline gives history the frame
   assert.equal(viewport.querySelectorAll('[data-testid="transcript-turn"]').length, 14)
 })
 
+test('a pause that outlasts the deadline after a frame still lets the next frame commit history', async () => {
+  const readiness = committedTranscriptHistory(canvas, 14, new AbortController().signal)
+  readiness.catch(() => {})
+  renderFrame()
+  await wait(deadline * 2)
+  renderFrame()
+  turns(4)
+  finish()
+  assert.equal(await readiness, viewport)
+})
+
 test('history that adds no turn while frames render still fails at the deadline', async () => {
   const started = performance.now()
   const readiness = committedTranscriptHistory(canvas, 14, new AbortController().signal)
