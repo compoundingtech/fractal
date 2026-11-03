@@ -44,6 +44,7 @@ HOST_NAME_NOTES = {
     "release-notes/fractal-web-machine-filter.json": "66f0a01017585369de805b5f69a030208b67939ce7ffcd288cecb9edf0f072aa",
     "release-notes/heal-checkpoint-covering-current-main.json": "7218f34f57f9c98c963c19af30ab55f76ea63779293bd0d1c602d76d72119def",
     "release-notes/heal-checkpoint-digest-extrema.json": "e697d12cb60d3daf648511e62453cacb6b56d7e1bc1348c5749851a1204da657",
+    "release-notes/hm-single-config.json": "6217665ea7cda1d043103b4e017e21cd10be51fa531cdf343c4a7f6afc2f3c62",
     "release-notes/reader-mmap.json": "a80ed4eabae4fdff5468dd38e0348c226680d59ad246154e631f33d904773c86",
     "release-notes/sekrets-vouch-endpoint.json": "3875f5d263c96d634e013186a0b3f37f291d828493daf58237d643d098883791",
     "release-notes/stop-deferral-history-off-startup.json": "56e528d365b43a616fddc20f4ffb96415d4de3c7a78b3efb79a2ac23fb98db4b",
