@@ -1315,6 +1315,7 @@ fn remove_inbox_duplicate(source: &Path, filename: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     /// Native inbox walkers reject staged names as non-message filenames. Pin the historical
     /// prefix on the actual generated name as well as that rejection.
