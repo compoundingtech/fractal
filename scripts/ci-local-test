@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """scripts/ci-local: the stages run in a home of their own, with no st, GitHub or SSH agent variable, in order, and the
 exit status is the first failure's. cargo and the stage scripts are stubs that record what they saw; nothing compiles."""
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -444,7 +445,25 @@ class CiLocal(unittest.TestCase):
                'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
         run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
-        self.addCleanup(lambda: run.poll() is None and (os.kill(run.pid, signal.SIGCONT), run.kill()))
+        def kill_run():
+            # The whole tree, not the run alone: a run killed while it or its stop is frozen leaves its lane stopped for good
+            # (20 stopped lanes after a day of failing runs of this test, 2026-11-03).
+            tree, grew = {run.pid}, True
+            while grew:
+                grew = False
+                for status in Path('/proc').glob('[0-9]*/status'):
+                    try:
+                        parent = int(next(line.split()[1] for line in status.read_text().splitlines() if line.startswith('PPid:')))
+                    except (OSError, StopIteration, ValueError):
+                        continue
+                    if parent in tree and int(status.parent.name) not in tree:
+                        tree.add(int(status.parent.name))
+                        grew = True
+            for pid in tree:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+            run.wait()
+        self.addCleanup(lambda: run.poll() is None and kill_run())
         workers = Path(f'{self.log}.workers')
 
         def alive():
