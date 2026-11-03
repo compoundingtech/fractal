@@ -5,7 +5,6 @@
 
 pub use crate::host::{detect_host, use_harness_state_root};
 pub(crate) use crate::host::{harness_state_root, state_root};
-pub(crate) use crate::process::{CAPTURE_CAP_BYTES, read_bounded_tail, reap_detached};
 
 use std::path::{Path, PathBuf};
 

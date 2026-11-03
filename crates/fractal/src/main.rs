@@ -610,6 +610,22 @@ enum FleetCommand {
         #[command(subcommand)]
         command: FleetTransportsCommand,
     },
+    /// Let this member start, restart and retire its agents without peers it cannot reach. With
+    /// `wait_for_peers_after_start` on, a member waits after each start to catch up with a peer
+    /// before acting on where its agents run; this releases the named peers for the current daemon
+    /// start only. Run it on the member.
+    AdmitWithout {
+        /// A peer this member stops waiting for. Repeat it for several.
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
+        /// Why the member may go on without them.
+        #[arg(long)]
+        reason: String,
+        /// The person or agent applying it.
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+        #[arg(long = "as")]
+        actor: String,
+    },
     /// Show this node, the fleet's members, and open invites.
     Status,
     /// Wait for this node's first sync to end: until it holds the same claims as the peer it
@@ -7282,7 +7298,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
         config.unlaned_seat.clone(),
-    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;

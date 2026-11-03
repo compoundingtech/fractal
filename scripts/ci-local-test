@@ -526,27 +526,34 @@ exit 0
         clippy = int(marker.read_text())
         time.sleep(0.5)  # the tests stage is done; the run is waiting for its lane
         run.terminate()
-        listed = False
-        deadline = time.monotonic() + 20
-        while not listed and run.poll() is None and time.monotonic() < deadline:
+
+        def reading_proc():
             try:
                 names = os.listdir(f'/proc/{run.pid}/fd')
             except OSError:
-                continue
+                return False
             for name in names:
                 try:
-                    target = os.readlink(f'/proc/{run.pid}/fd/{name}')
+                    if re.fullmatch(r'/proc/\d+/status', os.readlink(f'/proc/{run.pid}/fd/{name}')):
+                        return True
                 except OSError:
                     continue
-                if re.fullmatch(r'/proc/\d+/status', target):
-                    os.kill(run.pid, signal.SIGSTOP)
-                    listed = True
+            return False
+        # Frozen first, then looked at: a run seen reading /proc and frozen a moment later may have finished its listing in that
+        # moment and sent clippy its SIGTERM (a merge group, 2026-11-02, under load). Frozen with a status file open, it is inside the
+        # listing, and it signals nothing until the listing is done.
+        listed = False
+        deadline = time.monotonic() + 20
+        while not listed and run.poll() is None and time.monotonic() < deadline:
+            os.kill(run.pid, signal.SIGSTOP)
+            for _ in range(500):
+                if state(run.pid) in ('T', None, 'Z'):
                     break
+                time.sleep(0.001)
+            listed = state(run.pid) == 'T' and reading_proc()
+            if not listed:
+                os.kill(run.pid, signal.SIGCONT)
         self.assertTrue(listed, 'the test did not catch the stopped run reading /proc')
-        for _ in range(500):
-            if state(run.pid) == 'T':
-                break
-            time.sleep(0.01)
         self.assertEqual(state(run.pid), 'T', 'the stopped run is frozen while its /proc listing is open')
         # Frozen with that listing open, the run has not yet stopped clippy (it stops a process only after listing /proc).
         self.assertNotIn(state(clippy), (None, 'Z'), 'the run was frozen before it stopped clippy')
