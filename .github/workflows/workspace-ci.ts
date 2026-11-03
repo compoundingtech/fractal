@@ -209,7 +209,7 @@ export const afterPickRunner = { needs: [pickRunnerJobId], if: '${{ !cancelled()
  * record up to the GC cap, and `fetch-depth: 0` fetches every tag: 5,000 of them added 81.5 MiB and 16 s to a full fetch
  * (measured 2026-10-19), mostly source objects of tested commits that no branch holds. So check out one commit, then fetch the
  * rest with a negative refspec (git 2.29 or later). Deepening the shallow clone (`--unshallow`) took 21 s against 11 s for a
- * full fetch (2026-10-20, from hetz2): the server cannot reuse its packs for it. So the shallow marker goes and the history is
+ * full fetch (2026-10-20, from a build host): the server cannot reuse its packs for it. So the shallow marker goes and the history is
  * fetched as a fresh clone would (`--refetch`, git 2.36 or later), then checked: the whole history is here or the step fails.
  * The job token is used only when checkout did not persist its own.
  */

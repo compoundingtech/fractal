@@ -41,6 +41,23 @@ class PublicRepositoryCheck(unittest.TestCase):
             self.assertEqual(self.findings(f'prefix{name}suffix'), [])
             self.assertTrue(self.findings(path=f'docs/{name}.md'))
 
+    def test_notes_merged_before_a_host_was_listed_may_name_only_that_host_and_only_as_merged(self):
+        later = [host.replace('\\', '') for host in CHECK['LATER_HOSTS']]
+        earlier = [host.replace('\\', '') for host in CHECK['HOSTS'] if host not in CHECK['LATER_HOSTS']]
+        root = Path(__file__).resolve().parent.parent
+        for path in sorted(CHECK['HOST_NAME_NOTES']):
+            with self.subTest(path=path):
+                merged = root.joinpath(path).read_text(encoding='utf-8')
+                self.assertTrue(CHECK['HOST'].search(merged), 'a listed note names a later host')
+                self.assertEqual(self.findings(merged, path=path), [])
+                # Any change to the note, even one that adds nothing else, loses the exception.
+                self.assertTrue(self.findings(merged + ' ', path=path))
+                for name in earlier:
+                    self.assertTrue(self.findings(merged + f'ran on {name}', path=path))
+        for name in later:
+            self.assertTrue(self.findings(f'ran on {name}', path='release-notes/example.json'))
+            self.assertTrue(self.findings(path=f'release-notes/{name}.json'))
+
     def test_private_repository_references(self):
         for separator in ['-', '%2d']:
             name = separator.join(['st3', 'network'])
