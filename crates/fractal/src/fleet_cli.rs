@@ -1126,6 +1126,8 @@ async fn save_and_publish_fleet_settings(
             &fractal_daemon::api::FleetEndpointsRequest {
                 mode: file.mode.as_str().into(),
                 endpoints,
+                clear_fabric_rekey: file.mode == fractal_daemon::config::FleetMode::DialOut
+                    || !file.transports.iter().any(|transport| transport == "fabric"),
             },
         )
         .await
