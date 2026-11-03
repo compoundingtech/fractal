@@ -351,8 +351,11 @@ was refused recovers by seeding from the published head (`git fetch origin +refs
 so its chain continues rather than starting again. Without that seed, a pull on an empty copy starts a new chain that it
 cannot publish.
 
-Before other fetches, an unreadable local chain is repaired from a trusted published continuation in an isolated
-repository. The published head must verify against the existing `--log-keys`, and contain the exact damaged local
+Before other fetches, the publisher checks chain connectivity and streams the current tree's contents to detect
+unreadable bodies as well as empty objects. Historical blob bodies are not rescanned on every heartbeat. An unreadable
+local view is repaired from a trusted published continuation in an isolated repository. Repair scans full objects once
+to identify damaged loose files, including blobs whose headers still read. The published head must verify against the
+existing `--log-keys`, and contain the exact damaged local
 head in its ancestry. Broken loose objects are retained under `evidence-log.broken-objects`; no published head,
 an untrusted head, or a chain that cannot prove it continues the damaged local head is an alarm (exit 1).
 An unpublished damaged head requires operator recovery. Empty copies are not automatically seeded. The timer sets

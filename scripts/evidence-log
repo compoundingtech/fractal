@@ -78,7 +78,7 @@ class Usage(Refused):
     pass
 
 
-def git(repo, *args, stdin=None, check=True, env=None, config=()):
+def git(repo, *args, stdin=None, check=True, env=None, config=(), stdout=subprocess.PIPE):
     clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     clean.update(env or {})
     # No automatic maintenance: a detached `git maintenance run --auto` after one fetch rewrote the shallow file while the next
@@ -86,7 +86,7 @@ def git(repo, *args, stdin=None, check=True, env=None, config=()):
     command = ['git', '-C', repo, '-c', 'core.hooksPath=/dev/null', '-c', 'gpg.format=ssh', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0']
     for item in config:
         command += ['-c', item]
-    done = subprocess.run([*command, *args], input=stdin, capture_output=True, timeout=1800,
+    done = subprocess.run([*command, *args], input=stdin, stdout=stdout, stderr=subprocess.PIPE, timeout=1800,
                           env=dict(clean, GIT_NO_REPLACE_OBJECTS='1', GIT_NO_LAZY_FETCH='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C'))
     if check and done.returncode != 0:
         raise Refused(f'git {args[0]}: {done.stderr.decode(errors="replace").strip()[-300:]}')
@@ -316,7 +316,15 @@ def readable_log(repo, head):
         return False
     objects = b''.join(line.split(b' ', 1)[0] + b'\n' for line in walked.stdout.splitlines())
     checked = git(repo, 'cat-file', '--batch-check', stdin=objects, check=False)
-    return checked.returncode == 0 and not any(line.endswith(b' missing') for line in checked.stdout.splitlines())
+    if checked.returncode != 0 or any(line.endswith(b' missing') for line in checked.stdout.splitlines()):
+        return False
+    # Headers alone accept a truncated compressed blob. Read the current view too, streaming without retaining its contents.
+    # Historical blob bodies are not scanned on every heartbeat; rev-list above checks the chain's connectivity.
+    current = git(repo, 'ls-tree', '-r', '--format=%(objectname)', head, check=False)
+    if current.returncode != 0:
+        return False
+    bodies = b''.join(oid + b'\n' for oid in sorted(set(current.stdout.splitlines())))
+    return git(repo, 'cat-file', '--batch', stdin=bodies, check=False, stdout=subprocess.DEVNULL).returncode == 0
 
 
 def prepare_log(repo, remote, published, log_keys):
@@ -348,11 +356,16 @@ def prepare_log(repo, remote, published, log_keys):
         loose = {folder.name + path.name: path for folder in objects.iterdir() if len(folder.name) == 2 and folder.is_dir()
                  for path in folder.iterdir() if OID.fullmatch(folder.name + path.name)}
         checked = git(repo, 'cat-file', '--batch-check', stdin=''.join(f'{oid}\n' for oid in loose).encode(), check=False)
-        for line in checked.stdout.decode().splitlines():
-            if line.endswith(' missing') and line.split()[0] in loose:
-                oid = line.split()[0]
-                quarantine.mkdir(exist_ok=True)
-                os.replace(loose[oid], quarantine / f'{oid}.{time.time_ns()}')
+        broken = {line.split()[0] for line in checked.stdout.decode().splitlines() if line.endswith(' missing')}
+        # A repair scans complete objects once so header-readable, truncated bodies are moved aside as well.
+        scanned = git(repo, 'fsck', '--no-dangling', '--no-reflogs', check=False)
+        broken.update(re.findall(r"(?m)^error: corrupt loose object '([0-9a-f]+)'$", scanned.stderr.decode(errors='replace')))
+        broken.update(re.findall(r'(?m)^error: ([0-9a-f]+): object corrupt or missing:', scanned.stderr.decode(errors='replace')))
+        for oid in sorted(broken & loose.keys()):
+            if git(repo, 'cat-file', '-p', oid, check=False, stdout=subprocess.DEVNULL).returncode == 0:
+                continue  # preserve readable loose objects even if a diagnostic mentions their names
+            quarantine.mkdir(exist_ok=True)
+            os.replace(loose[oid], quarantine / f'{oid}.{time.time_ns()}')
         git(repo, 'fetch', '--refetch', '--no-tags', '-q', fresh, f'+{LOG}:{REMOTE_LOG}')
         if not readable_log(repo, published) or not log_signed(repo, published, log_keys):
             raise Refused('the published log could not repair the local object store')
