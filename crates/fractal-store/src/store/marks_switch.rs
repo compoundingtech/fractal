@@ -109,7 +109,7 @@ impl Store {
                     )
                 })
                 .map_err(anyhow::Error::msg)??;
-            tracing::info!(switched, ?blockers, "message marks switch changed");
+            tracing::debug!(switched, ?blockers, "message marks switch changed");
         }
         Ok((switched, blockers))
     }
