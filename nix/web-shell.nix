@@ -32,6 +32,8 @@ webPkgs.mkShell {
     webPkgs.nodejs_24
     webPkgs.python3
     webPkgs.bun
+    # ci-local-web runs the Python web-shell regression suite.
+    webPkgs.python3
     webPkgs.watchman
     effectUtilsPackages.buck2
     effectUtilsPackages.genie
