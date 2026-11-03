@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Include Claude local instructions and nested rules in launch contracts",
+  "replay": {"status": "none", "detail": "Existing incarnation receipts remain unchanged."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No coordination policy change."},
+  "compatibility": {"status": "changed", "detail": "Declared and newly launched contracts include CLAUDE.local.md and nested Claude rules files."},
+  "downtime": {"status": "none", "detail": "No automatic process refresh."},
+  "manual": {"status": "none", "detail": "No additional setup."},
+  "recovery": {"status": "none", "detail": "No migration to reverse."}
+}
