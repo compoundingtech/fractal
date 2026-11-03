@@ -1447,7 +1447,7 @@ class CommittedPolicy(unittest.TestCase):
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-workspace.yaml.genie.ts', 'scripts/ci-fractal-web', 'scripts/ci-fractal-web-changes',
             'scripts/ci-fractal-web-gate', 'scripts/ci-fractal-web-kit-graph', 'scripts/ci-fractal-web-licenses',
             'scripts/ci-fractal-web-licenses-test', 'scripts/ci-fractal-web-test', 'scripts/ci-typescript-client', 'scripts/ci-web-shell',
-            'scripts/ci-web-shell-inputs.jq', 'scripts/ci-web-shell-test',
+            'scripts/ci-web-shell-inputs.jq', 'scripts/ci-web-shell-test', 'scripts/prepare-pnpm-source-inputs.py',
             # ...plus what the lane reads that the detector does not name: a workspace member's manifest (the frozen install), the
             # client fixtures an SDK unit test opens, the source-input list the web shell hook publishes, and the public-repository
             # lint the scenario privacy lane runs.

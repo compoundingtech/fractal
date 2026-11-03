@@ -337,6 +337,13 @@ any process running as the account that runs the timer, until a `st sekrets` pro
 until then: nothing skips or refuses on it. Moving the key behind sekrets changes `signer.json` alone, not this file;
 replacing the key is a change of `.st/evidence-log-key`, which the gate protects (a change to it never skips).
 
+**One publisher at a time.** A publish (pull or gc) is a fast-forward of the head that run fetched, leased on it
+(`--force-with-lease`), so a host whose chain does not continue the published one (a second publisher, or a copy that was
+not seeded) publishes nothing and exits 1 with `publish_refused`. It never overwrites the other host's heads. A copy that
+was refused recovers by seeding from the published head (`git fetch origin +refs/evidence-log/main:refs/evidence-log/main`),
+so its chain continues rather than starting again. Without that seed, a pull on an empty copy starts a new chain that it
+cannot publish.
+
 Measured 2026-10-21 against this repository: the first pull (an empty copy) accepted 4,928 records in 548 s, most of it
 checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
 GC migrates or removes them). A pull with 46 new records took 7.7 s, one with none 0.8 s. The log's files held 426 KB.
@@ -1710,7 +1717,9 @@ starves no run. A host without the shim's slots, or a gate that cannot be read, 
 `tree_wait_s` (the wait for its tree), `tree_slot_wait_s` (the part of it with a tree free, waiting for a slot), `tree_held_s` and
 `tree_blocked_s`: the time the build lane held the tree and built nothing, `tree_pre_start_s` before `ci-local` started (admission and the dev
 shell) plus `tree_slot_blocked_s` with every running `ci-local` stage waiting for a build slot (one stage's wait while another builds is not
-counted). **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
+counted). A run that builds asks for its seat's lane burst before any of this (docs/st3/seat-lanes.md, "Bursts"), and its record has `burst`
+(the size held, or null with `burst_none` saying why) and `burst_wait_s`, the wait for it; a handover gives the burst back and the newer copy
+asks again. **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
 the slot keeps its path (`tree-N` and `target-N`, so cargo's ids for the workspace crates, which contain the path, still match), and when the tree
 there was last registered by another clone it is re-registered as a worktree of the clone now running (its notes land in that clone) while the inputs
 the cleaning keeps (members, installed dependencies, compat baselines) move across by rename. The run still signs only what it built and tested in
@@ -1969,6 +1978,24 @@ host's Watchman service, named by its socket. The note records `kit_shard_count=
 as to CI's aggregate note; its host and agent levels admit it for `pull_request` (`by_level`, `lane: true`). fractal-test asks the base's own
 `scripts/ci-fractal-web-changes` whether any web input changed since HEAD's merge base with the base: when none did, CI does not run the
 lane, so `--status` reads `not relevant` (covered) and a run skips it, neither a failure nor a note.
+
+Locally, web runs in its own thread alongside the Rust build lane and the serial light-check lane. On a build host it holds one
+counted heavy cargo stage slot for its whole run, including the dev shell; the kit plays inherit that admission and take no second
+place. Rust checks keep their per-command admission because their detached test guardian cannot inherit a held stage slot. Web and
+light output is buffered and printed after the build lane, and a background lane that exits without a result fails its checks.
+On timeout or interruption the web process group is killed together with its slot supervisor before the lane is joined; HUP and
+TERM unwind through the same cleanup. A cancelled run also stops a web process that starts during cancellation. Hosts with a cargo
+admission shim must support `--stage-slot`; an unsupported shim fails the check. The web changelog registry writer's generated
+`registry.generated.ts` and its atomic `.tmp` siblings are ignored so they cannot transiently dirty the shared tree for another lane.
+Web and `typescript-client` hold the same per-worktree file lock for their entire check, including every install and dependency
+reader: their different HOME and store settings can otherwise replace the shared `node_modules` while tests use it. The parent
+runner holds the lock in Git's worktree metadata, and web acquires it before taking a heavy slot. Rust and the other light checks
+remain concurrent. `ST_EVIDENCE_SERIAL=1` restores the listed check order, with web still holding its stage slot.
+
+An explicitly authorized candidate-runner measurement uses `--out` in a disposable directory, never `--push`; its exported packs are
+deleted after measurement. When `ST_TEST_REEXEC` is set outside a base copy's `st-test-base-*` directory, the ledger records the tested
+head as `candidate`. `scripts/fractal-test-report` lists those runs separately and excludes them from every SLO figure. Normal signing
+continues to execute the accepted base's runner.
 
 **Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
 is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory,

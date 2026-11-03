@@ -30,6 +30,7 @@ webPkgs.mkShell {
     # Ahead of Node, whose bundled Corepack is older.
     webPkgs.corepack
     webPkgs.nodejs_24
+    webPkgs.python3
     webPkgs.bun
     webPkgs.watchman
     effectUtilsPackages.buck2
@@ -45,14 +46,7 @@ webPkgs.mkShell {
     ln -sfn ${buckRoot}/.buck2/rules .buck2/rules
     ln -sfn ${buckRoot}/.buck2/capabilities .buck2/capabilities
     # Publish root-owned source inputs; pnpm must not mutate the canonical member.
-    node -e '
-      const { readFileSync } = require("node:fs");
-      const { spawnSync } = require("node:child_process");
-      const paths = JSON.parse(readFileSync("pnpm-source-inputs.json", "utf8")).sourceInputPaths;
-      const result = spawnSync(process.execPath, [
-        process.argv[1], "publish", process.cwd(), ".devenv/pnpm-source-inputs", ...paths,
-      ], { stdio: "inherit" });
-      process.exit(result.status ?? 1);
-    ' ${effect-utils}/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs
+    python3 scripts/prepare-pnpm-source-inputs.py publish \
+      --publisher ${effect-utils}/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs
   '';
 }

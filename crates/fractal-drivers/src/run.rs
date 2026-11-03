@@ -1,29 +1,12 @@
 //! Native host/process helper facades and retained catalog path helpers.
 //!
 //! Native drivers keep their established helper paths while catalog readers still use the
-//! working-directory and socket-path calculations below.
+//! socket-path calculations below.
 
 pub use crate::host::{detect_host, use_harness_state_root};
-pub(crate) use crate::host::{harness_state_root, state_root};
-pub(crate) use crate::process::{CAPTURE_CAP_BYTES, read_bounded_tail, reap_detached};
+pub(crate) use crate::host::harness_state_root;
 
 use std::path::{Path, PathBuf};
-
-use crate::reconcile::TaskTarget;
-
-/// Resolve a task's working directory: declared `cwd` (expanded), else the agent's `workspace`
-/// (expanded), else the spec file's directory (spec.md §2). A relative value is joined to the spec
-/// dir; an absolute one replaces it.
-pub(crate) fn resolve_task_cwd(
-    target: &TaskTarget,
-    spec_dir: &Path,
-    catalog_root: &Path,
-) -> PathBuf {
-    match target.cwd.as_deref().or(target.workspace.as_deref()) {
-        Some(c) => spec_dir.join(crate::expand::expand_catalog(c, catalog_root)),
-        None => spec_dir.to_path_buf(),
-    }
-}
 
 /// Resolve `PTY_ROOT` for retained catalog materialization and validation. A nonempty exported
 /// ambient `PTY_ROOT` takes precedence over the catalog declaration and its `<catalog>/pty`

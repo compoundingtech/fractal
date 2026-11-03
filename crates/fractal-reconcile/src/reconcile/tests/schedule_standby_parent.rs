@@ -135,3 +135,46 @@ schedule "orchard" {{ host "ivory"; standby {{ host "jade"; after "20ms" }}
     assert_eq!(primary.idempotency_conflicts(10).unwrap().0, 0,
         "host publication attempts conflicted despite sharing only occurrence run identity");
 }
+
+#[tokio::test]
+async fn a_primary_request_that_never_started_does_not_hold_the_standby_from_later_occurrences() {
+    let (primary, standby, _) = pair();
+    let primary = Arc::new(primary);
+    let standby = Arc::new(standby);
+    let root = tempfile::tempdir().unwrap();
+    let anchor_at = Utc::now() - chrono::Duration::seconds(1);
+    let anchor = anchor_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let source = format!(r#"version 2
+mission "harvest" state="ready" {{
+  goal "Perform the scheduled harvest occurrence."
+ completion {{ when "all-steps-exhausted" }}
+ step "done" {{ agentless }}
+}}
+schedule "orchard" {{ host "ivory"; standby {{ host "jade"; after "20ms" }}
+ every "1h"; anchor {anchor:?}; catch-up "latest"
+ work {{ mission "harvest"; workspace {:?} }}
+}}"#, root.path().to_str().unwrap());
+    apply_source(&primary, &source, "unstarted-primary-request");
+    // The primary reaches occurrence 0 and requests its work, then stops before it starts it.
+    let revision = primary.selected_desired_revision("schedule/orchard").unwrap().unwrap();
+    let append = |kind: &str, fields: Value, evidence: Vec<String>| primary.append_claim(&ClaimInput {
+        subject: "schedule/orchard".into(), kind: kind.into(), actor: None,
+        fields: serde_json::from_value(fields).unwrap(), evidence, expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let reached = append("schedule.occurrence-reached", json!({"revision": revision, "occurrence": 0,
+        "scheduled_at_unix_ms": anchor_at.timestamp_millis().to_string()}), vec![]);
+    append("schedule.work-requested", json!({"revision": revision, "occurrence": 0,
+        "mission": "mission/harvest", "mission_revision": "never-started",
+        "workspace": root.path().to_str().unwrap(), "inputs": {}}), vec![reached.id]);
+    // The standby's schedule gate counts only exchanges made since its reconciler started.
+    let reconciler = Reconciler::new(standby.clone(), Arc::new(FakeRuntime::default()), "jade".into(), Arc::new(Notify::new()));
+    sync(&primary, &standby);
+    sync(&standby, &primary);
+    sync(&primary, &standby);
+    assert_eq!(standby.pending_schedule_work_requests("schedule/orchard").unwrap().len(), 1);
+    reconciler.reconcile_once().unwrap();
+    // The standby never starts the primary's request, so only its own next occurrence can run.
+    let armed = reconciler.delayed_restarts.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert!(armed.iter().any(|key| key.starts_with("standby-due:schedule/orchard:") && key.ends_with(":jade:1")),
+        "the primary's unstarted request held the standby's next occurrence: {armed:?}");
+}

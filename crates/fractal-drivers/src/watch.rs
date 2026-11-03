@@ -10,24 +10,6 @@ use std::sync::mpsc::Sender;
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
-/// Watch a directory recursively, forwarding only events that can change reconciled state.
-///
-/// Recursive registration eagerly walks the tree (one inotify watch per directory), so this is
-/// only sound over st2-owned, payload-free directories. Symlink following is disabled: a link
-/// must never carry traversal outside the watched boundary.
-pub(crate) fn watch_recursive_mutations(
-    dir: &Path,
-    tx: Sender<()>,
-) -> notify::Result<notify::RecommendedWatcher> {
-    let mut watcher = recommended_watcher(move |result: notify::Result<Event>| {
-        if result.is_ok_and(|event| is_mutation(&event)) {
-            let _ = tx.send(());
-        }
-    })?;
-    watcher.watch(dir, RecursiveMode::Recursive)?;
-    Ok(watcher)
-}
-
 /// Watch only the inputs a native delivery pump consumes: the agent's `resources/inbox` subtree
 /// and its `status` file. Runtime records written beside them by the pump's own process group —
 /// the presence refresh's temp siblings, `harness-state`, `harness-context`, stream state — must
@@ -275,13 +257,15 @@ mod tests {
     }
 
     #[test]
-    fn recursive_watch_registration_failure_is_reported() {
+    fn delivery_watch_registration_failure_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing");
         let (tx, _rx) = std::sync::mpsc::channel();
 
-        watch_recursive_mutations(&missing, tx)
-            .expect_err("callers that require prompt wakeups must receive registration failure");
+        assert!(
+            watch_delivery_inputs_with_status(&missing, tx, false).is_none(),
+            "failed native inbox registration must not claim an active watcher"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -291,11 +275,14 @@ mod tests {
         use std::time::Duration;
 
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("watched");
+        let inbox = dir.path().join("resources/inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let file = inbox.join("watched");
         std::fs::write(&file, "before").unwrap();
 
         let (tx, rx) = channel();
-        let _watcher = watch_recursive_mutations(dir.path(), tx).expect("start inotify watcher");
+        let _watcher = watch_delivery_inputs_with_status(dir.path(), tx, false)
+            .expect("start native inbox watcher");
 
         for _ in 0..1_000 {
             assert_eq!(std::fs::read_to_string(&file).unwrap(), "before");
@@ -312,11 +299,13 @@ mod tests {
 
         fn assert_wakes(setup: fn(&Path), mutate: fn(&Path)) {
             let dir = tempfile::tempdir().unwrap();
-            setup(dir.path());
+            let inbox = dir.path().join("resources/inbox");
+            std::fs::create_dir_all(&inbox).unwrap();
+            setup(&inbox);
             let (tx, rx) = channel();
-            let _watcher =
-                watch_recursive_mutations(dir.path(), tx).expect("start inotify watcher");
-            mutate(dir.path());
+            let _watcher = watch_delivery_inputs_with_status(dir.path(), tx, false)
+                .expect("start native inbox watcher");
+            mutate(&inbox);
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("filesystem mutation must wake");
         }

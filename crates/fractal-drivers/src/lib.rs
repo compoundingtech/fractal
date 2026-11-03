@@ -42,8 +42,6 @@ pub mod driver;
 pub mod driver_diagnostic;
 pub mod driver_paths;
 pub mod eval_spec;
-pub mod event;
-pub mod exec_backend;
 pub mod expand;
 /// Private on purpose: every consumer is a sibling module in this crate, and the one site that
 /// deliberately keeps its own `flock` is documented in the module itself.
@@ -63,7 +61,6 @@ pub mod hooks;
 pub mod host;
 pub mod host_lock;
 pub mod identity;
-pub mod isolate;
 pub mod materialize;
 pub mod message;
 pub mod metrics;
@@ -72,8 +69,6 @@ pub mod migrations;
 mod native_channel;
 pub mod omp_session;
 pub mod opencode_session;
-pub mod park;
-mod process;
 pub mod pi_channel;
 /// The launch body shared by the pi-family wrappers; crate-internal, reached through
 /// `pi_session::run` and `omp_session::run`.
@@ -86,17 +81,12 @@ pub mod reconcile;
 pub mod reexec;
 
 pub mod residency;
-pub mod resource_observe;
-pub mod resource_profile;
-pub mod resource_profile_supervisor;
-pub mod resync;
 pub mod run;
 
 pub mod session_control;
 pub mod status;
 pub mod subagents;
 pub mod supervisor_chain;
-pub mod task_inventory;
 pub mod telemetry;
 pub mod validate;
 pub mod version;
@@ -115,7 +105,6 @@ pub use agent_spec::spec::{
     SessionDriver, Task, TaskKind, TaskLifecycle, parse_duration,
 };
 pub use catalog_lock::CatalogLock;
-pub use exec_backend::ExecBackend;
 pub use expand::{expand_env, expand_vars};
 pub use host_lock::HostLock;
 pub use reconcile::{

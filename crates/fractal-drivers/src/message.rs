@@ -1150,32 +1150,6 @@ pub fn with_resolved_state_dir<T>(
     }
 }
 
-/// Run an operation against retained, no-follow capabilities for an agent's inbox and archive.
-///
-/// Both directories are opened relative to the resolved agent capability, so replacing the
-/// declaration directory or either message-box ancestor with a symlink cannot redirect the
-/// operation outside the catalog after recipient resolution.
-pub(crate) fn with_resolved_message_boxes<T>(
-    catalog_root: &Path,
-    selector: &AgentSelector,
-    this_host: &str,
-    operation: impl FnOnce(&Path, &Path) -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    let agent = require_agent_handle(catalog_root, selector, this_host)?;
-    let capability = agent
-        .capability
-        .as_ref()
-        .context("resolved agent has no retained directory capability")?;
-    let inbox = open_message_box(capability, &["resources", "inbox"], true)?
-        .context("created inbox capability is missing")?;
-    let archive = open_message_box(capability, &["resources", "archive"], true)?
-        .context("created archive capability is missing")?;
-    operation(
-        &crate::directory::retained_dir_path(&inbox)?,
-        &crate::directory::retained_dir_path(&archive)?,
-    )
-}
-
 /// Locate one agent on a single coherent address book, reporting why an ordinary reference did not
 /// name exactly one subject (R24).
 ///
@@ -1199,23 +1173,6 @@ fn find_agent_handle(
         return Ok(select_agent(candidates, selector, this_host));
     }
     anyhow::bail!("catalog address book changed repeatedly while resolving {selector:?}")
-}
-
-/// Resolve or fail with the address-specific diagnostic attached to the caller's own message.
-fn require_agent_handle(
-    catalog_root: &Path,
-    selector: &AgentSelector,
-    this_host: &str,
-) -> anyhow::Result<AddressableAgent> {
-    find_agent_handle(catalog_root, selector, this_host)?
-        .map_err(anyhow::Error::new)
-        .with_context(|| {
-            format!(
-                "no agent '{}' found in catalog {}",
-                selector_reference(selector),
-                catalog_root.display()
-            )
-        })
 }
 
 /// Absence-tolerant lookup for callers whose next step depends on "no such subject" — an external
