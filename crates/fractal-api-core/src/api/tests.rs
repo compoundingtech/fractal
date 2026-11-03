@@ -1884,6 +1884,29 @@ async fn channel_history_queries_do_not_renew_delivery() {
     }
 }
 
+/// Doctor says whether this member records its seats' lifecycle as marks, and when it does not,
+/// what holds them off: here a configured peer whose start has not reached it.
+#[test]
+fn doctor_shows_whether_marks_are_on_and_what_holds_them_off() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    let marks = |state: &AppState| {
+        doctor_report(state).unwrap().0.checks.into_iter().find(|check| check.name == "message-marks").unwrap()
+    };
+    let undecided = marks(&state);
+    assert!(undecided.message.starts_with("off: every member is ready"), "{undecided:?}");
+    assert_eq!(state.store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+    let on = marks(&state);
+    assert_eq!(on.status, "pass");
+    assert!(on.message.starts_with("on:"), "{on:?}");
+    state.configured_peers = vec!["birch".into()];
+    assert!(!state.store.refresh_marks_switch(&state.configured_peers).unwrap().0);
+    let held = marks(&state);
+    assert_eq!(held.status, "pass");
+    assert!(held.message.starts_with("off: lifecycle claims until every other member advertises message_view_reads=1"), "{held:?}");
+    assert!(held.message.contains("birch: exchanges with this member outside its fleet membership"), "{held:?}");
+}
+
 #[test]
 fn doctor_names_failed_admission_even_if_opencode_reports_ready() {
     let root = tempfile::tempdir().unwrap();
