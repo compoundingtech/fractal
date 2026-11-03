@@ -1947,25 +1947,25 @@ def coverage(args, checks, commit, base_commit, repository, scratch, crates=()):
     tree = text(git('rev-parse', f'{commit}^{{tree}}'))
     lane_base = branch_point(commit, base_commit)
     verifier = Path(scratch) / 'evidence-verify'
-    verifier.write_bytes(git('show', f'{args.base}:scripts/evidence-verify').stdout)
-    lanes, rows = lane_names(args.base) if edited_lanes_unsigned(args.base) else set(), []
+    verifier.write_bytes(git('show', f'{base_commit}:scripts/evidence-verify').stdout)
+    lanes, rows = lane_names(base_commit) if edited_lanes_unsigned(base_commit) else set(), []
     for name in checks:
         # Against an older base a tree that edits a check's lane cannot be signed (its evidence-wrap refuses it): CI runs that check.
         # Otherwise a lane edit is signed, and asked about, like any other tree.
         edits = lane_edits(str(verifier), Path('.'), lane_base, name, tree) if name in lanes else []
-        unchanged = web_unchanged(args.base) if name == WEB else None
+        unchanged = web_unchanged(base_commit) if name == WEB else None
         if edits:
             rows.append((name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})', None))
         elif name == RUST_TESTS:
-            keys, error = crate_keys(args.base, Path('.'), tree, scratch)
+            keys, error = crate_keys(base_commit, Path('.'), tree, scratch)
             if not error:
                 keys, error = only_crates(keys, crates)
             if error:
                 rows.append((name, False, 'not covered', f'cannot compute the per-crate keys: {error}', []))
             else:
                 fetch_crate_notes(args.push or 'origin', keys)
-                missing, have = uncovered_crates(str(verifier), Path('.'), tree, args.base,
-                                                 repository if judged_by_policy(args.base) else None, lane_base, keys)
+                missing, have = uncovered_crates(str(verifier), Path('.'), tree, base_commit,
+                                                 repository if judged_by_policy(base_commit) else None, lane_base, keys)
                 rows.append((name, not missing, 'covered' if not missing else f'{len(missing)} crates to run',
                              f'{have} of {len(keys)} crates covered' + (f'; to run: {", ".join(c for c, _ in missing[:6])}'
                                                                          + (' ...' if len(missing) > 6 else '') if missing else ''),
@@ -1973,7 +1973,7 @@ def coverage(args, checks, commit, base_commit, repository, scratch, crates=()):
         elif unchanged:
             rows.append((name, True, 'not relevant', unchanged, None))
         else:
-            is_covered, why = covered(str(verifier), Path('.'), tree, name, args.base, repository, lane_base)
+            is_covered, why = covered(str(verifier), Path('.'), tree, name, base_commit, repository, lane_base)
             rows.append((name, is_covered, 'covered' if is_covered else 'not covered', why, None))
     return rows
 
@@ -2315,7 +2315,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     With `report` (the JUnit file of linux-gate's own run in this invocation: the same workspace build, the whole selection) nothing is run again:
     the crates without a note are signed from it, and the records say so (filterset `workspace`, the command of linux-gate's run)."""
     begun = time.monotonic()
-    keys, error = crate_keys(args.base, directory, tree, scratch)
+    keys, error = crate_keys(base_commit, directory, tree, scratch)
     if not error:
         keys, error = only_crates(keys, args.crate)
     if error:
@@ -2326,7 +2326,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     else:
         fetch_crate_notes(args.push or 'origin', keys)
         keyed = time.monotonic()
-        missing, have = uncovered_crates(tools['evidence-verify'], directory, tree, args.base, repository if judged_by_policy(args.base) else None,
+        missing, have = uncovered_crates(tools['evidence-verify'], directory, tree, base_commit, repository if judged_by_policy(base_commit) else None,
                                          lane_base, keys)
     verified_at = time.monotonic()
     if not missing:
@@ -2377,7 +2377,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
             # the crate goes on to its failing record below.
             return (f'rust-tests:{crate}', UNCOVERED, 0, f'{len(flaky)} test(s) passed only on a retry, CI runs it: {name_tests(flaky)}'[:200]), UNCOVERED
         wrap = [sys.executable, tools['evidence-wrap'], '--check', 'rust-tests', '--attempt', args.attempt,
-                '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base,
+                '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', base_commit,
                 '--input', f'crate={crate}', '--input', f'source_inputs={keys[crate]}', '--input', f'tests_run={facts["tests_run"]}',
                 '--input', f'tests_ignored={facts["tests_ignored"]}', '--input', f'test_list_sha256={facts["test_list_sha256"]}',
                 '--input', f'ignored_list_sha256={facts["ignored_list_sha256"]}',
@@ -2449,7 +2449,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     left = [crate for crate, (_, signed) in zip(selected, outcomes) if signed == UNCOVERED]
     if left:
         detail += f'; {len(left)} left for CI, a test passed only on a retry: {", ".join(left[:8])}' + (' ...' if len(left) > 8 else '')
-    empty = [crate for crate in empty if crate not in listed_no_tests(args.base)]
+    empty = [crate for crate in empty if crate not in listed_no_tests(base_commit)]
     if empty:
         # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).
         detail += f'; {len(empty)} ran no test (list under no_tests if they have none): {", ".join(empty[:8])}' + (' ...' if len(empty) > 8 else '')
@@ -2986,18 +2986,18 @@ def run_main(argv, cleanup):
                 tools = {}
                 for name in BASE_SCRIPTS:  # from the base as it is now, after any wait for a tree
                     path = Path(scratch) / name
-                    path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
+                    path.write_bytes(git('show', f'{base_commit}:scripts/{name}').stdout)
                     path.chmod(0o700)
                     tools[name] = str(path)
-                lag = behind(args.base)
+                lag = behind(base_commit)
                 tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
                 lane_base = branch_point(commit, base_commit)
                 repository = args.repository or repository_of(remote)
                 # -I: the signer's interpreter reads no PYTHON* variable, user site or current directory (evidence-wrap also drops them).
                 signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
                 rows, failed, unsigned = [], False, False
-                lanes = lane_names(args.base)
-                unsignable = lanes if edited_lanes_unsigned(args.base) else set()  # lanes whose edits the base's wrapper refuses to sign
+                lanes = lane_names(base_commit)
+                unsignable = lanes if edited_lanes_unsigned(base_commit) else set()  # lanes whose edits the base's wrapper refuses to sign
                 if target is None and any(name in BUILDS for name in checks):
                     target, target_lock = shared_target(tree_target)  # once: a top-up round builds in the same target, under the same lock
                 warm = target_warm(target) if any(name in BUILDS for name in checks) else None  # before anything builds in it
@@ -3031,12 +3031,12 @@ def run_main(argv, cleanup):
                         new_rows, bad = run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes,
                                                        target, report=gate_report)
                         return new_rows, bad, any(row[1] == UNCOVERED for row in new_rows)  # a crate left for CI: exit 4, not 1
-                    unchanged = web_unchanged(args.base) if name == WEB else None
+                    unchanged = web_unchanged(base_commit) if name == WEB else None
                     if unchanged:
                         return (name, 'not relevant', 0, unchanged), False, False  # nothing to run, nothing to sign: not a failure
                     if not args.rerun:
                         # Already signed for this tree (or its input key): nothing to measure again. Asked the way it is asked after a run.
-                        signed, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                        signed, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, base_commit, repository, lane_base)
                         if signed:
                             # With --push the covering note must also be on the remote (an earlier run may not have pushed it): push it as it is.
                             failure = push_record(directory, args.push, tree, record) if args.push else None
@@ -3045,7 +3045,7 @@ def run_main(argv, cleanup):
                     if problem:
                         return (name, 'NOT RUN', 0, problem), True, False
                     wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
-                            '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
+                            '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', base_commit]
                     if name in lanes:
                         # The branch point defines this lane: the note carries the digest of its definition, and a tree that edits the lane is not
                         # signed. It is the base itself when the branch holds the base's tip.
@@ -3155,7 +3155,7 @@ def run_main(argv, cleanup):
                     if args.out:
                         why = 'packs exported, not imported or verified' if ok else 'export failed'
                     else:
-                        is_covered, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                        is_covered, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, base_commit, repository, lane_base)
                         if args.push and is_covered and record:
                             CLAIMED.extend(record_refs(directory, record))
                     return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
@@ -3240,6 +3240,12 @@ def run_main(argv, cleanup):
                 rows.insert(0, ('setup', 'done', setup_seconds, 'fetch and the clean tree (the megarepo members are fetched when a check first needs them)'))
                 for name, result, seconds, why in rows:
                     print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
+                # The notes were measured and judged at base_commit. Another fetch in this clone can move the base ref meanwhile (2026-11-02:
+                # judged at the moved ref, a linux-clippy note right for its base read wrong_input): said here, not judged again.
+                now = text(git('rev-parse', '--verify', '-q', args.base + '^{commit}', check=False))
+                if now and now != base_commit:
+                    print(f'  base moved since signing: {args.base} is at {now[:12]} now; these notes are for {base_commit[:12]}, and a branch '
+                          f'that merges {now[:12]} needs them signed again')
                 if tree_target and target and target == tree_target and target.exists():
                     print(f'  target-{n}: {du_gb(target):.1f} GB (emptied before a run past {TARGET_MAX_GB:g} GB; the pool is capped at the sum of all, '
                           f'ST_TEST_POOL_MAX_GB)')
