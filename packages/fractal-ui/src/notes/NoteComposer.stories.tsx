@@ -106,7 +106,8 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await waitFor(() => expect(person.input).toHaveFocus())
   await expect(person.submit).toBeDisabled()
   await expect(within(personRegion).getByTestId('note-composer-limit')).toHaveTextContent('Notes hold up to 1024 bytes.')
-  await expect(within(personRegion).getByTestId('note-composer-limit')).not.toBeVisible()
+  // Visibility matchers ignore CSS clipping; assert the actual assistive-only geometry.
+  await expect(within(personRegion).getByTestId('note-composer-limit')).toHaveStyle({ position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clipPath: 'inset(50%)' })
   // Discard is offered only for a draft.
   await expect(within(personRegion).queryByTestId('note-composer-discard')).toBeNull()
   // An empty status line takes no space.

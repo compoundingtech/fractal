@@ -152,6 +152,13 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
             void window.__kitIsolationDocumentSnapshot(snapshot)
           })
           const goto = page.goto.bind(page)
+          const close = page.close.bind(page)
+          page.close = async (...args) => {
+            // Finish pagehide persistence writes while the old document still
+            // has a renderer, before reset clears the origin's storage.
+            if (!page.isClosed()) await goto('about:blank')
+            return close(...args)
+          }
           page.goto = async (...args) => {
             const response = await goto(...args)
             if (captured || ['http:', 'https:'].includes(new URL(page.url()).protocol)) {

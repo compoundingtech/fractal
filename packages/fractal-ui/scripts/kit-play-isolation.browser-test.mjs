@@ -143,6 +143,9 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
   const previous = await worker.newPage(pageOptions)
   await previous.goto(base)
   await seedState(previous)
+  await previous.evaluate(() => {
+    window.addEventListener('pagehide', () => localStorage.setItem('pagehide-flush', 'persisted'))
+  })
   assert.deepEqual(await readState(previous), {
     global: 'must not survive', local: 'local', session: 'session', cookie: 'previous-case=cookie',
     databases: ['previous-case'], caches: ['previous-case'],
