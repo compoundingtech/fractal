@@ -220,19 +220,26 @@ oldest first, with its holder, start (`started_unix_ms`) and `held_ms`, so a stu
 before it ends. `holders` ranks up to 16 holders by writer time over the last hour (count, over
 target, total and max). `long_holds` and `long_reads` keep the last 64 writer holds and read
 transactions over the target in that hour, newest first; a long hold also gives its `kind`
-(`batch` or `lend`), `writes` and `longest_write_ms`. The replication projection chunk's loan
+(`batch` or `lend`), and a batch its `writes` and `longest_write_ms`. A lend's borrower writes on
+the connection itself, uncounted, so a lend gives neither. The replication projection chunk's loan
 also says where its hold went: `stages` gives the time in each of `begin` (BEGIN IMMEDIATE),
 `chunk-read` (the frontier and chunk bounds), `incremental`, `replay`, `after-projection`,
 `health` (the projection_health write), `commit`, `rollback`, `callbacks` (the caller's progress
 and log sinks, which run under the writer) and `release` (giving the connection back, with the
 commit observers it runs). Inside `incremental`, rebuilding an aggregate a late claim reached is
 its own stage: `rebuild-base` (a desired subject, document or mission), `rebuild-tree` (a whole
-run tree), `rebuild-part` (one part of a tree) or `rebuild-planning` (every planning session).
+run tree), `rebuild-part` (one part of a tree), `rebuild-planning-session` (the planning session
+a planning claim names) or `rebuild-planning` (every planning session, for a claim that names none).
 Stages never overlap: a rebuild's time is not also in `incremental`, so the stages and
 `unattributed_ms` add up to `held_ms`. `rebuilt` counts, by the stage that ran them, the
 aggregates rebuilt and the claims they replayed. A full replay's own rebuilds count under
 `replay`. `unattributed_ms` is the rest: the handoff between the writer thread
-and the borrower. Its hold in progress names the `stage` it is in. Other holds carry no stages.
+and the borrower. Its hold in progress names the `stage` it is in. Starting a mission run also
+stages its lend: `existing-occurrence` (whether a schedule occurrence's run exists), `idempotency`
+(the cached response for its key), `admission` (owned-set, name and stale-ref checks), `inputs`,
+`capacity` (the mission's active-run limit), `run-rows` (the run, its generation and steps),
+`claims` (its creation claims), `view` (the run view it returns and caches), `idempotency-record`
+and `commit`. Other holds carry no stages.
 `begin` and `chunk-read` are marked but no control slows them, so a small `unattributed_ms` does
 not by itself show that their marks are placed right. `open_reads` lists up to eight read
 snapshots open past the target now. `waiting` counts callers waiting for the writer and reads
