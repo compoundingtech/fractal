@@ -11,8 +11,11 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn reconcile_lane_bursts(&self) -> Result<()> {
         let status = &self.seat_admission.status;
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
-        if status.state().lane_bursts.is_empty() && status.state().burst_touched.is_empty() {
-            return Ok(());
+        {
+            let state = status.state();
+            if state.lane_bursts.is_empty() && state.burst_touched.is_empty() {
+                return Ok(());
+            }
         }
         for agent in status.burst_expire(now) {
             eprintln!("st3: WARN {agent}'s lane burst lapsed: its holder stopped renewing it");

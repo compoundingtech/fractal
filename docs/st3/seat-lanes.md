@@ -299,7 +299,8 @@ a 90-second lease every 30 seconds. It gives the burst back when its input close
 started it ends, however it ends. A holder killed outright stops renewing, and the daemon drops the
 burst when its lease lapses; each such drop is counted (`bursts dropped by lease` in
 `st doctor --performance`), so a holder that crashes shows. The actor must be the seat itself, and
-only the seat's own host answers.
+only the seat's own host answers. While that daemon cannot be reached (a restart), the holder waits
+for it as it waits for room, saying so, rather than answering: the run that asked bounds the wait.
 
 The live lane is the largest, in each dimension, of the seat's own lane, each step it holds and its
 burst. A burst fits as a step's raise does: the raised lane must fit the host's room for lanes

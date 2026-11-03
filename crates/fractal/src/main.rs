@@ -3681,7 +3681,7 @@ struct AgentBurstArgs {
     reason: String,
     /// The agent itself: only an agent asks for its own lane's burst.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", value_parser = parse_publication_actor)]
+    #[arg(long = "as", value_parser = parse_agent_actor)]
     actor: String,
 }
 
@@ -15624,6 +15624,15 @@ fn parse_queue_move_actor(actor: &str) -> std::result::Result<String, String> {
         parse_person_subject(actor)
     };
     parsed.map_err(|_| "a queue move needs a complete `person/NAME` or `agent/PATH` subject".into())
+}
+
+/// An explicit `agent/PATH` subject, for a command only an agent runs for itself.
+fn parse_agent_actor(actor: &str) -> std::result::Result<String, String> {
+    if actor.strip_prefix("agent/").is_some_and(|name| !name.is_empty() && !name.ends_with('/')) {
+        Ok(actor.to_owned())
+    } else {
+        Err("only an agent acts here: give its explicit `agent/PATH` subject".into())
+    }
 }
 
 fn parse_publication_actor(actor: &str) -> std::result::Result<String, String> {

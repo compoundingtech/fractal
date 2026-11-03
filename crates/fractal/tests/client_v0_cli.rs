@@ -513,6 +513,9 @@ async fn agent_burst_cli_answers_none_where_the_agent_holds_no_lane_and_only_the
     let other = run_cli_human(&socket, &burst("agent/garden/other")).await;
     assert!(!other.status.success(), "{other:?}");
     assert!(String::from_utf8_lossy(&other.stderr).contains("only agent/garden/builder asks for its own lane burst"), "{other:?}");
+    let person = run_cli_human(&socket, &burst("person/operator")).await;
+    assert!(!person.status.success(), "{person:?}");
+    assert!(String::from_utf8_lossy(&person.stderr).contains("only an agent acts here"), "{person:?}");
     server.abort();
     // A daemon from before bursts has no route: an empty 404, which the holder reads as none.
     let older = root.path().join("older.sock");

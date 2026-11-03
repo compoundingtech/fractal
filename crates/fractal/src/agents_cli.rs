@@ -802,6 +802,15 @@ async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
             Err(error) if fractal_daemon::client::is_absent_route(&error) => {
                 return say("none this host's daemon has no lane bursts".into());
             }
+            // A daemon restarting is waited for, as a full host is: the run that asked bounds the
+            // wait, and never goes on in a lane it did not get.
+            Err(error) if !granted && fractal_daemon::client::daemon_unreachable(&error).is_some() => {
+                let why = format!("this host's daemon is not reachable ({}); asking again", error.root_cause());
+                if told.as_deref() != Some(why.as_str()) {
+                    say(format!("waiting {why}"))?;
+                    told = Some(why);
+                }
+            }
             // Held, a renewal that fails (a daemon restarting) is tried again: the lease outlasts a
             // few, and the raised slice still counts meanwhile.
             Err(error) if granted => eprintln!("fractal: WARN renewing the lane burst: {error:#}"),
