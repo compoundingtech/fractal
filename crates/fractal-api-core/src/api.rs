@@ -718,6 +718,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/agents/rollout", post(agents::rollout_agent))
         .route("/v1/agents/start", post(agents::start_mission_seat))
         .route("/v1/agents/source-offline", post(agents::override_placement_source))
+        .route("/v1/fleet/admission-override", post(fleet::admission_override))
         .route("/v1/agents/suspend", post(agents::suspend_agent))
         .route("/v1/agents/resume", post(agents::resume_agent))
         .route("/v1/agents/lane", get(agents::agent_lane))
@@ -11262,17 +11263,13 @@ async fn work_action_response_viewing(
         }
         return Ok(Json(response));
     }
-    let harness = state
+    // The claim's own incarnation is judged, not the seat's newest runtime record: another
+    // host can record the end of its own old runtime for a seat that has moved (#4743).
+    if !state
         .store
-        .current_harness(&actor)
+        .work_incarnation_live(&actor, incarnation)
         .map_err(ApiError::internal)?
-        .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
-                "inactive-work-incarnation",
-                format!("`{actor}` has no current live harness incarnation"),
-            ))
-        })?;
-    if harness.incarnation_id != incarnation || harness.state == "ended" {
+    {
         return Err(ApiError::bad(St3Error::new(
             "inactive-work-incarnation",
             format!("`{incarnation}` is not the current live incarnation of `{actor}`"),
