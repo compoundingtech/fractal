@@ -770,9 +770,12 @@ async fn views_and_lists_read_a_relay_hosts_seat_from_it() {
     assert_eq!(read["status_from"], json!({"host": OWNER, "state": "answered"}));
     assert_eq!(read["delivery"]["phase"], "read", "{read}");
     assert_eq!(read["operational"]["layer"], "current");
-    assert!(
-        read["revision"].as_str().unwrap().starts_with("offset-receipt/"),
-        "the host's newest mark is the resource's revision, so a client sees it move: {read}"
+    let local = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
+    let local = local.iter().find(|resource| resource["id"] == "message/00000000000000c1").unwrap();
+    assert_eq!(
+        (&read["revision"], &read["updated_at"]),
+        (&local["revision"], &local["updated_at"]),
+        "a host's answer never feeds the revision, which a client takes as monotonic: {read}"
     );
     let closed = resource("message/00000000000000c2");
     assert_eq!(closed["state"], "closed");
