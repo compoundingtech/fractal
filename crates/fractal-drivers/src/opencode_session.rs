@@ -42,7 +42,7 @@ use crate::provider_session::{
     describe_exit, install_signal_handler,
 };
 use crate::session_control::SessionControl;
-use crate::{delivery_ledger, ding, harness_context, message, status};
+use crate::{delivery_ledger, ding, harness_context, message};
 
 mod admission;
 
@@ -79,39 +79,6 @@ const REQUIRED_API_MARKERS: [&str; 12] = [
     "/permission",
     "/question",
 ];
-
-pub fn run(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    opencode_argv: Vec<String>,
-) -> Result<()> {
-    run_with_control(
-        catalog_root,
-        identity,
-        runtime_id,
-        opencode_argv,
-        SessionControl::Catalog,
-    )
-}
-
-pub fn run_with_control(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    opencode_argv: Vec<String>,
-    control: SessionControl,
-) -> Result<()> {
-    let this_host = crate::run::detect_host();
-    let agent_dir = message::resolve_declared_dir(catalog_root, &identity, &this_host)?
-        .with_context(|| format!("opencode driver agent '{identity}' is not declared"))?;
-    let paths = crate::driver_paths::Paths {
-        root: catalog_root.to_path_buf(),
-        agent_dir,
-        session_dir: state_dir(catalog_root, &identity),
-    };
-    run_with_paths(&paths, identity, runtime_id, opencode_argv, control)
-}
 
 pub fn run_with_paths(
     paths: &crate::driver_paths::Paths,
@@ -168,8 +135,6 @@ pub fn run_with_paths(
         Session {
             client,
             version_ok,
-            status_path: status::status_path(agent_dir),
-            control: control.clone(),
             // The pty session vouching for the record is the wrapper's task: the runtime ID
             // names the registry entry, and only aliases the identity on driver-expanded seats.
             writer: Writer::new(
@@ -183,9 +148,7 @@ pub fn run_with_paths(
             // only (HC-R15): nothing on this record is fenced on it. The claim above already
             // removed any predecessor's context record, so no second removal belongs here.
             spend: SpendProducer::new(agent_dir, &session),
-            context: match ContextProducer::new_for_control(
-                agent_dir, &identity, &session, &control,
-            ) {
+            context: match ContextProducer::new(agent_dir, &identity, &session) {
                 Ok(producer) => Some(producer),
                 Err(error) => {
                     tracing::warn!(
@@ -202,8 +165,8 @@ pub fn run_with_paths(
                     &identity,
                     &runtime_id,
                     paths.session_dir.join(delivery_ledger::LEDGER_FILE),
+                    control,
                 );
-                delivery.control = control;
                 delivery.pinned_session = selected_session(&argv);
                 // A predecessor's record names the predecessor's session, never this one's.
                 let _ = std::fs::remove_file(&delivery.binding_path);
@@ -238,74 +201,9 @@ pub fn run_with_paths(
     run_session(session, &mut ProviderProcess::Spawned(child), agent_dir)
 }
 
-/// Resume supervising an OpenCode provider a predecessor driver image launched through [`run`] and
-/// released for adoption. The server keeps its port and password, so this image reconnects to the
-/// same session, reseeds observed state from it, and continues delivery from the durable ledger.
-#[allow(clippy::too_many_arguments)]
-pub fn adopt(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    pid: u32,
-    session: String,
-    seq: u64,
-    port: u16,
-    password: String,
-    version_ok: bool,
-    producer_version: Option<String>,
-) -> Result<()> {
-    adopt_with_control(
-        catalog_root,
-        identity,
-        runtime_id,
-        pid,
-        session,
-        seq,
-        port,
-        password,
-        version_ok,
-        producer_version,
-        SessionControl::Catalog,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn adopt_with_control(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    pid: u32,
-    session: String,
-    seq: u64,
-    port: u16,
-    password: String,
-    version_ok: bool,
-    producer_version: Option<String>,
-    control: SessionControl,
-) -> Result<()> {
-    let this_host = crate::run::detect_host();
-    let agent_dir = message::resolve_declared_dir(catalog_root, &identity, &this_host)?
-        .with_context(|| format!("opencode driver agent '{identity}' is not declared"))?;
-    let paths = crate::driver_paths::Paths {
-        root: catalog_root.to_path_buf(),
-        agent_dir,
-        session_dir: state_dir(catalog_root, &identity),
-    };
-    adopt_with_paths(
-        &paths,
-        identity,
-        runtime_id,
-        pid,
-        session,
-        seq,
-        port,
-        password,
-        version_ok,
-        producer_version,
-        control,
-    )
-}
-
+/// Resume supervising the native provider launched through [`run_with_paths`] and released
+/// for adoption. Reattach with the explicit private paths and delivery control supplied by
+/// the owning control plane; the existing session and durable delivery ledger are preserved.
 #[allow(clippy::too_many_arguments)]
 pub fn adopt_with_paths(
     paths: &crate::driver_paths::Paths,
@@ -331,8 +229,6 @@ pub fn adopt_with_paths(
     let session_state = Session {
         client: Client::new(port, &password),
         version_ok,
-        status_path: status::status_path(agent_dir),
-        control: control.clone(),
         writer: Writer::new(
             agent_dir,
             identity.clone(),
@@ -340,20 +236,17 @@ pub fn adopt_with_paths(
             Some(runtime_id.clone()),
         )
         .with_ownership(session.clone(), seq),
-        context: ContextProducer::new_for_control(agent_dir, &identity, &session, &control).ok(),
+        context: ContextProducer::new(agent_dir, &identity, &session).ok(),
         spend: SpendProducer::new(agent_dir, &session),
-        delivery: {
-            let mut delivery = Delivery::with_state_path(
-                catalog_root,
-                agent_dir,
-                &this_host,
-                &identity,
-                &runtime_id,
-                paths.session_dir.join(delivery_ledger::LEDGER_FILE),
-            );
-            delivery.control = control;
-            delivery
-        },
+        delivery: Delivery::with_state_path(
+            catalog_root,
+            agent_dir,
+            &this_host,
+            &identity,
+            &runtime_id,
+            paths.session_dir.join(delivery_ledger::LEDGER_FILE),
+            control,
+        ),
         diagnostics: DiagnosticPublisher::new(
             agent_dir,
             DiagnosticDriver::OpenCode,
@@ -376,8 +269,6 @@ pub fn adopt_with_paths(
 struct Session {
     client: Client,
     version_ok: bool,
-    status_path: PathBuf,
-    control: SessionControl,
     writer: Writer,
     /// The numeric axis, `None` only where the record has nowhere safe to stage. Its absence is a
     /// missing advisory number, never a reason to fail a launch that is otherwise healthy.
@@ -401,11 +292,7 @@ struct Adoption {
 fn run_session(mut session: Session, child: &mut ProviderProcess, agent_dir: &Path) -> Result<()> {
     let (wake_tx, wake_rx) = mpsc::channel();
     crate::push_mailbox::watch(agent_dir, wake_tx.clone());
-    let _watcher = crate::watch::watch_delivery_inputs_with_status(
-        agent_dir,
-        wake_tx,
-        matches!(session.control, SessionControl::Catalog),
-    );
+    let _watcher = crate::watch::watch_delivery_inputs_with_status(agent_dir, wake_tx, false);
     let (event_tx, event_rx) = mpsc::channel();
     let sse_stop = std::sync::Arc::new(AtomicBool::new(false));
 
@@ -594,7 +481,6 @@ fn run_session(mut session: Session, child: &mut ProviderProcess, agent_dir: &Pa
 
         let now = Instant::now();
         if now >= next_presence {
-            session.control.refresh(&session.status_path);
             if evidence {
                 let _ = session.writer.heartbeat();
             }
@@ -1334,29 +1220,12 @@ struct ContextProducer {
 }
 
 impl ContextProducer {
-    #[cfg(test)]
     fn new(agent_dir: &Path, identity: &str, session: &str) -> Result<Self> {
-        Self::new_for_control(agent_dir, identity, session, &SessionControl::Catalog)
-    }
-
-    fn new_for_control(
-        agent_dir: &Path,
-        identity: &str,
-        session: &str,
-        control: &SessionControl,
-    ) -> Result<Self> {
-        let writer = match control {
-            SessionControl::Catalog => harness_context::Writer::new(
-                agent_dir,
-                identity,
-                harness_context::Harness::OpenCode,
-            )?,
-            SessionControl::Graph(_) => harness_context::Writer::new_paths(
-                agent_dir,
-                identity,
-                harness_context::Harness::OpenCode,
-            )?,
-        };
+        let writer = harness_context::Writer::new_paths(
+            agent_dir,
+            identity,
+            harness_context::Harness::OpenCode,
+        )?;
         Ok(Self {
             writer: writer.with_session(session),
             windows: BTreeMap::new(),
@@ -1687,7 +1556,6 @@ pub fn selected_session(argv: &[String]) -> Option<String> {
 struct Delivery {
     catalog_root: PathBuf,
     inbox: PathBuf,
-    status_path: PathBuf,
     control: SessionControl,
     this_host: String,
     identity: String,
@@ -1710,6 +1578,7 @@ impl Delivery {
         identity: &str,
         runtime_id: &str,
         ledger_path: PathBuf,
+        control: SessionControl,
     ) -> Self {
         let owner = identity.to_string();
         // The same derivation the transport uses, so a record whose messageID does not match its
@@ -1724,8 +1593,7 @@ impl Delivery {
         Self {
             catalog_root: catalog_root.to_path_buf(),
             inbox: message::inbox_dir(agent_dir),
-            status_path: status::status_path(agent_dir),
-            control: SessionControl::Catalog,
+            control,
             this_host: this_host.to_string(),
             identity: identity.to_string(),
             ledger,
@@ -1849,11 +1717,9 @@ impl Delivery {
         // file left the inbox releases ownership here; this pump never moves a file itself.
         self.ledger
             .prune(|filename| crate::push_mailbox::is_unread(self.inbox.parent().and_then(Path::parent).unwrap(), filename, &unread))?;
-        // Under graph control, continue receipt read-back for an existing attempt. No new
-        // input can pass `send` while held. Catalog DND retains its historical behavior.
-        if self.control.held(&self.status_path)
-            && (matches!(self.control, SessionControl::Catalog) || self.ledger.entries().is_empty())
-        {
+        // Continue receipt read-back for an existing attempt. No new input can pass
+        // `send` while held.
+        if self.control.held() && self.ledger.entries().is_empty() {
             return Ok(());
         }
         let managed = crate::push_mailbox::managed(self.inbox.parent().and_then(Path::parent).unwrap());
@@ -1988,8 +1854,7 @@ impl Delivery {
         text: &str,
         mut diagnostics: Option<&mut DiagnosticPublisher>,
     ) -> Result<()> {
-        if matches!(self.control, SessionControl::Graph(_)) && self.control.held(&self.status_path)
-        {
+        if self.control.held() {
             return Ok(());
         }
         self.next_attempt = Instant::now() + DELIVERY_RETRY;
@@ -2146,6 +2011,7 @@ pub fn consumed_delivery_paths(
 
 #[cfg(test)]
 mod tests {
+    use crate::status;
 
     /// Pins the admitted set itself: widening opencode has to be a deliberate edit here, beside
     /// the verification the minor was admitted on.
@@ -2776,6 +2642,7 @@ mod tests {
             "h.worker",
             "h.worker",
             path.clone(),
+            open_delivery_control(),
         );
         delivery.saw_session("ses_target");
         server.read_back_error.store(true, Ordering::SeqCst);
@@ -2810,14 +2677,27 @@ mod tests {
         assert!(!message::archive_dir(&agent_dir).exists());
     }
 
+    fn open_delivery_control() -> SessionControl {
+        let gate = crate::session_control::DeliveryGate::default();
+        gate.update(false, Duration::from_secs(3600));
+        SessionControl::Graph(gate)
+    }
+
     fn delivery_fixture(tmp: &Path, state_path: PathBuf) -> (Delivery, String) {
         let agent_dir = tmp.join("agents/h/worker");
         let inbox = message::inbox_dir(&agent_dir);
         std::fs::create_dir_all(&inbox).unwrap();
         let filename =
             message::send_to_inbox(&inbox, "h.sender", Some("subject"), None, &[], "body").unwrap();
-        let mut delivery =
-            Delivery::with_state_path(tmp, &agent_dir, "h", "h.worker", "h.worker", state_path);
+        let mut delivery = Delivery::with_state_path(
+            tmp,
+            &agent_dir,
+            "h",
+            "h.worker",
+            "h.worker",
+            state_path,
+            open_delivery_control(),
+        );
         delivery.saw_session("ses_target");
         (delivery, filename)
     }
@@ -2983,34 +2863,36 @@ mod tests {
         delivery.control = SessionControl::Graph(gate.clone());
         delivery.pump(&client);
         assert!(server.posts.lock().unwrap().is_empty());
-        assert!(!delivery.status_path.exists());
-        status::set_state(&delivery.status_path, status::State::Dnd).unwrap();
-        let bytes = std::fs::read(&delivery.status_path).unwrap();
+        let status_path = status::status_path(&root.path().join("agents/h/worker"));
+        assert!(!status_path.exists());
+        status::set_state(&status_path, status::State::Dnd).unwrap();
+        let bytes = std::fs::read(&status_path).unwrap();
         gate.update(true, Duration::from_secs(30));
         delivery.pump(&client);
         assert!(server.posts.lock().unwrap().is_empty());
         gate.update(false, Duration::from_secs(30));
         delivery.pump(&client);
         assert_eq!(server.posts.lock().unwrap().len(), 1);
-        assert_eq!(std::fs::read(&delivery.status_path).unwrap(), bytes);
+        assert_eq!(std::fs::read(&status_path).unwrap(), bytes);
     }
 
     #[test]
-    fn dnd_suppresses_delivery_and_waiting_mail_opens_the_first_session() {
+    fn graph_hold_suppresses_delivery_and_waiting_mail_opens_the_first_session() {
         let tmp = tempfile::tempdir().unwrap();
         let server = spawn_fake_server();
         let client = Client::new(server.port, "pw");
         let state_path = tmp.path().join("state/delivery-ledger.json");
         let (mut delivery, _) = delivery_fixture(tmp.path(), state_path);
 
-        let agent_dir = tmp.path().join("agents/h/worker");
-        status::set_state(&status::status_path(&agent_dir), status::State::Dnd).unwrap();
+        let SessionControl::Graph(gate) = &delivery.control;
+        let gate = gate.clone();
+        gate.update(true, Duration::from_secs(3600));
         delivery.pump(&client);
         assert!(server.posts.lock().unwrap().is_empty());
 
         // A seat starts with no prompt, so no session exists yet. Waiting mail creates the first
         // one, shows it in the TUI, and goes into it.
-        status::set_state(&status::status_path(&agent_dir), status::State::Available).unwrap();
+        gate.update(false, Duration::from_secs(3600));
         delivery.target_session = None;
         delivery.pump(&client);
         assert_eq!(delivery.target_session.as_deref(), Some("ses_created"));

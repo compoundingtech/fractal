@@ -231,7 +231,7 @@ and verification belong to the publisher. Failures still export failure records 
 
 ## 12. Verification and push time (measured 2026-10-24)
 
-Two warm full runs on hetz2 took 935 s and 1116 s against the 12-minute budget, with 123 to 270 s outside every check row. Where it went, and what
+Two warm full runs on a build host took 935 s and 1116 s against the 12-minute budget, with 123 to 270 s outside every check row. Where it went, and what
 changed:
 
 - **Asking the verifier about 52 crates.** `fractal-test` ran `evidence-verify --crate-key` once per crate: 52 processes, each loading all of the tree's
@@ -251,7 +251,7 @@ changed:
 
 `evidence-wrap` verifies each new record before it pushes it, by asking the verifier about the check on the record's tree. For a per-crate check
 that asked for the tree's newest `rust-tests` record whatever its crate, so one crate's failed record on the tree made every record signed after it
-come back "did not verify locally" (50 of 52 crates on hetz2 at feefaa9c95 when a mailbox test failed). A record that signs a `crate` and a
+come back "did not verify locally" (50 of 52 crates on a build host at feefaa9c95 when a mailbox test failed). A record that signs a `crate` and a
 `source_inputs` key is now verified with `--crate-key CRATE=KEY`: as that crate's, the same rule the gate and `fractal-test` use. Nothing about the record
 or the verifier's rules changes.
 

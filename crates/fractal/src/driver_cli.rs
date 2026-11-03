@@ -1155,13 +1155,13 @@ async fn drive_st2_native_loop(
                 }
                 replacement.check();
             }
-            _ = settle.retry_tick(&mut work_retry, &mut work_interval), if !completion_announced && settle.passed() => {
+            _ = settle.retry_tick(&mut work_retry, &mut work_interval), if !completion_announced && settle.passed() && !task.is_finished() => {
                 let tick: Result<()> = async {
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
                         && work_retry.ready()
                     {
-                        renew_claimed_work(client, subject, minute, &mut work_retry).await?;
+                        renew_claimed_work(client, subject, &incarnation, minute, &mut work_retry).await?;
                         work_retry.succeeded();
                         renewed_minute = Some(minute);
                     }
@@ -2039,7 +2039,7 @@ async fn run_pi_channel(
                     && renewed_minute != Some(renew_minute)
                     && work_retry.ready()
                 {
-                    match renew_claimed_work(client, subject, renew_minute, &mut work_retry).await {
+                    match renew_claimed_work(client, subject, &incarnation, renew_minute, &mut work_retry).await {
                         Ok(()) => {
                             work_retry.succeeded();
                             renewed_minute = Some(renew_minute);
@@ -2802,13 +2802,13 @@ async fn drive_codex_native_loop(
                     replacement.check();
                 }
             }
-            _ = settle.retry_tick(&mut work_retry, &mut work_interval), if !completion_announced && settle.passed() => {
+            _ = settle.retry_tick(&mut work_retry, &mut work_interval), if !completion_announced && settle.passed() && !task.is_finished() => {
                 let tick: Result<()> = async {
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
                         && work_retry.ready()
                     {
-                        renew_claimed_work(client, subject, minute, &mut work_retry).await?;
+                        renew_claimed_work(client, subject, &incarnation, minute, &mut work_retry).await?;
                         work_retry.succeeded();
                         renewed_minute = Some(minute);
                     }

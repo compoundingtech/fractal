@@ -1,25 +1,4 @@
 use super::*;
-use agent_spec::spec::TaskKind;
-use crate::reconcile::TaskLaunch;
-use std::collections::BTreeMap;
-
-fn target(id: &str, cmd: &str) -> TaskTarget {
-    TaskTarget {
-        kind: TaskKind::Pty,
-        pty_id: id.to_string(),
-        bus_id: "example-linux.demo".to_string(),
-        name: "agent".to_string(),
-        derived: false,
-        launch: TaskLaunch::Shell(cmd.to_string()),
-        cwd: None,
-        workspace: None,
-        tags: BTreeMap::new(),
-        env: BTreeMap::new(),
-        keep: false,
-        presentation: None,
-    }
-}
-
 
 #[test]
 fn session_socket_overage_is_derived_from_the_resolved_root() {
@@ -110,35 +89,4 @@ fn detect_host_matches_kernel_hostname() {
     let host = detect_host();
     assert!(!host.is_empty());
     assert_eq!(host, expected);
-}
-
-
-#[test]
-fn resolve_cwd_honors_relative_absolute_workspace_and_default() {
-    let mut t = target("x", "y");
-    // relative cwd → joined onto the spec dir
-    t.cwd = Some("sub".into());
-    assert_eq!(
-        resolve_task_cwd(&t, Path::new("/cat/example-linux/demo"), Path::new(".")),
-        Path::new("/cat/example-linux/demo/sub")
-    );
-    // absolute cwd → replaces
-    t.cwd = Some("/repos/fabric".into());
-    assert_eq!(
-        resolve_task_cwd(&t, Path::new("/cat/example-linux/demo"), Path::new(".")),
-        Path::new("/repos/fabric")
-    );
-    // no cwd but a workspace → workspace
-    t.cwd = None;
-    t.workspace = Some("/repos/ws".into());
-    assert_eq!(
-        resolve_task_cwd(&t, Path::new("/cat/example-linux/demo"), Path::new(".")),
-        Path::new("/repos/ws")
-    );
-    // neither → spec dir
-    t.workspace = None;
-    assert_eq!(
-        resolve_task_cwd(&t, Path::new("/cat/example-linux/demo"), Path::new(".")),
-        Path::new("/cat/example-linux/demo")
-    );
 }

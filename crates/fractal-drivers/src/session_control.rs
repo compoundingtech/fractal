@@ -3,7 +3,6 @@
 //! A graph permit is short lived and starts closed. A daemon outage can never leave an old
 //! permission to hand off queued input standing forever. This has no filesystem transport.
 
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -137,24 +136,15 @@ impl std::fmt::Debug for PromptAnswers {
     }
 }
 
-/// Catalog drivers retain their product's status transport. Native drivers take graph control.
-#[derive(Clone, Debug, Default)]
+/// Native drivers take explicit graph delivery control from the owning control plane.
+#[derive(Clone, Debug)]
 pub enum SessionControl {
-    #[default]
-    Catalog,
     Graph(DeliveryGate),
 }
 
 impl SessionControl {
-    pub(crate) fn refresh(&self, status_path: &Path) {
-        if matches!(self, Self::Catalog) {
-            let _ = crate::status::refresh(status_path);
-        }
-    }
-
-    pub(crate) fn held(&self, status_path: &Path) -> bool {
+    pub(crate) fn held(&self) -> bool {
         match self {
-            Self::Catalog => crate::status::read_state(status_path) == crate::status::State::Dnd,
             Self::Graph(gate) => gate.held(),
         }
     }
@@ -165,26 +155,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_control_starts_closed_expires_and_never_reads_or_refreshes_status() {
+    fn native_control_starts_closed_expires_and_ignores_status() {
         let root = tempfile::tempdir().unwrap();
         let status = root.path().join("status");
         let gate = DeliveryGate::default();
         let control = SessionControl::Graph(gate.clone());
-        assert!(control.held(&status));
+        assert!(control.held());
         assert_eq!(
             gate.blocked_reason(),
             Some(DeliveryBlockReason::ControlUnavailable)
         );
-        control.refresh(&status);
         assert!(!status.exists());
         crate::status::set_state(&status, crate::status::State::Dnd).unwrap();
         let before = std::fs::read(&status).unwrap();
         gate.update(false, Duration::from_secs(10));
-        assert!(!control.held(&status));
-        control.refresh(&status);
+        assert!(!control.held());
         assert_eq!(std::fs::read(&status).unwrap(), before);
         gate.update(true, Duration::from_secs(10));
-        assert!(control.held(&status));
+        assert!(control.held());
         assert_eq!(gate.blocked_reason(), Some(DeliveryBlockReason::HoldActive));
         gate.unavailable();
         assert_eq!(
@@ -192,12 +180,12 @@ mod tests {
             Some(DeliveryBlockReason::ControlUnavailable)
         );
         gate.update(false, Duration::ZERO);
-        assert!(control.held(&status));
+        assert!(control.held());
         gate.idle();
-        assert!(control.held(&status));
+        assert!(control.held());
         assert_eq!(gate.blocked_reason(), Some(DeliveryBlockReason::Idle));
         gate.update(false, Duration::from_secs(10));
-        assert!(!control.held(&status), "fresh mail needs a new graph permit");
+        assert!(!control.held(), "fresh mail needs a new graph permit");
         gate.unavailable();
         assert_eq!(
             gate.blocked_reason(),

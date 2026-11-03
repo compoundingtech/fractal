@@ -996,3 +996,134 @@ fn ownership_launch_choice_comes_only_from_the_install_and_defaults_off() {
         }
     }
 }
+
+/// A blocked or stalled diagnostic whose reason ends with `cause`, as the driver publishes them (#4789).
+fn unattached_with(store: &Store, incarnation: &str, status: &str, cause: serde_json::Value) -> u128 {
+    attachment(store, incarnation, false);
+    store
+        .append_claim(&ClaimInput {
+            subject: SEAT.into(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(SEAT.into()),
+            fields: BTreeMap::from([
+                ("code".into(), json!("claude-channel-unattached")),
+                ("status".into(), json!(status)),
+                ("reason".into(), json!(format!("claude-channel-unattached: test cause={cause}"))),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    // Recovery's backoff counts from the harness view's `since`, which the fold may set from an
+    // earlier observation of the same state.
+    store.current_harness(SEAT).unwrap().unwrap().since_unix_ms
+}
+
+fn uncharged(store: &Store) -> Vec<crate::model::ClaimRecord> {
+    store
+        .claims_for(SEAT, Some("runtime.action.requested"))
+        .unwrap()
+        .into_iter()
+        .filter(|claim| claim.body["fields"]["operation"] == super::super::channel_recovery::UNCHARGED_OPERATION)
+        .collect()
+}
+
+fn recover_any(reconciler: &Reconciler<FakeRuntime>, desired: &DesiredSubject, incarnation: &str, at: u128) -> usize {
+    reconciler.reconcile_claude_channel_recovery(
+        desired, desired.member.as_ref().unwrap(), Some(&claude_seat_pty("orchid", "running", incarnation)), None, at,
+    ).unwrap();
+    uncharged(&reconciler.store).len()
+}
+
+fn cause(kind: &str, route: &str, at: u64) -> serde_json::Value {
+    json!({"kind": kind, "route": route, "plugin_check_error": null, "project_st_server": false,
+        "plugin_check_ms": 12_300, "driver_started_at_ms": at, "launched_at_ms": at + 33_000, "session_started_at_ms": null})
+}
+
+/// A Claude that never started is no channel failure: it is restarted on a long backoff that
+/// doubles, never charged, and after three in a row for one cause the seat's fault names it.
+#[test]
+fn a_claude_that_never_starts_restarts_on_a_long_backoff_without_charging_and_its_cause_surfaces() {
+    let (store, _runtime, reconciler, desired) = setup();
+    let fault = || store.operational_failure(&super::super::channel_recovery::channel_cause_attention(SEAT)).unwrap()
+        .map(|failure| (failure.status, failure.reason));
+    let mut expected = 0;
+    for (incarnation, backoff_min) in [("one", 5), ("two", 10), ("three", 20)] {
+        // Each restart's start times differ; its cause signature does not.
+        let since = unattached_with(&store, incarnation, "stalled", cause("claude-not-started", "approved-plugin", expected as u64 * 1_000));
+        assert_eq!(recover_any(&reconciler, &desired, incarnation, since + 60_000), expected, "{incarnation}: no short backoff");
+        assert_eq!(recover_any(&reconciler, &desired, incarnation, since + backoff_min * 60_000 - 1), expected);
+        expected += 1;
+        assert_eq!(recover_any(&reconciler, &desired, incarnation, since + backoff_min * 60_000), expected, "{incarnation} after {backoff_min} min");
+        assert!(attempts(&store).is_empty(), "never charged to the budget");
+        if incarnation != "three" {
+            assert!(fault().is_none(), "{incarnation}");
+        }
+    }
+    let request = uncharged(&store).pop().unwrap();
+    let reason = request.body["fields"]["reason"].as_str().unwrap();
+    assert!(reason.contains("not charged to the channel recovery budget: Claude did not start; restart 3 in a row"), "{reason}");
+    let (status, reason) = fault().expect("the cause surfaces after three in a row");
+    assert_eq!(status, "pending");
+    assert!(reason.contains("restarted 3 times in a row for the same cause") && reason.contains(r#""kind":"claude-not-started""#), "{reason}");
+    // The fourth waits the cap, 30 minutes.
+    let since = unattached_with(&store, "four", "stalled", cause("claude-not-started", "approved-plugin", 9));
+    assert_eq!(recover_any(&reconciler, &desired, "four", since + 30 * 60_000 - 1), 3);
+    assert_eq!(recover_any(&reconciler, &desired, "four", since + 30 * 60_000), 4);
+    // The channel attaches: the fault clears.
+    attachment(&store, "five", true);
+    recover_any(&reconciler, &desired, "five", since + 31 * 60_000);
+    assert_eq!(fault().map(|(status, _)| status).as_deref(), Some("resolved"));
+}
+
+/// A channel that fails again for the cause the last charged attempt named is not charged again;
+/// another cause is.
+#[test]
+fn a_repeat_of_the_last_charged_cause_is_not_charged_but_another_cause_is() {
+    let (store, _runtime, reconciler, desired) = setup();
+    let since = unattached_with(&store, "one", "blocked", cause("channel-not-initialized", "approved-plugin", 1));
+    assert!(recover(&reconciler, &desired, "one", since + 10_000).unwrap());
+    assert_eq!(attempts(&store).len(), 1);
+    assert!(attempts(&store)[0].body["fields"]["reason"].as_str().unwrap().contains(r#"cause={"kind":"channel-not-initialized""#));
+    let since = unattached_with(&store, "two", "blocked", cause("channel-not-initialized", "approved-plugin", 2));
+    assert_eq!(recover_any(&reconciler, &desired, "two", since + 20_000), 0, "no short backoff for a repeat");
+    assert_eq!(recover_any(&reconciler, &desired, "two", since + 5 * 60_000), 1);
+    assert_eq!(attempts(&store).len(), 1, "a repeat is not charged");
+    let since = unattached_with(&store, "three", "blocked", cause("channel-not-initialized", "inline-development", 3));
+    assert!(recover(&reconciler, &desired, "three", since + 20_000).unwrap());
+    assert_eq!(attempts(&store).len(), 2, "another cause is charged");
+}
+
+/// A charged attempt between uncharged restarts ends their run: the count, its backoff and the
+/// fault start again.
+#[test]
+fn a_charged_attempt_ends_a_run_of_uncharged_restarts() {
+    let (store, _runtime, reconciler, desired) = setup();
+    for incarnation in ["one", "two"] {
+        let since = unattached_with(&store, incarnation, "stalled", cause("claude-not-started", "approved-plugin", 1));
+        let before = uncharged(&store).len();
+        let backoff = if before == 0 { 5 } else { 10 };
+        assert_eq!(recover_any(&reconciler, &desired, incarnation, since + backoff * 60_000), before + 1);
+    }
+    let since = unattached_with(&store, "three", "blocked", cause("channel-not-initialized", "inline-development", 1));
+    assert!(recover(&reconciler, &desired, "three", since + 10_000).unwrap());
+    // Stalled again: the first of a new run, 5 min, no fault.
+    let since = unattached_with(&store, "four", "stalled", cause("claude-not-started", "approved-plugin", 1));
+    assert_eq!(recover_any(&reconciler, &desired, "four", since + 5 * 60_000), 3);
+    assert!(uncharged(&store).pop().unwrap().body["fields"]["reason"].as_str().unwrap().contains("restart 1 in a row"));
+    assert!(store.operational_failure(&super::super::channel_recovery::channel_cause_attention(SEAT)).unwrap().is_none());
+}
+
+#[test]
+fn a_cause_marker_inside_the_cause_is_part_of_its_json() {
+    let (store, _runtime, reconciler, desired) = setup();
+    let tricky = json!({"kind": "channel-not-initialized", "route": "inline-development", "plugin_check_error": "x cause={y}",
+        "project_st_server": false, "plugin_check_ms": 1, "driver_started_at_ms": 1, "launched_at_ms": 1, "session_started_at_ms": 1});
+    let since = unattached_with(&store, "one", "blocked", tricky.clone());
+    assert!(recover(&reconciler, &desired, "one", since + 10_000).unwrap());
+    let since = unattached_with(&store, "two", "blocked", tricky);
+    assert_eq!(recover_any(&reconciler, &desired, "two", since + 20_000), 0, "the same cause, read whole, is a repeat");
+    assert_eq!(attempts(&store).len(), 1);
+}

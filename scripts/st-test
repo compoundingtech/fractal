@@ -918,6 +918,112 @@ def governed(argv, name, output=None):
     return argv
 
 
+def burst_size(checks, base='HEAD'):
+    """(cores, memory) a run of `checks` asks its seat's lane to be raised to (config lane-bursts.json, `build`), or None when
+    it builds nothing or the file names no size."""
+    if not any(name in BUILDS for name in checks):
+        return None
+    blob = config_blob(base, 'lane-bursts.json')
+    try:
+        size = json.loads(blob)['build'] if blob else None
+        return (int(size['cores']), str(size['memory'])) if size else None
+    except (ValueError, KeyError, TypeError) as error:
+        raise Failure(f'lane-bursts.json names no usable build size: {error}')
+
+
+class Burst:
+    """A seat's lane raised for one run (docs/st3/seat-lanes.md, Bursts), held by `fractal agents burst` while its stdin is open.
+    The holder renews the daemon's lease and gives the burst back when its stdin closes: when this run ends, whatever ends it.
+    `granted` is the size held, or None with `why` when the run holds none (no lane, lanes off, a daemon without bursts)."""
+
+    def __init__(self):
+        self.holder, self.granted, self.why, self.waited, self.errors = None, None, None, 0.0, None
+
+    def record(self):
+        return {'burst': None if self.granted is None else {'cores': self.granted[0], 'memory': self.granted[1]},
+                'burst_wait_s': round(self.waited), **({'burst_none': self.why} if self.why else {})}
+
+    def release(self):
+        holder, self.holder = self.holder, None
+        if holder is None:
+            return
+        with contextlib.suppress(OSError):
+            holder.stdin.close()
+        try:
+            holder.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.wait()
+        holder.stdout.close()
+        self.errors.close()
+
+
+def lane_burst(size, limit_s, output=None):
+    """Raise this seat's lane to `size` for the run, waiting in the host's order up to `limit_s` seconds (--queue-limit): a Burst.
+    Asked before the run takes a pool tree, as a slot was: a tree held while its run waits for room is a tree nobody can use.
+    A run that names no seat (ST_AGENT), or whose fractal or daemon has no lane bursts, holds none and says why."""
+    output = output or sys.stderr
+    burst = Burst()
+    agent = os.environ.get('ST_AGENT')
+    st = os.environ.get('ST3_BIN') or shutil.which('fractal') or shutil.which('st')
+    if size is None:
+        return burst
+    if not agent or not st:
+        burst.why = 'no seat to raise the lane of' if not agent else 'no fractal on PATH'
+        return burst
+    cores, memory = size
+    began = time.monotonic()
+    errors = tempfile.TemporaryFile()  # a file, not a pipe: a holder's warnings over hours must never fill a pipe nobody reads
+    holder = subprocess.Popen([st, 'agents', 'burst', agent, '--cores', str(cores), '--memory', memory, '--reason', 'st-test',
+                               '--as', agent], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+    told, pending = None, ''
+    try:
+        while True:
+            if '\n' not in pending:
+                left = limit_s - (time.monotonic() - began)
+                ready, _, _ = select.select([holder.stdout], [], [], max(0.0, left))
+                if not ready:
+                    raise Failure(f'waited {limit_s:g}s (--queue-limit) for a lane burst of {cores} cores/{memory}: {told or "no answer"}')
+                chunk = os.read(holder.stdout.fileno(), 4096).decode(errors='replace')
+                if chunk:
+                    pending += chunk
+                    continue
+                # It ended without an answer: an older fractal without the command, or an error.
+                holder.wait()
+                errors.seek(0)
+                why = errors.read().decode(errors='replace').strip().splitlines()
+                if any('unrecognized subcommand' in text for text in why):
+                    burst.why = "this host's fractal has no lane bursts"
+                    print(f'fractal-test: no lane burst: {burst.why}; the checks run in the lane as it is', file=output, flush=True)
+                    return burst
+                raise Failure(f'fractal agents burst ended without an answer: {(why or [f"exit {holder.returncode}"])[-1]}')
+            line, pending = pending.split('\n', 1)
+            kind, _, detail = line.partition(' ')
+            if kind == 'waiting':
+                if detail != told:
+                    print(f'fractal-test: waiting for a lane burst: {detail}', file=output, flush=True)
+                    told = detail
+            elif kind == 'granted':
+                burst.holder, burst.granted, burst.waited, burst.errors = holder, (cores, memory), time.monotonic() - began, errors
+                holder = None
+                print(f'fractal-test: lane burst {cores} cores/{memory} granted after {round(burst.waited)}s', file=output, flush=True)
+                return burst
+            elif kind == 'none':
+                burst.why, burst.waited = detail, time.monotonic() - began
+                print(f'fractal-test: no lane burst: {detail}; the checks run in the lane as it is', file=output, flush=True)
+                return burst
+            elif kind == 'refused':
+                raise Failure(f'lane burst {cores} cores/{memory} refused: {detail}')
+    finally:
+        if holder is not None:
+            with contextlib.suppress(OSError):
+                holder.stdin.close()
+            holder.kill()
+            holder.wait()
+            holder.stdout.close()
+            errors.close()
+
+
 def web_slot(argv):
     """Hold one counted host heavy slot around the whole web check, including its dev shell and signing wrapper.
 
@@ -1320,7 +1426,7 @@ def evict_to_cap(base, limit_gb, keep=None):
 
 
 PRIORITY_AGING_SECONDS, PRIORITY_FLOOR = 120, 5  # the cargo shim's rank aging: a waiting ticket's rank improves by 1 per 120 s, never below 5 (ranks under 5 never age)
-PRIORITY_MAX_WAIT_SECONDS = 2 * 3600  # a pool-tree ticket that has waited this long is served before every younger ticket whatever its rank (oldest first): ranks under the floor never age, so without a limit a steady stream of them starves rank-50 runs indefinitely (hetz2, 2026-10-29: five rank-50 tickets waited 4 to 12.5 hours)
+PRIORITY_MAX_WAIT_SECONDS = 2 * 3600  # a pool-tree ticket that has waited this long is served before every younger ticket whatever its rank (oldest first): ranks under the floor never age, so without a limit a steady stream of them starves rank-50 runs indefinitely (a build host, 2026-10-29: five rank-50 tickets waited 4 to 12.5 hours)
 
 
 # Last in the pool (2026-11-01, Factory, from the 10-31 st-test SLO report: on one build host the shadow queue signer's seed held 18% of the
@@ -1962,25 +2068,25 @@ def coverage(args, checks, commit, base_commit, repository, scratch, crates=()):
     tree = text(git('rev-parse', f'{commit}^{{tree}}'))
     lane_base = branch_point(commit, base_commit)
     verifier = Path(scratch) / 'evidence-verify'
-    verifier.write_bytes(git('show', f'{args.base}:scripts/evidence-verify').stdout)
-    lanes, rows = lane_names(args.base) if edited_lanes_unsigned(args.base) else set(), []
+    verifier.write_bytes(git('show', f'{base_commit}:scripts/evidence-verify').stdout)
+    lanes, rows = lane_names(base_commit) if edited_lanes_unsigned(base_commit) else set(), []
     for name in checks:
         # Against an older base a tree that edits a check's lane cannot be signed (its evidence-wrap refuses it): CI runs that check.
         # Otherwise a lane edit is signed, and asked about, like any other tree.
         edits = lane_edits(str(verifier), Path('.'), lane_base, name, tree) if name in lanes else []
-        unchanged = web_unchanged(args.base) if name == WEB else None
+        unchanged = web_unchanged(base_commit) if name == WEB else None
         if edits:
             rows.append((name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})', None))
         elif name == RUST_TESTS:
-            keys, error = crate_keys(args.base, Path('.'), tree, scratch)
+            keys, error = crate_keys(base_commit, Path('.'), tree, scratch)
             if not error:
                 keys, error = only_crates(keys, crates)
             if error:
                 rows.append((name, False, 'not covered', f'cannot compute the per-crate keys: {error}', []))
             else:
                 fetch_crate_notes(args.push or 'origin', keys)
-                missing, have = uncovered_crates(str(verifier), Path('.'), tree, args.base,
-                                                 repository if judged_by_policy(args.base) else None, lane_base, keys)
+                missing, have = uncovered_crates(str(verifier), Path('.'), tree, base_commit,
+                                                 repository if judged_by_policy(base_commit) else None, lane_base, keys)
                 rows.append((name, not missing, 'covered' if not missing else f'{len(missing)} crates to run',
                              f'{have} of {len(keys)} crates covered' + (f'; to run: {", ".join(c for c, _ in missing[:6])}'
                                                                          + (' ...' if len(missing) > 6 else '') if missing else ''),
@@ -1988,7 +2094,7 @@ def coverage(args, checks, commit, base_commit, repository, scratch, crates=()):
         elif unchanged:
             rows.append((name, True, 'not relevant', unchanged, None))
         else:
-            is_covered, why = covered(str(verifier), Path('.'), tree, name, args.base, repository, lane_base)
+            is_covered, why = covered(str(verifier), Path('.'), tree, name, base_commit, repository, lane_base)
             rows.append((name, is_covered, 'covered' if is_covered else 'not covered', why, None))
     return rows
 
@@ -2330,7 +2436,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     With `report` (the JUnit file of linux-gate's own run in this invocation: the same workspace build, the whole selection) nothing is run again:
     the crates without a note are signed from it, and the records say so (filterset `workspace`, the command of linux-gate's run)."""
     begun = time.monotonic()
-    keys, error = crate_keys(args.base, directory, tree, scratch)
+    keys, error = crate_keys(base_commit, directory, tree, scratch)
     if not error:
         keys, error = only_crates(keys, args.crate)
     if error:
@@ -2341,7 +2447,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     else:
         fetch_crate_notes(args.push or 'origin', keys)
         keyed = time.monotonic()
-        missing, have = uncovered_crates(tools['evidence-verify'], directory, tree, args.base, repository if judged_by_policy(args.base) else None,
+        missing, have = uncovered_crates(tools['evidence-verify'], directory, tree, base_commit, repository if judged_by_policy(base_commit) else None,
                                          lane_base, keys)
     verified_at = time.monotonic()
     if not missing:
@@ -2392,7 +2498,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
             # the crate goes on to its failing record below.
             return (f'rust-tests:{crate}', UNCOVERED, 0, f'{len(flaky)} test(s) passed only on a retry, CI runs it: {name_tests(flaky)}'[:200]), UNCOVERED
         wrap = [sys.executable, tools['evidence-wrap'], '--check', 'rust-tests', '--attempt', args.attempt,
-                '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base,
+                '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', base_commit,
                 '--input', f'crate={crate}', '--input', f'source_inputs={keys[crate]}', '--input', f'tests_run={facts["tests_run"]}',
                 '--input', f'tests_ignored={facts["tests_ignored"]}', '--input', f'test_list_sha256={facts["test_list_sha256"]}',
                 '--input', f'ignored_list_sha256={facts["ignored_list_sha256"]}',
@@ -2464,7 +2570,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     left = [crate for crate, (_, signed) in zip(selected, outcomes) if signed == UNCOVERED]
     if left:
         detail += f'; {len(left)} left for CI, a test passed only on a retry: {", ".join(left[:8])}' + (' ...' if len(left) > 8 else '')
-    empty = [crate for crate in empty if crate not in listed_no_tests(args.base)]
+    empty = [crate for crate in empty if crate not in listed_no_tests(base_commit)]
     if empty:
         # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).
         detail += f'; {len(empty)} ran no test (list under no_tests if they have none): {", ".join(empty[:8])}' + (' ...' if len(empty) > 8 else '')
@@ -2611,10 +2717,103 @@ class Limit:
         return time.monotonic() - self.started if self.begins_at else self.pre_start
 
 
+GROUP_EXIT_SECONDS = 10.0
+
+
+class GroupExitFailure(Failure):
+    """The group was killed but cleanup failed; do not reset its bound by killing and waiting again."""
+
+
+def group_member(pid, pgid, proc='/proc'):
+    """The start ticks of a live member, or None. Zombies already closed their descriptors."""
+    try:
+        fields = Path(proc, str(pid), 'stat').read_text().rsplit(')', 1)[1].split()
+        return int(fields[19]) if fields[0] != 'Z' and int(fields[2]) == pgid else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def live_group_members(pgid, proc='/proc'):
+    members = {}
+    for path in Path(proc).iterdir():
+        if path.name.isdigit():
+            started = group_member(int(path.name), pgid, proc)
+            if started is not None:
+                members[int(path.name)] = started
+    return members
+
+
+def wait_group_exit(pgid, seconds=GROUP_EXIT_SECONDS, proc='/proc', reap=None):
+    """SIGKILL is asynchronous: wait for descriptor closure, not just the leader. Fail visibly if live members remain.
+
+    Pin identities before waiting, then rescan after exits for any late children. Without pidfds, inspect /proc at short
+    intervals; without /proc, check group existence and reap the leader. Both keep the same bound. Zombie-only groups
+    seen through /proc are already drained.
+    """
+    deadline, pidfds = time.monotonic() + seconds, hasattr(os, 'pidfd_open')
+    members = None
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            who = ", ".join(map(str, members)) if members else 'unknown (no /proc)'
+            raise GroupExitFailure(f'process group {pgid} still has live members {who} '
+                                   f'after SIGKILL and {seconds:g}s; cleanup did not complete')
+        return left
+    while True:
+        members = live_group_members(pgid, proc) if Path(proc).is_dir() else None
+        if members is None:
+            if reap is not None:
+                reap()  # Do not leave our own zombie leader making killpg(0) report an existing group forever.
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+        elif not members:
+            return
+        remaining()
+        # Catch a member that joined or forked while the previous SIGKILL was landing.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGKILL)
+        if members is None:  # Portable path without /proc: wait for the whole group to disappear under the same bound.
+            time.sleep(min(0.02, remaining()))
+            continue
+        with contextlib.ExitStack() as cleanup:
+            poller, pending = select.poll(), set()
+            if pidfds:
+                for pid, started in members.items():
+                    try:
+                        fd = os.pidfd_open(pid)
+                    except ProcessLookupError:
+                        continue
+                    except OSError as error:
+                        if error.errno != errno.ENOSYS:
+                            raise GroupExitFailure(f'process group {pgid}: cannot pin member {pid}: {error}; '
+                                                   'cleanup did not complete') from error
+                        pidfds = False
+                        break
+                    cleanup.callback(os.close, fd)
+                    # A reused PID must never make this wait on an unrelated process.
+                    if group_member(pid, pgid, proc) == started:
+                        poller.register(fd, select.POLLIN)
+                        pending.add(fd)
+            if not pidfds:
+                time.sleep(min(0.02, remaining()))
+                continue
+            while pending:
+                for fd, event in poller.poll(max(1, int(remaining() * 1000))):
+                    if event & (select.POLLIN | select.POLLHUP):
+                        poller.unregister(fd)
+                        pending.discard(fd)
+                    else:
+                        raise GroupExitFailure(f'process group {pgid}: exit readiness failed (event {event}); cleanup did not complete')
+
+
 def kill_limited(process, group=False):
     if group:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
+        process._st_group_kill_started = True
+        wait_group_exit(process.pid, reap=process.poll)
     else:
         process.kill()
 
@@ -2641,8 +2840,15 @@ class ProcessGroups:
         with self.lock:
             self.cancelled = True
             processes = tuple(self.processes)
+        failure = None
         for process in processes:
-            kill_limited(process, group=True)
+            try:
+                kill_limited(process, group=True)
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+        if failure is not None:
+            raise failure
 
 
 def join_lanes(lanes):
@@ -2682,12 +2888,17 @@ def run_limited(argv, limit, kill_group=False, groups=None, **options):
     if kill_group:
         options['start_new_session'] = True
     with subprocess.Popen(argv, **options) as process:
-        if kill_group and groups is not None:
-            groups.add(process)
+        process._st_group_kill_started = False
         try:
+            if kill_group and groups is not None:
+                groups.add(process)
             return wait_limited(process, limit, group=kill_group)
+        except GroupExitFailure:
+            raise
         except BaseException:
-            kill_limited(process, kill_group)
+            # A second signal during the drain must not restart its ten-second bound.
+            if not kill_group or not process._st_group_kill_started:
+                kill_limited(process, kill_group)
             raise
         finally:
             if kill_group and groups is not None:
@@ -2972,6 +3183,9 @@ def run_main(argv, cleanup):
         tree_waits, tree_taken, blocked = {}, None, {}  # the tree's waits, when it was taken, and what the build lane waited holding it
         if not needs_tree(checks):
             pool_trees = None  # a throwaway worktree, as with ST_TEST_TREES=off, and no wait for a tree
+        # The seat's lane raised for the run (Bursts, docs/st3/seat-lanes.md), before any tree: given back when the run ends.
+        burst = lane_burst(burst_size(checks), args.queue_limit)
+        cleanup.callback(burst.release)
         try:
             if pool_trees:
                 root = pool_root()
@@ -3001,18 +3215,18 @@ def run_main(argv, cleanup):
                 tools = {}
                 for name in BASE_SCRIPTS:  # from the base as it is now, after any wait for a tree
                     path = Path(scratch) / name
-                    path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
+                    path.write_bytes(git('show', f'{base_commit}:scripts/{name}').stdout)
                     path.chmod(0o700)
                     tools[name] = str(path)
-                lag = behind(args.base)
+                lag = behind(base_commit)
                 tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
                 lane_base = branch_point(commit, base_commit)
                 repository = args.repository or repository_of(remote)
                 # -I: the signer's interpreter reads no PYTHON* variable, user site or current directory (evidence-wrap also drops them).
                 signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
                 rows, failed, unsigned = [], False, False
-                lanes = lane_names(args.base)
-                unsignable = lanes if edited_lanes_unsigned(args.base) else set()  # lanes whose edits the base's wrapper refuses to sign
+                lanes = lane_names(base_commit)
+                unsignable = lanes if edited_lanes_unsigned(base_commit) else set()  # lanes whose edits the base's wrapper refuses to sign
                 if target is None and any(name in BUILDS for name in checks):
                     target, target_lock = shared_target(tree_target)  # once: a top-up round builds in the same target, under the same lock
                 warm = target_warm(target) if any(name in BUILDS for name in checks) else None  # before anything builds in it
@@ -3046,12 +3260,12 @@ def run_main(argv, cleanup):
                         new_rows, bad = run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes,
                                                        target, report=gate_report)
                         return new_rows, bad, any(row[1] == UNCOVERED for row in new_rows)  # a crate left for CI: exit 4, not 1
-                    unchanged = web_unchanged(args.base) if name == WEB else None
+                    unchanged = web_unchanged(base_commit) if name == WEB else None
                     if unchanged:
                         return (name, 'not relevant', 0, unchanged), False, False  # nothing to run, nothing to sign: not a failure
                     if not args.rerun:
                         # Already signed for this tree (or its input key): nothing to measure again. Asked the way it is asked after a run.
-                        signed, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                        signed, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, base_commit, repository, lane_base)
                         if signed:
                             # With --push the covering note must also be on the remote (an earlier run may not have pushed it): push it as it is.
                             failure = push_record(directory, args.push, tree, record) if args.push else None
@@ -3060,7 +3274,7 @@ def run_main(argv, cleanup):
                     if problem:
                         return (name, 'NOT RUN', 0, problem), True, False
                     wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
-                            '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
+                            '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', base_commit]
                     if name in lanes:
                         # The branch point defines this lane: the note carries the digest of its definition, and a tree that edits the lane is not
                         # signed. It is the base itself when the branch holds the base's tip.
@@ -3170,7 +3384,7 @@ def run_main(argv, cleanup):
                     if args.out:
                         why = 'packs exported, not imported or verified' if ok else 'export failed'
                     else:
-                        is_covered, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                        is_covered, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, base_commit, repository, lane_base)
                         if args.push and is_covered and record:
                             CLAIMED.extend(record_refs(directory, record))
                     return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
@@ -3228,8 +3442,10 @@ def run_main(argv, cleanup):
                         try:
                             join_lanes(started_threads)  # never release the clean tree while a background lane still uses it
                         except BaseException:  # an interrupt can also arrive while the foreground waits for web
-                            web_groups.cancel()
-                            join_lanes(started_threads)
+                            try:
+                                web_groups.cancel()
+                            finally:
+                                join_lanes(started_threads)
                             raise
                     for name in background:
                         results.setdefault(name, ((name, 'FAILED (lane exited)', 0, 'lane exited without a result'), True, False))
@@ -3255,6 +3471,12 @@ def run_main(argv, cleanup):
                 rows.insert(0, ('setup', 'done', setup_seconds, 'fetch and the clean tree (the megarepo members are fetched when a check first needs them)'))
                 for name, result, seconds, why in rows:
                     print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
+                # The notes were measured and judged at base_commit. Another fetch in this clone can move the base ref meanwhile (2026-11-02:
+                # judged at the moved ref, a linux-clippy note right for its base read wrong_input): said here, not judged again.
+                now = text(git('rev-parse', '--verify', '-q', args.base + '^{commit}', check=False))
+                if now and now != base_commit:
+                    print(f'  base moved since signing: {args.base} is at {now[:12]} now; these notes are for {base_commit[:12]}, and a branch '
+                          f'that merges {now[:12]} needs them signed again')
                 if tree_target and target and target == tree_target and target.exists():
                     print(f'  target-{n}: {du_gb(target):.1f} GB (emptied before a run past {TARGET_MAX_GB:g} GB across both targets; the pool is capped at the sum of all, '
                           f'ST_TEST_POOL_MAX_GB)')
@@ -3281,7 +3503,7 @@ def run_main(argv, cleanup):
                             'host': socket.gethostname().split('.')[0], 'tree': tree, 'commit': commit, 'base': base_commit, 'behind': lag,
                             'full': not args.check and not args.crate and not round_number, 'top_up': round_number, 'checks': checks, 'pool_tree': n, 'warm': warm,
                             'parallel': parallel, 'rows': [{'name': name, 'result': result, 'seconds': seconds} for name, result, seconds, _ in rows],
-                            'exit': code, 'stages': stages, **held, **({'candidate': commit} if candidate else {})})
+                            'exit': code, 'stages': stages, **held, **burst.record(), **({'candidate': commit} if candidate else {})})
                 if code or not args.push or args.out or TARGET or not (merged or whole):
                     # Nothing more to push: a failure, no --push, an export or --seed, or a narrowed run that merged nothing pushes only
                     # its notes, as before.

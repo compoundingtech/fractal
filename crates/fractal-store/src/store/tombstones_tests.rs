@@ -856,7 +856,7 @@ fn a_trim_never_makes_a_write_wait_long() {
     store.bind_fleet(FLEET).unwrap();
     // This test times how long the trim holds the writer. Every commit waits for the disk with
     // `synchronous=FULL`, and a shared disk makes that wait the whole measurement: a chunk
-    // held 13 ms of CPU and its commit waited 259 ms on hetz2. Without the sync, a write waits
+    // held 13 ms of CPU and its commit waited 259 ms on a build host. Without the sync, a write waits
     // only for the trim's own work. The 500 ms bound is unchanged.
     store
         .connection

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """scripts/ci-local: the stages run in a home of their own, with no st, GitHub or SSH agent variable, with buffered parallel lanes and a separate fleet target, and the
 exit status is the first failure's. cargo and the stage scripts are stubs that record what they saw; nothing compiles."""
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,26 @@ RECORD = '''#!/usr/bin/env bash
 # a stand-in for the build admission shim, which exports CARGO_SHIM_DEPTH
 python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ), "umask": u}))' "$@" >> "$CI_LOCAL_TEST_LOG"
 '''
+
+
+def kill_tree(process):
+    """SIGKILL a test's run and everything under it (read from /proc's PPid lines), then reap it: killed alone, a run frozen
+    mid-stop leaves its lane stopped for good (20 stopped lanes after a day of failing runs of the worker test, 2026-11-03)."""
+    tree, grew = {process.pid}, True
+    while grew:
+        grew = False
+        for status in Path('/proc').glob('[0-9]*/status'):
+            try:
+                parent = int(next(line.split()[1] for line in status.read_text().splitlines() if line.startswith('PPid:')))
+            except (OSError, StopIteration, ValueError):
+                continue
+            if parent in tree and int(status.parent.name) not in tree:
+                tree.add(int(status.parent.name))
+                grew = True
+    for pid in tree:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    process.wait()
 
 
 class CiLocal(unittest.TestCase):
@@ -519,16 +540,21 @@ exit 0
                'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
         run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
-        self.addCleanup(lambda: run.poll() is None and (os.kill(run.pid, signal.SIGCONT), run.kill()))
+        self.addCleanup(lambda: run.poll() is None and kill_tree(run))
         workers = Path(f'{self.log}.workers')
 
         def alive():
-            # This test's own workers only: each carries its CI_LOCAL_TEST_LOG.
+            # This test's own workers only: each carries its CI_LOCAL_TEST_LOG, or is still clippy's child. A worker in the middle of
+            # its exec has an empty environ for a moment (seen once in 800 runs, and in a merge group, 2026-11-03), so the parent counts too.
             pids = [int(line) for line in workers.read_text().split()] if workers.exists() else []
+            parent = Path(f'{self.log}.clippy').read_text().strip() if Path(f'{self.log}.clippy').exists() else None
             def ours(pid):
                 try:
-                    return f'CI_LOCAL_TEST_LOG={self.log}\0'.encode() in Path(f'/proc/{pid}/environ').read_bytes()
-                except OSError:
+                    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+                    if fields[0] == 'Z':
+                        return False
+                    return fields[1] == parent or f'CI_LOCAL_TEST_LOG={self.log}\0'.encode() in Path(f'/proc/{pid}/environ').read_bytes()
+                except (OSError, IndexError):
                     return False
             return [pid for pid in pids if ours(pid)]
         self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in alive()])
@@ -559,21 +585,37 @@ exit 0
                 except OSError:
                     continue
             return False
+        def ran_ns(pid):
+            try:
+                return int(Path(f'/proc/{pid}/schedstat').read_text().split()[0])
+            except (OSError, ValueError, IndexError):
+                return None
         # Frozen first, then looked at: a run seen reading /proc and frozen a moment later may have finished its listing in that
         # moment and sent clippy its SIGTERM (a merge group, 2026-11-02, under load). Frozen with a status file open, it is inside the
-        # listing, and it signals nothing until the listing is done.
-        listed = False
-        deadline = time.monotonic() + 20
-        while not listed and run.poll() is None and time.monotonic() < deadline:
+        # listing, and it signals nothing until the listing is done. Between looks the run gets 20 us on a CPU: frozen again at once,
+        # it barely ran and was still short of its listing 20 s later (6 of 15 on a loaded build host, 2026-11-03). Each look is at a new point of
+        # the stop, so the looks end inside the listing, or the listing ends and clippy with it, which fails below by name.
+        listed, looks = False, 0
+        deadline = time.monotonic() + 120
+        while run.poll() is None and state(clippy) not in (None, 'Z') and time.monotonic() < deadline:
             os.kill(run.pid, signal.SIGSTOP)
             for _ in range(500):
                 if state(run.pid) in ('T', None, 'Z'):
                     break
                 time.sleep(0.001)
-            listed = state(run.pid) == 'T' and reading_proc()
-            if not listed:
-                os.kill(run.pid, signal.SIGCONT)
-        self.assertTrue(listed, 'the test did not catch the stopped run reading /proc')
+            looks += 1
+            if state(run.pid) == 'T' and reading_proc():
+                listed = True
+                break
+            before = ran_ns(run.pid)
+            os.kill(run.pid, signal.SIGCONT)
+            while before is not None and (ran_ns(run.pid) or before) - before < 20_000 and run.poll() is None \
+                    and time.monotonic() < deadline:
+                time.sleep(0)
+            if before is None:
+                time.sleep(0.001)
+        self.assertTrue(listed, f'the test did not catch the stopped run reading /proc ({looks} looks; run exit {run.poll()}, '
+                                f'clippy {state(clippy)}): the stop listed /proc and stopped clippy between two looks')
         self.assertEqual(state(run.pid), 'T', 'the stopped run is frozen while its /proc listing is open')
         # Frozen with that listing open, the run has not yet stopped clippy (it stops a process only after listing /proc).
         self.assertNotIn(state(clippy), (None, 'Z'), 'the run was frozen before it stopped clippy')
@@ -584,7 +626,8 @@ exit 0
                 break
             time.sleep(0.01)
         late, frozen = alive(), state(clippy) == 'T'
-        self.assertTrue(late or frozen, 'clippy neither started its worker nor was frozen by the stop')
+        self.assertTrue(late or frozen, f'clippy neither started its worker nor was frozen by the stop (clippy {state(clippy)}, run '
+                                        f'{state(run.pid)}, workers {workers.read_text() if workers.exists() else None!r})')
         os.kill(run.pid, signal.SIGCONT)
         run.wait(timeout=20)
         for _ in range(100):
@@ -593,6 +636,27 @@ exit 0
             time.sleep(0.05)
         self.assertEqual(alive(), [], 'a worker the lane started after the stop listed /proc outlived the run')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
+
+    def test_a_failing_tests_cleanup_kills_a_frozen_run_and_its_frozen_lane(self):
+        # A run, its lane and the lane's stage, all frozen as a stop leaves them: killing the run alone leaves the other two stopped.
+        run = subprocess.Popen(['bash', '-c', '( sleep 300 & echo $!; wait ) & wait'], stdout=subprocess.PIPE, text=True)
+        stage = int(run.stdout.readline())
+        lane = int(Path(f'/proc/{stage}/stat').read_text().rsplit(')', 1)[1].split()[1])
+        for pid in (run.pid, lane, stage):
+            os.kill(pid, signal.SIGSTOP)
+
+        def gone(pid):
+            try:
+                return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z'
+            except OSError:
+                return True
+        self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in (lane, stage) if not gone(pid)])
+        kill_tree(run)
+        for _ in range(200):
+            if gone(lane) and gone(stage):
+                break
+            time.sleep(0.01)
+        self.assertTrue(gone(lane) and gone(stage), 'the frozen lane outlived the cleanup of its run')
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
         self.stage_exits = [0, 3, 5]
