@@ -75,10 +75,12 @@ export interface NoteQuickAddProps extends Omit<NoteComposerProps, 'autoFocus' |
  */
 export function NoteQuickAdd({ state, targetLabel, shortcutEnabled, onShortcutEnabledChange, ...composer }: NoteQuickAddProps) {
   const { request, isOpen, close } = state
-  const [pending, setPending] = React.useState(false)
+  const [ownPending, setPending] = React.useState(false)
   const [announcement, setAnnouncement] = React.useState('')
   const anchor = React.useMemo(() => ({ current: request?.anchor ?? null }), [request])
   React.useEffect(() => setPending(false), [request])
+  // A host-held create state may already be in flight from another entry point for this target.
+  const pending = ownPending || composer.createState?._tag === 'Pending'
   const dismiss = () => { if (!pending) close() }
   return <>
     {/* Persistent: the composer's own status unmounts with the popover. */}

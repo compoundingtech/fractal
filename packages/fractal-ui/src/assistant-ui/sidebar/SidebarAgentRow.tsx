@@ -182,7 +182,7 @@ const openRow = (row: Row, actions: SidebarActions | undefined, onOpen: ((row: R
 export interface AgentRowActionsProps extends SidebarClock {
   readonly row: Row
   readonly reportedStatusOnly?: boolean
-  /** The selected row: its "Add note…" item shows the host's note shortcut, which acts on the selection. */
+  /** The selected row: its "Add note…" item names the host's note shortcut, which acts on the selection from the conversation. */
   readonly active?: boolean
   readonly actions?: SidebarActions
   readonly onOpen?: (row: Row) => void
@@ -239,10 +239,11 @@ export function AgentRowActions({ row, now, reportedStatusOnly = false, active =
       <MenuItem id="open" textValue="Open conversation" isDisabled={!canOpen} onAction={() => openRow(row, actions, onOpen)} style={menuItemStyle}>Open conversation{!canOpen && <Text slot="description" {...stylex.props(styles.menuReason)}>{row.subagent !== undefined && row.subagent.session_id === undefined ? 'No session reported for this subagent' : 'Conversation opening is unavailable'}</Text>}</MenuItem>
       {actions?.split !== undefined && <MenuItem id="split-right" onAction={() => actions.split?.(row.ref, 'right')} style={menuItemStyle}>Open in split right</MenuItem>}
       {actions?.split !== undefined && <MenuItem id="split-below" onAction={() => actions.split?.(row.ref, 'below')} style={menuItemStyle}>Open in split below</MenuItem>}
-      {actions?.note !== undefined && <MenuItem id="note" textValue="Add note…" shortcut={active ? actions.noteShortcut : undefined} onAction={() => {
+      {/* The shortcut is described, not shown as a key: focus returns to this trigger inside the tree, where `n` is typeahead. */}
+      {actions?.note !== undefined && <MenuItem id="note" textValue="Add note…" onAction={() => {
         const anchor = menuTriggerRef.current ?? anchorRef.current
         if (anchor !== null) actions.note?.(row.ref, anchor)
-      }} style={menuItemStyle}>Add note…</MenuItem>}
+      }} style={menuItemStyle}><Text slot="label">Add note…</Text>{active && actions.noteShortcut !== undefined && <Text slot="description" {...stylex.props(styles.menuReason)}>{`Press ${actions.noteShortcut} in the conversation`}</Text>}</MenuItem>}
       <MenuItem id="reported-details" onAction={() => { onDetailsPress?.(); setDetailsOpen(true) }} style={menuItemStyle}>Reported agent details</MenuItem>
       {actions?.details !== undefined && <MenuItem id="details" onAction={() => actions.details?.(row.ref)} style={menuItemStyle}>Agent details</MenuItem>}
       {actions?.declaration !== undefined && row.subagent === undefined && <MenuItem id="declaration" onAction={() => actions.declaration?.(row.ref)} style={menuItemStyle}>View KDL</MenuItem>}

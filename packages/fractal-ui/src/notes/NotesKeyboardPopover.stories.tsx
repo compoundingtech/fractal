@@ -298,10 +298,11 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(page.getByTestId('note-quick-add-status')).toHaveTextContent('Note added to Planner.')
   await expect(count()).toBe('2')
 
-  // The row menu's "Add note…" carries the shortcut on the selected row and returns focus to the trigger.
+  // The row menu's "Add note…" describes the shortcut on the selected row (it works from the conversation, not the
+  // tree, where `n` is typeahead) and returns focus to the trigger.
   await userEvent.click(menuTrigger(plannerTarget))
-  const item = await page.findByRole('menuitem', { name: /^Add note…/ })
-  await expect(item.textContent).not.toBe('Add note…')
+  const item = await page.findByRole('menuitem', { name: 'Add note…' })
+  await expect(item).toHaveAccessibleDescription('Press N in the conversation')
   await userEvent.click(item)
   await page.findByRole('dialog', { name: 'Add note to Planner' })
   await waitFor(() => expect(input()).toHaveFocus())

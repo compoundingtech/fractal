@@ -200,13 +200,18 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(sessionRegion).not.toHaveTextContent('session/agent')
   await expectNoAudiencePresentation(canvasElement)
 
-  // Unavailable: reason visible and linked, nothing submits.
+  // Unavailable: reason visible and linked, the draft still editable (it is local), nothing submits.
   const unavailableRegion = canvas.getByRole('region', { name: 'Unavailable composer' })
   const unavailable = parts(unavailableRegion)
   await expect(within(unavailableRegion).getByTestId('note-composer-disabled-reason')).toHaveTextContent(disabledReason)
   await expect(unavailable.input).toHaveAccessibleDescription(expect.stringContaining(disabledReason))
-  await expect(unavailable.input).toHaveAttribute('readonly')
+  await expect(unavailable.input).not.toHaveAttribute('readonly')
+  await userEvent.click(unavailable.input)
+  await userEvent.keyboard('Drafted while offline{Enter}')
+  await expect(unavailable.input).toHaveValue('Drafted while offline')
   await expect(unavailable.submit).toBeDisabled()
+  await expect(within(unavailableRegion).queryByRole('alert')).toBeNull()
+  await expect(canvas.getByTestId('submitted')).not.toHaveTextContent('Drafted while offline')
 
   // Over the server byte limit: counted in UTF-8 bytes, explained, not submittable.
   const longRegion = canvas.getByRole('region', { name: 'Long composer' })

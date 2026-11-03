@@ -45,22 +45,36 @@ interface Fixture {
   readonly registry: AtomRegistry.AtomRegistry
   /** Negative control only: a second registry that does not share drafts. */
   readonly splitRegistry: AtomRegistry.AtomRegistry
+  /** Settles every held create: refused with the synthetic cause, or published. */
+  readonly settleHeld: (outcome: 'refuse' | 'accept') => void
 }
 
+/** The first create is refused; a create whose text starts with "Held" waits for the fixture's settle controls. */
 const makeFixture = (): Fixture => {
   const registry = AtomRegistry.make()
   const splitRegistry = AtomRegistry.make()
   const notes = Atom.make<Feed<readonly SubjectNote[]>>(observed({ value: [retireNote] })).pipe(Atom.keepAlive)
   let refusals = 1
+  const held: PromiseWithResolvers<void>[] = []
   const source = { ...fixtureSource({ world: fixtureProjections }), notes, notesActor: Atom.make<string | undefined>(viewer), noteActions: {
     create: async (to: string, text: string) => {
-      if (refusals-- > 0) throw new Error('Synthetic gateway refusal.')
+      if (text.startsWith('Held')) {
+        const gate = Promise.withResolvers<void>()
+        held.push(gate)
+        await gate.promise
+      } else if (refusals-- > 0) throw new Error('Synthetic gateway refusal.')
       const previous = registry.get(notes)
       registry.set(notes, observed({ value: [publishedNote(text, to), ...(previous._tag === 'Observed' ? previous.value : [])] }))
     },
     archive: async () => undefined,
   } }
-  return { source, registry, splitRegistry }
+  const settleHeld = (outcome: 'refuse' | 'accept') => {
+    for (const gate of held.splice(0)) {
+      if (outcome === 'refuse') gate.reject(new Error('Synthetic gateway refusal.'))
+      else gate.resolve()
+    }
+  }
+  return { source, registry, splitRegistry, settleHeld }
 }
 
 /** The production wiring at story scale: the kit sidebar rows carry the menu action, the pane carries the inline entry. */
@@ -80,11 +94,17 @@ function Workspace({ fixture, negativeControl }: { readonly fixture: Fixture; re
         renderRow={item => <div data-wf-agent-ref={item.row.ref}><MilestoneAgentRow row={item.row} active={item.id === selected} actions={actions} now={storyNow} /></div>} />
     </nav>
     <section aria-label="Agent pane" {...stylex.props(styles.pane)}>
-      <AgentNotes agentRef={selected} targetLabel={labelFor(selected) ?? ''} />
+      {/* Keyed per agent like the production conversation pane, so switching agents unmounts the notes. */}
+      <AgentNotes key={selected} agentRef={selected} targetLabel={labelFor(selected) ?? ''} />
       <div role="log" aria-label="Transcript" tabIndex={0} data-testid="transcript" {...stylex.props(styles.transcript)}>
         {labelFor(selected)} is comparing the two diffs.
       </div>
     </section>
+    {/* Fixture-only gateway controls; a play presses them with `click()`, so focus stays where the person left it. */}
+    <div role="group" aria-label="Fixture gateway" {...stylex.props(styles.fixtureControls)}>
+      <button type="button" onClick={() => fixture.settleHeld('refuse')}>Refuse held create</button>
+      <button type="button" onClick={() => fixture.settleHeld('accept')}>Accept held create</button>
+    </div>
     {/* Negative control: a separate registry breaks the shared per-target draft. */}
     {negativeControl ? <DataSourceProvider source={fixture.source} registry={fixture.splitRegistry}>{notePopover}</DataSourceProvider> : notePopover}
   </div>
@@ -170,6 +190,12 @@ export const scenarioExemptions: readonly string[] = [
   'TouchLight440:contract-fixture',
 ]
 
+const nextFrame = () => {
+  const { promise, resolve } = Promise.withResolvers<number>()
+  requestAnimationFrame(resolve)
+  return promise
+}
+
 const scopes = (canvasElement: HTMLElement) => {
   const canvas = within(canvasElement)
   const page = within(canvasElement.ownerDocument.body)
@@ -245,16 +271,59 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(notes().getByTestId('note-list')).toHaveTextContent('Keep this draftn')
   await expect(notes().getByTestId('note-session')).toHaveTextContent('This session')
 
+  // Collapsing the disclosure while composing closes the composer too: Add note is back beside the summary, and the
+  // draft returns with the composer.
+  await userEvent.click(addNote())
+  await waitFor(() => expect(inline()).toHaveFocus())
+  await userEvent.keyboard('Collapsed mid-thought')
+  await userEvent.click(summary)
+  await waitFor(() => expect(disclosure).not.toHaveAttribute('open'))
+  await waitFor(() => expect(notes().queryByTestId('note-composer')).toBeNull())
+  await expect(addNote()).toBeVisible()
+  await userEvent.click(addNote())
+  await waitFor(() => expect(inline()).toHaveFocus())
+  await expect(disclosure).toHaveAttribute('open')
+  await expect(inline()).toHaveValue('Collapsed mid-thought')
+
+  // A create in flight survives switching agents (the pane remounts per agent): its refusal is waiting on return,
+  // with the text kept.
+  await userEvent.clear(inline())
+  await userEvent.keyboard('Held across agents{Enter}')
+  await waitFor(() => expect(notes().getByTestId('note-composer-submit')).toHaveTextContent('Adding…'))
+  treeRow(plannerTarget).focus()
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(canvas.getByRole('region', { name: 'Notes for Planner' })).toBeInTheDocument())
+  await expect(notes().queryByTestId('note-composer')).toBeNull()
+  canvas.getByRole('button', { name: 'Refuse held create' }).click()
+  treeRow(target).focus()
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(canvas.getByRole('region', { name: 'Notes for Reviewer' })).toBeInTheDocument())
+  await expect(await notes().findByRole('alert')).toHaveTextContent("Couldn't add the note. Your text is kept. Synthetic gateway refusal.")
+  await expect(inline()).toHaveValue('Held across agents')
+  await expect(notes().getByTestId('note-composer-submit')).toHaveTextContent('Retry')
+
+  // When the note lands after the person moved focus elsewhere, Add note does not take it back.
+  await userEvent.click(notes().getByTestId('note-composer-submit'))
+  await waitFor(() => expect(notes().getByTestId('note-composer-submit')).toHaveTextContent('Adding…'))
+  await userEvent.click(transcript)
+  canvas.getByRole('button', { name: 'Accept held create' }).click()
+  await waitFor(() => expect(notes().queryByTestId('note-composer')).toBeNull())
+  await expect(notes().getByTestId('note-list')).toHaveTextContent('Held across agents')
+  await nextFrame()
+  await nextFrame()
+  await expect(transcript).toHaveFocus()
+
   // In the tree `n` is typeahead: focus moves to "Nightly checks" and nothing opens.
   treeRow(target).focus()
   await userEvent.keyboard('n')
   await waitFor(() => expect(canvasElement.ownerDocument.activeElement?.closest('[data-sidebar-tree-key]')).toBe(treeRow(nightlyTarget)))
   await expect(page.queryByRole('dialog')).toBeNull()
 
-  // The selected row's menu offers Add note… with its shortcut; focus returns to the trigger on close.
+  // The selected row's menu offers Add note… and describes its shortcut, which works from the conversation (here in
+  // the tree `n` is typeahead); focus returns to the trigger on close.
   await userEvent.click(menuTrigger(target))
-  const selectedItem = await page.findByRole('menuitem', { name: /^Add note…/ })
-  await expect(selectedItem.textContent).not.toBe('Add note…')
+  const selectedItem = await page.findByRole('menuitem', { name: 'Add note…' })
+  await expect(selectedItem).toHaveAccessibleDescription('Press N in the conversation')
   await userEvent.click(selectedItem)
   await waitFor(() => expect(popoverInput()).toHaveFocus())
   await userEvent.keyboard('{Escape}')
@@ -310,26 +379,33 @@ const feedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   for (const feedCase of feedCases(false)) {
     await expect(pane(feedCase.id).getByRole('region', { name: `Notes for ${feedCase.targetLabel ?? `Reviewer — ${feedCase.label}`}` })).toBeInTheDocument()
   }
-  const openComposer = async (id: string) => {
+  // While notes cannot be added the composer still takes a draft (it is local); only submitting waits, with the reason.
+  const openComposer = async (id: string, reason: string) => {
     await userEvent.click(pane(id).getByTestId('agent-notes-add'))
-    return pane(id).getByTestId('note-composer')
+    const composer = pane(id).getByTestId('note-composer')
+    await expect(composer).toHaveTextContent(reason)
+    const input = within(composer).getByTestId('note-composer-input')
+    await expect(input).not.toHaveAttribute('readonly')
+    await waitFor(() => expect(input).toHaveFocus())
+    await userEvent.keyboard(`Drafted while ${id}{Enter}`)
+    await expect(input).toHaveValue(`Drafted while ${id}`)
+    await expect(within(composer).getByTestId('note-composer-submit')).toBeDisabled()
+    await expect(within(composer).queryByRole('alert')).toBeNull()
   }
 
   await expect(pane('waiting').getByTestId('agent-notes-feed-status')).toHaveTextContent('Loading notes…')
-  const waitingComposer = await openComposer('waiting')
-  await expect(waitingComposer).toHaveTextContent('Wait for the notes connection before adding a note.')
-  await expect(within(waitingComposer).getByTestId('note-composer-submit')).toBeDisabled()
+  await openComposer('waiting', 'Wait for the notes connection before adding a note.')
 
   await expect(pane('unavailable').getByTestId('agent-notes-feed-status')).toHaveTextContent('Notes are not available from this gateway.')
   await expect(pane('unavailable').queryByTestId('agent-notes-add')).toBeNull()
 
   await expect(pane('stale').getByTestId('agent-notes-stale')).toHaveTextContent('Notes are out of date. Waiting for the connection.')
-  await expect(await openComposer('stale')).toHaveTextContent('Wait for the notes connection before adding a note.')
+  await openComposer('stale', 'Wait for the notes connection before adding a note.')
   await expect(pane('stale').queryByRole('button', { name: 'Archive' })).toBeNull()
 
   await expect(pane('partial').getByTestId('agent-notes-partial')).toHaveTextContent('Showing notes in the current window.')
 
-  await expect(await openComposer('no-actor')).toHaveTextContent('Waiting for your signed-in identity.')
+  await openComposer('no-actor', 'Waiting for your signed-in identity.')
 
   const long = canvasElement.querySelector<HTMLElement>('[data-feed-case="long"]')!
   await userEvent.click(pane('long').getByTestId('agent-notes-summary'))
@@ -356,6 +432,7 @@ const styles = stylex.create({
   sidebar: { flex: '0 1 280px', minWidth: 0, height: 200, display: 'flex', flexDirection: 'column' },
   pane: { flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: s.sm, borderWidth: 1, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md },
   transcript: { padding: s.md, color: text.fgMuted, fontSize: t.uiSize, lineHeight: t.uiLeading, minHeight: 96 },
+  fixtureControls: { display: 'flex', flexWrap: 'wrap', gap: s.sm, flexBasis: '100%', minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading },
   feedCases: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: s.lg, minWidth: 0 },
   feedCase: { display: 'flex', flexDirection: 'column', gap: s.xs, minWidth: 0, borderWidth: 1, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, overflow: 'hidden' },
   heading: { margin: s.zero, paddingInline: s.md, paddingBlockStart: s.sm, fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fgMuted },

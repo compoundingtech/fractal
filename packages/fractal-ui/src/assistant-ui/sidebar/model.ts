@@ -88,7 +88,7 @@ export interface SidebarActions {
   readonly declaration?: (ref: string) => void
   /** Host-owned note quick-add for a row, anchored to `anchor` (the row's menu trigger); the row offers "Add note…" only when set. */
   readonly note?: (ref: string, anchor: Element) => void
-  /** The key the host binds to add a note to the selected agent; the selected row's "Add note…" item shows it. */
+  /** The key the host binds to add a note to the selected agent from the conversation; the selected row's "Add note…" item describes it. */
   readonly noteShortcut?: string
 }
 

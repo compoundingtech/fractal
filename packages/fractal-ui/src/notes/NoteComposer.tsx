@@ -22,10 +22,17 @@ const reachCopy = (target: string | undefined): string =>
       : isSessionTarget(target) ? sessionNoteReach
         : 'Notes reach the agent as context.'
 
+/** One create's progress: none, in flight, or refused with the gateway's stated cause when it gave one. */
+export type NoteCreateState =
+  | { readonly _tag: 'Idle' }
+  | { readonly _tag: 'Pending' }
+  | { readonly _tag: 'Refused'; readonly detail: string | undefined }
+export const noteCreateIdle: NoteCreateState = { _tag: 'Idle' }
+
 export interface NoteComposerProps {
   /** Adds the note. A rejection keeps the text and shows an error with the rejection's message; resolution clears the draft. */
   readonly onSubmit: (text: string) => Promise<void>
-  /** Why notes cannot be added right now; the draft stays readable and is not submitted. */
+  /** Why notes cannot be added right now. The draft stays editable, since it is local; nothing submits until the reason clears. */
   readonly disabledReason?: string | undefined
   readonly autoFocus?: boolean | undefined
   /** Controlled draft text; the host retains it per target. */
@@ -41,18 +48,27 @@ export interface NoteComposerProps {
   readonly surface?: 'card' | 'bare' | undefined
   /** Reports a create in flight, so a host overlay can refuse dismissal until it settles. */
   readonly onPendingChange?: ((pending: boolean) => void) | undefined
+  /**
+   * Controlled create state. A host that unmounts the composer while a create is in flight (another agent, then
+   * back) keeps it per target beside the draft, so the remounted composer shows the pending create or its refusal.
+   */
+  readonly createState?: NoteCreateState | undefined
+  readonly onCreateStateChange?: ((state: NoteCreateState) => void) | undefined
   /** Closing never discards the draft; the host retains controlled drafts per target. */
   readonly onClose?: (() => void) | undefined
 }
 
 /** Plain-text note input. Every note reaches the target's agents, so there is no audience choice. */
-export function NoteComposer({ onSubmit, disabledReason, autoFocus = false, draft, onDraftChange, target, targetLabel, showTarget = true, surface: chromeSurface = 'card', onPendingChange, onClose }: NoteComposerProps) {
+export function NoteComposer({ onSubmit, disabledReason, autoFocus = false, draft, onDraftChange, target, targetLabel, showTarget = true, surface: chromeSurface = 'card', onPendingChange, createState, onCreateStateChange, onClose }: NoteComposerProps) {
   const [localDraft, setLocalDraft] = React.useState('')
   const text = draft ?? localDraft
   const updateDraft = (next: string) => { setLocalDraft(next); onDraftChange?.(next) }
-  const [pending, setPendingState] = React.useState(false)
-  const setPending = (next: boolean) => { setPendingState(next); onPendingChange?.(next) }
-  const [failure, setFailure] = React.useState<{ readonly detail: string | undefined } | undefined>(undefined)
+  const [localCreate, setLocalCreate] = React.useState<NoteCreateState>(noteCreateIdle)
+  const create = createState ?? localCreate
+  // Every write goes through here, including one that lands after this composer unmounted: the host's state is the record.
+  const setCreate = (next: NoteCreateState) => { setLocalCreate(next); onCreateStateChange?.(next); onPendingChange?.(next._tag === 'Pending') }
+  const pending = create._tag === 'Pending'
+  const failure = create._tag === 'Refused' ? create : undefined
   const [feedback, setFeedback] = React.useState('')
   // The text a Discard removed, until the next edit or submit; Undo puts it back.
   const [discarded, setDiscarded] = React.useState<string | undefined>(undefined)
@@ -67,27 +83,25 @@ export function NoteComposer({ onSubmit, disabledReason, autoFocus = false, draf
 
   const submit = async () => {
     if (!canSubmit) return
-    setPending(true)
-    setFailure(undefined)
+    setCreate({ _tag: 'Pending' })
     setDiscarded(undefined)
     setFeedback('Adding note…')
     try {
       await onSubmit(text)
     } catch (error) {
-      setPending(false)
       setFeedback('')
-      setFailure({ detail: error instanceof Error && error.message.trim() !== '' ? error.message.trim() : undefined })
+      setCreate({ _tag: 'Refused', detail: error instanceof Error && error.message.trim() !== '' ? error.message.trim() : undefined })
       inputRef.current?.focus()
       return
     }
-    setPending(false)
+    setCreate(noteCreateIdle)
     updateDraft('')
     setFeedback('Note added.')
   }
   const discard = () => {
     setDiscarded(text)
     updateDraft('')
-    setFailure(undefined)
+    if (failure !== undefined) setCreate(noteCreateIdle)
     setFeedback('Draft discarded.')
     inputRef.current?.focus()
   }
@@ -124,7 +138,7 @@ export function NoteComposer({ onSubmit, disabledReason, autoFocus = false, draf
     <TextField
       value={text}
       onChange={next => { setDiscarded(undefined); updateDraft(next) }}
-      isReadOnly={pending || disabledReason !== undefined}
+      isReadOnly={pending}
       isInvalid={overLimit}
       autoFocus={autoFocus}
       aria-describedby={describedBy}

@@ -4,7 +4,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import { Schema } from 'effect'
 import * as stylex from '@stylexjs/stylex'
 import { VisuallyHidden } from 'react-aria'
-import { NoteBadge, NoteComposer, NoteList, NoteQuickAdd, useNoteQuickAdd, useNoteShortcut, type NoteQuickAddState } from '../../../../packages/fractal-ui/src/notes/index.ts'
+import { NoteBadge, NoteComposer, NoteList, NoteQuickAdd, noteCreateIdle, useNoteQuickAdd, useNoteShortcut, type NoteCreateState, type NoteQuickAddState } from '../../../../packages/fractal-ui/src/notes/index.ts'
 import { Button } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import type { SidebarActions } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
@@ -13,9 +13,11 @@ import { useDataSource, useSubjectNotes } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 
 const noActor = Atom.make<string | undefined>(undefined)
-// The data-source registry scopes these; retained panes and quick-add share each target's draft, and a
-// pane's disclosure and composer state survive switching to another agent and back.
+// The data-source registry scopes these; retained panes and quick-add share each target's draft and create, and a
+// pane's disclosure and composer state survive switching to another agent and back. A create still in flight when
+// its pane unmounts records its outcome here, so the refusal is waiting when the person returns.
 const noteDraft = Atom.family((target: string) => Atom.make('').pipe(Atom.keepAlive))
+const noteCreate = Atom.family((target: string) => Atom.make<NoteCreateState>(noteCreateIdle).pipe(Atom.keepAlive))
 const notesOpen = Atom.family((target: string) => Atom.make(false).pipe(Atom.keepAlive))
 const composerOpen = Atom.family((target: string) => Atom.make(false).pipe(Atom.keepAlive))
 /** One per-user preference: whether unmodified `n` opens the quick-add for the selected agent. */
@@ -28,12 +30,13 @@ const useNoteComposer = (target: string) => {
   const feed = useSubjectNotes(target)
   const actor = useAtomValue(source.notesActor ?? noActor)
   const [draft, onDraftChange] = useAtom(noteDraft(target))
+  const [createState, onCreateStateChange] = useAtom(noteCreate(target))
   const actions = source.noteActions
   const disabledReason = actions === undefined ? 'This source cannot write notes.'
     : actor === undefined ? 'Waiting for your signed-in identity.'
     : feed._tag !== 'Observed' || feed.freshness !== 'live' ? 'Wait for the notes connection before adding a note.'
     : undefined
-  return { source, feed, actor, actions, composer: { draft, onDraftChange, disabledReason, onSubmit: async (text: string) => {
+  return { source, feed, actor, actions, composer: { draft, onDraftChange, createState, onCreateStateChange, disabledReason, onSubmit: async (text: string) => {
     if (actions === undefined || disabledReason !== undefined) throw new Error(disabledReason ?? 'This source cannot write notes.')
     await actions.create(target, text)
   } } }
@@ -50,6 +53,21 @@ const noteAnchor = (ref: string): Element | null => {
     ?? [...document.querySelectorAll(`[data-agent-notes="${escaped}"]`)].find(element => laidOut(element) !== null)
     ?? null
 }
+
+/**
+ * After the composer closes, Add note takes focus only where focus still is: inside that pane's notes, or on the
+ * body because the focused composer just unmounted. Found by target rather than by ref, so a create that settles
+ * after its pane remounted (another agent, then back) reaches the current pane, and focus the person moved
+ * elsewhere in the meantime stays there.
+ */
+const refocusAddNote = (agentRef: string) => requestAnimationFrame(() => {
+  for (const section of document.querySelectorAll<HTMLElement>(`[data-agent-notes="${CSS.escape(agentRef)}"]`)) {
+    const active = section.ownerDocument.activeElement
+    if (active !== null && active !== section.ownerDocument.body && !section.contains(active)) continue
+    const addNote = laidOut(section.querySelector('[data-agent-notes-add]'))
+    if (addNote instanceof HTMLElement) { addNote.focus(); return }
+  }
+})
 
 const QuickAddFor = ({ state, target, targetLabel, shortcutEnabled, onShortcutEnabledChange }: {
   readonly state: NoteQuickAddState
@@ -116,12 +134,11 @@ export const AgentNotes = ({ agentRef, targetLabel }: { readonly agentRef: strin
   const [open, setOpen] = useAtom(notesOpen(agentRef))
   const [composing, setComposing] = useAtom(composerOpen(agentRef))
   const [announcement, setAnnouncement] = React.useState('')
-  const addNote = React.useRef<HTMLButtonElement>(null)
   if (source.notes === undefined) return null
   const label = targetLabel.trim() || fallbackTargetLabel
   const collapse = () => {
     setComposing(false)
-    requestAnimationFrame(() => addNote.current?.focus())
+    refocusAddNote(agentRef)
   }
   const composerNode = composing && <NoteComposer key={agentRef} {...composer} target={agentRef} targetLabel={label} showTarget={false} surface="bare" autoFocus
     onClose={collapse} onSubmit={async text => {
@@ -134,7 +151,9 @@ export const AgentNotes = ({ agentRef, targetLabel }: { readonly agentRef: strin
     <div {...stylex.props(styles.lane)}>
       <div {...stylex.props(styles.header)}>
         {observed !== undefined
-          ? <details open={open} onToggle={event => setOpen(event.currentTarget.open)} data-testid="agent-notes-disclosure" {...stylex.props(styles.details)}>
+          // Closing the disclosure also closes the composer, so Add note is back beside the summary; the draft and
+          // any create in flight stay with the target and return when the composer reopens.
+          ? <details open={open} onToggle={event => { const next = event.currentTarget.open; setOpen(next); if (!next) setComposing(false) }} data-testid="agent-notes-disclosure" {...stylex.props(styles.details)}>
             <summary data-testid="agent-notes-summary" {...stylex.props(styles.summary)}>
               <span aria-hidden="true" {...stylex.props(styles.chevron, open && styles.chevronOpen)}><Icon name="chevron-right" /></span>
               {observed.value.length === 0 ? 'Notes' : <NoteBadge notes={observed.value} interactive={false} />}
@@ -146,8 +165,9 @@ export const AgentNotes = ({ agentRef, targetLabel }: { readonly agentRef: strin
             </div>
           </details>
           : <p role="status" data-testid="agent-notes-feed-status" {...stylex.props(styles.heading, styles.details)}>{feed._tag === 'Waiting' ? 'Loading notes…' : 'Notes are not available from this gateway.'}</p>}
-        {/* A gateway without notes offers nothing to add to; a loading feed still takes a draft. */}
-        {!composing && feed._tag !== 'Unavailable' && <Button ref={addNote} variant="ghost" size="sm" data-testid="agent-notes-add" onPress={() => { setOpen(true); setComposing(true) }}>Add note</Button>}
+        {/* A gateway without notes offers nothing to add to. Otherwise the composer opens even while notes cannot be
+            added (loading, out of date, no identity yet): the draft is local, and only submitting waits. */}
+        {!composing && feed._tag !== 'Unavailable' && <Button variant="ghost" size="sm" data-testid="agent-notes-add" data-agent-notes-add="" onPress={() => { setOpen(true); setComposing(true) }}>Add note</Button>}
       </div>
       {observed === undefined && feed._tag !== 'Unavailable' && composerNode}
       {observed?.freshness === 'stale' && <p role="status" data-testid="agent-notes-stale" {...stylex.props(styles.status)}>Notes are out of date. Waiting for the connection.</p>}
