@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 os.environ.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
 sys.dont_write_bytecode = True
@@ -36,7 +37,9 @@ class Watch(unittest.TestCase):
         env = dict(os.environ, GIT_AUTHOR_NAME='l', GIT_AUTHOR_EMAIL='l@x', GIT_COMMITTER_NAME='l', GIT_COMMITTER_EMAIL='l@x')
         tree = subprocess.run(['git', '-C', str(self.remote), 'mktree'], input=b'', capture_output=True, check=True).stdout.decode().strip()
         subject = f'evidence-log v1 as_of={watch.iso(as_of).replace("Z", "+00:00")} added=0 gc=0 missing=0'
-        commit = subprocess.run(['git', '-C', str(self.remote), 'commit-tree', tree, '-m', subject], capture_output=True, env=env,
+        parent = watch.git(str(self.remote), 'rev-parse', '--verify', watch.LOG)
+        parents = ['-p', parent.stdout.decode().strip()] if parent.returncode == 0 else []
+        commit = subprocess.run(['git', '-C', str(self.remote), 'commit-tree', tree, *parents, '-m', subject], capture_output=True, env=env,
                                 check=True).stdout.decode().strip()
         subprocess.run(['git', '-C', str(self.remote), 'update-ref', watch.LOG, commit], check=True)
 
@@ -86,6 +89,55 @@ class Watch(unittest.TestCase):
         self.assertEqual(self.run_watch(T0 + 520)[0], 1)
         self.assertEqual(len(self.lines()), 1)
         self.assertIn('evidence log STALLED', self.lines()[0])
+
+    def test_empty_loose_objects_rebuild_the_fetch_copy_and_preserve_notification_state(self):
+        self.publish(T0)
+        self.assertEqual(self.run_watch(T0 + 400)[0], 1)
+        repo = self.root / 'state/head.git'
+        for offset in (500, 600):
+            self.publish(T0 + offset)
+            # Fetch a fresh head without changing watch.json, then emulate a reset that leaves that object empty.
+            fetched = watch.git(str(repo), 'fetch', '-q', '--no-tags', '--depth=1', str(self.remote), f'+{watch.LOG}:{watch.SEEN}')
+            self.assertEqual(fetched.returncode, 0, fetched.stderr)
+            old = watch.git(str(repo), 'rev-parse', watch.SEEN).stdout.decode().strip()
+            loose = repo / 'objects' / old[:2] / old[2:]
+            loose.parent.mkdir(exist_ok=True)
+            if loose.exists():
+                loose.chmod(0o644)
+            loose.write_bytes(b'')
+            code, result = self.run_watch(T0 + offset + 1)
+            self.assertEqual((code, result['stalled']), (0, False), result)
+            self.assertEqual(result['head'], watch.git(str(self.remote), 'rev-parse', watch.LOG).stdout.decode().strip())
+            self.assertEqual(len(list((self.root / 'state').glob('head.git.broken-*'))), 1)
+        self.assertEqual(len(self.lines()), 2, self.lines())
+        self.assertIn('moving again', self.lines()[1])
+
+    def test_an_unreachable_remote_is_reported_without_rebuilding_a_healthy_copy(self):
+        repo = str(self.root / 'head.git')
+        self.publish(T0)
+        self.assertEqual(watch.published_as_of(repo, str(self.remote))[0], T0)
+        with mock.patch.object(watch, 'git', wraps=watch.git) as commands:
+            as_of, problem = watch.published_as_of(repo, str(self.root / 'unreachable.git'))
+        self.assertIsNone(as_of)
+        self.assertIn('fetch of the log head failed', problem)
+        self.assertEqual(sum(call.args[1] == 'fetch' for call in commands.call_args_list), 1)
+        self.assertFalse(list(self.root.glob('head.git.broken-*')))
+
+    def test_fetch_timeout_does_not_rebuild_the_copy(self):
+        repo = str(self.root / 'head.git')
+        with mock.patch.object(watch, 'git', side_effect=subprocess.TimeoutExpired('fetch', 120)), mock.patch.object(watch, 'rebuild') as rebuild:
+            self.assertIn('timed out', watch.published_as_of(repo, str(self.remote))[1])
+        rebuild.assert_not_called()
+
+    def test_state_is_synced_before_rename(self):
+        path = str(self.root / 'watch.json')
+        events = []
+        replace = os.replace
+        with mock.patch.object(watch.os, 'fsync', side_effect=lambda fd: events.append('sync')), \
+             mock.patch.object(watch.os, 'replace', side_effect=lambda a, b: (events.append('rename'), replace(a, b))):
+            watch.save(path, {'last_head': 'abc'})
+        self.assertEqual(events, ['sync', 'rename', 'sync'])
+        self.assertEqual(watch.load(path), {'last_head': 'abc'})
 
     def test_step_is_pure_and_an_unreadable_head_keeps_counting_from_when_it_first_was(self):
         state, line, stalled = watch.step({}, T0, None, 'no ref', 360, 3600)

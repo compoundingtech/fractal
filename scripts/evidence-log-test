@@ -2,8 +2,10 @@
 """scripts/evidence-log against real repositories and signed records: a bare remote plays GitHub, a second bare repository is the
 host's copy. What is accepted and refused, the signed heartbeat, publishing, a deleted record reported and restored, GC lines
 before GC deletes, a head that is not ours, a second publisher's older chain refused, and a signer that fails."""
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -210,6 +212,121 @@ sys.exit(log.main(sys.argv[1:]))
         self.assertEqual(self.pull()[1]['added'], 1)
         self.assertEqual(len(self.lines(f'trees/{self.tree[:2]}/{self.tree}')), 1)
 
+    def truncate(self, oid):
+        path = self.host / 'objects' / oid[:2] / oid[2:]
+        self.assertTrue(path.is_file(), path)
+        path.chmod(0o644)
+        path.write_bytes(b'')
+
+    def test_a_damaged_local_head_is_restored_from_a_trusted_published_continuation(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        self.truncate(first)
+        code, result, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+        self.assertTrue(list((self.host / 'evidence-log.broken-objects').iterdir()))
+        # Damage in a tree or blob reachable from an otherwise readable head is repaired too.
+        blob = self.host_git('rev-parse', f'{result["head"]}:trees/{self.tree[:2]}/{self.tree}')
+        self.truncate(blob)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(len(self.lines(f'trees/{self.tree[:2]}/{self.tree}')), 1)
+
+    def test_repair_refuses_an_untrusted_or_missing_published_head_without_restarting_the_chain(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        other = self.f.key('other-publisher')
+        foreign = self.pull('--publish', signer=['ssh-keygen', '-q', '-Y', 'sign', '-n', 'git', '-f', str(other)])[1]['head']
+        self.truncate(foreign)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 1, error)
+        self.assertIn('not signed by a key in --log-keys', error)
+        self.assertEqual(self.host_git('rev-parse', log.LOG), foreign)
+        self.assertEqual(self.remote_head(), foreign)
+        # No origin head is also an alarm, rather than permission to start from scratch.
+        self.host_git('update-ref', log.LOG, first)
+        subprocess.run(['git', '-C', str(self.remote), 'update-ref', '-d', log.LOG], check=True)
+        self.truncate(first)
+        self.assertEqual(self.pull('--publish')[0], 1)
+        self.assertEqual(self.host_git('rev-parse', log.LOG), first)
+
+    def test_repair_keeps_relative_file_remotes_relative_to_the_publisher(self):
+        self.record()
+        self.host_git('remote', 'set-url', 'origin', '../github.git')
+        first = self.pull('--publish')[1]['head']
+        self.truncate(first)
+        code, result, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+
+    def test_repair_uses_the_same_relative_log_key_file_as_normal_extension(self):
+        self.record()
+        (self.host / 'relative-log-keys').write_text(self.log_keys.read_text())
+        self.assertEqual(self.pull('--publish', '--log-keys', 'relative-log-keys')[0], 0)
+        code, result, error = self.pull('--publish', '--log-keys', 'relative-log-keys')
+        self.assertEqual(code, 0, error)
+        first = result['head']
+        self.truncate(first)
+        code, result, error = self.pull('--publish', '--log-keys', 'relative-log-keys')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+
+    def test_repair_honors_the_publishers_revocations_before_moving_any_objects(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        (self.host / 'revoked-log-key').write_text(self.log_key.with_suffix('.pub').read_text())
+        self.host_git('config', 'gpg.ssh.revocationFile', 'revoked-log-key')
+        self.assertEqual(self.pull('--publish')[0], 1, 'normal extension refuses the revoked key')
+        self.truncate(first)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 1, error)
+        self.assertIn('not signed by a key in --log-keys', error)
+        self.assertFalse((self.host / 'evidence-log.broken-objects').exists(), 'the isolated verifier must honor the same revocation')
+
+    def test_repair_restores_a_truncated_blob_whose_header_still_reads(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        path = f'trees/{self.tree[:2]}/{self.tree}'
+        expected = self.lines(path)
+        blob = self.host_git('rev-parse', f'{first}:{path}')
+        loose = self.host / 'objects' / blob[:2] / blob[2:]
+        compressed = loose.read_bytes()
+        self.assertGreater(len(compressed), 64)
+        loose.chmod(0o644)
+        loose.write_bytes(compressed[:64])
+        header = subprocess.run(['git', '-C', str(self.host), 'cat-file', '--batch-check'], input=f'{blob}\n',
+                                capture_output=True, text=True, check=True).stdout
+        self.assertIn(' blob ', header, 'a header-only probe misses this corruption')
+        code, result, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+        self.assertEqual(self.lines(path), expected)
+
+    def test_repair_refuses_a_trusted_published_head_from_an_unrelated_chain(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        tree = self.host_git('rev-parse', f'{first}^{{tree}}')
+        unrelated = log.commit(str(self.host), tree, None, 'unrelated signed head', self.signer, NOW + 600)
+        self.host_git('push', '-q', '--force', 'origin', f'{unrelated}:{log.LOG}')
+        self.truncate(first)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 1, error)
+        self.assertIn('does not continue the damaged local head', error)
+        self.assertEqual(self.host_git('rev-parse', log.LOG), first)
+        self.assertEqual(self.remote_head(), unrelated)
+        self.assertFalse((self.host / 'evidence-log.broken-objects').exists(), 'trust is checked before changing local storage')
+
+    def test_empty_copies_still_require_explicit_seeding_from_the_published_chain(self):
+        self.record()
+        published = self.pull('--publish')[1]['head']
+        self.host = bare(self.f.root / 'empty-copy.git')
+        self.host_git('remote', 'add', 'origin', str(self.remote))
+        code, result, error = self.pull('--publish')
+        self.assertEqual(code, 1, error)
+        self.assertIn('is not an ancestor', result['publish_refused'])
+        self.assertEqual(self.remote_head(), published)
+
     def test_publish_puts_the_head_on_the_remote_and_a_moved_remote_head_is_reported_and_replaced_only_by_a_head_that_continues_it(self):
         self.record()
         code, result, _ = self.pull('--publish')
@@ -243,6 +360,29 @@ sys.exit(log.main(sys.argv[1:]))
         self.assertEqual((code, result['missing']), (0, []))
         self.assertEqual(len(self.lines(f'trees/{self.tree[:2]}/{self.tree}')), 2, 'restoring logs nothing twice')
         self.assertTrue(passed)
+
+    def test_a_refused_checkpoint_still_packs_refs_and_restores_missing_records(self):
+        old = self.record()
+        first = self.pull('--publish')[1]['head']
+        published = self.pull('--publish')[1]['head']
+        self.host_git('update-ref', log.LOG, first)  # this copy no longer continues the published head
+        self.record(seconds=10)
+        self.record(seconds=20)
+        ref = self.f.ref_of[old]
+        for count in (1, 500):  # failure during verification, then at the final checkpoint
+            with self.subTest(chunk_refs=count):
+                subprocess.run(['git', '-C', str(self.remote), 'update-ref', '-d', ref], check=True)
+                output = io.StringIO()
+                with mock.patch.object(log, 'CHUNK_REFS', count), contextlib.redirect_stdout(output):
+                    code = log.main(['pull', '--repo', str(self.host), '--publish', '--restore',
+                                     '--signer', json.dumps(self.signer), '--log-keys', str(self.log_keys), '--now', str(NOW)])
+                result = json.loads(output.getvalue())
+                self.assertEqual(code, 4, result)
+                self.assertEqual((result['added'], result['published'], result['restored']), (1, False, True), result)
+                self.assertEqual(result['missing'], [ref])
+                self.assertIn(ref, self.remote_refs())
+                self.assertIn(f'{result["head"]} {log.LOG}', (self.host / 'packed-refs').read_text())
+                self.assertEqual(self.remote_head(), published, 'a refused publication still never overwrites the remote')
 
     def test_gc_lines_go_first_so_what_gc_deletes_is_not_missing_and_new_records_count_after_them(self):
         old = self.record()
@@ -408,11 +548,20 @@ sys.exit(log.main(sys.argv[1:]))
         (config / 'signer.json').write_text(json.dumps(self.signer))
         (config / 'log-keys').write_text(self.log_keys.read_text())
         env = dict({k: v for k, v in os.environ.items() if not k.startswith('GIT_')}, EVIDENCE_LOG_STATE=str(self.f.root / 'state'),
-                   EVIDENCE_LOG_REMOTE=str(self.remote), EVIDENCE_LOG_CONFIG=str(config), EVIDENCE_LOG_FLAGS='--publish')
+                   EVIDENCE_LOG_REMOTE='../../github.git', EVIDENCE_LOG_CONFIG=str(config), EVIDENCE_LOG_FLAGS='--publish')
         done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
         result = json.loads(done.stdout)
         self.assertEqual((result['added'], result['published']), (1, True), result)
+        timer_repo = self.f.root / 'state/repo.git'
+        self.assertEqual(subprocess.check_output(['git', '-C', str(timer_repo), 'config', 'core.fsync'], text=True).strip(), 'objects,reference')
+        # The timer must reach repair even when its bootstrap fetch sees a corrupt local log ref.
+        head = result['head']
+        damaged = timer_repo / 'objects' / head[:2] / head[2:]
+        damaged.chmod(0o644)
+        damaged.write_bytes(b'')
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
         published = subprocess.run(['git', '-C', str(self.remote), 'show', f'refs/evidence-log/main:trees/{self.tree[:2]}/{self.tree}'],
                                    capture_output=True, text=True).stdout
         self.assertIn(f'record {record} unit 0 ', published)
