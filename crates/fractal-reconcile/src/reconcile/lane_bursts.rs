@@ -79,6 +79,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(first) = first {
             return Ok(BurstJudged::Waits(format!("burst lane {} for {agent} waits behind {first}, first in line for room", show_lane(lane))));
         }
+        // A seat that has waited long to start is served before more bursts: the host drains to
+        // fit for it, as it does for the first seat in line.
+        if let Some((seat, waited)) = self.seat_admission.status.aged_lane_head(now, BURST_YIELDS_TO_START_AFTER_SECS)
+            .filter(|(seat, _)| seat != agent)
+        {
+            return Ok(BurstJudged::Waits(format!(
+                "burst lane {} for {agent} waits behind {seat}, which has waited {} min to start", show_lane(lane), waited / 60)));
+        }
         let held = self.held_lanes(agent, now)?;
         let outside = (host.outside)().unwrap_or(0);
         let free = room.memory.saturating_sub(held).saturating_sub(outside);
@@ -94,6 +102,9 @@ impl<R: RuntimeControl> Reconciler<R> {
 /// How soon a waiting burst is judged again without a claim to wake it: what seats outside lanes
 /// hold changes without one.
 const BURST_RETRY_MS: u128 = 5_000;
+
+/// How long the first seat in line for room waits before new bursts wait behind it.
+const BURST_YIELDS_TO_START_AFTER_SECS: u64 = 15 * 60;
 
 enum BurstJudged {
     Granted(Capacity),

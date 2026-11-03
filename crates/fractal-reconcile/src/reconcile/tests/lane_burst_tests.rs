@@ -158,3 +158,31 @@ fn after_a_daemon_restart_a_raised_slice_counts_and_its_renewed_burst_holds_it_a
     hold(&reconciler, &store, builder, &member);
     assert_eq!(reconciler.seat_admission.status.state().lane_raised.get(builder), Some(&burst));
 }
+
+#[test]
+fn a_burst_waits_behind_a_seat_that_has_waited_long_to_start() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let reconciler = laned(Arc::new(FakeRuntime::default()), &store);
+    seat(&store, "builder", "capacity cores=2 memory=\"4G\"");
+    let status = &reconciler.seat_admission.status;
+    let at = now();
+    // A seat waiting for room since 10 minutes ago: a burst that fits is still granted.
+    status.lane_wait("agent/node.big", "lane 8 cores/48.0G does not fit".into(), true, at - 600);
+    status.state().lane_waits[0].checked = at;
+    status.burst_hold("agent/node.builder", Capacity { cores: 2, memory: 6 * G }, "st-test", at);
+    reconciler.reconcile_lane_bursts().unwrap();
+    assert_eq!(status.burst_granted("agent/node.builder"), Some(Capacity { cores: 2, memory: 6 * G }));
+    assert!(status.burst_release("agent/node.builder"));
+    reconciler.reconcile_lane_bursts().unwrap();
+    // Once it has waited 15 minutes, a new burst waits behind it, so the host drains to fit for it.
+    status.state().lane_waits[0].since = at - 15 * 60;
+    status.burst_hold("agent/node.builder", Capacity { cores: 2, memory: 6 * G }, "st-test", at);
+    reconciler.reconcile_lane_bursts().unwrap();
+    assert_eq!(status.burst_granted("agent/node.builder"), None);
+    assert_eq!(status.state().lane_bursts[0].wait.as_deref(), Some(
+        "burst lane 2 cores/6.0G for agent/node.builder waits behind agent/node.big, which has waited 15 min to start"));
+    // Its start leaves the line: the burst is served.
+    status.lane_admitted("agent/node.big", Capacity { cores: 8, memory: 4 * G }, at);
+    reconciler.reconcile_lane_bursts().unwrap();
+    assert_eq!(status.burst_granted("agent/node.builder"), Some(Capacity { cores: 2, memory: 6 * G }));
+}
