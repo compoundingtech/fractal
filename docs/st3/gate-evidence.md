@@ -1693,7 +1693,18 @@ and this bridge marker. Do not prefer or copy the shim while copy-only bases rem
 
 `scripts/fractal-test` runs the whole per-PR suite: each required check that has a local command (today `typescript-client`, `genie-freshness`, `ci-script-tests`
 and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and means the same) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
-records the exit code and output digest. The checks that do not build (`typescript-client`, `genie-freshness`, `ci-script-tests`) run alongside
+records the exit code and output digest.
+
+If the local `typescript-client` check exits 127, the runner prints its caller's `PATH` and `BASH_ENV`, plus
+the web shell hook's start/end snapshots: `PATH`, `command -v pnpm`, `BASH_ENV`, and the publisher's exit status.
+A missing report or end marker means that hook entry or completion was not observed. These snapshots describe
+the hook before the child Bash starts; inherited startup code can still change the child's environment afterward.
+The check keeps its failed status and is not rerun. The report lives in the run's private scratch directory;
+the shell hook writes it only when the runner supplies `CI_WEB_SHELL_DIAGNOSTICS`, and ordinary developer
+shells print no additional output. This gathers evidence for the unresolved environment incident in
+[#4659](https://github.com/compoundingtech/fractal/issues/4659), rather than claiming a later pass fixed it.
+
+The checks that do not build (`typescript-client`, `genie-freshness`, `ci-script-tests`) run alongside
 `linux-gate`, one after another in a lane of their own, as CI runs them on runners of their own: their output is kept and printed after
 linux-gate's, never interleaved, and the summary lists every check as before (`ST_EVIDENCE_SERIAL=1` runs them one after another). The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
