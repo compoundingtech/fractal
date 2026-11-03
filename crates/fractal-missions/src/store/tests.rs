@@ -1870,7 +1870,7 @@ mission "example/onboarding" state="ready" {
         concat!(
             "version 2\nmission-run \"example/onboarding\" {{\n",
             "  mission \"mission/example/onboarding@{}\"\n",
-            "  workspace {:?}\n  requester \"person/birch\"\n}}\n",
+            "  workspace {:?}\n  requester \"person/alex\"\n}}\n",
         ),
         mission.revision,
         directory.path(),
