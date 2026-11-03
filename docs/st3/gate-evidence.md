@@ -1804,7 +1804,7 @@ PATHs differ would otherwise rebuild nearly the whole workspace in the same pool
 All the repositories' pools together are kept under `ST_TEST_POOL_MAX_GB` (default 60; `0` or `off` for no cap): before a run starts, with its own
 tree already held, `fractal-test` removes the least recently used trees and both their workspace and fleet-compat targets whose lock is free, oldest first, until the pool directory
 (`~/.cache/st-test`) fits, never one in use, and says on stderr what it removed. The per-target guard (below) stays. A run can exceed the cap by its own growth (one run's tests, clippy and fleet-compat builds end near 60 GB with incremental
-compilation, which the checks now turn off as CI does), so size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus about 60. Where cargo's
+compilation, which the checks now turn off as CI does), so allow about 80 GB for one run (the earlier shared build estimate of 60 GB plus up to about 20 GB for compatibility), and size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus that allowance. Where cargo's
 `build-dir` points elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`), the intermediates live there, not in the pool, and the cap does not count them.
 A run's `TMPDIR` (and `TMP` and `TEMP`), for `fractal-test` itself and every check it starts, is a directory of its own on disk,
 `/var/tmp/st-test.XXXXXXXX` (in `ST_TEST_TMP` when set), removed when the run ends (`--keep` keeps it and says where; no later run removes
@@ -1885,7 +1885,7 @@ Fleet compatibility uses the kept sibling `target-N-fleet-compat`, about 20 GB e
 its feature selection can relink binaries that the tests are executing (#4128). Both targets count toward the pool cap, are evicted
 together under the tree's lock, and are emptied together before a run when their combined size exceeds the existing 80 GB target limit. A shared
 `ST_EVIDENCE_TARGET=PATH` uses `PATH-fleet-compat` under the same exclusive lock. With `off`, fleet compatibility builds in the tree's
-`target-fleet-compat`; an explicit `CARGO_TARGET_DIR=PATH` uses the separate `PATH-fleet-compat` without st-test trimming either directory.
+`target/fleet-compat` (under the usual ignored `target/`, also excluded by the dependency-input checker); an explicit `CARGO_TARGET_DIR=PATH` uses the separate `PATH-fleet-compat` without st-test trimming either directory.
 Operations' terms: it is emptied before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it). st-test empties only a target it or cargo made, by its CACHEDIR.TAG, or a pool tree's own target inside the pool directory; st-test writes the tag when it creates a target, since cargo tags only a target directory it creates itself. It is never
 pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
 no longer used by default and can be deleted.
@@ -2018,7 +2018,7 @@ carry; run by hand, `ci-local` fetches main itself and never trusts a local ref,
 `evidence-wrap --input NAME=VALUE` adds is recorded the same way; it refuses the names it sets itself. Each stage is the `scripts/ci-linux` stage as its CI job runs it, after building and
 installing the rendered hooks as the job's test-archive setup does, in a home of its own.
 Clippy and fleet compatibility each run in a buffered lane beside tests. Clippy shares the workspace target and Cargo's build lock;
-fleet compatibility uses its own target. Their logs are printed after foreground stages, in the requested stage order, and the first
+fleet compatibility uses its own target, so its compiles can overlap the tests build; every Cargo command still takes host build admission. Their logs are printed after foreground stages, in the requested stage order, and the first
 failure in that order is returned, including a lane that leaves no result. `CI_LOCAL_SERIAL=1` restores sequential stages while keeping
 the separate targets. HOME and the XDG state, config, data
 and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,

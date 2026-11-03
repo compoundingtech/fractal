@@ -191,7 +191,8 @@ BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
 # left alone.
 # One run (test build + clippy + fleet-compat profiles) ends near 60 GB; with incremental compilation on, a quarter to a half of that is debug/incremental
 # (a build host, 2026-10-23: target-0 99 GB of which incremental 40, deps 55, examples 5). The check is only made before a run, so a limit below one run's
-# size would empty the target every time and nothing would ever be warm: 80 GB lets one run's output stay.
+# size would empty the targets every time and nothing would ever be warm. The separate compatibility target can add about 20 GB;
+# 80 GB is still the combined budget for both targets, and measurements track whether either gets trimmed in normal use.
 TARGET_MAX_GB = 80.0
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.

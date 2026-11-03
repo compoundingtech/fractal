@@ -293,7 +293,7 @@ run_stage() {
   # Keep every cargo command in that stage in its own target, even in serial mode or when the caller supplied a target.
   if [ "$stage" = fleet-compat ]; then
     local compat_target
-    compat_target=$(python3 -I -c 'import os; print(os.path.abspath(os.environ.get("CARGO_TARGET_DIR") or "target") + "-fleet-compat")')
+    compat_target=$(python3 -I -c 'import os; target=os.environ.get("CARGO_TARGET_DIR"); print(os.path.abspath(target) + "-fleet-compat" if target else os.path.abspath("target/fleet-compat"))')
     local CARGO_TARGET_DIR=$compat_target
     export CARGO_TARGET_DIR
   fi
@@ -359,6 +359,8 @@ cleanup_lanes() {
   rm -rf "$scratch" "$tmp"
 }
 trap cleanup_lanes EXIT
+# For prompt cancellation while a foreground pipeline runs, signal this process group: Bash defers a PID-only trap until
+# that pipeline ends. st-test's runner signals the group. The EXIT path then stops all buffered lanes before scratch cleanup.
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
