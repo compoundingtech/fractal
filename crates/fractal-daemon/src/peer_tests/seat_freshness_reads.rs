@@ -763,7 +763,7 @@ async fn views_and_lists_read_a_relay_hosts_seat_from_it() {
     // history for the mail the host closed.
     let mut resources = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
-    crate::api::relay_client_message_items(&state, &mut resources, now).await.unwrap();
+    crate::api::relay_client_message_items(&state, &mut resources, now, false).await.unwrap();
     let resource = |id: &str| resources.iter().find(|resource| resource["id"] == id).unwrap().clone();
     let read = resource("message/00000000000000c1");
     assert_eq!(read["state"], "read", "{read}");
@@ -778,6 +778,38 @@ async fn views_and_lists_read_a_relay_hosts_seat_from_it() {
     assert_eq!(closed["state"], "closed");
     assert_eq!(closed["operational"], json!({"layer": "history", "actionable": false, "reasons": ["closed"]}));
     assert!(resource("message/00000000000000b1").get("status_from").is_none());
+    let mut current = crate::api::client_message_resources(&viewer, None, false, None).unwrap();
+    crate::api::relay_client_message_items(&state, &mut current, now, true).await.unwrap();
+    assert!(
+        current.iter().all(|resource| resource["id"] != "message/00000000000000c2"),
+        "current messages leave out what the host closed"
+    );
+
+    // A paging client's current pages, one message each: the one the host closed is left out,
+    // its page comes back empty with a cursor, and the walk reaches every other message once.
+    while viewer.maintain_client_message_selectors().unwrap() {}
+    let mut query = crate::api::ClientListQuery { limit: Some(1), ..Default::default() };
+    let mut snapshot = crate::api::new_client_snapshot(&state);
+    let (mut walked, mut empty) = (Vec::new(), 0);
+    for _ in 0..10 {
+        let (axum::Extension(next), axum::Json(page)) =
+            crate::api::client_reads::client_messages_sql_page_for_tests(&state, snapshot.clone(), &query)
+                .await
+                .unwrap();
+        snapshot = next;
+        walked.extend(page.items.iter().map(|item| item["id"].as_str().unwrap().to_owned()));
+        empty += usize::from(page.items.is_empty() && page.page.next_cursor.is_some());
+        match page.page.next_cursor {
+            Some(cursor) => query.cursor = Some(cursor),
+            None => break,
+        }
+    }
+    walked.sort();
+    assert_eq!(
+        walked,
+        ["message/00000000000000b1", "message/00000000000000c1", "message/00000000000000c3"]
+    );
+    assert_eq!(empty, 1, "the page of the message the host closed");
 }
 
 /// A view does not wait for a host that does not answer: it waits a second, then shows this

@@ -4717,19 +4717,20 @@ fn client_message_resource(
 /// answer, `status_from` names the host and whether it answered, `delivery` reads what it said,
 /// and a message its host closed is history, as a message this member closed is. A host's mark
 /// newer than this member's records is the resource's `revision` and `updated_at`, as this
-/// member's own mark would be, so a client that keeps resources by revision sees it move. Every
-/// message is kept, so a page's cursor and size hold. `views` are the messages, each with its
-/// sent time.
+/// member's own mark would be, so a client that keeps resources by revision sees it move.
+/// `views` are the messages, each with its sent time. Answers the messages the host closed: a
+/// list of current messages leaves them out, as it leaves out those this member closed.
 pub async fn relay_client_messages<'a>(
     state: &AppState,
     items: impl IntoIterator<Item = &'a mut Value>,
     views: Vec<(crate::model::MessageView, u128)>,
     now: u128,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<BTreeSet<String>> {
     let messages = views.iter().map(|(message, _)| message.clone()).collect::<Vec<_>>();
     let relayed = message_reads::read_for_views(state, &messages).await?;
+    let mut closed = BTreeSet::new();
     if relayed.is_empty() {
-        return Ok(());
+        return Ok(closed);
     }
     let store = state.store.clone();
     let patches = tokio::task::spawn_blocking(move || -> anyhow::Result<BTreeMap<String, Value>> {
@@ -4773,17 +4774,20 @@ pub async fn relay_client_messages<'a>(
         }
         if patch["state"] == "closed" {
             item["operational"] = json!({ "layer": "history", "actionable": false, "reasons": ["closed"] });
+            closed.extend(item.get("id").and_then(Value::as_str).map(str::to_owned));
         }
     }
-    Ok(())
+    Ok(closed)
 }
 
 /// [`relay_client_messages`] for resources read without their messages, such as a detail or a
-/// page cut from a materialized collection: each message and its sent time are read again.
+/// page cut from a materialized collection: each message and its sent time are read again. With
+/// `drop_closed`, the messages the host closed leave `items`.
 pub async fn relay_client_message_items(
     state: &AppState,
-    items: &mut [Value],
+    items: &mut Vec<Value>,
     now: u128,
+    drop_closed: bool,
 ) -> anyhow::Result<()> {
     let ids = items
         .iter()
@@ -4808,7 +4812,11 @@ pub async fn relay_client_message_items(
         Ok(views)
     })
     .await??;
-    relay_client_messages(state, items.iter_mut(), views, now).await
+    let closed = relay_client_messages(state, items.iter_mut(), views, now).await?;
+    if drop_closed {
+        items.retain(|item| !item.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id)));
+    }
+    Ok(())
 }
 
 pub fn client_message_resources(
