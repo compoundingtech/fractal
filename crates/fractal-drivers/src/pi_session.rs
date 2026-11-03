@@ -1,12 +1,9 @@
-//! Controlled pi launch with a session-owned presence lease.
+//! Native pi launch and adoption with session-owned observed records.
 //!
-//! pi has no MCP and no app-server: its integration point is an extension loaded into the
-//! interactive process, and that extension reaches st2 by spawning `st2 driver pi-channel`. The
-//! launch body itself is shared with omp — the family's other extension-driven harness — in
-//! [`crate::pi_family_session`]; what lives here is what is genuinely pi's: its extension asset,
-//! its channel variable names, and the release its harness-context arithmetic was measured on.
-
-use std::path::Path;
+//! The pi extension spawns this binary's channel. The native driver supplies explicit paths and
+//! ownership, and the outer provider wrapper records terminal state when the provider exits.
+//! Launch mechanics are shared with omp in [`crate::pi_family_session`]; this module supplies
+//! pi's extension asset, channel environment names, and measured context-producer release.
 
 use anyhow::Result;
 
@@ -52,37 +49,6 @@ pub(crate) const PI_KIND: HarnessKind = HarnessKind {
     seq_env: CHANNEL_SEQ,
     verify_version: None,
 };
-
-/// Run one interactive pi provider and maintain its presence until it exits.
-pub fn run(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    pi_argv: Vec<String>,
-) -> Result<()> {
-    pi_family_session::run_for(catalog_root, identity, runtime_id, pi_argv, &PI_KIND)
-}
-
-/// Resume supervising a pi provider a predecessor driver image launched and released.
-pub fn adopt(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    pid: u32,
-    session: String,
-    seq: u64,
-) -> Result<()> {
-    pi_family_session::adopt_for(
-        catalog_root,
-        identity,
-        runtime_id,
-        &PI_KIND,
-        pid,
-        session,
-        seq,
-        true,
-    )
-}
 
 #[cfg(test)]
 mod tests {
