@@ -49760,6 +49760,8 @@ mission "fresh" state="ready" {
             assert!(seat.store.observations_for(SEAT, "runtime.action.requested").unwrap().is_empty());
             assert_eq!(seat.store.step_run(&held).unwrap().unwrap().status, "claimed");
             seat.work(&held, "complete", "context-complete").unwrap();
+            seat.reconciler.reconcile_once().unwrap();
+            assert_eq!(seat.store.step_run(&held).unwrap().unwrap().status, "completed");
             seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member)).unwrap();
             assert_eq!(seat.reconciler.runtime.stops.lock().unwrap().len(), 1);
             assert!(seat.store.step_run(&SeatQueueFixture::step(&second, "work")).unwrap().is_some());
