@@ -216,8 +216,8 @@ mod tests {
         let short = traced_blockers(&store);
         for index in 0..300 {
             for member in [&store, &peer] {
-                claim(member, &format!("message/{}-{index}", member.origin), "message.sent", Some("person/ash"),
-                    json!({"from": "person/ash", "to": "person/rowan", "content": "history", "status": "sent"}));
+                claim(member, &format!("message/{}-{index}", member.origin), "message.sent", Some("person/sender"),
+                    json!({"from": "person/sender", "to": "person/recipient", "content": "history", "status": "sent"}));
             }
         }
         sync(&peer, &store);
