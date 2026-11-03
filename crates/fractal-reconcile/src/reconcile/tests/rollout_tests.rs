@@ -52,7 +52,7 @@ impl RuntimeControl for Runtime {
         );
         self.stops.lock().push(expected.unwrap().into());
         observed.status = "exited".into();
-        let mut late = self.late_stops.lock().unwrap();
+        let mut late = self.late_stops.lock();
         if *late > 0 {
             *late -= 1;
             anyhow::bail!("stop PTY failed: daemon PID 1 is still running after 7s");
@@ -699,6 +699,7 @@ fn independent_ask_request(key: &str) -> crate::model::PersonAskRequest {
         reason: "Choose the next bed".into(), actor: SUBJECT.into(), step: None,
         new_run: Some("independent-bed".into()), incarnation: Some("original-1".into()),
         request: None, idempotency_key: key.into(),
+        deadline_ms: None, default_answer: None,
     }
 }
 
