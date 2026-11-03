@@ -1040,7 +1040,7 @@ class StTest(unittest.TestCase):
         self.assertIn('clean worktree', out)
 
     def test_a_host_that_preloads_a_library_into_every_process_still_signs(self):
-        """hetz2 sets LD_PRELOAD (jemalloc) for every process; the signer refuses it, so the launcher must not pass it on."""
+        """A build host sets LD_PRELOAD (jemalloc) for every process; the signer refuses it, so the launcher must not pass it on."""
         self.commit('b.txt', 'two')
         empty = Path(self.tmp.name) / 'empty'
         empty.mkdir()
@@ -1325,8 +1325,15 @@ class StTest(unittest.TestCase):
         (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': rev}}}}))
         command = st_test.members_command(directory)
         step = (ROOT / '.github/workflows/workspace-ci.ts').read_text().split('export const megarepoApplyStep', 1)[1].split('} as const', 1)[0]
-        ci = step.replace('$(jq -r \'.nodes["effect-utils"].locked.rev\' flake.lock)', rev)
-        self.assertIn(f'nix run "{command[2]}" {" ".join(command[3:])}', ci)
+        self.assertIn('python3 scripts/prepare-pnpm-source-inputs.py apply', step)
+        # CI delegates to the shared preparer. Compare its actual argv, not the old inline shell spelling.
+        import ast
+        source = ast.parse((ROOT / 'scripts/prepare-pnpm-source-inputs.py').read_text())
+        apply = next(node for node in ast.walk(source) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                     and node.func.value.id == 'subprocess' and node.func.attr == 'run')
+        ci = eval(compile(ast.Expression(apply.args[0]), '<megarepo argv>', 'eval'), {'revision': rev})
+        self.assertEqual(ci, ['nix', *command[1:], '--lock-sync', 'off'])
         (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': 'main; rm -rf /'}}}}))
         with self.assertRaises(ValueError):
             st_test.members_command(directory)
@@ -3822,16 +3829,20 @@ class PoolQueue(unittest.TestCase):
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)
         free, asked, waits, got = [False], [], {}, []
+        # Its third look, not a fixed 0.6 s: a waiter thread scheduled late on a loaded host had looked only twice by then (#4807).
+        third = threading.Event()
 
         def slot_ready():
             asked.append(time.monotonic())
+            if len(asked) >= 3:
+                third.set()
             return free[0], 'test: 1 of 1 heavy slots busy'
 
         said = io.StringIO()
         with contextlib.redirect_stderr(said):
             waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)))
             waiter.start()
-            time.sleep(0.6)
+            self.assertTrue(third.wait(30), f'the waiter looked {len(asked)} time(s) in 30 s')
             self.assertEqual(got, [])                                           # both trees are free, but its build would wait for a slot
             for n in range(2):                                                  # and it holds neither while it waits (only for its look)
                 with open(self.root / f'tree-{n}.lock', 'w') as probe:
@@ -4469,7 +4480,7 @@ class PerCrate(StTest):
 
     def test_one_crate_with_a_failed_test_does_not_make_the_other_crates_records_unverified(self):
         # evidence-wrap's check after signing used to ask for the tree's newest rust-tests record whatever its crate: with a failed crate's record
-        # on the tree (signed first, here), every crate signed after it came back "did not verify locally" (50 of 52 on hetz2 at feefaa9c95).
+        # on the tree (signed first, here), every crate signed after it came back "did not verify locally" (50 of 52 on a build host at feefaa9c95).
         code, out, err = self.run_crates('--push', 'origin', FAKE_FAIL='base')
         self.assertEqual(code, 1, out + err)
         self.assertNotIn('did not verify locally', out)

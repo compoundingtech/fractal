@@ -4,6 +4,11 @@
 use super::*;
 use serde_json::json;
 
+pub(super) fn channel_cause_attention(subject: &str) -> String {
+    let digest = hex::encode(sha2::Sha256::digest(format!("claude-channel-cause:{subject}").as_bytes()));
+    format!("attention/claude-channel-cause-{}", &digest[..32])
+}
+
 const MAX_ATTEMPTS: usize = 3;
 const RECHECK_BACKOFF_MS: u128 = 10_000;
 const ATTEMPT_WINDOW_MS: u128 = 6 * 60 * 60 * 1_000;
@@ -22,13 +27,46 @@ fn recheck_backoff_ms() -> u128 {
         .map_or(RECHECK_BACKOFF_MS, |cap| cap.min(RECHECK_BACKOFF_MS))
 }
 const RECOVERY: &str = "claude-channel-recovery";
+/// A restart that spends no budget: Claude never started (its diagnostic is `stalled`), or the
+/// channel failed again for the cause the last charged attempt already named (#4789). It waits
+/// the long backoff, so a seat that cannot start is retried slowly, and keeps its budget for
+/// real channel failures.
+pub(super) const UNCHARGED_OPERATION: &str = "claude-channel-recovery-uncharged-v1";
+/// The first long backoff, doubled for each uncharged restart in a row, at most [`LONG_BACKOFF_MAX_MS`].
+const LONG_BACKOFF_MS: u128 = 5 * 60 * 1_000;
+const LONG_BACKOFF_MAX_MS: u128 = 30 * 60 * 1_000;
+/// After this many uncharged restarts in a row for one cause, the seat's operational fault names it.
+const UNCHARGED_FAULT_AFTER: usize = 3;
+/// Where an unattached diagnostic's reason carries its cause JSON (crates/fractal main.rs,
+/// claude_attachment_reason), and where a restart request records the cause it was for.
+const CAUSE_MARKER: &str = " cause=";
+
+/// The cause a reason ends with, if it names one.
+fn reason_cause(reason: &str) -> Option<Value> {
+    // The first marker: the reason's own text comes before it, and a marker inside the cause (in a
+    // plugin error, say) is inside its JSON.
+    let (_, cause) = reason.split_once(CAUSE_MARKER)?;
+    serde_json::Deserializer::from_str(cause).into_iter::<Value>().next()?.ok()
+}
+
+/// What makes two causes the same: what failed and what the driver chose, not when.
+fn cause_signature(cause: &Value) -> Value {
+    json!({
+        "kind": cause["kind"], "route": cause["route"],
+        "plugin_check_error": cause["plugin_check_error"], "project_st_server": cause["project_st_server"],
+    })
+}
+
+fn claim_signature(claim: &crate::model::ClaimRecord) -> Option<Value> {
+    claim.body["fields"]["reason"].as_str().and_then(reason_cause)
+}
 // Existing operation-string field is the policy stamp. Old requests remain automatic history,
 // but never spend the new rolling budget. No schema or legacy claim rewrite is needed.
 pub(super) const POLICY_OPERATION: &str = "claude-channel-recovery-window-v1";
 pub(super) fn automatic_request(claim: &crate::model::ClaimRecord) -> bool {
     matches!(
         claim.body["fields"]["operation"].as_str(),
-        Some(RECOVERY | POLICY_OPERATION)
+        Some(RECOVERY | POLICY_OPERATION | UNCHARGED_OPERATION)
     )
 }
 
@@ -246,14 +284,36 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && harness.reason.as_deref() == Some("claude-channel-unattached")
             })
         else {
+            if self.store.claude_channel_attached(&subject.subject, incarnation)? {
+                self.clear_channel_cause_fault(&subject.subject)?;
+            }
             return Ok(false);
         };
         // A recorded request owns this incarnation's stop/start, even if it is still in flight.
-        if attempts
+        let uncharged: Vec<_> = restarts
             .iter()
+            .filter(|claim| claim.store_index > reset && claim.body["fields"]["operation"] == UNCHARGED_OPERATION
+                && now.saturating_sub(claim.accepted_at_unix_ms) < ATTEMPT_WINDOW_MS)
+            .copied()
+            .collect();
+        if attempts.iter().map(|claim| **claim).chain(uncharged.iter().copied())
             .any(|claim| claim_incarnation(claim) == Some(incarnation))
         {
             return Ok(false);
+        }
+        // What the driver says is wrong (#4789): a Claude that never started, or the cause the last
+        // charged attempt already restarted for, is no new channel failure to spend budget on.
+        let diagnostic = self.store.claims_for(&subject.subject, Some("harness.diagnostic"))?
+            .into_iter()
+            .rev()
+            .find(|claim| claim.body["fields"]["code"] == "claude-channel-unattached" && claim_incarnation(claim) == Some(incarnation));
+        let stalled = diagnostic.as_ref().is_some_and(|claim| claim.body["fields"]["status"] == "stalled");
+        let signature = diagnostic.as_ref().and_then(claim_signature).map(|cause| cause_signature(&cause));
+        let repeated = signature.is_some()
+            && attempts.iter().max_by_key(|claim| claim.store_index).and_then(|claim| claim_signature(claim)) == signature;
+        if stalled || repeated {
+            let charged_since = attempts.iter().map(|claim| claim.store_index).max();
+            return self.restart_uncharged(subject, member, incarnation, &token, &harness, &uncharged, charged_since, signature, stalled, blocked, now);
         }
         // The attachment report may be newer than the driver's diagnostic. Recheck the live
         // current delivery fence directly before charging a retry or parking the seat.
@@ -319,7 +379,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     ("operation".into(), json!(POLICY_OPERATION)),
                     ("runtime_id".into(), json!(member.runtime_id)),
                     ("incarnation_id".into(), json!(incarnation)),
-                    ("reason".into(), json!(format!("Automatic Claude channel recovery attempt {} of {MAX_ATTEMPTS}: the channel remained unattached during recheck; restart and continue the native session", attempts.len() + 1))),
+                    ("reason".into(), json!(format!("Automatic Claude channel recovery attempt {} of {MAX_ATTEMPTS}: the channel remained unattached during recheck; restart and continue the native session{}", attempts.len() + 1,
+                        signature.as_ref().map_or_else(String::new, |signature| format!("{CAUSE_MARKER}{signature}"))))),
                 ]),
                 evidence: vec![token.clone(), harness.claim], expected_subject: None,
                 idempotency_key: Some(format!("{POLICY_OPERATION}:restart:{}:{token}:{incarnation}:{}:{episode}", subject.subject, harness.since_unix_ms)),
@@ -332,6 +393,98 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         self.signal_changed();
         Ok(true)
+    }
+
+    /// Restarts `incarnation` without charging the budget, on the long backoff that doubles for each
+    /// uncharged restart in a row. After [`UNCHARGED_FAULT_AFTER`] of them for one cause, the
+    /// seat's operational fault names it, so a seat that keeps failing for one cause is seen; it
+    /// clears when the channel attaches.
+    #[allow(clippy::too_many_arguments)]
+    fn restart_uncharged(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        incarnation: &str,
+        token: &str,
+        harness: &crate::model::CurrentHarnessView,
+        uncharged: &[&crate::model::ClaimRecord],
+        charged_since: Option<u64>,
+        signature: Option<Value>,
+        stalled: bool,
+        blocked: Option<&anyhow::Error>,
+        now: u128,
+    ) -> Result<bool> {
+        // The uncharged restarts in a row for this cause: a charged attempt or another cause ends the run.
+        let charged = charged_since.unwrap_or(0);
+        let in_row = uncharged.iter().rev()
+            .take_while(|claim| claim.store_index > charged && claim_signature(claim) == signature)
+            .count();
+        let backoff = (LONG_BACKOFF_MS << in_row.min(8)).min(LONG_BACKOFF_MAX_MS);
+        let due = harness.since_unix_ms.saturating_add(backoff);
+        if now < due {
+            self.arm_restart(&format!("channel-recovery:{}", subject.subject), due);
+            return Ok(false);
+        }
+        if let Some(error) = blocked {
+            anyhow::bail!("Claude channel recovery is blocked: {error:#}");
+        }
+        self.store.owned_desired_guard(subject)?;
+        let why = if stalled { "Claude did not start" } else { "the channel failed again for the cause the last charged attempt named" };
+        let cause = signature.as_ref().map_or_else(String::new, |signature| format!("{CAUSE_MARKER}{signature}"));
+        if in_row + 1 >= UNCHARGED_FAULT_AFTER {
+            self.raise_channel_cause_fault(subject, in_row + 1, &cause)?;
+        }
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(), kind: "runtime.action.requested".into(),
+            actor: Some(RECONCILER_ACTOR.into()),
+            fields: BTreeMap::from([
+                ("action".into(), json!("restart")),
+                ("operation".into(), json!(UNCHARGED_OPERATION)),
+                ("runtime_id".into(), json!(member.runtime_id)),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("reason".into(), json!(format!("Automatic Claude restart, not charged to the channel recovery budget: {why}; restart {} in a row for it, after a {} min backoff{cause}", in_row + 1, backoff / 60_000))),
+            ]),
+            evidence: vec![token.to_owned(), harness.claim.clone()], expected_subject: None,
+            idempotency_key: Some(format!("{UNCHARGED_OPERATION}:restart:{}:{token}:{incarnation}:{}", subject.subject, harness.since_unix_ms)),
+        })?;
+        self.signal_changed();
+        Ok(false)
+    }
+
+    /// The operational fault naming the cause a seat keeps failing for without spending budget.
+    fn raise_channel_cause_fault(&self, subject: &DesiredSubject, in_row: usize, cause: &str) -> Result<()> {
+        let attention = channel_cause_attention(&subject.subject);
+        if self.store.operational_failure(&attention)?.is_some_and(|item| item.status == "pending") {
+            return Ok(());
+        }
+        self.store.record_operational_failure(&attention, &AttentionRequest {
+            reviewer: "person/operator".into(),
+            title: format!("{}'s Claude channel keeps failing for one cause", subject.subject),
+            reason: format!(
+                "{} has been restarted {in_row} times in a row for the same cause without its channel coming up; these restarts spend no channel recovery budget, so it keeps retrying on a long backoff (at most 30 min).{cause}",
+                subject.subject
+            ),
+            severity: "warning".into(),
+            targets: vec![subject.subject.clone()],
+            actor: RECONCILER_ACTOR.into(),
+            idempotency_key: format!("{UNCHARGED_OPERATION}:fault:{}:{in_row}", subject.subject),
+        })?;
+        Ok(())
+    }
+
+    /// Clears the cause fault once the seat's channel attached.
+    pub(super) fn clear_channel_cause_fault(&self, subject: &str) -> Result<()> {
+        let attention = channel_cause_attention(subject);
+        if let Some(failure) = self.store.operational_failure(&attention)?
+            && failure.status == "pending"
+        {
+            self.store.recover_operational_failure(
+                &attention,
+                "The seat's Claude channel attached.",
+                &format!("{UNCHARGED_OPERATION}:cleared:{}", failure.request),
+            )?;
+        }
+        Ok(())
     }
 
     /// Whether `incarnation`'s channel reported attached before this daemon started. Only phase

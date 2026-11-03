@@ -23,16 +23,18 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, userAgent: await testRunnerUserAgent(browser) })
   const origins = new Set()
   let previousCase = null
+  const residualError = isolation => {
+    const error = new Error(`Kit isolation ${isolation.boundary} audit: residual Web Storage ${JSON.stringify(isolation)}`)
+    error.isolation = isolation
+    return error
+  }
   const residualStorage = (boundary, snapshot) => {
     const storage = [
       { kind: 'localStorage', keys: snapshot.local },
       { kind: 'sessionStorage', keys: snapshot.session },
     ].filter(({ keys }) => keys.length)
     if (!storage.length) return
-    const isolation = { boundary, origin: snapshot.origin, storage, workerId, previousCase }
-    const error = new Error(`Kit isolation ${boundary} audit: residual Web Storage ${JSON.stringify(isolation)}`)
-    error.isolation = isolation
-    throw error
+    throw residualError({ boundary, origin: snapshot.origin, storage, workerId, previousCase })
   }
   const trackOrigin = url => {
     const parsed = new URL(url)
@@ -90,6 +92,21 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
         })))
       }
     }
+    // On a residue, read the origin's inert probe once more with nothing cleared or written in between. Its key names
+    // say whether the residue is held in storage or was already gone, as an in-flight write's would not be (#3896).
+    // Diagnostic only: the case fails either way. Null when no probe has been opened for that origin yet.
+    const withReaudit = async check => {
+      try {
+        return await check()
+      } catch (error) {
+        if (!error.isolation) throw error
+        const probe = auditPages.get(error.isolation.origin)
+        const reaudit = probe && inertAudit(error.isolation.origin, probe)
+          ? { localStorage: await probe.evaluate(() => Object.keys(localStorage)) }
+          : null
+        throw residualError({ ...error.isolation, reaudit })
+      }
+    }
     return {
       context,
       setPreviousCase(value) { previousCase = value },
@@ -120,7 +137,7 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
         for (const origin of origins) {
           await client.send('Storage.clearDataForOrigin', { origin, storageTypes: 'all' })
         }
-        await audit()
+        await withReaudit(audit)
         return { resetMilliseconds: performance.now() - started }
       },
       // Audit only the FIRST HTTP(S) top-level document of each fresh page.
@@ -157,7 +174,7 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
             if (captured || ['http:', 'https:'].includes(new URL(page.url()).protocol)) {
               const snapshot = await firstSnapshot
               if (snapshot.error) throw new Error(`Kit isolation document-start audit failed at ${snapshot.origin}: ${snapshot.error}`)
-              residualStorage('document-start', snapshot)
+              await withReaudit(() => residualStorage('document-start', snapshot))
             }
             return response
           }
