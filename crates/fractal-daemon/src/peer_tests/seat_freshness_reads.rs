@@ -485,6 +485,50 @@ async fn the_mail_backlog_counts_a_relay_hosts_seat_by_its_answer() {
     );
 }
 
+/// Doctor's late-mail count reads a relay host's seat's mail from that host, as the backlog does:
+/// mail it read is not late, and mail it did not answer for is unknown, by host, never late.
+#[tokio::test(flavor = "multi_thread")]
+async fn doctors_late_mail_counts_a_relay_hosts_seat_by_its_answer() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, _birch) = owner(root.path()).await;
+    let later = smallclaims::store::now_ms() + 20_000;
+    let late = |state: crate::api::AppState, seat: String| {
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            crate::api::unread_current_seat_counts(&state, &BTreeSet::from([seat.as_str()]), later, Some(&runtime))
+                .unwrap()
+        })
+    };
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer
+        .import_replication(OWNER, &owner.export_replication(0).unwrap())
+        .unwrap();
+    let answered = late(
+        app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url))),
+        cedar.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answered, (0, 0, BTreeMap::new()), "the host read it");
+
+    let quiet = Arc::new(Store::open(&root.path().join("quiet.db"), VIEWER).unwrap());
+    quiet
+        .import_replication(OWNER, &owner.export_replication(0).unwrap())
+        .unwrap();
+    let silent = app(
+        quiet.clone(),
+        VIEWER,
+        root.path(),
+        Some(relay(root.path(), hung().await)),
+    );
+    let unknown = late(silent.clone(), cedar.clone()).await.unwrap();
+    assert_eq!(
+        unknown,
+        (0, 0, BTreeMap::from([(OWNER.to_owned(), 1)])),
+        "an unknown is not counted as late"
+    );
+}
+
 /// The host checks a read itself: an unsigned one is refused before its API is asked, and a
 /// signed one it cannot answer (an unknown operation, too many messages, a subject that is not a
 /// message) gets a signed 400 naming why, which the asker can tell from a missing route.
