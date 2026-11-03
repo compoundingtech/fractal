@@ -5,7 +5,7 @@
 //! a remote TUI, which resolves the profile differently (it drops the profile's network table, so
 //! the driver also passes `sandbox_workspace_write.network_access`); the live eval
 //! `evals/fractal/codex-minimal-access` proves that path with a real seat. They need a `codex` that supports `sandbox -P` and `python3`, and skip loudly without them
-//! unless `ST_REQUIRE_CODEX_SANDBOX=1`, which the hetz2 run sets.
+//! unless `ST_REQUIRE_CODEX_SANDBOX=1`, which the build host's run sets.
 
 use std::fs;
 use std::net::TcpListener;
