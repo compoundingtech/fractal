@@ -84,11 +84,14 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
     task = None
     previous_sigchld = None
     roots = []
-    evidence_manifest = tempfile.NamedTemporaryFile(prefix="test-evidence-", mode="w+")
+    evidence_manifest = (tempfile.NamedTemporaryFile(prefix="test-evidence-", mode="w+")
+                         if control is None else None)
     code = 1
     try:
-        env = {**os.environ, "FRACTAL_TEST_SUPERVISOR": str(os.getpid()),
-               "FRACTAL_TEST_EVIDENCE_MANIFEST": evidence_manifest.name}
+        env = dict(os.environ)
+        if evidence_manifest is not None:
+            env.update(FRACTAL_TEST_SUPERVISOR=str(os.getpid()),
+                       FRACTAL_TEST_EVIDENCE_MANIFEST=evidence_manifest.name)
         # Allocate under the guardian, not the killable controller. Remove only
         # these freshly created roots, and only after their processes are reaped.
         for name, prefix, parent in temporary_roots:
@@ -124,14 +127,15 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
             kill_group(task.pid)
             code = task.wait()
         reap_descendants()
-        from fractal_test_evidence import finish
-        try:
-            finish(Path(evidence_manifest.name), code)
-        except Exception as error:
-            print(f"isolated test evidence capture: {error}", file=sys.stderr)
-            code = code or 1
-        finally:
-            evidence_manifest.close()
+        if evidence_manifest is not None:
+            from fractal_test_evidence import finish
+            try:
+                finish(Path(evidence_manifest.name), code)
+            except Exception as error:
+                print(f"isolated test evidence capture: {error}", file=sys.stderr)
+                code = code or 1
+            finally:
+                evidence_manifest.close()
         if not keep:
             for root in roots:
                 shutil.rmtree(root)

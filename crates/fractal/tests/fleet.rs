@@ -299,7 +299,7 @@ impl Node {
         } else {
             vec!["up", "--web-listen", "off"]
         };
-        let daemon = DaemonProcess::spawn(
+        let daemon = DaemonProcess::spawn_isolated(
             self.command(&up),
             log("daemon.log"),
             log("daemon.stderr.log"),
@@ -380,7 +380,10 @@ impl Node {
         for pid in [
             self.daemon.as_ref().map(DaemonProcess::id),
             self.worker.as_ref().map(Child::id),
-        ].into_iter().flatten() {
+        ]
+        .into_iter()
+        .flatten()
+        {
             let status = Command::new("kill")
                 .args([format!("-{signal}"), pid.to_string()])
                 .status()
