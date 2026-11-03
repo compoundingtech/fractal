@@ -53,6 +53,7 @@ pub mod schedule_active_run_tests;
 pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod mission_capacity;
+pub mod marks_switch;
 pub mod glasses;
 pub mod mailbox_wakes;
 pub mod mailbox_changes;
@@ -10799,6 +10800,17 @@ fn first_unknown_kind(kinds: impl IntoIterator<Item = String>) -> Option<String>
     kinds.into_iter().find(|kind| !known_replicated_claim_kind(kind))
 }
 
+/// The recipient a graph message was sent to, as its send names it.
+fn message_recipient_tx(connection: &Connection, subject: &str) -> Result<Option<String>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT json_extract(body,'$.fields.to') FROM claims WHERE subject=?1 AND kind='message.sent' LIMIT 1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-had57f3887933 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))
+        .optional()?
+        .flatten())
+}
+
 fn validate_message_transition(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
@@ -19904,7 +19916,7 @@ fn enrich_step_wake_with(
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h98fccb80a458 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-he0a6137d85fc owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.body, claims.accepted_at_unix_ms,
                 EXISTS(SELECT 1 FROM claims consumed
                        WHERE consumed.subject=claims.subject
@@ -19926,6 +19938,9 @@ fn enrich_step_wake_with(
                        WHERE staged.subject=claims.subject
                          AND staged.kind='message.staged'
                          AND staged.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_staged staged
+                       WHERE staged.message=claims.subject
+                         AND staged.recorded_at_unix_ms<=CAST(?1 AS INTEGER))
          FROM claims INDEXED BY claims_message_to_index
          WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
            AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
@@ -22403,6 +22418,10 @@ pub fn append_claim_with_commit_context(
                 stored_fields = Some(fields);
             }
             if settled_receipt || validate_message_transition(transaction, input)? {
+                // A repeat of a step recorded as a mark answers that mark's receipt.
+                if let Some(receipt) = message_marks::recorded(transaction, &graph.origin, &input.subject, &input.kind).map_err(internal)? {
+                    return Ok((receipt, false));
+                }
                 let latest_id = latest_claim_id_tx(transaction, &input.subject)
                     .map_err(internal)?
                     .ok_or_else(|| {
@@ -22420,6 +22439,22 @@ pub fn append_claim_with_commit_context(
                         )
                     })?;
                 return Ok((latest, false));
+            }
+            // A seat this member hosts records its own delivery, read and close of graph mail as a
+            // local mark once marks are on (db break-up 4b-2; message_marks::local_consumer and
+            // recorded_as_mark: a staging stays a claim for now), whoever acts for it:
+            // the fences, replays and transition rules above have applied. A write acting for a
+            // retired seat or under a delegation stays a claim, which carries its proof, and so
+            // does a native read, whose proof links the native turn to its claim
+            // (local_native_delivery_receipts_v2, conversation_deliveries.rs).
+            if message_marks::recorded_as_mark(&input.kind)
+                && context.native_receipt.is_none()
+                && !input.fields.contains_key("acting_for")
+                && !input.fields.contains_key("delegation")
+                && let Some(recipient) = message_recipient_tx(transaction, &input.subject).map_err(internal)?
+                && message_marks::local_consumer(transaction, &graph.origin, &input.subject, &recipient).map_err(internal)?
+            {
+                return message_marks::record_tx(transaction, &graph.origin, &input.subject, &input.kind, &recipient);
             }
             let predecessor = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                 transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_, String>(0)).optional().map_err(internal)?

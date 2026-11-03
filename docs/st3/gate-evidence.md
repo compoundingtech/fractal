@@ -327,6 +327,11 @@ stall. On 2026-10-28 a gate reported 21 per-crate passes as unlogged although th
 written its GC lines (03:42Z) for keys whose deletion was still pending, and those keys belonged to open pull requests.
 GC now keeps the crate keys of live trees.
 
+The watcher rebuilds its disposable fetch repository once when a fetch fails with demonstrated local object damage,
+or its fetched head cannot be read. It retains the newest `head.git.broken-*` copy for inspection and preserves
+`watch.json`, synced before replacement, so recovery sends the usual single notification. A healthy copy with an
+unreachable remote reports the fetch failure without rebuilding; a fetch timeout also leaves the copy in place.
+
 The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
 one file at the head. The signer is a command that signs standard input (`ssh-keygen -Y sign -n git -f KEY`, or the same
@@ -345,6 +350,20 @@ not seeded) publishes nothing and exits 1 with `publish_refused`. It never overw
 was refused recovers by seeding from the published head (`git fetch origin +refs/evidence-log/main:refs/evidence-log/main`),
 so its chain continues rather than starting again. Without that seed, a pull on an empty copy starts a new chain that it
 cannot publish.
+
+A failed checkpoint publication stops further checkpoints, then still packs refs and restores missing records when
+`--restore` was requested. Missing records retain alarm exit 4; a publication failure without missing records exits 1.
+
+Before other fetches, the publisher checks chain connectivity and streams the current tree's contents to detect
+unreadable bodies as well as empty objects. Historical blob bodies are not rescanned on every heartbeat. An unreadable
+local view is repaired from a trusted published continuation in an isolated repository. Repair scans full objects once
+to identify damaged loose files, including blobs whose headers still read. The published head must verify against the
+existing `--log-keys`, using the publisher's working directory and effective signature verification settings, including
+revocations, and contain the exact damaged local head in its ancestry. Broken loose objects are retained under
+`evidence-log.broken-objects`; no published head,
+an untrusted head, or a chain that cannot prove it continues the damaged local head is an alarm (exit 1).
+An unpublished damaged head requires operator recovery. Empty copies are not automatically seeded. The timer sets
+`core.fsync=objects,reference` on existing and new log repositories with Git's default fsync method.
 
 Measured 2026-10-21 against this repository: the first pull (an empty copy) accepted 4,928 records in 548 s, most of it
 checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
@@ -1695,7 +1714,18 @@ and this bridge marker. Do not prefer or copy the shim while copy-only bases rem
 
 `scripts/fractal-test` runs the whole per-PR suite: each required check that has a local command (today `typescript-client`, `genie-freshness`, `ci-script-tests`
 and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and means the same) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
-records the exit code and output digest. The checks that do not build (`typescript-client`, `genie-freshness`, `ci-script-tests`) run alongside
+records the exit code and output digest.
+
+If the local `typescript-client` check exits 127, the runner prints its caller's `PATH` and `BASH_ENV`, plus
+the web shell hook's start/end snapshots: `PATH`, `command -v pnpm`, `BASH_ENV`, and the publisher's exit status.
+A missing report or end marker means that hook entry or completion was not observed. These snapshots describe
+the hook before the child Bash starts; inherited startup code can still change the child's environment afterward.
+The check keeps its failed status and is not rerun. The report lives in the run's private scratch directory;
+the shell hook writes it only when the runner supplies `CI_WEB_SHELL_DIAGNOSTICS`, and ordinary developer
+shells print no additional output. This gathers evidence for the unresolved environment incident in
+[#4659](https://github.com/compoundingtech/fractal/issues/4659), rather than claiming a later pass fixed it.
+
+The checks that do not build (`typescript-client`, `genie-freshness`, `ci-script-tests`) run alongside
 `linux-gate`, one after another in a lane of their own, as CI runs them on runners of their own: their output is kept and printed after
 linux-gate's, never interleaved, and the summary lists every check as before (`ST_EVIDENCE_SERIAL=1` runs them one after another). The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how

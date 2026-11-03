@@ -305,6 +305,25 @@ def report_environment(scratch, environment):
     return dict(environment, PATH=f'{bin_dir}{os.pathsep}{environment.get("PATH", os.defpath)}')
 
 
+def typescript_shell_diagnostics(report, environment, output=None):
+    """Describe a failed shell entry without retrying it or changing the failed check's status."""
+    stream = output or sys.stderr
+    print('fractal-test: typescript-client exit 127; caller environment before nix develop:', file=stream)
+    for name in ('PATH', 'BASH_ENV'):
+        print(f'  {name}={environment.get(name, "<unset>")!r}', file=stream)
+    print('fractal-test: web shell hook environment (before child Bash startup):', file=stream)
+    try:
+        with report.open(errors='replace') as source:
+            snapshot = source.read(16385)
+        shown = snapshot[:16384]
+        print(shown, end='' if shown.endswith('\n') else '\n', file=stream)
+        if len(snapshot) > 16384:
+            print('  [hook report truncated at 16 KiB]', file=stream)
+    except OSError as error:
+        print(f'  hook not observed: {error}', file=stream)
+    stream.flush()
+
+
 def scrub_seat_environment():
     """A CI runner has none of the variables an agent seat carries (identity, mission, session, daemon endpoint, hook and messaging
     settings, and the pty session it runs in), and the checks must see what CI sees: tests that read them fail or behave differently
@@ -3271,6 +3290,9 @@ def run_main(argv, cleanup):
                     if args.out:
                         wrap += ['--out', args.out]
                     environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
+                    shell_report = Path(scratch) / f'typescript-shell-{round_number}.log' if name == 'typescript-client' else None
+                    if shell_report is not None:
+                        environment['CI_WEB_SHELL_DIAGNOSTICS'] = str(shell_report)
                     environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                     if target and name in BUILDS:
                         environment['CARGO_TARGET_DIR'] = str(target)
@@ -3365,6 +3387,8 @@ def run_main(argv, cleanup):
                                            cwd=directory, env=environment, stdout=output,
                                            stderr=subprocess.STDOUT if output else None)
                     seconds = round(time.monotonic() - started)
+                    if code == 127 and shell_report is not None:
+                        typescript_shell_diagnostics(shell_report, environment, output)
                     ok = code == 0
                     if args.out:
                         why = 'packs exported, not imported or verified' if ok else 'export failed'
