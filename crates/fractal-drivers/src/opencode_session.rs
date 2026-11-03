@@ -80,39 +80,6 @@ const REQUIRED_API_MARKERS: [&str; 12] = [
     "/question",
 ];
 
-pub fn run(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    opencode_argv: Vec<String>,
-) -> Result<()> {
-    run_with_control(
-        catalog_root,
-        identity,
-        runtime_id,
-        opencode_argv,
-        SessionControl::Catalog,
-    )
-}
-
-pub fn run_with_control(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    opencode_argv: Vec<String>,
-    control: SessionControl,
-) -> Result<()> {
-    let this_host = crate::run::detect_host();
-    let agent_dir = message::resolve_declared_dir(catalog_root, &identity, &this_host)?
-        .with_context(|| format!("opencode driver agent '{identity}' is not declared"))?;
-    let paths = crate::driver_paths::Paths {
-        root: catalog_root.to_path_buf(),
-        agent_dir,
-        session_dir: state_dir(catalog_root, &identity),
-    };
-    run_with_paths(&paths, identity, runtime_id, opencode_argv, control)
-}
-
 pub fn run_with_paths(
     paths: &crate::driver_paths::Paths,
     identity: String,
@@ -238,74 +205,9 @@ pub fn run_with_paths(
     run_session(session, &mut ProviderProcess::Spawned(child), agent_dir)
 }
 
-/// Resume supervising an OpenCode provider a predecessor driver image launched through [`run`] and
-/// released for adoption. The server keeps its port and password, so this image reconnects to the
-/// same session, reseeds observed state from it, and continues delivery from the durable ledger.
-#[allow(clippy::too_many_arguments)]
-pub fn adopt(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    pid: u32,
-    session: String,
-    seq: u64,
-    port: u16,
-    password: String,
-    version_ok: bool,
-    producer_version: Option<String>,
-) -> Result<()> {
-    adopt_with_control(
-        catalog_root,
-        identity,
-        runtime_id,
-        pid,
-        session,
-        seq,
-        port,
-        password,
-        version_ok,
-        producer_version,
-        SessionControl::Catalog,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn adopt_with_control(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    pid: u32,
-    session: String,
-    seq: u64,
-    port: u16,
-    password: String,
-    version_ok: bool,
-    producer_version: Option<String>,
-    control: SessionControl,
-) -> Result<()> {
-    let this_host = crate::run::detect_host();
-    let agent_dir = message::resolve_declared_dir(catalog_root, &identity, &this_host)?
-        .with_context(|| format!("opencode driver agent '{identity}' is not declared"))?;
-    let paths = crate::driver_paths::Paths {
-        root: catalog_root.to_path_buf(),
-        agent_dir,
-        session_dir: state_dir(catalog_root, &identity),
-    };
-    adopt_with_paths(
-        &paths,
-        identity,
-        runtime_id,
-        pid,
-        session,
-        seq,
-        port,
-        password,
-        version_ok,
-        producer_version,
-        control,
-    )
-}
-
+/// Resume supervising the native provider launched through [`run_with_paths`] and released
+/// for adoption. Reattach with the explicit private paths and delivery control supplied by
+/// the owning control plane; the existing session and durable delivery ledger are preserved.
 #[allow(clippy::too_many_arguments)]
 pub fn adopt_with_paths(
     paths: &crate::driver_paths::Paths,
