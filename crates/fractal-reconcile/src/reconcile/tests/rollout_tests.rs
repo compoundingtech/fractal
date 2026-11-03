@@ -4,6 +4,7 @@ use super::*;
 use parking_lot::Mutex;
 use crate::rollout::{self, Policy};
 use crate::store::owned_sets::{Options, Source};
+use crate::store::adhoc_work::AdhocWorkStore;
 use serde_json::json;
 
 #[derive(Default)]
@@ -556,6 +557,7 @@ fn apply_restart_waits_for_ask_person_and_answered_work() {
         reason: "Choose the next bed".into(), actor: SUBJECT.into(),
         step: Some(run.steps[0].subject.clone()), new_run: None,
         incarnation: Some("original-1".into()), request: None, idempotency_key: "bed".into(),
+        deadline_ms: None, default_answer: None,
     }).unwrap();
     seat.publish_plain("second", Some(&Policy::when_idle(1_800_000, false)), "defer-ask");
     seat.busy(false);
@@ -1188,7 +1190,7 @@ fn rollout_drains_then_resumes_once_across_disk_reopens() {
 #[test]
 fn rollout_provider_switch_is_rejected_before_draining_the_incumbent() {
     let seat = Seat::new();
-    let original = seat.runtime.observation.lock().unwrap().clone().unwrap();
+    let original = seat.runtime.observation.lock().clone().unwrap();
     let revision = seat.store.owned_sets().unwrap()[0].revision.clone();
     let source = seat
         .source("replacement-model", "")
@@ -1225,11 +1227,11 @@ fn rollout_provider_switch_is_rejected_before_draining_the_incumbent() {
         seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
     );
     assert!(!reconciler.reconcile_rollout(&seat.desired(), Some(&original), None).unwrap());
-    let observed = seat.runtime.observation.lock().unwrap().clone().unwrap();
+    let observed = seat.runtime.observation.lock().clone().unwrap();
     assert_eq!(observed.incarnation_id, original.incarnation_id);
     assert_eq!(observed.status, original.status);
-    assert!(seat.runtime.starts.lock().unwrap().is_empty());
-    assert!(seat.runtime.stops.lock().unwrap().is_empty());
+    assert!(seat.runtime.starts.lock().is_empty());
+    assert!(seat.runtime.stops.lock().is_empty());
 }
 
 #[test]
@@ -2164,7 +2166,7 @@ fn assert_manual_rollout_after_exit(native_session: &str) {
 fn stopped_rollout_waits_before_start_attempt_and_releases_fifo_after_admission() {
     let seat = Seat::new();
     seat.publish_mode(2, "second", None, false, true);
-    seat.runtime.observation.lock().unwrap().as_mut().unwrap().status = "exited".into();
+    seat.runtime.observation.lock().as_mut().unwrap().status = "exited".into();
     let desired = seat.desired();
     seat.append("runtime.observed", json!({
         "status":"exited", "runtime_id":desired.member.as_ref().unwrap().runtime_id,
@@ -2181,7 +2183,7 @@ fn stopped_rollout_waits_before_start_attempt_and_releases_fifo_after_admission(
         mode: "enforce".into(), reason: "test pressure".into(), queue: true, observed_at: None,
     };
     for _ in 0..8 {
-        let observed = seat.runtime.observation.lock().unwrap().clone();
+        let observed = seat.runtime.observation.lock().clone();
         assert!(reconciler.reconcile_rollout(&desired, observed.as_ref(), None).unwrap());
         if !status.state().pending.is_empty() {
             break;
@@ -2189,11 +2191,11 @@ fn stopped_rollout_waits_before_start_attempt_and_releases_fifo_after_admission(
     }
     assert_eq!(seat.operation().phase, "starting");
     for _ in 0..4 {
-        let observed = seat.runtime.observation.lock().unwrap().clone();
+        let observed = seat.runtime.observation.lock().clone();
         assert!(reconciler.reconcile_rollout(&desired, observed.as_ref(), None).unwrap());
         assert!(!seat.operation().start_attempted);
         assert!(seat.store.runtime_start_for(SUBJECT).unwrap().is_none());
-        assert!(seat.runtime.starts.lock().unwrap().is_empty());
+        assert!(seat.runtime.starts.lock().is_empty());
         assert_eq!(status.state().pending.front().unwrap().subject, SUBJECT);
         assert_eq!(status.state().pending.len(), 1);
     }
@@ -2203,19 +2205,19 @@ fn stopped_rollout_waits_before_start_attempt_and_releases_fifo_after_admission(
     status.state().decision.queue = false;
     assert!(!status.admit(later, None, None, false, 2));
     for _ in 0..5 {
-        let observed = seat.runtime.observation.lock().unwrap().clone();
+        let observed = seat.runtime.observation.lock().clone();
         assert!(reconciler.reconcile_rollout(&desired, observed.as_ref(), None).unwrap());
     }
-    assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
+    assert_eq!(seat.runtime.starts.lock().len(), 1);
     assert!(seat.operation().start_attempted);
     assert_eq!(status.state().pending.front().unwrap().subject, later);
     assert!(status.admit(later, None, None, false, 3));
     assert!(status.state().pending.is_empty());
     seat.binding("replacement-1", "native-one");
-    let observed = seat.runtime.observation.lock().unwrap().clone();
+    let observed = seat.runtime.observation.lock().clone();
     assert!(reconciler.reconcile_rollout(&desired, observed.as_ref(), None).unwrap());
     assert_eq!(seat.operation().phase, "running");
-    assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
+    assert_eq!(seat.runtime.starts.lock().len(), 1);
 }
 
 
@@ -2475,7 +2477,7 @@ fn a_moved_seat_resumes_by_native_id_without_the_source_hosts_transcript_path() 
             None,
         );
         seat.reconcile();
-        let started = seat.runtime.starts.lock().unwrap()[0].clone();
+        let started = seat.runtime.starts.lock()[0].clone();
         assert_eq!(started.environment[crate::suspension::RESUME_ENV], "native-one", "{source_host}");
         assert_eq!(
             started.environment.get(crate::rollout::RESUME_PATH_ENV).map(String::as_str),
@@ -2738,10 +2740,10 @@ fn restart_launch_continues_the_recorded_native_session() {
         Some("agent-restart:canary".into()),
     );
     seat.reconcile();
-    assert_eq!(*seat.runtime.stops.lock().unwrap(), ["original-1"]);
+    assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
     seat.reconcile();
     let launch = {
-        let starts = seat.runtime.starts.lock().unwrap();
+        let starts = seat.runtime.starts.lock();
         assert_eq!(starts.len(), 1);
         starts[0].clone()
     };
@@ -2774,7 +2776,7 @@ fn restart_launch_continues_the_recorded_native_session() {
         .unwrap();
     assert_eq!(completion.kind, "runtime.action.succeeded");
     assert_eq!(completion.body["fields"]["incarnation_id"], "replacement-1");
-    assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
+    assert_eq!(seat.runtime.starts.lock().len(), 1);
     assert!(crash_loop_parks(&seat.store).is_empty());
 }
 
@@ -2796,9 +2798,9 @@ fn a_predecessor_still_observed_running_is_replaced_once_after_reopen() {
     for _ in 0..3 {
         seat.reconcile();
     }
-    let starts = seat.runtime.starts.lock().unwrap().clone();
+    let starts = seat.runtime.starts.lock().clone();
     assert_eq!(starts.len(), 1, "exactly one replacement boots");
-    assert!(seat.runtime.stops.lock().unwrap().is_empty());
+    assert!(seat.runtime.stops.lock().is_empty());
     assert_eq!(starts[0].environment[crate::suspension::CONTINUE_ENV], "native-one");
     let actual = seat.store.latest_actual_value(SUBJECT).unwrap().unwrap();
     assert_eq!(
@@ -2815,7 +2817,7 @@ fn a_predecessor_still_observed_running_is_replaced_once_after_reopen() {
 #[test]
 fn a_suspend_whose_stop_timed_out_before_the_exit_leaves_no_fault() {
     let seat = Seat::new();
-    *seat.runtime.late_stops.lock().unwrap() = 1;
+    *seat.runtime.late_stops.lock() = 1;
     seat.snapshotting();
     seat.reconcile();
     assert!(seat.store.member_reconcile_fault(SUBJECT, None).unwrap().is_some());
