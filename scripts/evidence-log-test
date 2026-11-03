@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,6 +19,9 @@ TIMER = ROOT / 'scripts/evidence-log-timer'
 loader = importlib.machinery.SourceFileLoader('evidence_verify_test_for_log', str(ROOT / 'scripts/evidence-verify-test'))
 support = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(support)
+loader = importlib.machinery.SourceFileLoader('evidence_log_test_module', str(LOG))
+log = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(log)
 NOW = 1_800_000_000
 
 
@@ -104,6 +108,126 @@ class EvidenceLog(unittest.TestCase):
 
     def remote_head(self):
         return subprocess.run(['git', '-C', str(self.remote), 'rev-parse', 'refs/evidence-log/main'], capture_output=True, text=True).stdout.strip()
+
+    def test_a_deadline_during_verification_keeps_a_published_chunk_and_the_next_pull_finishes(self):
+        records = {self.record(seconds=seconds) for seconds in (0, 10, 20)}
+        # Stop while the second verification is in flight, after one real signed, published checkpoint.
+        driver = self.f.root / 'interrupted.py'
+        driver.write_text(f'''import importlib.machinery, importlib.util, signal, sys, time
+loader = importlib.machinery.SourceFileLoader('log', {str(LOG)!r})
+log = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(log)
+log.CHUNK_REFS = 1
+accept = log.accept
+calls = 0
+def interrupted(*args):
+    global calls
+    calls += 1
+    if calls == 2:
+        signal.setitimer(signal.ITIMER_REAL, 0.05)
+        time.sleep(10)
+    return accept(*args)
+log.accept = interrupted
+sys.exit(log.main(sys.argv[1:]))
+''')
+        done = subprocess.run([sys.executable, str(driver), 'pull', '--repo', str(self.host), '--publish',
+                               '--signer', json.dumps(self.signer), '--log-keys', str(self.log_keys)], capture_output=True, text=True)
+        self.assertLess(done.returncode, 0, done.stderr)
+        partial = self.remote_head()
+        self.assertEqual(self.host_git('rev-parse', log.LOG), partial)
+        self.assertEqual(len(self.host_git('for-each-ref', '--format=%(refname)', log.COPY).split()), 1)
+        path = f'trees/{self.tree[:2]}/{self.tree}'
+        self.assertEqual(len(self.lines(path)), 1)
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['added']), (0, 2), error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), partial)
+        self.assertEqual({line.split()[1] for line in self.lines(path)}, records)
+        self.assertEqual(len(self.lines(path)), 3)
+
+    def test_checkpoints_sample_the_clock_when_committing_and_also_bound_rejected_work(self):
+        self.record(seconds=0)
+        self.record(seconds=10)
+        self.record(key=self.rogue, seconds=20)
+        argv = ['pull', '--repo', str(self.host), '--publish', '--signer', json.dumps(self.signer), '--log-keys', str(self.log_keys)]
+        with mock.patch.object(log, 'CHUNK_REFS', 1), mock.patch.object(log.time, 'time', side_effect=[NOW, NOW + 600, NOW + 1200, NOW + 1800]):
+            self.assertEqual(log.main(argv), 0)
+        stamps = self.host_git('log', '--format=%ct', log.LOG).splitlines()
+        self.assertEqual(stamps, [str(NOW + 1800), str(NOW + 1200), str(NOW + 600)])
+        self.assertIn(log.iso(NOW + 1800), self.host_git('show', '-s', '--format=%s', log.LOG))
+
+    def test_copy_markers_never_advance_when_the_checkpoint_signer_fails(self):
+        self.record()
+        before = self.pull()[1]['head']
+        new = self.record(seconds=10)
+        code, _, error = self.pull(signer=[sys.executable, '-c', 'import sys; sys.exit(1)'])
+        self.assertEqual(code, 1, error)
+        self.assertEqual(self.host_git('rev-parse', log.LOG), before)
+        self.assertNotIn(new, self.host_git('for-each-ref', '--format=%(objectname)', log.COPY))
+        self.assertEqual(self.pull()[1]['added'], 1)
+
+    def test_elapsed_verification_time_also_triggers_a_checkpoint(self):
+        self.record(seconds=0)
+        self.record(seconds=10)
+        with mock.patch.object(log.time, 'monotonic', side_effect=[0, 121, 121, 242, 242]):
+            self.assertEqual(log.main(['pull', '--repo', str(self.host), '--signer', json.dumps(self.signer),
+                                       '--log-keys', str(self.log_keys), '--now', str(NOW)]), 0)
+        self.assertEqual(len(self.host_git('log', '--format=%H', log.LOG).splitlines()), 2)
+        self.assertEqual(len(self.lines(f'trees/{self.tree[:2]}/{self.tree}')), 2)
+
+    def test_interruption_after_log_commit_before_copy_markers_does_not_duplicate_lines(self):
+        self.record()
+        update = log.git
+
+        def interrupted(repo, *args, **kwargs):
+            if args[:2] == ('update-ref', '--stdin') and b'update refs/evidence-copy/' in kwargs.get('stdin', b''):
+                raise log.Refused('interrupted after committing the log')
+            return update(repo, *args, **kwargs)
+
+        with mock.patch.object(log, 'git', side_effect=interrupted):
+            self.assertEqual(log.main(['pull', '--repo', str(self.host), '--signer', json.dumps(self.signer),
+                                       '--log-keys', str(self.log_keys), '--now', str(NOW)]), 1)
+        self.assertEqual(self.host_git('for-each-ref', '--format=%(refname)', log.COPY), '')
+        self.assertEqual(self.pull()[1]['added'], 1)
+        self.assertEqual(len(self.lines(f'trees/{self.tree[:2]}/{self.tree}')), 1)
+
+    def truncate(self, oid):
+        path = self.host / 'objects' / oid[:2] / oid[2:]
+        self.assertTrue(path.is_file(), path)
+        path.chmod(0o644)
+        path.write_bytes(b'')
+
+    def test_a_damaged_local_head_is_restored_from_a_trusted_published_continuation(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        self.truncate(first)
+        code, result, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+        self.assertTrue(list((self.host / 'evidence-log.broken-objects').iterdir()))
+        # Damage in a tree or blob reachable from an otherwise readable head is repaired too.
+        blob = self.host_git('rev-parse', f'{result["head"]}:trees/{self.tree[:2]}/{self.tree}')
+        self.truncate(blob)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(len(self.lines(f'trees/{self.tree[:2]}/{self.tree}')), 1)
+
+    def test_repair_refuses_an_untrusted_or_missing_published_head_without_restarting_the_chain(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        other = self.f.key('other-publisher')
+        foreign = self.pull('--publish', signer=['ssh-keygen', '-q', '-Y', 'sign', '-n', 'git', '-f', str(other)])[1]['head']
+        self.truncate(foreign)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 1, error)
+        self.assertIn('not signed by a key in --log-keys', error)
+        self.assertEqual(self.host_git('rev-parse', log.LOG), foreign)
+        self.assertEqual(self.remote_head(), foreign)
+        # No origin head is also an alarm, rather than permission to start from scratch.
+        self.host_git('update-ref', log.LOG, first)
+        subprocess.run(['git', '-C', str(self.remote), 'update-ref', '-d', log.LOG], check=True)
+        self.truncate(first)
+        self.assertEqual(self.pull('--publish')[0], 1)
+        self.assertEqual(self.host_git('rev-parse', log.LOG), first)
 
     def test_publish_puts_the_head_on_the_remote_and_a_moved_remote_head_is_reported_and_replaced_only_by_a_head_that_continues_it(self):
         self.record()
@@ -308,6 +432,15 @@ class EvidenceLog(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         result = json.loads(done.stdout)
         self.assertEqual((result['added'], result['published']), (1, True), result)
+        timer_repo = self.f.root / 'state/repo.git'
+        self.assertEqual(subprocess.check_output(['git', '-C', str(timer_repo), 'config', 'core.fsync'], text=True).strip(), 'objects,reference')
+        # The timer must reach repair even when its bootstrap fetch sees a corrupt local log ref.
+        head = result['head']
+        damaged = timer_repo / 'objects' / head[:2] / head[2:]
+        damaged.chmod(0o644)
+        damaged.write_bytes(b'')
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
         published = subprocess.run(['git', '-C', str(self.remote), 'show', f'refs/evidence-log/main:trees/{self.tree[:2]}/{self.tree}'],
                                    capture_output=True, text=True).stdout
         self.assertIn(f'record {record} unit 0 ', published)

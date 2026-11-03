@@ -303,9 +303,11 @@ shallow copy sends every shallow root on every fetch (13 s to fetch 20 records i
 record back. It accepts a record that is well formed and
 signed by a key main's `.st/evidence-keys` trusts for the signer the record names, keeps it under `refs/evidence-copy/`
 (never pruned), and appends one line per record and check to the log. An input-index ref is logged under its key only
-when the record carries that key. It then commits the log, every time, even with nothing new: the commit is signed by
-the log key and its message carries its time, so a verifier can refuse a head that is not fresh. `--publish` pushes the
-head to `refs/evidence-log/main`; a logged record the remote no longer has is reported (`missing`, exit 4), and
+when the record carries that key. It checkpoints after 500 verified refs or 120 seconds of verification, and commits
+every pull even with nothing new. Each commit is signed by the log key and stamped when made, so a verifier can refuse
+a head that is not fresh. The log head is written before the copy markers: an interrupted checkpoint may verify a ref
+again, but cannot skip its missing log line. `--publish` pushes each checkpoint to `refs/evidence-log/main`;
+a logged record the remote no longer has is reported (`missing`, exit 4), and
 `--restore` pushes it back. `evidence-log gc --plan FILE` appends a GC line for each tree and input key of an
 evidence-gc plan and drops their copies; it runs before the plan's deletions (`evidence-gc --before-delete`), so a pull
 does not restore them. It also keeps the plan's ref names as pending deletions in the copy
@@ -325,6 +327,11 @@ stall. On 2026-10-28 a gate reported 21 per-crate passes as unlogged although th
 written its GC lines (03:42Z) for keys whose deletion was still pending, and those keys belonged to open pull requests.
 GC now keeps the crate keys of live trees.
 
+The watcher rebuilds its disposable fetch repository once when a fetch fails with demonstrated local object damage,
+or its fetched head cannot be read. It retains the newest `head.git.broken-*` copy for inspection and preserves
+`watch.json`, synced before replacement, so recovery sends the usual single notification. A healthy copy with an
+unreachable remote reports the fetch failure without rebuilding; a fetch timeout also leaves the copy in place.
+
 The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
 one file at the head. The signer is a command that signs standard input (`ssh-keygen -Y sign -n git -f KEY`, or the same
@@ -341,8 +348,12 @@ replacing the key is a change of `.st/evidence-log-key`, which the gate protects
 (`--force-with-lease`), so a host whose chain does not continue the published one (a second publisher, or a copy that was
 not seeded) publishes nothing and exits 1 with `publish_refused`. It never overwrites the other host's heads. A copy that
 was refused recovers by seeding from the published head (`git fetch origin +refs/evidence-log/main:refs/evidence-log/main`),
-so its chain continues rather than starting again. Without that seed, a pull on an empty copy starts a new chain that it
-cannot publish.
+so its chain continues rather than starting again. A pull on an empty copy seeds from the published head automatically,
+only after verifying its signature against `--log-keys`. Before other fetches, an unreadable local chain is repaired
+from a trusted published continuation in an isolated repository. Broken loose objects are retained under
+`evidence-log.broken-objects`; no published head, an untrusted head, or a chain that cannot prove it continues the
+damaged local head is an alarm (exit 1). An unpublished damaged head requires operator recovery. The timer sets
+`core.fsync=objects,reference` on existing and new log repositories with Git's default fsync method.
 
 Measured 2026-10-21 against this repository: the first pull (an empty copy) accepted 4,928 records in 548 s, most of it
 checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
