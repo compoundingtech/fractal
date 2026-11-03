@@ -69,6 +69,12 @@ pub struct AgentRestartRequest {
     /// handoff that is ready since its last turn, which its new session is given first.
     #[serde(default)]
     fresh_session: bool,
+    /// Start the seat now even if its lane does not fit the host (docs/st3/seat-lanes.md,
+    /// "Admission by fit"). Needs a reason, recorded on the request with its actor.
+    #[serde(default)]
+    ignore_fit: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 pub async fn restart_agent(
@@ -76,6 +82,14 @@ pub async fn restart_agent(
     Json(request): Json<AgentRestartRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-restart-actor")?;
+    let ignore_fit_reason = match (request.ignore_fit, request.reason.as_deref().map(str::trim)) {
+        (false, _) => None,
+        (true, Some(reason)) if !reason.is_empty() => Some(reason.to_owned()),
+        (true, _) => return Err(ApiError::bad(St3Error::new(
+            "restart-ignore-fit-reason",
+            "starting a seat despite its lane's fit needs a reason, which is recorded with who asked",
+        ))),
+    };
     let subject = if request.subject.starts_with("agent/") {
         request.subject
     } else {
@@ -224,6 +238,10 @@ pub async fn restart_agent(
                 )
             }))
             .chain(request.fresh_session.then(|| ("fresh_session".to_owned(), Value::Bool(true))))
+            .chain(ignore_fit_reason.into_iter().flat_map(|reason| [
+                ("ignore_fit".to_owned(), Value::Bool(true)),
+                ("reason".to_owned(), Value::String(reason)),
+            ]))
             .collect(),
             evidence: vec![token],
             expected_subject: None,

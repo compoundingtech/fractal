@@ -217,6 +217,16 @@ pub trait Runtime: Send + Sync {
         self.forget_views();
     }
 
+    /// A paced trim deleted a chunk of claims and goes on. The chunk did not change the graph
+    /// (each chunk checks), and the claims kept answer every reader as the whole log does, so
+    /// what the views hold still answers: refold soon, but keep serving. The trim forgets the
+    /// views once when its run stops. By default, as for any other change beneath the views. A
+    /// runtime whose published lists take seconds to fold from nothing overrides it, so a trim
+    /// that commits a chunk every fraction of a second does not restart every fold.
+    fn claims_trimmed(&self) {
+        self.forget_views();
+    }
+
     /// Shared tables the projection digest covers, with the columns each leaves out.
     fn digest_tables(&self) -> &'static [(&'static str, &'static [&'static str])];
 

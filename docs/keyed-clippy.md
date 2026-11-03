@@ -8,8 +8,8 @@ plan on 2026-10-29.
 
 ## The problem
 
-Clippy and fleet compatibility are covered today only by linux-gate's whole-check note. That note's `inputs` (27 paths in
-`.st/evidence-skip-policy.json`) include `docs/st2`, `docs/st3`, `docs/vrs`, `evals`, `.github` and `scripts`, because the tests
+The original design addressed clippy and fleet compatibility being covered only by linux-gate's whole-check note. That note's `inputs` in
+`.st/evidence-skip-policy.json` include `docs/st3`, `evals`, `.github` and `scripts`, because the tests
 read them. So a docs-only pull request changes linux-gate's input key, and its clippy stage runs again even though no file clippy
 reads has changed. Measured over 32 local runs, clippy's stage has a mean of 1975 s and a median of 1541 s, including its
 build-queue wait. On a warm target its own work is about 390 s (`docs/st3/gate-evidence.md`).
@@ -31,7 +31,7 @@ Its inputs are therefore:
 
 | group | paths |
 |---|---|
-| Rust sources and manifests | every workspace member's directory (`crates/`, the root package's `src`, `tests`, `benches`, `build.rs`), `Cargo.toml`, `Cargo.lock`, `.cargo/` |
+| Rust sources and manifests | every workspace member's directory (`crates/`, `components/`, and `examples/client-tui/`), `Cargo.toml`, `Cargo.lock`, `.cargo/` |
 | toolchain | `flake.lock`, `flake.nix` (nixpkgs' cargo, rustc and clippy in `devShells.default`; there is no `rust-toolchain` file) |
 | lint config | none in files today: no `clippy.toml`, no `[lints]` table, no crate-level `deny`/`warn`. The key must still include `clippy.toml`, `.clippy.toml` and every manifest (already included), so that adding one changes the key |
 | verdict data | `.github/clippy-baseline.json`, `.github/clippy-splits.json` |
@@ -99,7 +99,7 @@ base, so it has no `base_inputs` and is not base-bound in st-test. Its check is 
 
 - crate `fractal`'s dependency closure as `scripts/rust-test-keys` walks it: the directory of every crate it depends on and the
   manifest of every workspace member, but not `fractal`'s `extra` paths in `.st/rust-test-inputs.json` (what the rest of its tests
-  read at run time) and not the root package `fractal-legacy-runner`, which it does not depend on;
+  read at run time);
 - every file a `#[path = ...]` in those crates compiles in from outside them (`crates/pty-launch-environment.rs`,
   `scripts/ci-test-paths.rs`);
 - the files the workspace's compiles read from outside the crates (`include_str!` of docs, fixtures, `wit/`, `slo/`, `plugins/`,
@@ -123,7 +123,7 @@ uncovered read before the merge queue sees it; it records `run_command_sha256` (
 (`source_inputs`), so a tree with the same key reuses it. linux-gate keeps its fleet-compat stage while linux-fleet-compat is in shadow.
 `scripts/evidence-verify-test` (`FleetCompatKey`)
 changes each declared input alone and sees the key change, and changes files the stage does not read (a doc, `scripts/st-test`, the
-root package, a crate outside the closure, the messaging baseline) and sees it stay.
+retired root-package path, a crate outside the closure, the messaging baseline) and sees it stay.
 
 ## The risk, and how each key is kept honest
 
@@ -148,10 +148,11 @@ A key that leaves out an input lets a note cover a tree it never measured. Three
    HEAD, the index and HEAD's ref, which lie under `.git` in a plain checkout such as CI's and outside the repository in the linked
    worktrees local runs use, so only CI would have seen them. PR 1 only warned, while no default local run checked it; since PR 2 every local run checks it
    before the merge queue does. It cannot see files the codegen check reads; those are declared by hand. Its last line, `dep-info: check=linux-clippy units=N files=M uncovered=K`, is counted in the daily report.
-   Only units the stage reported are read, so a stale `.d` file in a restored cache cannot fail it. The first measurement (a warm
-   target, 2026-10-26) found the files `--all-targets` compiles in from outside the member directories, among them
-   `docs/st3/invariants.md`, `docs/st3/schema.md` and `docs/vrs/requirements.md` (tests' `include_str!`) and the `wit/` files a proc
-   macro reads. They are in the key, so editing one of those docs does re-run clippy; any other doc does not.
+   Only units the stage reported are read, so a stale `.d` file in a restored cache cannot fail it.
+   Files compiled from outside member directories include `docs/st3/invariants.md` and
+   `docs/st3/schema.md` (tests' `include_str!`) and the `wit/` files a proc macro reads.
+   They are in the key, so editing one of those inputs re-runs clippy. The current dep-info
+   report names the complete set of inputs; a document outside that set does not affect the key.
 
 ## Rollout
 

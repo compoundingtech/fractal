@@ -122,7 +122,7 @@ fn native_delivery_ambiguity_is_global_and_legacy_receipts_have_no_link() {
     );
     assert!(
         store
-            .conversation_changed_at(OWNER, first_cut, store.index().unwrap(), 0, 0)
+            .conversation_changed_at(OWNER, first_cut, store.index().unwrap(), 0, 0, (0, 0))
             .unwrap()
     );
     let (fence, read) = prepared(&store, "message/legacy");

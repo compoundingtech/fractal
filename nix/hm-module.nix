@@ -41,6 +41,9 @@ let
     ) + ":/usr/local/bin:/usr/bin:/bin";
     XDG_CONFIG_HOME = config.xdg.configHome;
     XDG_STATE_HOME = config.xdg.stateHome;
+    # Services use the replaceable st3 image path, including externally managed builds.
+    # Keep internal daemon/seat launches out of the human alias-deprecation channel.
+    FRACTAL_SUPPRESS_DEPRECATION = "1";
   };
   upArgs =
     [ "up" "--state-dir" cfg.stateDir ]

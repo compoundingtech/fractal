@@ -300,6 +300,15 @@ impl Store {
         )
     }
 
+    /// Whether `incarnation` of `subject` may act on its work (see [`work_incarnation_live`]).
+    pub fn work_incarnation_live(&self, subject: &str, incarnation: &str) -> Result<bool> {
+        // Its work claims and progress live on step subjects, written with this agent as actor.
+        smallclaims::touched::note_read(|| subject.to_owned());
+        smallclaims::touched::note_read(|| format!("actor:{subject}"));
+        let connection = self.readers.get();
+        crate::store::work_incarnation_live(&connection, subject, incarnation)
+    }
+
     pub fn current_harness(
         &self,
         subject: &str,

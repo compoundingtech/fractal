@@ -1414,6 +1414,98 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     assert!(!log.contains("st3 up") && !log.contains("fractal up"), "{log}");
 }
 
+/// A daemon that is stopping can answer a request with an error instead of dropping the
+/// connection: its runtime cancels the request's blocking work, and the reply is a 500. The
+/// channel's first request after its hello must take that as the outage it is, not exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pi_family_channel_outlives_an_error_from_a_stopping_daemon_after_its_hello() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = fractal_daemon::test_support::evidence_tempdir();
+    let root = root.path();
+    let seat = "agent/stopping-omp";
+    let incarnation = "4377:2026-11-01T09:00:00.000Z";
+    let mut daemon = Daemon::new(root);
+    daemon.observe_running(seat, incarnation);
+    // The channel reads the status twice before its hello and once after it. The third read is
+    // answered as a stopping daemon answers it.
+    let statuses = Arc::new(AtomicUsize::new(0));
+    let refused = Arc::new(Notify::new());
+    let app = fractal_daemon::api::router(daemon.state()).layer(axum::middleware::from_fn({
+        let statuses = statuses.clone();
+        let refused = refused.clone();
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let statuses = statuses.clone();
+            let refused = refused.clone();
+            async move {
+                if request.uri().path() == "/v1/status" && statuses.fetch_add(1, Ordering::SeqCst) == 2 {
+                    refused.notify_one();
+                    let body = json!({"code": "internal", "message": "task 7 was cancelled", "details": {}});
+                    return axum::response::IntoResponse::into_response(
+                        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)),
+                    );
+                }
+                next.run(request).await
+            }
+        }
+    }));
+    daemon.serve(app, false).await;
+
+    let channel_stderr = root.join("omp-channel-stderr.log");
+    let mut channel = seat_command(root, &daemon.socket)
+        .arg("--catalog")
+        .arg(root.join("catalog"))
+        .args(["driver", "omp-channel", "--identity", "stopping-omp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(std::fs::File::create(&channel_stderr).unwrap()))
+        .spawn()
+        .unwrap();
+    let mut input = channel.stdin.take().unwrap();
+    let (frames, received) = std::sync::mpsc::channel::<Value>();
+    let output = channel.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(frame) = serde_json::from_str(&line) {
+                let _ = frames.send(frame);
+            }
+        }
+    });
+    let hello = received.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(hello["type"], "hello");
+    tokio::time::timeout(Duration::from_secs(10), refused.notified())
+        .await
+        .expect("the channel never read the status after its hello");
+
+    // The channel still runs: it takes the harness's state and delivers mail.
+    writeln!(input, "{}", json!({"type": "state", "state": "idle"})).unwrap();
+    input.flush().unwrap();
+    daemon.send("message/stopping-omp-mail", seat, "SLATE HERON");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let message = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match received.recv_timeout(remaining) {
+            Ok(frame) if frame["type"] == "message" => break frame,
+            Ok(_) => {}
+            Err(error) => {
+                let status = channel.try_wait().unwrap();
+                let stderr = std::fs::read_to_string(&channel_stderr).unwrap();
+                panic!("the channel delivered no message ({error}); exit {status:?}; stderr: {stderr}");
+            }
+        }
+    };
+    assert!(message.to_string().contains("SLATE HERON"), "{message}");
+    assert!(channel.try_wait().unwrap().is_none());
+    let _ = stop(channel);
+    let stderr = std::fs::read_to_string(&channel_stderr).unwrap();
+    assert!(stderr.is_empty(), "the channel wrote to stderr: {stderr}");
+    let log = driver_log(root);
+    assert!(log.contains("task 7 was cancelled"), "the channel did not log the error it kept running through: {log}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_after_catchup() {
     if fractal_daemon::test_support::supervise_test() {

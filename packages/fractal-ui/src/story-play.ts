@@ -18,31 +18,52 @@ export async function tooltipFor(anchor: HTMLElement, name: string): Promise<HTM
   })
 }
 
-/** Observe the final history commit; each advancing batch gets the configured async assertion deadline. */
+/**
+ * Observe the final history commit. History advances one batch per animation frame, so a stall is the configured
+ * async deadline passing with no new turn, then two more frames with none: one to run a batch and the next to show
+ * its commit. A browser that renders no frames gives the viewport no chance to advance (a loaded host can pause its
+ * compositor for a second while page timers still run), so the deadline waits for those frames. Frames from before
+ * the deadline do not count, so a pause that outlasts it still leaves the first frame after it to commit a batch.
+ */
 export async function committedTranscriptHistory(canvasElement: HTMLElement, expectedTurns: number, abortSignal: AbortSignal): Promise<HTMLElement> {
   const canvas = within(canvasElement)
   const controls = canvas.getByTestId('transcript-history-controls')
   let observer: MutationObserver | undefined
   let onAbort: (() => void) | undefined
   let deadline: number | undefined
+  let frame: number | undefined
   try {
     await new Promise<void>((resolve, reject) => {
+      const timeout = getConfig().asyncUtilTimeout
       let mountedTurns = canvasElement.querySelectorAll('[data-testid="transcript-turn"]').length
+      let expired = false
+      let frames = 0
+      const fail = (reason: string) => reject(new Error(`History readiness ${reason}: expected data-state="complete" and ${expectedTurns} turns; last data-state="${controls.dataset.state}", mounted turns=${canvasElement.querySelectorAll('[data-testid="transcript-turn"]').length}`))
+      const stalled = () => { if (expired && frames >= 2) fail(`stalled for ${timeout}ms and ${frames} frames`) }
+      const arm = () => {
+        expired = false
+        frames = 0
+        window.clearTimeout(deadline)
+        deadline = window.setTimeout(() => { expired = true; frames = 0 }, timeout)
+      }
+      const countFrame = () => {
+        frames++
+        stalled()
+        frame = window.requestAnimationFrame(countFrame)
+      }
       const complete = () => {
         if (controls.dataset.state === 'complete') { resolve(); return }
         const nextTurns = canvasElement.querySelectorAll('[data-testid="transcript-turn"]').length
         if (nextTurns > mountedTurns && nextTurns <= expectedTurns) {
           mountedTurns = nextTurns
-          window.clearTimeout(deadline)
-          deadline = window.setTimeout(() => fail(`stalled for ${timeout}ms`), timeout)
+          arm()
         }
       }
-      const fail = (reason: string) => reject(new Error(`History readiness ${reason}: expected data-state="complete" and ${expectedTurns} turns; last data-state="${controls.dataset.state}", mounted turns=${canvasElement.querySelectorAll('[data-testid="transcript-turn"]').length}`))
       onAbort = () => fail('aborted')
       abortSignal.addEventListener('abort', onAbort, { once: true })
       if (abortSignal.aborted) { onAbort(); return }
-      const timeout = getConfig().asyncUtilTimeout
-      deadline = window.setTimeout(() => fail(`stalled for ${timeout}ms`), timeout)
+      arm()
+      frame = window.requestAnimationFrame(countFrame)
       observer = new MutationObserver(complete)
       observer.observe(canvasElement, { attributes: true, attributeFilter: ['data-state'], childList: true, subtree: true })
       // Also handle a final commit that preceded observer registration.
@@ -51,6 +72,7 @@ export async function committedTranscriptHistory(canvasElement: HTMLElement, exp
   } finally {
     observer?.disconnect()
     window.clearTimeout(deadline)
+    if (frame !== undefined) window.cancelAnimationFrame(frame)
     if (onAbort !== undefined) abortSignal.removeEventListener('abort', onAbort)
   }
   await expect(controls).toHaveAttribute('aria-busy', 'false')

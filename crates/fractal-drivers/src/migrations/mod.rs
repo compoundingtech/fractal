@@ -17,7 +17,7 @@
 //! Each subdirectory MUST name, in its `mod.rs` doc comment, the delta record under
 //! `docs/vrs/.delta/` that carries its deletion trigger, and its seam MUST carry a
 //! `DELETION TRIGGER: DELTA-NNN` comment. The delta record's Resolution Signal is a live query,
-//! so "may this go?" is answered by running a command rather than by reading an opinion. A
+//! so "may this go?" is answered by measuring its named producer rather than an opinion. A
 //! `deletion_trigger_*` test asserts the local half: that once no old record exists, the module
 //! contributes nothing, so removing it cannot change behaviour.
 

@@ -74,8 +74,12 @@ struct KeptWorkWakes {
 struct KeptWorkWake {
     subject: String,
     created_index: u64,
-    view: Option<((u64, Option<String>), MessageView)>,
+    view: Option<(WakeVersion, MessageView)>,
 }
+
+/// A message's version as a kept view was read at: its latest claim index, its latest desired
+/// revision, and the kinds of mark recorded for it.
+type WakeVersion = (u64, Option<String>, i64);
 
 #[cfg(test)]
 thread_local! {
@@ -531,7 +535,7 @@ impl DeliveryStore for Store {
                     gone.insert(kept.subject.clone());
                     continue;
                 }
-                let key = (version.latest_claim_index, version.desired_claim_id.clone());
+                let key = (version.latest_claim_index, version.desired_claim_id.clone(), version.latest_mark);
                 let message = match &kept.view {
                     Some((read_at, view)) if *read_at == key => view.clone(),
                     _ => {
@@ -740,13 +744,18 @@ impl DeliveryStore for Store {
         let names = |party: &str| recipient_names(&connection, party, message_bare_recipient(party));
         let recipients = recipient.as_deref().map(names).transpose()?;
         let senders = sender.as_deref().map(names).transpose()?;
-        let (stream, more) = self.stream_page_after(
-            recipients.as_deref(),
-            senders.as_deref(),
-            after.unwrap_or(0),
-            limit - output.len(),
-            matches,
-        )?;
+        let filter = fractal_store::store::messages_shard::Filter {
+            recipients: recipients.as_deref(),
+            senders: senders.as_deref(),
+            open_only: !include_closed,
+        };
+        // Only a title is beyond the shard's query: its match reads each item the filter passes.
+        let mut titled = |message: &MessageView| {
+            subject.is_none_or(|title| message.title.as_deref() == Some(title))
+                && subject_prefix.is_none_or(|prefix| message.title.as_deref().is_some_and(|title| title.starts_with(prefix)))
+        };
+        let keep = (subject.is_some() || subject_prefix.is_some()).then_some(&mut titled as &mut dyn FnMut(&MessageView) -> bool);
+        let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - output.len(), keep)?;
         output.extend(stream);
         let next = stream_cursor(more, &output, last_read);
         Ok((output, next))

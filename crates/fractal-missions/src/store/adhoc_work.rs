@@ -182,9 +182,10 @@ fn names_current_handoff(
 }
 
 /// The recipient's receipt for a handoff note that is a stream item: the read or close it
-/// already recorded, or a read recorded now. It names the step, as a stream receipt does.
-fn stream_note_read(store: &Store, note: &str, actor: &str) -> Result<String, St3Error> {
-    use crate::store::messages_shard::{lifecycle_receipt, mailbox_reads, record_admitted_lifecycle};
+/// already recorded, else the read [`stream_note_read`] records. It names the step, as a stream
+/// receipt does, and writes nothing.
+fn stream_note_receipt(store: &Store, note: &str, actor: &str) -> Result<String, St3Error> {
+    use crate::store::messages_shard::{lifecycle_receipt, mailbox_reads};
     let read = BTreeMap::from([("status".to_owned(), json!("read"))]);
     for kind in ["message.read", "message.closed"] {
         if mailbox_reads::lifecycle_step(store, note, kind)
@@ -194,9 +195,23 @@ fn stream_note_read(store: &Store, note: &str, actor: &str) -> Result<String, St
             return Ok(lifecycle_receipt(&store.origin, note, kind, Some(actor), &read).id);
         }
     }
-    // The graph's acknowledgement reads the note wherever it stands; so does the stream's.
-    record_admitted_lifecycle(store, note, "message.read", Some(actor), &read)?;
     Ok(lifecycle_receipt(&store.origin, note, "message.read", Some(actor), &read).id)
+}
+
+/// Record the recipient's read of a stream handoff note, unless it already read or closed it.
+fn stream_note_read(store: &Store, note: &str, actor: &str) -> Result<(), St3Error> {
+    use crate::store::messages_shard::{mailbox_reads, record_admitted_lifecycle};
+    for kind in ["message.read", "message.closed"] {
+        if mailbox_reads::lifecycle_step(store, note, kind)
+            .map_err(internal)?
+            .is_some_and(|(recorded, _)| recorded == actor)
+        {
+            return Ok(());
+        }
+    }
+    // The graph's acknowledgement reads the note wherever it stands; so does the stream's.
+    let read = BTreeMap::from([("status".to_owned(), json!("read"))]);
+    record_admitted_lifecycle(store, note, "message.read", Some(actor), &read).map(drop)
 }
 
 pub trait AdhocWorkStore {
@@ -284,18 +299,20 @@ impl AdhocWorkStore for Store {
         ) -> Result<StepRunView, St3Error> {
         let subject = normalize_step_run(subject);
         // A note in the messages shard is a stream item: its read is this member's record there.
-        // Its recipient's read is recorded before the graph's writer is taken: the shard's
-        // admission can seal graph batches under the shard's writer, so the graph's writer must
-        // never wait on the shard's. The note is read only when it is this step's current handoff
-        // to the reader; the transaction below checks that again under the writer.
+        // The progress below cites the read's receipt, whose id is known before it is recorded.
+        // The read itself is recorded only once the acknowledgment has committed, so a refused
+        // one leaves the note unread, and outside the graph's writer: the shard's admission can
+        // seal graph batches under the shard's writer, so the graph's writer must never wait on
+        // the shard's. The note is cited only when it is this step's current handoff to the
+        // reader; the transaction below checks that again under the writer.
         let stream_receipt = match self.message(&input.message).map_err(internal)? {
             Some(note) if crate::store::messages_shard::mailbox_reads::is_stream_item(&note) => {
                 let current = names_current_handoff(&self.readers.get(), &subject, input)?;
-                Some(current.then(|| stream_note_read(self, &input.message, &input.actor)).transpose()?)
+                Some(current.then(|| stream_note_receipt(self, &input.message, &input.actor)).transpose()?)
             }
             _ => None,
         };
-        self.connection.batched(|tx| {
+        let view = self.connection.batched(|tx| {
             let mut view = person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the handed-off step is missing"))?;
             let handoff = latest_handoff(tx, &view, now_ms())?.ok_or_else(|| St3Error::new("missing-handoff", "this attempt has no handoff note"))?;
             if handoff.body["fields"]["handoff_message"] != input.message || handoff.body["fields"]["handoff_to"] != input.actor || view.assigned_to.as_deref() != Some(&input.actor) {
@@ -309,18 +326,26 @@ impl AdhocWorkStore for Store {
                 return Err(St3Error::new("stale-handoff", "this handoff is no longer waiting for acknowledgment"));
             }
             let (receipt, predecessors) = if let Some(receipt) = &stream_receipt {
-                // Were the progress claim to fail, the note stays read and a repeated
-                // acknowledgment finds it so. The receipt is not a graph claim, so the progress
-                // cites it without following it.
+                // The receipt is not a graph claim, so the progress cites it without following it.
                 let receipt = receipt.clone().ok_or_else(|| St3Error::new("stale-handoff", "the handoff changed while it was acknowledged; acknowledge it again"))?;
                 (receipt, vec![handoff.id])
             } else {
                 let seen: Option<String> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h21741300df1e owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND actor=?2 AND kind IN ('message.read','message.closed') ORDER BY CANONICAL_ASC(claims) LIMIT 1"), params![input.message, input.actor], |row| row.get(0)).optional().map_err(internal)?;
-                let receipt = match seen {
-                    Some(receipt) => receipt,
-                    None => append_claim_tx(tx, &self.origin, &input.message, "message.read", Some(&input.actor), &json!({"fields": {"status": "read"}}), &[], None).map_err(claim_append_error)?.id,
-                };
-                (receipt.clone(), vec![receipt, handoff.id])
+                // Without a graph read, the reader's local mark (message_marks.rs) is its read: the
+                // progress cites its receipt, which is not a graph claim and so no predecessor.
+                let marked: Option<String> = if seen.is_some() { None } else { tx.query_row(
+                    "SELECT receipt FROM local_message_marks WHERE message=?1 AND consumer=?2
+                     AND kind IN ('message.read','message.closed') ORDER BY recorded_at_unix_ms LIMIT 1",
+                    params![input.message, input.actor], |row| row.get::<_, String>(0),
+                ).optional().map_err(internal)? };
+                match (seen, marked) {
+                    (Some(receipt), _) => (receipt.clone(), vec![receipt, handoff.id]),
+                    (None, Some(marked)) => (marked, vec![handoff.id]),
+                    (None, None) => {
+                        let receipt = append_claim_tx(tx, &self.origin, &input.message, "message.read", Some(&input.actor), &json!({"fields": {"status": "read"}}), &[], None).map_err(claim_append_error)?.id;
+                        (receipt.clone(), vec![receipt, handoff.id])
+                    }
+                }
             };
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.progress", Some(&input.actor), &json!({"fields": {
                 "attempt": view.attempt, "status": "ready", "summary": "Handoff acknowledged", "worker_reported": view.worker_reported,
@@ -329,7 +354,13 @@ impl AdhocWorkStore for Store {
             project_mission_run_update(tx, &claim)?;
             enrich_step_queue(tx, &mut view).map_err(internal)?;
             Ok(view)
-        }).map_err(internal)?
+        }).map_err(internal)??;
+        // Acknowledged, now or before: the note is read. A read that fails here is recorded by
+        // the repeated acknowledgment its error asks for.
+        if let Some(Some(_)) = &stream_receipt {
+            stream_note_read(self, &input.message, &input.actor)?;
+        }
+        Ok(view)
     }
 }
 

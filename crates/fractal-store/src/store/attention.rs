@@ -1063,13 +1063,29 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
         );
     }
     if target.starts_with("message/") {
-        return row(
+        let claimed = row(
             &canonical_sql("SELECT substr(kind, 9), accepted_at_unix_ms FROM claims
              WHERE subject=?1 AND kind IN
                ('message.sent', 'message.staged', 'message.delivered', 'message.read', 'message.closed')
              ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
             target,
-        );
+        )?;
+        // A local mark (message_marks.rs) counts when it is further along than the claims.
+        let marked: Option<TargetState> = connection
+            .query_row(
+                "SELECT substr(kind, 9), CAST(recorded_at_unix_ms AS TEXT) FROM local_message_marks
+                 WHERE message=?1 ORDER BY CASE kind WHEN 'message.closed' THEN 3 WHEN 'message.read' THEN 2 ELSE 1 END DESC,
+                 recorded_at_unix_ms DESC LIMIT 1",
+                [target],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?.parse().ok())),
+            )
+            .optional()?;
+        return Ok(match (claimed, marked) {
+            (Some(claimed), Some(marked))
+                if super::message_marks::rank(&marked.0) > super::message_marks::rank(&claimed.0) => Some(marked),
+            (None, marked) => marked,
+            (claimed, _) => claimed,
+        });
     }
     Ok(pull_request_state_tx(connection, target)?.map(|(state, since)| (state, Some(since))))
 }

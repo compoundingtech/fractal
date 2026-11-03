@@ -6,7 +6,7 @@
 //! `forget_views`.
 
 use super::*;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
 /// Every person's rows of one view at one cut. A person with no rows has no entry.
 pub struct OwnerListPublication {
@@ -24,6 +24,9 @@ pub struct OwnerList {
     /// People read again, in total, and full reads of everyone.
     pub people_read: AtomicU64,
     pub full_reads: AtomicU64,
+    /// Read everyone again at the next refresh, while the newest rows keep serving and a
+    /// refresh under way still publishes: claims were trimmed beneath an unchanged cut.
+    pub refold: AtomicBool,
 }
 
 impl OwnerList {
@@ -31,6 +34,12 @@ impl OwnerList {
         let mut published = self.published.lock().unwrap_or_else(PoisonError::into_inner);
         self.forgotten.fetch_add(1, AtomicOrdering::AcqRel);
         *published = None;
+    }
+
+    /// Read everyone again at the next refresh, unlike [`Self::forget`] keeping the newest
+    /// rows served and a refresh under way able to publish.
+    pub fn refold(&self) {
+        self.refold.store(true, AtomicOrdering::Release);
     }
 }
 

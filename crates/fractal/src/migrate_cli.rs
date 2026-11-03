@@ -187,6 +187,8 @@ impl Layout {
                 "fractal-apply.service".into()
             } else if old.name == "org.nix-community.home.smalltalk" {
                 "com.compoundingtech.fractal".into()
+            } else if old.name == "org.nix-community.home.smalltalk-replication" {
+                "com.compoundingtech.fractal.replication".into()
             } else if old.name == "org.nix-community.home.smalltalk-apply" {
                 "com.compoundingtech.fractal-apply".into()
             } else {
@@ -430,7 +432,8 @@ fn validate_journal(layout: &Layout, journal: &Journal, current: &Services) -> R
         "fractal.service", "fractal-replication.service", "fractal-apply.service"];
     #[cfg(target_os = "macos")]
     let allowed = ["com.compoundingtech.st3", "org.nix-community.home.smalltalk", "com.compoundingtech.st3.replication",
-        "org.nix-community.home.smalltalk-apply", "com.compoundingtech.fractal", "com.compoundingtech.fractal.replication", "com.compoundingtech.fractal-apply"];
+        "org.nix-community.home.smalltalk-replication", "org.nix-community.home.smalltalk-apply",
+        "com.compoundingtech.fractal", "com.compoundingtech.fractal.replication", "com.compoundingtech.fractal-apply"];
     ensure!(!journal.services.legacy.is_empty() && !journal.services.target.is_empty(), "journal has no daemon plan");
     for unit in journal.services.legacy.iter().chain(&journal.services.target) {
         let filename = if cfg!(target_os = "macos") { format!("{}.plist", unit.name) } else { unit.name.clone() };

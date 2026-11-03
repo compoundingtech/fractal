@@ -1,137 +1,38 @@
 # Local eval corpus
 
-This repository keeps an st2 and an st3 form of each migration eval.
-
-An st3-only eval can prove a new runtime feature that st2 does not implement.
-
-The initial st2 corpus came from `compoundingtech/evals` commit `3db48ab56d40ce27dfd94f89d2db9b692d93836a`.
-
+The [Fractal corpus](fractal/) contains the current eval fixtures. Each KDL-backed eval
+starts with `version 2`; complete harness variants can live in its `variants/` directory.
 Future imports require an explicit eval review before they enter this corpus.
 
+## Eval and harness inventory
 
-| Eval | st2 | st3 |
-| --- | --- | --- |
-| License MIT | `st2/license-mit` | `fractal/license-mit` |
-| Ghost bug | `st2/ghost-bug` | `fractal/ghost-bug` |
-| Signal rename | `st2/signal-rename` | `fractal/signal-rename` |
-| Restart continuity | `st2/restart-continuity` | `fractal/restart-continuity` |
-| Fork in the road | `st2/fork-in-the-road` | `fractal/fork-in-the-road` |
-| Poisoned pull request | `st2/poisoned-pr` | `fractal/poisoned-pr` |
-| Test Writing | `st2/test-writing` | `fractal/test-writing` |
-| Weird Git Setup | `st2/weird-git-setup` | `fractal/weird-git-setup` |
-| Claude Skill Inheritance | `st2/claude-skill-inheritance` | `fractal/claude-skill-inheritance` |
-| Resource cold start | `st2/resource-cold-start` | `fractal/resource-cold-start` |
-| Resource retarget | `st2/resource-retarget` | `fractal/resource-retarget` |
-| Resource handoff | `st2/resource-handoff` | `fractal/resource-handoff` |
-| Context and resource continuity | `st2/context-resource-continuity` | `fractal/context-resource-continuity` |
-| Crash escalation | `st2/crash-escalation` | `fractal/crash-escalation` |
-| PTY attach machine stream | `st2/pty-attach-machine-stream` | `fractal/pty-attach-machine-stream` |
-| PTY attach only | `st2/pty-attach-only` | `fractal/pty-attach-only` |
-| PTY send and peek | `st2/pty-send-peek` | `fractal/pty-send-peek` |
-| Network smoke | `st2/network-smoke` | `fractal/network-smoke` |
-| Network isolation | `st2/network-isolation` | `fractal/network-isolation` |
-| Mission Document Lift | Not supported | `fractal/mission-document-lift` |
-| Mixed Worker Pool | Not supported | `fractal/mixed-worker-pool` |
-| Cross-harness message wake | Not supported | `fractal/cross-harness-message-wake` |
-| Work wake reliability | Not supported | `fractal/work-wake-reliability` |
-| Seat queue | Not supported | `fractal/seat-queue` |
-| Planning Mode | Not supported | `fractal/planning-mode` |
-| Run Generation Revision | Not supported | `fractal/run-generation-revision` |
-| Mission Inputs | Not supported | `fractal/mission-inputs` |
-| Local File Refresh | Not supported | `fractal/local-file-refresh` |
-| Constraint Inheritance | Not supported | `fractal/constraint-inheritance` |
-| Continuous Stewardship | Not supported | `fractal/continuous-stewardship` |
-| Automatic GitHub Intake | Not supported | `fractal/automatic-github-intake` |
-| Codex compaction message delivery | Not supported | `fractal/codex-compaction-message-delivery` |
-| Native session import | Not supported | `fractal/native-session-import` |
-| Graceful messaging | Not supported | `fractal/graceful-messaging` |
-| Messaging faults | Not supported | `fractal/messaging-faults` |
-| Codex minimal access | Not supported | `fractal/codex-minimal-access` |
+The model-free and model-backed lists in
+[`crates/fractal/tests/examples.rs`](../crates/fractal/tests/examples.rs) are the maintained
+inventory. Its tests compare those lists with the actual `evals/fractal/*/eval.kdl` files,
+check that model-free fixtures have no model seats or gates, and verify the declared native
+harnesses and model judges. Read the current fixture and controller for exact models and
+seat counts rather than using a second hand-copied aggregate here.
 
-The License MIT, Restart continuity, and Claude Skill Inheritance pairs use Claude Sonnet in both runtimes.
+To list KDL files from the repository root:
 
-The Ghost bug, Signal rename, Fork in the road, Poisoned pull request, Test Writing, and Weird Git Setup pairs use Codex.
+```sh
+rg --files evals/fractal -g eval.kdl
+```
 
-The ten remaining pairs are model-free.
+The inventory includes attention inbox, free mode, loop exhaustion/feedback/until-green,
+queue revision, replication convergence, review escalation, runtime readiness recovery and
+seat mission work. [Codex minimal access](fractal/codex-minimal-access/eval.kdl) declares one
+Codex worker and no model judge; its gates check managed minimal permissions.
 
-Mission Inputs, Local File Refresh, and Constraint Inheritance are also model-free.
+A runner may create its agents dynamically. Graceful messaging uses
+`scripts/fractal-graceful-messaging-eval/run` and records the selected harnesses in its report;
+it has no eval KDL. Messaging faults uses real native drivers and embedded extensions with a
+token-free provider stand-in across two isolated nodes, so it adds no native model seats.
 
-Run Generation Revision starts one Codex planner through the launch API.
-
-The Fractal corpus has 46 active evals. Twenty-three are model-free, and twenty-three use at least one model.
-
-Each eval KDL starts with a document version. A missing version means version zero.
-
-st2 accepts versions zero and one. st3 accepts version two.
-
-## Harness inventory
-
-The seat counts include every native agent seat. The LLM judge counts are separate.
-
-| Runtime | Eval | Native agent seats | LLM judges |
-| --- | --- | --- | --- |
-| st2 | License MIT | Claude Sonnet × 2, Codex × 1 | None |
-| st2 | Ghost bug | Codex × 2 | None |
-| st2 | Signal rename | Codex × 4 | None |
-| st2 | Restart continuity | Claude Sonnet × 2 | None |
-| Fractal | License MIT | Claude Sonnet × 2 | Codex × 1 |
-| Fractal | Ghost bug | Codex × 2 | Codex × 1 |
-| Fractal | Signal rename | Codex × 4 | Codex × 1 |
-| Fractal | Restart continuity | Claude Sonnet × 2 | None |
-| st2 | Fork in the road | Codex × 4 | None |
-| Fractal | Fork in the road | Codex × 4 | None |
-| st2 | Poisoned pull request | Codex × 2 | None |
-| Fractal | Poisoned pull request | Codex × 2 | None |
-| st2 | Test Writing | Codex × 2 | None |
-| Fractal | Test Writing | Codex × 2 | None |
-| st2 | Weird Git Setup | Codex × 1 | None |
-| Fractal | Weird Git Setup | Codex × 1 | None |
-| st2 | Claude Skill Inheritance | Claude Sonnet × 1 | None |
-| Fractal | Claude Skill Inheritance | Claude Sonnet × 1 | None |
-| Fractal | Mission Document Lift | Codex × 1 | None |
-| Fractal | Mixed Worker Pool | Claude Sonnet × 1, Codex × 1 | None |
-| Fractal | Cross-harness message wake | Claude Opus × 1, Codex × 1, Pi × 1, OMP × 1 | None |
-| Fractal | Work wake reliability | Codex × 1 | None |
-| Fractal | Seat mission work | Codex × 1 | None |
-| Fractal | Seat queue | Claude Sonnet × 1, or Codex × 1 or OMP × 1 chosen by its runner | None |
-| Fractal | Planning Mode | Codex × 1, created by the launch API | None |
-| Fractal | Run Generation Revision | Codex × 1, created by the launch API | None |
-| Fractal | Continuous Stewardship | Codex × 1 | None |
-| Fractal | Automatic GitHub Intake | Codex × 1 | None |
-| Fractal | Codex compaction message delivery | Codex × 1 | None |
-| Fractal | Native session import | Claude × 1, Codex × 1, Pi × 1, OMP × 1, OpenCode × 1 (raw, then imported) | None |
-| Fractal | Graceful messaging | One seat for each harness its runner names: Claude, Codex, OMP, Pi, OpenCode | None |
-
-The paired and st3-only corpus has 14 Claude seats, 43 Codex seats, two Pi seats, two OMP seats,
-and one OpenCode seat. It also has three Codex LLM judges.
-
-Graceful messaging is not in those seat counts: `scripts/fractal-graceful-messaging-eval/run` chooses
-its seats at run time, and its committed reports name them. It needs no eval KDL, because it restarts
-and replaces its own daemon.
-
-Seat queue is counted with its default Claude seat. `scripts/fractal-seat-queue-eval/run` can put Codex
-`gpt-6-luna` or omp `openai-codex/gpt-5.6-luna` in that seat instead. Its chief agent is a
-model-free command, not a native agent seat.
-
-The twenty-three model-free Fractal evals add no model seats and no LLM judges.
-Messaging faults runs real native drivers and embedded extensions with a token-free provider API
-stand-in across two isolated nodes; it adds no native model seats.
-
-Claude task baselines remain explicitly pinned to `claude-sonnet-5`; the native-channel wake
-canary uses Claude Code's `opus` alias and records the concrete model selected by the provider.
-
-Model agents must use a native `harness` block. A setup or fixture process can use `command`.
-
-An eval can keep seat variants in `variants/`. A variant is a complete eval KDL that changes only the
-seat under test, so one fixture can compare harnesses. The omp readiness runs use omp on
-`openai-codex/gpt-5.6-luna`, Codex `gpt-6-luna`, and Claude `claude-sonnet-5` variants of
-cross-harness message wake, work wake reliability, seat mission work, and restart continuity.
-Cross-harness message wake also has omp `openai-codex/gpt-5.6-sol` and `openai-codex/gpt-6-astra`
-variants for the omp model comparison.
-
-Codex `gpt-5.6-sol` is the default model judge.
-
-An eval can use a Claude judge for a specific reason. Record the choice in this inventory and the run report.
+Model agents use a native `harness` block. Setup and fixture processes can use `command`.
+A variant is a complete eval KDL that changes only the seat under test. Keep native agents
+and model judges distinct in the run report, and record the concrete provider model when
+a fixture selects an alias. Fixture declarations pin their own task models and judges.
 
 ## Fractal message discipline
 
@@ -171,8 +72,6 @@ Commit the report with the run evidence. Do not leave the only report in termina
 ## Validation
 
 ```sh
-st2 eval ./evals/st2/license-mit
-st2 eval ./evals/st2/network-smoke
 cargo test -p fractal --test integration examples::
 ```
 

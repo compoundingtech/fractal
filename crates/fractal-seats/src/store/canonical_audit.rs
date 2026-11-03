@@ -106,6 +106,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_publications",
         "local_client_message_cut_epoch",
         "local_idle_messages",
+        // Member-local consumer marks: never replicated, outside every digest.
+        "local_message_marks",
         "coordination_sends",
         "local_coordination_backfill",
         "stop_deferral_claims",
