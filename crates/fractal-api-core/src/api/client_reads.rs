@@ -973,6 +973,9 @@ pub async fn client_messages(
     .await
     .map(|(Extension(snapshot), page)| (snapshot, page))?;
     page.replicated = replicated;
+    relay_client_message_items(&state, &mut page.items, client_now_ms())
+        .await
+        .map_err(ApiError::internal)?;
     Ok((Extension(snapshot), Json(page)))
 }
 
@@ -1070,15 +1073,17 @@ pub(super) async fn client_messages_sql_page_with_envelope(
             rows.truncate(limit);
             // Delivery enrichment reads the store too: keep it on the blocking
             // worker and inside the same read snapshot as selector/body folding.
+            let mut views = Vec::with_capacity(rows.len());
             let resources = rows.into_iter().map(|(message, metadata, current)| {
                 let key = (
                     metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?,
                     message.subject.clone(),
                 );
+                views.push((message.clone(), key.0));
                 let resource = client_message_resource(&reader.store, message, &metadata, current, now)?;
                 Ok((key, resource))
             }).collect::<anyhow::Result<Vec<_>>>()?;
-            Ok((cut_epoch, Some((snapshot, through, selected_more, resources))))
+            Ok((cut_epoch, Some((snapshot, through, selected_more, resources, views))))
         })
     }).await?;
     // Retire every affected receipt for this store, not just the cursor that
@@ -1089,9 +1094,13 @@ pub(super) async fn client_messages_sql_page_with_envelope(
             !cut.store.ptr_eq(&store) || cut.cut_epoch >= cut_epoch
         });
     }
-    let Some((snapshot, through, selected_more, resources)) = read else {
+    let Some((snapshot, through, selected_more, mut resources, views)) = read else {
         return Err(client_page_expired("the message page cut was invalidated; restart pagination"));
     };
+    // Mail to a seat on another host that keeps its receipts reads that host's answer.
+    relay_client_messages(state, resources.iter_mut().map(|(_, resource)| resource), views, now)
+        .await
+        .map_err(ApiError::internal)?;
     let mut keys = Vec::with_capacity(resources.len());
     let mut item_sizes = Vec::with_capacity(resources.len());
     let mut items = Vec::with_capacity(resources.len());
@@ -1273,12 +1282,16 @@ pub async fn client_messages_detail(
     Query(query): Query<ClientListQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let person = client_v0::person_filter(&session, query.person.as_deref())?;
-    client_detail(
+    let Json(mut item) = client_detail(
         client_message_resources(&state.store, person.as_deref(), query.history, None)
             .map_err(ApiError::internal)?,
         "message",
         &id,
-    )
+    )?;
+    relay_client_message_items(&state, std::slice::from_mut(&mut item), client_now_ms())
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(item))
 }
 
 pub async fn client_launches(

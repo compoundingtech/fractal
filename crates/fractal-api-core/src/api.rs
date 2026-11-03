@@ -4712,6 +4712,85 @@ fn client_message_resource(
     Ok(resource)
 }
 
+/// Take the answers of the hosts that keep these messages' receipts into their client resources
+/// (db break-up step 4b). `state` is the further of this member's records and the host's
+/// answer, `status_from` names the host and whether it answered, `delivery` reads what it said,
+/// and a message its host closed is history, as a message this member closed is. Every message
+/// is kept, so a page's cursor and size hold. `views` are the messages, each with its sent time.
+pub async fn relay_client_messages<'a>(
+    state: &AppState,
+    items: impl IntoIterator<Item = &'a mut Value>,
+    views: Vec<(crate::model::MessageView, u128)>,
+    now: u128,
+) -> anyhow::Result<()> {
+    let messages = views.iter().map(|(message, _)| message.clone()).collect::<Vec<_>>();
+    let relayed = message_reads::read_for_views(state, &messages).await?;
+    if relayed.is_empty() {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let patches = tokio::task::spawn_blocking(move || -> anyhow::Result<BTreeMap<String, Value>> {
+        let mut patches = BTreeMap::new();
+        for (mut message, sent_at) in views {
+            let Some(answer) = relayed.get(&message.subject) else {
+                continue;
+            };
+            message_reads::take_in(&mut message, answer);
+            let delivery = message_delivery_for(&store, &message, sent_at, now, Some(answer))?;
+            patches.insert(message.subject.clone(), json!({
+                "state": message.status, "status_from": message.status_from, "delivery": delivery,
+            }));
+        }
+        Ok(patches)
+    })
+    .await??;
+    for item in items {
+        let Some(patch) = item.get("id").and_then(Value::as_str).and_then(|id| patches.get(id)) else {
+            continue;
+        };
+        for field in ["state", "status_from", "delivery"] {
+            item[field] = patch[field].clone();
+        }
+        if patch["state"] == "closed" {
+            item["operational"] = json!({ "layer": "history", "actionable": false, "reasons": ["closed"] });
+        }
+    }
+    Ok(())
+}
+
+/// [`relay_client_messages`] for resources read without their messages, such as a detail or a
+/// page cut from a materialized collection: each message and its sent time are read again.
+pub async fn relay_client_message_items(
+    state: &AppState,
+    items: &mut [Value],
+    now: u128,
+) -> anyhow::Result<()> {
+    let ids = items
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let views = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<_>> {
+        let mut views = Vec::new();
+        for id in ids {
+            let Some(message) = store.message(&id)? else {
+                continue;
+            };
+            let sent_at = store
+                .latest_claim(&id, Some("message.sent"))?
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or_default();
+            views.push((message, sent_at));
+        }
+        Ok(views)
+    })
+    .await??;
+    relay_client_messages(state, items.iter_mut(), views, now).await
+}
+
 pub fn client_message_resources(
     store: &Store,
     person: Option<&str>,
@@ -10785,6 +10864,7 @@ pub fn accept_message_receipt_with_upload_owner(
             in_reply_to: request.in_reply_to,
             tags,
             created_index: record.store_index,
+            status_from: None,
             attachments,
             body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
             body_bytes: body.as_ref().map(|body| body.size),

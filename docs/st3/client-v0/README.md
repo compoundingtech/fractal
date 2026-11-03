@@ -1568,6 +1568,18 @@ of a message; see [long messages](../long-messages.md#device-signatures)) are th
 All are definite refusals that wrote nothing, so a composer keeps the person's text. See
 [long messages](../long-messages.md).
 
+### A message's state from its seat's host
+
+A seat's host can keep how far its mail got (delivered, read, closed) on that host alone, and other
+hosts then ask it. A message resource whose recipient's seat runs on such a host carries
+`status_from: {host, state, reason?}`:
+- `state: "answered"`: the resource's own `state` is the further of this host's records and that
+  host's answer. A message that host closed is history (`operational.reasons: ["closed"]`).
+- Any other word, such as `unknown`: that host did not answer in time, and `state` is only this
+  host's own records, which can be behind. `reason` says why. A client shows the state as unknown.
+A view waits at most a second for a host, and does not ask a host that missed for half a minute.
+Without `status_from`, this host's own records are the whole answer, as on older daemons.
+
 ## Event feed and resynchronization
 
 `GET /v1/client/events?after=CURSOR&limit=N&wait_ms=M` returns at most the negotiated event and byte

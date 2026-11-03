@@ -11,9 +11,15 @@
 //! a host's silence, so doctor's checks, one after another, wait for a silent host once. One read
 //! asks at most [`MAX_HOSTS`] hosts, all at once, and at most [`MAX_MESSAGES_PER_HOST`] messages
 //! of each, so a slow host costs one deadline and a large backlog a bounded number of requests.
+//!
+//! A message view or list asks the same way ([`read_views`]), but a UI never waits long: it waits
+//! [`VIEW_DEADLINE`], and a host that did not answer is not asked again by views for
+//! [`VIEW_SILENT_FOR`]. Its messages then read as this member's own records, with
+//! `status_from` saying the host's answer is unknown.
 
 use super::*;
 use crate::peer::{MAX_READ_MESSAGES, MessageMarksAnswer, SEAT_FRESHNESS_READS_FEATURE};
+use crate::model::StatusFrom;
 use crate::store::message_marks;
 use std::collections::HashMap;
 
@@ -23,6 +29,10 @@ pub const STATUS_DEADLINE: Duration = Duration::from_secs(3);
 pub const CHECK_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a host's answer about a message, or its silence, is reused.
 const KEEP_FOR: Duration = Duration::from_secs(5);
+/// How long a message view or list waits for every host it asks.
+pub const VIEW_DEADLINE: Duration = Duration::from_secs(1);
+/// How long views do not ask a host that did not answer.
+pub const VIEW_SILENT_FOR: Duration = Duration::from_secs(30);
 /// The most answers kept; past it the oldest half goes.
 const KEPT_ANSWERS: usize = 8_192;
 /// The most hosts one read asks.
@@ -65,14 +75,15 @@ pub struct KeptAnswers {
 }
 
 impl KeptAnswers {
-    fn silent(&self, host: &str) -> Option<String> {
+    /// Why `host` did not answer, if it did not within the last `within`.
+    fn silent(&self, host: &str, within: Duration) -> Option<String> {
         let silent = self.silent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        silent.get(host).filter(|(at, _)| at.elapsed() < KEEP_FOR).map(|(_, reason)| reason.clone())
+        silent.get(host).filter(|(at, _)| at.elapsed() < within).map(|(_, reason)| reason.clone())
     }
 
     fn fell_silent(&self, host: &str, reason: &str) {
         let mut silent = self.silent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        silent.retain(|_, (at, _)| at.elapsed() < KEEP_FOR);
+        silent.retain(|_, (at, _)| at.elapsed() < VIEW_SILENT_FOR.max(KEEP_FOR));
         silent.insert(host.to_owned(), (Instant::now(), reason.to_owned()));
     }
 
@@ -213,6 +224,16 @@ pub async fn read(
     asks: BTreeMap<String, Vec<String>>,
     deadline: Duration,
 ) -> BTreeMap<String, Relayed> {
+    read_paced(state, asks, deadline, KEEP_FOR).await
+}
+
+/// [`read`], not asking a host that did not answer within the last `silent_for`.
+async fn read_paced(
+    state: &AppState,
+    asks: BTreeMap<String, Vec<String>>,
+    deadline: Duration,
+    silent_for: Duration,
+) -> BTreeMap<String, Relayed> {
     let kept = state.store.extension::<KeptAnswers>();
     // Each message's host, and what it answered or why it did not.
     let mut heard = Vec::<Heard>::new();
@@ -228,7 +249,7 @@ pub async fn read(
             continue;
         }
         let mut asked = Vec::new();
-        let silent = kept.silent(&host);
+        let silent = kept.silent(&host, silent_for);
         for subject in subjects {
             match (kept.get(&subject), &silent) {
                 (Some(answer), _) => heard.push((host.clone(), Ok(answer))),
@@ -384,10 +405,105 @@ pub fn asks_for<'a>(
     messages: impl IntoIterator<Item = &'a MessageView>,
 ) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
     let mut asks = BTreeMap::<String, Vec<String>>::new();
+    // Messages to one recipient, of one kind, share a host.
+    let mut hosts = HashMap::<(String, bool), Option<String>>::new();
     for message in messages {
-        if let Some(host) = relay_host(store, message)? {
+        let kind = (
+            message.to.clone(),
+            crate::store::messages_shard::mailbox_reads::is_stream_item(message),
+        );
+        let host = match hosts.get(&kind) {
+            Some(host) => host.clone(),
+            None => {
+                let host = relay_host(store, message)?;
+                hosts.insert(kind, host.clone());
+                host
+            }
+        };
+        if let Some(host) = host {
             asks.entry(host).or_default().push(message.subject.clone());
         }
     }
     Ok(asks)
+}
+
+/// Ask the hosts of `messages` how far each got, within [`VIEW_DEADLINE`], and take each
+/// answer in: a message whose seat's host keeps its receipts is as far as the further of this
+/// member's records and the host's answer, and says in `status_from` which host it asked and
+/// whether that host answered. A message the host says is closed leaves the list when
+/// `drop_closed`, as a list of open mail drops closed mail of its own. Every other message is
+/// left as it is.
+pub async fn read_views(
+    state: &AppState,
+    messages: &mut Vec<MessageView>,
+    drop_closed: bool,
+) -> anyhow::Result<()> {
+    let relayed = read_for_views(state, messages).await?;
+    let mut closed = BTreeSet::new();
+    for message in messages.iter_mut() {
+        let Some(relayed) = relayed.get(&message.subject) else {
+            continue;
+        };
+        take_in(message, relayed);
+        if message.status == "closed" {
+            closed.insert(message.subject.clone());
+        }
+    }
+    if drop_closed {
+        messages.retain(|message| !closed.contains(&message.subject));
+    }
+    Ok(())
+}
+
+/// What the hosts of `messages` said about them, within [`VIEW_DEADLINE`], for the messages whose
+/// seat's host keeps their receipts. Asks nobody when none of them has such a host.
+pub async fn read_for_views(
+    state: &AppState,
+    messages: &[MessageView],
+) -> anyhow::Result<BTreeMap<String, Relayed>> {
+    if messages.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let asks = {
+        let store = state.store.clone();
+        let views = messages.to_vec();
+        tokio::task::spawn_blocking(move || asks_for(&store, views.iter())).await??
+    };
+    if asks.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    Ok(read_paced(state, asks, VIEW_DEADLINE, VIEW_SILENT_FOR).await)
+}
+
+/// [`read_views`] for one message, which is never dropped.
+pub async fn read_view(state: &AppState, message: &mut MessageView) -> anyhow::Result<()> {
+    let mut messages = vec![message.clone()];
+    read_views(state, &mut messages, false).await?;
+    if let Some(read) = messages.pop() {
+        *message = read;
+    }
+    Ok(())
+}
+
+/// Take a host's answer about `message` in.
+pub fn take_in(message: &mut MessageView, relayed: &Relayed) {
+    message.status_from = Some(match relayed {
+        Relayed::Answered { host, status, .. } => {
+            if let Some(status) = status
+                && message_marks::rank(status) > message_marks::rank(&message.status)
+            {
+                message.status = (*status).to_owned();
+            }
+            StatusFrom {
+                host: host.clone(),
+                state: "answered".into(),
+                reason: None,
+            }
+        }
+        Relayed::Unknown { host, reason } => StatusFrom {
+            host: host.clone(),
+            state: "unknown".into(),
+            reason: Some(reason.clone()),
+        },
+    });
 }
