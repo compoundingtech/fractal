@@ -280,6 +280,10 @@ async function interactionPlay({ canvasElement }: { canvasElement: HTMLElement }
   try { await rejectsControl('Missing keyboard focus ring', assertFocus) } finally { tabs[1].style.outlineStyle = outline }
   for (const tab of [tabs[2], tabs.at(-1)!, tabs[0]]) {
     await userEvent.keyboard(tab === tabs[2] ? '{Home}{ArrowRight}{ArrowRight}' : tab === tabs[0] ? '{Home}' : '{End}')
+    // The keyboard reveal scrolls the strip, and the browser dispatches that scroll event with the next frame. RAC
+    // closes an open tooltip on scroll, so on a loaded host whose next frame comes late the event closed the hover
+    // tooltip below (#4488). Scroll events are dispatched before frame callbacks, so one frame lets it land first.
+    await frames(1)
     await userEvent.click(tab)
     assertSelected(tab)
     assertPaint(strip)
