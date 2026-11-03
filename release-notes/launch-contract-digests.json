@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Define stable prompt and binary launch-contract digests",
+  "summary": "Define prompt and binary launch digests covering authored settings, workspace instructions and declared tool files; capture running render destinations independently of mutable sources",
   "replay": {"status": "none", "detail": "No replay behavior changes."},
   "schema": {"status": "none", "detail": "No storage migration or schema version change."},
   "rules": {"status": "none", "detail": "No fleet coordination or checkpoint changes."},
