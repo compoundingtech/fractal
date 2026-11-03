@@ -351,6 +351,9 @@ was refused recovers by seeding from the published head (`git fetch origin +refs
 so its chain continues rather than starting again. Without that seed, a pull on an empty copy starts a new chain that it
 cannot publish.
 
+A failed checkpoint publication stops further checkpoints, then still packs refs and restores missing records when
+`--restore` was requested. Missing records retain alarm exit 4; a publication failure without missing records exits 1.
+
 Before other fetches, the publisher checks chain connectivity and streams the current tree's contents to detect
 unreadable bodies as well as empty objects. Historical blob bodies are not rescanned on every heartbeat. An unreadable
 local view is repaired from a trusted published continuation in an isolated repository. Repair scans full objects once

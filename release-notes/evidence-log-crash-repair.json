@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Publisher repair retains broken loose objects and refuses untrusted, unrelated or absent published heads. An unpublished damaged local head requires operator recovery. Watcher repair retains its newest broken repository and preserves synced notification state. Revert scripts without converting stored data."
+    "detail": "Publisher repair retains broken loose objects and refuses untrusted, unrelated or absent published heads. An unpublished damaged local head requires operator recovery. Failed checkpoint publication still packs refs, performs requested record restoration and retains the missing-record alarm. Watcher repair retains its newest broken repository and preserves synced notification state. Revert scripts without converting stored data."
   }
 }

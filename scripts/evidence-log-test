@@ -2,8 +2,10 @@
 """scripts/evidence-log against real repositories and signed records: a bare remote plays GitHub, a second bare repository is the
 host's copy. What is accepted and refused, the signed heartbeat, publishing, a deleted record reported and restored, GC lines
 before GC deletes, a head that is not ours, a second publisher's older chain refused, and a signer that fails."""
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -358,6 +360,29 @@ sys.exit(log.main(sys.argv[1:]))
         self.assertEqual((code, result['missing']), (0, []))
         self.assertEqual(len(self.lines(f'trees/{self.tree[:2]}/{self.tree}')), 2, 'restoring logs nothing twice')
         self.assertTrue(passed)
+
+    def test_a_refused_checkpoint_still_packs_refs_and_restores_missing_records(self):
+        old = self.record()
+        first = self.pull('--publish')[1]['head']
+        published = self.pull('--publish')[1]['head']
+        self.host_git('update-ref', log.LOG, first)  # this copy no longer continues the published head
+        self.record(seconds=10)
+        self.record(seconds=20)
+        ref = self.f.ref_of[old]
+        for count in (1, 500):  # failure during verification, then at the final checkpoint
+            with self.subTest(chunk_refs=count):
+                subprocess.run(['git', '-C', str(self.remote), 'update-ref', '-d', ref], check=True)
+                output = io.StringIO()
+                with mock.patch.object(log, 'CHUNK_REFS', count), contextlib.redirect_stdout(output):
+                    code = log.main(['pull', '--repo', str(self.host), '--publish', '--restore',
+                                     '--signer', json.dumps(self.signer), '--log-keys', str(self.log_keys), '--now', str(NOW)])
+                result = json.loads(output.getvalue())
+                self.assertEqual(code, 4, result)
+                self.assertEqual((result['added'], result['published'], result['restored']), (1, False, True), result)
+                self.assertEqual(result['missing'], [ref])
+                self.assertIn(ref, self.remote_refs())
+                self.assertIn(f'{result["head"]} {log.LOG}', (self.host / 'packed-refs').read_text())
+                self.assertEqual(self.remote_head(), published, 'a refused publication still never overwrites the remote')
 
     def test_gc_lines_go_first_so_what_gc_deletes_is_not_missing_and_new_records_count_after_them(self):
         old = self.record()

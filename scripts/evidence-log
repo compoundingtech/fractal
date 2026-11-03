@@ -17,7 +17,8 @@ GitHub is only the transport. One `pull` (scripts/evidence-log.timer runs it eve
      than its bound, so a deleted or rewound log costs skips and never makes an old one count;
   5. with --publish, pushes the head to `refs/evidence-log/main` on the remote, only as a fast-forward of the published head
      this run fetched (then the preceding checkpoint), and leased on it: a host whose chain does not continue the published one
-     (a second publisher) refuses loudly and publishes nothing, so two publishers never overwrite each other's heads;
+     (a second publisher, or a copy not seeded from the remote) refuses loudly and publishes nothing, so two publishers never
+     overwrite each other's heads;
      with --restore, pushes back any logged record the remote no longer has (and reports it: `missing`).
 `gc` appends a GC line for every tree and input key of an evidence-gc plan (`--plan-out`) and drops their copies: run it BEFORE
 the plan's deletions (evidence-gc --before-delete), so a pull does not restore what GC removed. It also keeps the names of the
@@ -450,6 +451,7 @@ def pull(args):
         processed, started = 0, time.monotonic()
         return True
 
+    publish_failed = False
     with tempfile.NamedTemporaryFile() as keys, tempfile.NamedTemporaryFile() as revocations:
         keys.write(keys_text)
         keys.flush()
@@ -465,12 +467,12 @@ def pull(args):
             processed += 1
             if processed >= CHUNK_REFS or time.monotonic() - started >= CHUNK_SECONDS:
                 if not checkpoint():
-                    return 1, summary
-    if processed or not summary['chunks']:
-        if not checkpoint():
-            return 1, summary
+                    publish_failed = True
+                    break
+    if not publish_failed and (processed or not summary['chunks']):
+        publish_failed = not checkpoint()
     git(repo, 'pack-refs', '--all')  # thousands of loose refs made one for-each-ref take 7 s
-    status = 0
+    status = 1 if publish_failed else 0
     if args.restore and summary['missing']:
         pushed = git(repo, 'push', '--porcelain', remote, *[f'{copied[name]}:{name}' for name in summary['missing']], check=False)
         summary['restored'] = pushed.returncode == 0
