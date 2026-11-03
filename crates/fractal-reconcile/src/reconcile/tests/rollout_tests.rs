@@ -403,7 +403,7 @@ impl Seat {
 #[test]
 fn rollout_drains_then_resumes_once_across_disk_reopens() {
     let mut seat = Seat::new();
-    let original = seat.runtime.launch_contract(&seat.store, &seat.desired()).unwrap();
+    let original = seat.runtime.launch_contract(&seat.store, &seat.desired(), seat.desired().member.as_ref().unwrap()).unwrap();
     let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
     seat.append("runtime.action.succeeded", json!({
         "action":"start", "desired_token":token, "incarnation_id":"original-1",
@@ -416,7 +416,7 @@ fn rollout_drains_then_resumes_once_across_disk_reopens() {
         false,
     );
     *seat.runtime.binary.lock().unwrap() = "replacement binary".into();
-    let declared = seat.runtime.launch_contract(&seat.store, &seat.desired()).unwrap();
+    let declared = seat.runtime.launch_contract(&seat.store, &seat.desired(), seat.desired().member.as_ref().unwrap()).unwrap();
     let running = crate::contract::running(&seat.store, SUBJECT, "original-1").unwrap().unwrap();
     assert_eq!(running, original, "publication must not relabel the running process");
     assert_eq!(declared.drift(&running), Some(crate::launch_contract::Drift {
