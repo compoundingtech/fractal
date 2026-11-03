@@ -55,6 +55,25 @@ if name == "taskpolicy":
 if name == "nice":
     assert args[:2] == ["-n", "19"], args
     os.execvpe(args[2], args[2:], os.environ)
+if name == "nix":
+    assert args == ["run", "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo",
+                    "--", "apply", "--worktree-mode", "commit", "--git-protocol", "https",
+                    "--lock-sync", "off"], args
+    if control.get("member_exit"):
+        sys.exit(control["member_exit"])
+    publisher = Path.cwd() / "repos/effect-utils/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs"
+    publisher.parent.mkdir(parents=True, exist_ok=True)
+    publisher.write_text("// publisher fixture\n")
+    sys.exit(0)
+if name == "node":
+    assert Path(args[0]).is_file(), args
+    assert args[1:4] == ["publish", str(Path.cwd()), ".devenv/pnpm-source-inputs"], args
+    if control.get("publish_exit"):
+        sys.exit(control["publish_exit"])
+    staged = Path.cwd() / ".devenv/pnpm-source-inputs/current"
+    staged.mkdir(parents=True, exist_ok=True)
+    (staged / "fixture.json").write_text(json.dumps(args[4:]))
+    sys.exit(0)
 if name == "pnpm":
     if args == ["install", "--frozen-lockfile", "--ignore-scripts"]:
         for package in ("", "apps/ios", "clients/typescript/fractal-views", "clients/typescript/fractal-client"):
@@ -201,7 +220,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.control_path = self.root / "control.json"
         self.control_path.write_text("{}")
         self.command_log = self.root / "commands.jsonl"
-        for name in ("gate-slot", "taskpolicy", "nice", "pnpm", "pod", "xcodebuild", "xcrun", "codesign", "st", "node"):
+        for name in ("gate-slot", "taskpolicy", "nice", "pnpm", "pod", "xcodebuild", "xcrun", "codesign", "st", "node", "nix"):
             executable = self.tools / name
             executable.write_text(f"#!{sys.executable}\n" + textwrap.dedent(COMMAND_FIXTURE))
             executable.chmod(0o755)
@@ -244,6 +263,12 @@ class ReleaseDeliveryTests(unittest.TestCase):
         }))
         self.write_source("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n")
         self.write_source("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+        self.write_source("scripts/prepare-pnpm-source-inputs.py",
+                          (SCRIPT.parents[3] / "scripts/prepare-pnpm-source-inputs.py").read_text())
+        self.write_source("flake.lock", json.dumps({"nodes": {"effect-utils": {"locked": {"rev": "a" * 40}}}}))
+        self.write_source("megarepo.lock", json.dumps({"version": 1, "members": {}}))
+        self.write_source("pnpm-source-inputs.json", json.dumps({"sourceInputPaths": [
+            "repos/effect-utils/packages/@overeng/utils"]}))
         self.write_source("apps/ios/app.json", json.dumps({"expo": {
             "name": "Fractal", "slug": "fractal", "ios": {"bundleIdentifier": BUNDLE_ID},
         }}))
@@ -1336,6 +1361,57 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                           for entry in builds}, {str(derived)})
         self.assertEqual(self.device_commands("install"), [])
 
+    def test_source_inputs_are_republished_before_install_and_on_cached_builds(self):
+        self.reconcile("--build-only")
+        commands = self.commands()
+        names = [entry["command"] for entry in commands]
+        self.assertLess(names.index("nix"), names.index("node"))
+        self.assertLess(names.index("node"), names.index("pnpm"))
+        staged = self.state / "checkout/.devenv/pnpm-source-inputs/current/fixture.json"
+        self.assertEqual(json.loads(staged.read_text()), ["repos/effect-utils/packages/@overeng/utils"])
+        staged.unlink()
+        self.change_js("republish")
+        self.reconcile("--build-only")
+        self.assertTrue(staged.exists())
+        self.assertEqual(len(self.install_commands()), 1)
+        self.assertEqual(len(self.commands("node")), 2)
+
+    def test_missing_nix_fails_closed_with_actionable_log(self):
+        (self.tools / "nix").unlink()
+        # Hide every host Nix: the fixture directory supplies Git and no Nix.
+        (self.tools / "git").symlink_to(shutil.which("git", path=self.env["PATH"]))
+        self.env["PATH"] = os.pathsep.join((str(self.tools), "/usr/bin", "/bin"))
+        self.reconcile("--build-only")
+        self.assertEqual(self.install_commands(), [])
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        self.assertIn("nix is required on PATH", log.read_text())
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+
+    def test_unpinned_megarepo_tool_is_refused_before_network_or_install(self):
+        self.write_source("flake.lock", json.dumps({"nodes": {"effect-utils": {"locked": {"rev": "main"}}}}))
+        commit = self.commit("Invalid CLI pin")
+        self.reconcile("--build-only")
+        self.assertEqual(self.commands("nix"), [])
+        self.assertEqual(self.install_commands(), [])
+        log = self.state / "artifacts" / commit / "build.log"
+        self.assertIn("must be a full commit SHA", log.read_text())
+
+    def test_publisher_failure_never_installs_or_builds(self):
+        self.configure(publish_exit=43)
+        self.reconcile("--build-only")
+        self.assertEqual(self.install_commands(), [])
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+
+    def test_member_preparation_failure_never_installs_or_builds(self):
+        self.configure(member_exit=42)
+        self.reconcile("--build-only")
+        self.assertEqual(self.install_commands(), [])
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertEqual(self.saved_state().get("pending"), None)
+        events = [json.loads(line) for line in (self.state / "outcomes.jsonl").read_text().splitlines()]
+        self.assertEqual(events[-1]["reason"], "source_inputs_preparation_failed")
+
     def test_package_manifest_and_workspace_lock_changes_invalidate_installation(self):
         self.reconcile("--build-only")
         changes = (
@@ -1345,6 +1421,10 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
             ("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n# updated\n"),
             ("package.json", (self.source / "package.json").read_text().replace("12.15.0", "12.15.1")),
             (".pnpmfile.cjs", "module.exports = { hooks: {} };\n"),
+            ("megarepo.lock", json.dumps({"version": 1, "members": {}, "test": "changed"})),
+            ("flake.lock", json.dumps({"nodes": {"effect-utils": {"locked": {"rev": "a" * 40}}}, "test": "changed"})),
+            ("pnpm-source-inputs.json", json.dumps({"sourceInputPaths": [
+                "repos/effect-utils/packages/@overeng/utils-dev"]})),
         )
         for count, (relative, contents) in enumerate(changes, start=1):
             with self.subTest(path=relative):

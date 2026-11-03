@@ -228,7 +228,7 @@ class EvidenceLog(unittest.TestCase):
         self.assertIn('not signed by a key in --log-keys', error)
 
     def test_of_two_publishers_the_one_whose_chain_is_older_is_refused_and_the_published_chain_keeps_going(self):
-        # hetz2 publishes, goes away; dev3 takes over from the published head; hetz2 boots with its timer on and pulls again.
+        # Host A publishes, goes away; host B takes over from the published head; host A boots with its timer on and pulls again.
         self.record()
         standby_key = self.f.key('standby')
         with open(self.log_keys, 'a') as keys:

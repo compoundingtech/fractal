@@ -1,5 +1,5 @@
-//! A step's capacity raises its seat's lane while the seat holds the step, and the lane goes back
-//! to the seat's own when it no longer does (docs/st3/seat-lanes.md).
+//! A step's capacity raises its seat's lane while the seat holds the step, and so does a burst its
+//! command holds; the lane goes back to the seat's own when neither does (docs/st3/seat-lanes.md).
 use super::*;
 use fractal_runtime::Capacity;
 use super::seat_admission_queue::{show_lane, show_memory};
@@ -18,6 +18,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         };
         let mut wanted = self.wanted_lane(agent, base, work)?;
+        // A burst its command holds raises it too (lane_bursts.rs); its grant or end marks this read.
+        smallclaims::touched::note_read(|| format!("lane-burst:{agent}"));
+        if let Some(burst) = self.seat_admission.status.burst_granted(agent) {
+            wanted = Capacity { cores: wanted.cores.max(burst.cores), memory: wanted.memory.max(burst.memory) };
+        }
         let status = &self.seat_admission.status;
         // A daemon that restarted has no record of what it set, and a raise lasts as long as the
         // slice: it reads the slice, so a lane a step left raised comes down and counts until then.

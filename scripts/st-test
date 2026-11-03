@@ -903,6 +903,112 @@ def governed(argv, name, output=None):
     return argv
 
 
+def burst_size(checks, base='HEAD'):
+    """(cores, memory) a run of `checks` asks its seat's lane to be raised to (config lane-bursts.json, `build`), or None when
+    it builds nothing or the file names no size."""
+    if not any(name in BUILDS for name in checks):
+        return None
+    blob = config_blob(base, 'lane-bursts.json')
+    try:
+        size = json.loads(blob)['build'] if blob else None
+        return (int(size['cores']), str(size['memory'])) if size else None
+    except (ValueError, KeyError, TypeError) as error:
+        raise Failure(f'lane-bursts.json names no usable build size: {error}')
+
+
+class Burst:
+    """A seat's lane raised for one run (docs/st3/seat-lanes.md, Bursts), held by `fractal agents burst` while its stdin is open.
+    The holder renews the daemon's lease and gives the burst back when its stdin closes: when this run ends, whatever ends it.
+    `granted` is the size held, or None with `why` when the run holds none (no lane, lanes off, a daemon without bursts)."""
+
+    def __init__(self):
+        self.holder, self.granted, self.why, self.waited, self.errors = None, None, None, 0.0, None
+
+    def record(self):
+        return {'burst': None if self.granted is None else {'cores': self.granted[0], 'memory': self.granted[1]},
+                'burst_wait_s': round(self.waited), **({'burst_none': self.why} if self.why else {})}
+
+    def release(self):
+        holder, self.holder = self.holder, None
+        if holder is None:
+            return
+        with contextlib.suppress(OSError):
+            holder.stdin.close()
+        try:
+            holder.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.wait()
+        holder.stdout.close()
+        self.errors.close()
+
+
+def lane_burst(size, limit_s, output=None):
+    """Raise this seat's lane to `size` for the run, waiting in the host's order up to `limit_s` seconds (--queue-limit): a Burst.
+    Asked before the run takes a pool tree, as a slot was: a tree held while its run waits for room is a tree nobody can use.
+    A run that names no seat (ST_AGENT), or whose fractal or daemon has no lane bursts, holds none and says why."""
+    output = output or sys.stderr
+    burst = Burst()
+    agent = os.environ.get('ST_AGENT')
+    st = os.environ.get('ST3_BIN') or shutil.which('fractal') or shutil.which('st')
+    if size is None:
+        return burst
+    if not agent or not st:
+        burst.why = 'no seat to raise the lane of' if not agent else 'no fractal on PATH'
+        return burst
+    cores, memory = size
+    began = time.monotonic()
+    errors = tempfile.TemporaryFile()  # a file, not a pipe: a holder's warnings over hours must never fill a pipe nobody reads
+    holder = subprocess.Popen([st, 'agents', 'burst', agent, '--cores', str(cores), '--memory', memory, '--reason', 'st-test',
+                               '--as', agent], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+    told, pending = None, ''
+    try:
+        while True:
+            if '\n' not in pending:
+                left = limit_s - (time.monotonic() - began)
+                ready, _, _ = select.select([holder.stdout], [], [], max(0.0, left))
+                if not ready:
+                    raise Failure(f'waited {limit_s:g}s (--queue-limit) for a lane burst of {cores} cores/{memory}: {told or "no answer"}')
+                chunk = os.read(holder.stdout.fileno(), 4096).decode(errors='replace')
+                if chunk:
+                    pending += chunk
+                    continue
+                # It ended without an answer: an older fractal without the command, or an error.
+                holder.wait()
+                errors.seek(0)
+                why = errors.read().decode(errors='replace').strip().splitlines()
+                if any('unrecognized subcommand' in text for text in why):
+                    burst.why = "this host's fractal has no lane bursts"
+                    print(f'fractal-test: no lane burst: {burst.why}; the checks run in the lane as it is', file=output, flush=True)
+                    return burst
+                raise Failure(f'fractal agents burst ended without an answer: {(why or [f"exit {holder.returncode}"])[-1]}')
+            line, pending = pending.split('\n', 1)
+            kind, _, detail = line.partition(' ')
+            if kind == 'waiting':
+                if detail != told:
+                    print(f'fractal-test: waiting for a lane burst: {detail}', file=output, flush=True)
+                    told = detail
+            elif kind == 'granted':
+                burst.holder, burst.granted, burst.waited, burst.errors = holder, (cores, memory), time.monotonic() - began, errors
+                holder = None
+                print(f'fractal-test: lane burst {cores} cores/{memory} granted after {round(burst.waited)}s', file=output, flush=True)
+                return burst
+            elif kind == 'none':
+                burst.why, burst.waited = detail, time.monotonic() - began
+                print(f'fractal-test: no lane burst: {detail}; the checks run in the lane as it is', file=output, flush=True)
+                return burst
+            elif kind == 'refused':
+                raise Failure(f'lane burst {cores} cores/{memory} refused: {detail}')
+    finally:
+        if holder is not None:
+            with contextlib.suppress(OSError):
+                holder.stdin.close()
+            holder.kill()
+            holder.wait()
+            holder.stdout.close()
+            errors.close()
+
+
 def web_slot(argv):
     """Hold one counted host heavy slot around the whole web check, including its dev shell and signing wrapper.
 
@@ -1305,7 +1411,7 @@ def evict_to_cap(base, limit_gb, keep=None):
 
 
 PRIORITY_AGING_SECONDS, PRIORITY_FLOOR = 120, 5  # the cargo shim's rank aging: a waiting ticket's rank improves by 1 per 120 s, never below 5 (ranks under 5 never age)
-PRIORITY_MAX_WAIT_SECONDS = 2 * 3600  # a pool-tree ticket that has waited this long is served before every younger ticket whatever its rank (oldest first): ranks under the floor never age, so without a limit a steady stream of them starves rank-50 runs indefinitely (hetz2, 2026-10-29: five rank-50 tickets waited 4 to 12.5 hours)
+PRIORITY_MAX_WAIT_SECONDS = 2 * 3600  # a pool-tree ticket that has waited this long is served before every younger ticket whatever its rank (oldest first): ranks under the floor never age, so without a limit a steady stream of them starves rank-50 runs indefinitely (a build host, 2026-10-29: five rank-50 tickets waited 4 to 12.5 hours)
 
 
 # Last in the pool (2026-11-01, Factory, from the 10-31 st-test SLO report: on one build host the shadow queue signer's seed held 18% of the
@@ -2957,6 +3063,9 @@ def run_main(argv, cleanup):
         tree_waits, tree_taken, blocked = {}, None, {}  # the tree's waits, when it was taken, and what the build lane waited holding it
         if not needs_tree(checks):
             pool_trees = None  # a throwaway worktree, as with ST_TEST_TREES=off, and no wait for a tree
+        # The seat's lane raised for the run (Bursts, docs/st3/seat-lanes.md), before any tree: given back when the run ends.
+        burst = lane_burst(burst_size(checks), args.queue_limit)
+        cleanup.callback(burst.release)
         try:
             if pool_trees:
                 root = pool_root()
@@ -3270,7 +3379,7 @@ def run_main(argv, cleanup):
                             'host': socket.gethostname().split('.')[0], 'tree': tree, 'commit': commit, 'base': base_commit, 'behind': lag,
                             'full': not args.check and not args.crate and not round_number, 'top_up': round_number, 'checks': checks, 'pool_tree': n, 'warm': warm,
                             'parallel': parallel, 'rows': [{'name': name, 'result': result, 'seconds': seconds} for name, result, seconds, _ in rows],
-                            'exit': code, 'stages': stages, **held, **({'candidate': commit} if candidate else {})})
+                            'exit': code, 'stages': stages, **held, **burst.record(), **({'candidate': commit} if candidate else {})})
                 if code or not args.push or args.out or TARGET or not (merged or whole):
                     # Nothing more to push: a failure, no --push, an export or --seed, or a narrowed run that merged nothing pushes only
                     # its notes, as before.

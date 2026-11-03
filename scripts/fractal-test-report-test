@@ -155,6 +155,20 @@ class StTestReport(unittest.TestCase):
         self.assertIn('No full warm run in the window', out)
         self.assertIn('**Within the objective.**', self.run_report(str(self.write([record(600)], 'ok.jsonl')), '--markdown')[1])
 
+    def test_each_wait_is_its_own_line_over_every_run_in_the_window(self):
+        waited = lambda total, **waits: dict(record(total), **waits)
+        result = self.result(waited(600, tree_wait_s=30, burst_wait_s=120), waited(500, tree_wait_s=10, tree_slot_wait_s=5),
+                             dict(waited(50, burst_wait_s=40), full=False), waited(400, burst_wait_s=None))
+        self.assertEqual(result['waits'], {
+            'pool tree': {'count': 2, 'p50_s': 10, 'p90_s': 30, 'max_s': 30},
+            'build slot, tree free': {'count': 1, 'p50_s': 5, 'p90_s': 5, 'max_s': 5},
+            'lane burst': {'count': 2, 'p50_s': 40, 'p90_s': 120, 'max_s': 120}})  # the run left out (not full) waited too
+        self.assertEqual(self.result(record(600))['waits'], {})  # a run that recorded no wait adds no line
+        code, out, err = self.run_report(str(self.write([waited(600, burst_wait_s=120)], 'burst.jsonl')), '--markdown')
+        self.assertEqual(code, 0, err)
+        self.assertIn('| lane burst | 1 | 120s | 120s | 120s |', out)
+        self.assertNotIn('| pool tree |', out)
+
     def test_a_record_st_test_writes_is_one_the_report_reads(self):
         """The two scripts agree on the record: fractal-test's own writer, read back here."""
         st_loader = importlib.machinery.SourceFileLoader('st_test_for_report', str(ROOT / 'scripts/st-test'))

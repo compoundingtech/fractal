@@ -1420,7 +1420,7 @@ jobs:
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
         run: |
-          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          python3 scripts/prepare-pnpm-source-inputs.py apply
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
         if: needs.evidence-gate-genie-freshness.outputs.skip != 'true' && needs.evidence-gate-genie-freshness.outputs.refuse != 'true'
       - name: Check license coverage, runner selection and generated files
@@ -1579,7 +1579,7 @@ jobs:
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
         run: |
-          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          python3 scripts/prepare-pnpm-source-inputs.py apply
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
         if: needs.evidence-gate-ci-script-tests.outputs.skip != 'true' && needs.evidence-gate-ci-script-tests.outputs.refuse != 'true'
       - name: Run the CI scripts' self-tests on their declared inputs
@@ -1716,7 +1716,7 @@ jobs:
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
         run: |
-          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          python3 scripts/prepare-pnpm-source-inputs.py apply
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true' && needs.evidence-gate-typescript-client.outputs.refuse != 'true'
       - uses: actions/setup-node@v4
@@ -3950,6 +3950,7 @@ jobs:
               "nix/fractal-web*.nix",
               "scripts/ci-fractal-web*",
               "scripts/ci-web-shell*",
+              "scripts/prepare-pnpm-source-inputs.py",
               "scripts/ci-typescript-client*",
               ".github/workflows/fleet.yml*",
               ".github/workflows/workspace-ci.ts",
@@ -4153,6 +4154,7 @@ jobs:
               "flake.lock",
               "scripts/ci-fractal-web*",
               "scripts/ci-web-shell*",
+              "scripts/prepare-pnpm-source-inputs.py",
               "nix/web-shell*",
               ".github/workflows/fleet.yml*",
               ".github/workflows/workspace-ci.ts",
@@ -4328,7 +4330,7 @@ jobs:
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
         run: |
-          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          python3 scripts/prepare-pnpm-source-inputs.py apply
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
       - name: Check web shell identity invariants
         run: python3 scripts/ci-web-shell-test
@@ -4336,7 +4338,7 @@ jobs:
         id: web-shell-key
         shell: bash
         env:
-          CI_WEB_SHELL_SOURCE_HASH: ${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}
+          CI_WEB_SHELL_SOURCE_HASH: ${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq', 'scripts/prepare-pnpm-source-inputs.py') }}
         run: bash scripts/ci-web-shell key
       - name: Restore the pnpm store
         id: pnpm-store

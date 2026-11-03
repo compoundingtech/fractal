@@ -57,7 +57,7 @@ fn text(output: &Output) -> String {
 }
 
 /// The prefix of the account a test makes, so a later run can remove what a killed run left. A
-/// host may declare its own fixture users (hetz2 has `sttfx1`..`sttfx32`), so it is not theirs.
+/// host may declare its own fixture users (a build host may have `sttfx1`..`sttfx32`), so it is not theirs.
 const PREFIX: &str = "sttiletest";
 
 /// Whether the account `name` with user ID `uid` is one these tests made: a user ID in the test

@@ -1,8 +1,10 @@
 # Seat lanes (design note)
 
 Status: step 1 built (lanes on agents, behind a per-host switch). Step 2 built: missions and steps
-declare capacity, seats start by fit, and a step's lane is applied while its seat holds it. Build
-slots go once lanes have run a day on every Linux member without a guard trip.
+declare capacity, seats start by fit, and a step's lane is applied while its seat holds it. Bursts
+built: a command raises its seat's lane for its own run. A host's build slots go once every seat that
+built there in the trailing seven days runs in a lane and the host has run a day that way without a
+guard trip.
 
 ## What a seat lane is
 
@@ -166,8 +168,12 @@ purpose is `#[ignore]`d.
 
 `lanes = "on"` in `~/.config/st3/config.toml` (default `off`). It affects only seats that declare a
 `capacity`. With it off, a declared lane is logged at launch as "not enforced: lanes are off on this
-host", and the seat starts as today. A seat's lane is applied when the seat starts; a change to the
-declaration or the switch takes effect at its next start.
+host", and the seat starts as today. A seat's lane is applied when the seat starts. A change to a
+running laned seat's declared `capacity` resizes its live lane on the next pass, without a relaunch
+(a lower memory comes down only once the lane holds less, as a step's lowering does); a seat that
+had no lane when it started gets one at its next start, and so does a change to the switch. A
+capacity change never restarts a seat: it is not one of the launch fields a declaration change
+compares.
 
 ### Placement for unlaned daemon seats
 
@@ -276,12 +282,55 @@ wait in line with their reasons. The order and
 the reasons live in the daemon's memory, as the envelope queue's do; a daemon restart rebuilds them
 from the next pass. `builds.slice` keeps its own cap and admission and is not counted.
 
+## Bursts
+
+A seat's base lane is sized for its harness thinking, not for its builds; a command that builds asks
+for a burst, its seat's lane raised for that command's run alone:
+
+```
+fractal agents burst AGENT --cores 8 --memory 24G --reason st-test --as AGENT
+```
+
+The command is the holder. It asks the daemon on the seat's host, prints one line per answer
+(`waiting REASON` each time the reason changes, then `granted CORES MEMORY`; or `none WHY` when
+the seat holds no lane there, lanes are off, or the daemon has no bursts; or `refused WHY` for a
+burst that can never fit), and then holds the burst while its standard input stays open, renewing
+a 90-second lease every 30 seconds. It gives the burst back when its input closes: when the run that
+started it ends, however it ends. A holder killed outright stops renewing, and the daemon drops the
+burst when its lease lapses; each such drop is counted (`bursts dropped by lease` in
+`st doctor --performance`), so a holder that crashes shows. The actor must be the seat itself, and
+only the seat's own host answers. While that daemon cannot be reached (a restart), the holder waits
+for it as it waits for room, saying so, rather than answering: the run that asked bounds the wait.
+
+The live lane is the largest, in each dimension, of the seat's own lane, each step it holds and its
+burst. A burst fits as a step's raise does: the raised lane must fit the host's room for lanes
+beside the other lanes and what seats outside lanes hold. Bursts wait in the order they asked, so a
+small one does not pass the first in line; one larger than the host can ever give is refused at
+once. A seat that has waited 15 minutes or more to start, first in line for room, is served before
+more bursts: a new burst waits behind it, so a stream of bursts cannot keep it from starting. It
+does so only while that seat would fit once every step's raise and burst on the host were given
+back; one that waits for another seat to stop gains nothing from it, so bursts go on beside it. A
+waiting burst's reason starts `burst lane`. While held, admission counts the seat at the raised
+lane. Released, its cores come back at once and its memory once the lane holds less than it
+will allow, as a step's lowering does. Bursts live in the daemon's memory: after a daemon restart
+the slice is still raised and counts, as any raise does, and the holder's next renewal holds it
+again.
+
+A burst is tied to the command, not to a step, so a seat in `work wait` holds only its base and
+its steps. A seat without a lane, or a host with lanes off, holds no burst: the holder answers
+`none`.
+
+`scripts/fractal-test` asks for one before it takes a pool tree (a tree held while its run waits
+for room is a tree nobody can use), sized by `.st/lane-bursts.json` for a run that builds (any
+check in `BUILDS`); a run that builds nothing asks for none. It waits up to `--queue-limit`, prints
+each reason, and records `burst` (the size held, or none and why) and `burst_wait_s` in the run's
+`runs.jsonl` line, which `scripts/fractal-test-report` shows as its own line beside the tree and
+slot waits. A fractal or daemon without bursts holds none, says so, and the checks run in the lane
+as it is. Its compiles still go to the host's sccache server in `builds.slice` (above): the burst
+bounds the rest of the run.
+
 ## Later steps (decided, not built)
 
-- **Bursts.** A heavy command asks for a burst; `st-test` asks for one sized to the checks it will
-  run (covered checks skip, a docs-only run needs almost nothing). A burst raises the live scope
-  with `systemctl --user set-property --runtime` and lowers it when the command ends. A step may
-  adjust the base. A seat in `work wait` holds only its base.
 - **Placement.** A mission that pins no host runs on a member with room for it: see
   [lane-placement.md](lane-placement.md).
 - **Starvation.** Waiters already wait in order, so the host drains to fit for the first in line

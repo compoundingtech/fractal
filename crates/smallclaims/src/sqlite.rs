@@ -127,7 +127,7 @@ fn configured_read_cache_kib(value: Option<&str>) -> usize {
 /// How much of the store file each reader maps, in MiB. In WAL mode SQLite drops a reader's whole
 /// page cache when its next transaction sees any commit, so on a busy store every request
 /// fetched every page it touched again with one `read()` call each: 87,500 calls a second
-/// across 73 readers on dev3 (#3343). A mapped page is the kernel's one shared copy and costs
+/// across 73 readers on one host (#3343). A mapped page is the kernel's one shared copy and costs
 /// no call. The default covers any store; the bundled SQLite's ceiling is raised to match.
 pub const READ_MMAP_MIB: u64 = 1 << 20;
 

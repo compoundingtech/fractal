@@ -1329,7 +1329,7 @@ ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p fractal --features 
 twice on one generated store: alone, then beside a CPU and disk hog at the priority seats get by
 default. On Linux that is nice 10 and best-effort IO priority 7; on macOS, `taskpolicy -b`
 (background QoS). The test process may itself run niced (cargo's tests run in `builds.slice` on
-hetz2, which a host timer renices to 10), so the hog runs 10 nice levels below the test process, at
+a build host, which a host timer renices to 10), so the hog runs 10 nice levels below the test process, at
 most 19, and the report names both. The hog is twice the online CPUs in busy loops and two writers
 that `fsync` 128 MiB files; the timed load starts once the 1-minute load average is past the
 core count (`ST_LOAD_HOG_RAMP_SECONDS`, 180 by default), and the run fails if the load average was
@@ -1346,7 +1346,7 @@ not, until `ST_LOAD_HOG_STRICT=1`.
 ```sh
 ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo test --release \
   -p fractal --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
-nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
+nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on a marked host
 ```
 
 The daily long lanes run it on `main` as `daily-perf-load-hog`, with its table in the step summary
@@ -1364,25 +1364,27 @@ the `perf-load-hog-macos` artifact. A Mac of the fleet
 runs that binary (`ST_LOAD_GATE=1 ST_LOAD_HOG=1 ./perf_load-macos-arm64 a_seat_priority_hog --nocapture`);
 nothing is built on a Mac.
 
-#### Measuring a change on hetz2: the perf slot
+#### Measuring a change on a shared host: the perf slot
 
 A builder measures a change with `nix develop .#perf -c bash scripts/ci-perf load`. Outside CI on
-hetz2 that takes the perf slot first (`scripts/ci-perf-slot`; its `--help` repeats this page's
-flow), so nobody has to remember to. One run holds the slot at a time. Others wait in line, oldest
-first, and are told who holds it, since when, and for which branch; `scripts/ci-perf-slot --status`
+a host marked by the file `~/.config/fractal/perf-slot`, that takes the perf slot first
+(`scripts/ci-perf-slot`; its `--help` repeats this page's flow), so nobody has to remember to.
+Without the marker, no host takes it automatically. One run holds the slot at a time. Others wait
+in line, oldest first, and are told who holds it, since when, and for which branch; `scripts/ci-perf-slot --status`
 shows the same. Outside CI the report summary goes to `$RUNNER_TEMP/perf-summary.md`
 (`/var/tmp/st-perf-UID` by default, where generated stores also stay between runs); `cost` is not slotted, since its counts do not depend on
 the machine.
 
 - The slot is the kernel's `flock` on `/var/tmp/perf-slot/slot.lock`, held by a watchdog that
   lives as long as the run. A run killed at any point, even with SIGKILL, has its process
-  group killed and the slot freed at once. Cargo's test runner on hetz2 starts the test binary
+  group killed and the slot freed at once. Cargo's test runner on such a host starts the test binary
   with `systemd-run --user --scope`, which moves the process into a transient unit but keeps it in
   the group; `scripts/ci-perf-slot-test` proves that case.
 - A run past its timeout is stopped (SIGTERM, then SIGKILL after 10 s) and frees the slot. The
   timeout is two hours unless the run asks for less with `--timeout`; time in line does not
   count. A run stopped by it exits 124.
-- Only `load` and `load-hog` are slotted, and only on hetz2. Anywhere else nothing shares the machine.
+- Only `load` and `load-hog` are slotted, and only on a host with the marker file. Without it no host
+  takes the slot automatically; `scripts/ci-perf-slot -- COMMAND` still takes it by hand.
   `scripts/ci-perf-slot-test` proves turns, order, kill, signals and timeout.
 
 The budgets that apply to a local run are the absolute ones: every request's p99 budget and the

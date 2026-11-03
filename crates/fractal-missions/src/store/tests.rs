@@ -6823,7 +6823,7 @@ fn a_planning_rebuild_leaves_the_operations_alone() {
         .unwrap();
     // A planning write rebuilds the planning tables only: it must not re-derive operations
     // (241,000 rows, 19 s on a real store).
-    store.rebuild_planning_projection().unwrap();
+    store.rebuild_planning_projection("example").unwrap();
     assert_eq!(count(&store), 0);
     // The full rebuild does, which is what the planning path used to run on every write.
     store.rebuild_claim_projections().unwrap();

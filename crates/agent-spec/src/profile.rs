@@ -1327,13 +1327,13 @@ mod tests {
             ResourceProfileRegistry::empty().with_profile(demo_profile(ProfileClass::Immediate));
         assert_eq!(
             registry.resolve(
-                Path::new("/cat/agents/dev3/janitor"),
-                "dev.schickling.agent-goal://dev3/janitor"
+                Path::new("/cat/agents/devbox-a/janitor"),
+                "dev.schickling.agent-goal://devbox-a/janitor"
             ),
             Some(Resolution {
-                path: PathBuf::from("/cat/agents/dev3/janitor/resources/goal.md"),
+                path: PathBuf::from("/cat/agents/devbox-a/janitor/resources/goal.md"),
                 class: ProfileClass::Immediate,
-                containment_root: PathBuf::from("/cat/agents/dev3/janitor"),
+                containment_root: PathBuf::from("/cat/agents/devbox-a/janitor"),
             })
         );
     }

@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn fleet_admit_without_binds_mutating_actor_to_harness() {
+    for actor in ["agent/own", "agent/peer", "person/operator"] {
+        let cli = Cli::try_parse_from([
+            "fractal", "fleet", "admit-without", "--peer", "peer",
+            "--reason", "peer unavailable", "--as", actor,
+        ]).unwrap();
+        assert_eq!(
+            guard_mutating_cli_actor(&cli.command, Some("agent/own"), None).is_ok(),
+            actor == "agent/own",
+            "{actor}",
+        );
+        assert!(guard_mutating_cli_actor(&cli.command, None, None).is_ok());
+    }
+}
+
+#[test]
 fn alias_deprecation_uses_argv0_basename_and_exact_suppression() {
     use std::ffi::OsStr;
     for (path, expected) in [
@@ -2125,6 +2141,9 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             claude_attachment_reconciled: false,
             claude_attachment_terminal: None,
             claude_readiness_fallback: ClaudeReadinessFallback::default(),
+            claude_channel_launch: None,
+            claude_attach_started_ms: None,
+            claude_session_started_ms: None,
             claude_attachment_admissions: AdmissionBucket {
                 binding: Some(("incarnation".into(), 4, "token".into())),
                 tokens: 0,

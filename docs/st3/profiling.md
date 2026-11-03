@@ -826,7 +826,7 @@ Each reader also maps the store file (`PRAGMA mmap_size`, 1 TiB by default, so t
 In WAL mode SQLite empties a reader's page cache whenever its next transaction sees any commit,
 and on a busy store nearly every request starts after one. Without the mapping that request
 fetched every page it touched again with one `read()` call each, from the kernel's file cache
-into the connection's private cache: on dev3, 87,500 calls a second across 73 readers, with 79%
+into the connection's private cache: on one host, 87,500 calls a second across 73 readers, with 79%
 of the daemon's CPU in the kernel (#3343). A mapped page needs no call and no copy, and all
 readers share the kernel's one copy of it. WAL frames are still read with `read()`. Mapped
 pages the daemon has touched count in its RSS as file-backed memory (`RssFile`), so VmRSS,

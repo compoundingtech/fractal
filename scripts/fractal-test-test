@@ -654,6 +654,100 @@ class GovernedTest(unittest.TestCase):
             self.assertIsNone(st_test.own_cap(Path(tmp, 'cgroup'), Path(tmp, 'sys')))
 
 
+class LaneBurstTest(unittest.TestCase):
+    """A run raises its seat's lane through `fractal agents burst`, held while the holder's stdin is open (docs/st3/seat-lanes.md, Bursts)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.calls = Path(self.tmp.name) / 'calls'
+        self.released = Path(self.tmp.name) / 'released'
+
+    def fractal(self, body):
+        """A fake fractal: records its arguments, runs BODY (which prints the holder's answers), then holds until stdin closes."""
+        path = Path(self.tmp.name) / 'fractal'
+        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\necho released >> {self.released}\n')
+        path.chmod(0o755)
+        return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
+
+    def burst(self, body, size=(8, '24G'), limit=10, env=None):
+        said = io.StringIO()
+        with mock.patch.dict(os.environ, env if env is not None else self.fractal(body)):
+            return st_test.lane_burst(size, limit, output=said), said.getvalue()
+
+    def test_the_size_follows_what_the_run_builds(self):
+        blob = json.dumps({'version': 1, 'build': {'cores': 8, 'memory': '24G'}}).encode()
+        with mock.patch.object(st_test, 'config_blob', return_value=blob) as read:
+            self.assertEqual(st_test.burst_size(['linux-gate', 'ci-script-tests']), (8, '24G'))
+            self.assertIsNone(st_test.burst_size(['ci-script-tests', 'genie-freshness']))  # builds nothing: no burst, and no read
+            self.assertEqual(read.call_count, 1)
+        with mock.patch.object(st_test, 'config_blob', return_value=None):
+            self.assertIsNone(st_test.burst_size(['linux-gate']))
+        with mock.patch.object(st_test, 'config_blob', return_value=b'{"build": {"cores": 8}}'):
+            with self.assertRaisesRegex(st_test.Failure, 'no usable build size'):
+                st_test.burst_size(['linux-gate'])
+        self.assertIn('"build"', (ROOT / '.st/lane-bursts.json').read_text())
+
+    def test_it_waits_in_line_says_each_reason_once_and_holds_until_released(self):
+        burst, said = self.burst('echo "waiting burst lane 8 cores/24.0G does not fit"; echo "waiting burst lane 8 cores/24.0G does not fit"; '
+                                 'sleep 1; echo "waiting burst lane waits behind agent/crew/other"; echo granted')
+        self.assertEqual(burst.granted, (8, '24G'))
+        self.assertGreaterEqual(burst.waited, 1)
+        self.assertEqual(said.count('does not fit'), 1)
+        self.assertIn('waits behind agent/crew/other', said)
+        self.assertEqual(self.calls.read_text().split(), ['agents', 'burst', 'agent/crew/builder', '--cores', '8', '--memory', '24G',
+                                                          '--reason', 'st-test', '--as', 'agent/crew/builder'])
+        self.assertFalse(self.released.exists(), 'held while the run goes on')
+        burst.release()
+        self.assertEqual(self.released.read_text(), 'released\n')
+        record = burst.record()
+        self.assertEqual(record['burst'], {'cores': 8, 'memory': '24G'})
+        self.assertGreaterEqual(record['burst_wait_s'], 1)
+
+    def test_a_seat_without_a_lane_or_a_daemon_without_bursts_holds_none_and_says_why(self):
+        burst, said = self.burst('echo "none agent/crew/builder has no lane on this host"; exit 0')
+        self.assertIsNone(burst.granted)
+        self.assertEqual(burst.record()['burst_none'], 'agent/crew/builder has no lane on this host')
+        self.assertIn('the checks run in the lane as it is', said)
+        burst.release()  # nothing held: nothing to give back
+        older, said = self.burst("echo \"error: unrecognized subcommand 'burst'\" >&2; exit 2")
+        self.assertIsNone(older.granted)
+        self.assertEqual(older.why, "this host's fractal has no lane bursts")
+        self.assertIn('no lane burst', said)
+
+    def test_no_seat_or_nothing_to_build_asks_nothing(self):
+        burst, _ = self.burst('echo granted', env={'ST_AGENT': '', 'ST3_BIN': '/nonexistent/fractal'})
+        self.assertEqual(burst.why, 'no seat to raise the lane of')
+        burst, _ = self.burst('echo granted', size=None)
+        self.assertEqual(burst.record(), {'burst': None, 'burst_wait_s': 0})
+        self.assertFalse(self.calls.exists())
+
+    def test_a_refusal_or_a_holder_that_dies_without_an_answer_fails_the_run(self):
+        with self.assertRaisesRegex(st_test.Failure, 'refused: burst lane 64 cores/512.0G can never fit on this host'):
+            self.burst('echo "refused burst lane 64 cores/512.0G can never fit on this host"')
+        with self.assertRaisesRegex(st_test.Failure, 'ended without an answer: the daemon is not running'):
+            self.burst('echo "the daemon is not running" >&2; exit 1')
+
+    def test_a_wait_past_the_queue_limit_fails_and_ends_the_holder(self):
+        with self.assertRaisesRegex(st_test.Failure, r'waited 0.5s \(--queue-limit\) for a lane burst of 8 cores/24G: burst lane full'):
+            self.burst('echo "waiting burst lane full"; sleep 30', limit=0.5)
+
+    def test_a_run_killed_outright_still_gives_its_burst_back(self):
+        env = self.fractal('echo granted')
+        script = (f'import importlib.machinery, importlib.util, os\n'
+                  f'loader = importlib.machinery.SourceFileLoader("st_test_kill", {str(ROOT / "scripts/st-test")!r})\n'
+                  f'st = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader)); loader.exec_module(st)\n'
+                  f'burst = st.lane_burst((8, "24G"), 10)\nprint(burst.granted, flush=True)\nos.kill(os.getpid(), 9)\n')
+        done = subprocess.run([sys.executable, '-c', script], env=dict(os.environ, **env), capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, -9, done.stderr)
+        self.assertIn("(8, '24G')", done.stdout)
+        for _ in range(100):  # the holder's stdin closed with its run: it gives the burst back by itself
+            if self.released.exists():
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.released.read_text(), 'released\n')
+
+
 class StTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -946,7 +1040,7 @@ class StTest(unittest.TestCase):
         self.assertIn('clean worktree', out)
 
     def test_a_host_that_preloads_a_library_into_every_process_still_signs(self):
-        """hetz2 sets LD_PRELOAD (jemalloc) for every process; the signer refuses it, so the launcher must not pass it on."""
+        """A build host sets LD_PRELOAD (jemalloc) for every process; the signer refuses it, so the launcher must not pass it on."""
         self.commit('b.txt', 'two')
         empty = Path(self.tmp.name) / 'empty'
         empty.mkdir()
@@ -1231,8 +1325,15 @@ class StTest(unittest.TestCase):
         (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': rev}}}}))
         command = st_test.members_command(directory)
         step = (ROOT / '.github/workflows/workspace-ci.ts').read_text().split('export const megarepoApplyStep', 1)[1].split('} as const', 1)[0]
-        ci = step.replace('$(jq -r \'.nodes["effect-utils"].locked.rev\' flake.lock)', rev)
-        self.assertIn(f'nix run "{command[2]}" {" ".join(command[3:])}', ci)
+        self.assertIn('python3 scripts/prepare-pnpm-source-inputs.py apply', step)
+        # CI delegates to the shared preparer. Compare its actual argv, not the old inline shell spelling.
+        import ast
+        source = ast.parse((ROOT / 'scripts/prepare-pnpm-source-inputs.py').read_text())
+        apply = next(node for node in ast.walk(source) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                     and node.func.value.id == 'subprocess' and node.func.attr == 'run')
+        ci = eval(compile(ast.Expression(apply.args[0]), '<megarepo argv>', 'eval'), {'revision': rev})
+        self.assertEqual(ci, ['nix', *command[1:], '--lock-sync', 'off'])
         (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': 'main; rm -rf /'}}}}))
         with self.assertRaises(ValueError):
             st_test.members_command(directory)
@@ -3136,7 +3237,7 @@ finally:
         record, = self.runs()
         self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'top_up', 'checks',
                                                  'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages', 'tree_wait_s', 'tree_slot_wait_s',
-                                                 'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s']))
+                                                 'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s', 'burst', 'burst_wait_s']))
         # Its tree: free at once, and nothing that waited in it (no check here runs scripts/ci-local).
         self.assertEqual((record['tree_wait_s'], record['tree_slot_wait_s'], record['tree_blocked_s']), (0, 0, 0))
         self.assertLessEqual(record['tree_held_s'], record['total_s'])
@@ -3216,6 +3317,29 @@ finally:
         log.write_text(row)
         self.assertEqual(st_test.ci_local_stages(log), [{'name': 'setup', 'start': '2026-11-02T03:57:46Z', 'end': '2026-11-02T04:02:20Z',
                                                          'seconds': 274, 'exit': None, 'queue_waits': 2, 'queue_s': 232}])
+
+    def test_a_run_that_builds_takes_its_lane_burst_before_its_tree_records_it_and_gives_it_back(self):
+        self.commit('b.txt', 'two')
+        order, real_tree = [], st_test.acquire_tree
+
+        def burst(size, limit):
+            order.append(('burst', size, limit))
+            held = st_test.Burst()
+            held.granted, held.waited = size, 42.4
+            held.release = lambda: order.append(('released',))
+            return held
+
+        def tree(*args, **kwargs):
+            order.append(('tree',))
+            return real_tree(*args, **kwargs)
+
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'lane_burst', side_effect=burst), \
+                mock.patch.object(st_test, 'burst_size', return_value=(8, '24G')), mock.patch.object(st_test, 'acquire_tree', side_effect=tree):
+            code, out, err = self.run_st_test('--queue-limit', '600', command=['sh', '-c', 'echo ran'], extra_env={'ST_EVIDENCE_GOVERN': 'off'})
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(order, [('burst', (8, '24G'), 600.0), ('tree',), ('released',)])
+        record, = self.runs()
+        self.assertEqual((record['burst'], record['burst_wait_s']), ({'cores': 8, 'memory': '24G'}, 42))
 
     def test_a_check_that_runs_ci_local_still_prints_as_it_goes_and_its_stages_and_warmth_are_recorded(self):
         self.commit('b.txt', 'two')
@@ -3705,16 +3829,20 @@ class PoolQueue(unittest.TestCase):
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)
         free, asked, waits, got = [False], [], {}, []
+        # Its third look, not a fixed 0.6 s: a waiter thread scheduled late on a loaded host had looked only twice by then (#4807).
+        third = threading.Event()
 
         def slot_ready():
             asked.append(time.monotonic())
+            if len(asked) >= 3:
+                third.set()
             return free[0], 'test: 1 of 1 heavy slots busy'
 
         said = io.StringIO()
         with contextlib.redirect_stderr(said):
             waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)))
             waiter.start()
-            time.sleep(0.6)
+            self.assertTrue(third.wait(30), f'the waiter looked {len(asked)} time(s) in 30 s')
             self.assertEqual(got, [])                                           # both trees are free, but its build would wait for a slot
             for n in range(2):                                                  # and it holds neither while it waits (only for its look)
                 with open(self.root / f'tree-{n}.lock', 'w') as probe:
@@ -4352,7 +4480,7 @@ class PerCrate(StTest):
 
     def test_one_crate_with_a_failed_test_does_not_make_the_other_crates_records_unverified(self):
         # evidence-wrap's check after signing used to ask for the tree's newest rust-tests record whatever its crate: with a failed crate's record
-        # on the tree (signed first, here), every crate signed after it came back "did not verify locally" (50 of 52 on hetz2 at feefaa9c95).
+        # on the tree (signed first, here), every crate signed after it came back "did not verify locally" (50 of 52 on a build host at feefaa9c95).
         code, out, err = self.run_crates('--push', 'origin', FAKE_FAIL='base')
         self.assertEqual(code, 1, out + err)
         self.assertNotIn('did not verify locally', out)
