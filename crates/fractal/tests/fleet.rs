@@ -6765,15 +6765,6 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     assert_eq!(listed(&o).await, before_rollback);
 }
 
-/// Whether `node`'s own start advertises seat-freshness reads (db break-up 4b-3): a release that
-/// asks a host for its seats' marks, so a member of this build records them beside it.
-async fn reads_seat_freshness(node: &Node) -> bool {
-    node.claims().await.iter().any(|claim| {
-        claim["subject"] == format!("daemon/{}", node.name) && claim["kind"] == "daemon.started"
-            && claim.pointer("/body/fields/features/seat_freshness_reads").and_then(Value::as_i64) == Some(1)
-    })
-}
-
 /// Whether `node`'s own start advertises message view reads: a release whose message view and
 /// lists ask a seat's host for its marks (db break-up 4b-4), so a member of this build records
 /// them beside it.
