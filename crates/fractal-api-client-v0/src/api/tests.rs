@@ -86,6 +86,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         "/v1/agents/suspend",
         "/v1/agents/resume",
         "/v1/agents/native-session",
+        "/v1/agents/lane/burst",
         "/v1/work/revision/approve/proposal",
         "/v1/work/delegation",
         "/v1/messages/example/claims",

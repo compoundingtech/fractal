@@ -2813,6 +2813,11 @@ enum AgentsCommand {
     /// Print the systemd slice of one agent's lane, as this daemon names it (docs/st3/seat-lanes.md).
     /// It names where the lane is when the agent has one; the cgroup tree shows whether it exists.
     Lane { subject: String },
+    /// Raise one agent's lane for a command's run and hold it while standard input stays open
+    /// (docs/st3/seat-lanes.md, "Bursts"). Prints one line per answer: `waiting REASON` as the reason
+    /// changes, then `granted CORES MEMORY`; or `none WHY` when the agent holds no lane here, or
+    /// `refused WHY` for a burst that can never fit. Closing standard input gives it back.
+    Burst(AgentBurstArgs),
     /// Write or read the handoff an agent leaves for the session that follows it.
     Handoff {
         #[command(subcommand)]
@@ -3657,6 +3662,27 @@ struct AgentResumeArgs {
     /// How long to wait for the agent to resume its native session.
     #[arg(long, default_value = "10m")]
     timeout: String,
+}
+
+#[derive(Args)]
+struct AgentBurstArgs {
+    /// Exact agent subject or its identity without the `agent/` prefix.
+    #[arg(value_parser = parse_agent_start_identity)]
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: true })))]
+    subject: String,
+    /// The lane's cores while the burst holds.
+    #[arg(long)]
+    cores: u32,
+    /// The lane's memory while the burst holds, such as 24G.
+    #[arg(long)]
+    memory: String,
+    /// What asks, shown while it waits and holds.
+    #[arg(long, default_value = "a command")]
+    reason: String,
+    /// The agent itself: only an agent asks for its own lane's burst.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_parser = parse_agent_actor)]
+    actor: String,
 }
 
 #[derive(Args)]
@@ -11807,6 +11833,10 @@ fn render_performance(view: &Value) -> String {
         }
         let _ = writeln!(out);
     }
+    if let Some(lapsed) = view["lane_bursts"]["dropped_by_lease"].as_u64() {
+        let _ = writeln!(out, "LANE BURSTS  {} held · {} waiting · {lapsed} dropped by lease since start",
+            view["lane_bursts"]["held"], view["lane_bursts"]["waiting"]);
+    }
     if let Some(note) = view["query_time_note"].as_str() {
         let _ = writeln!(out, "{note}");
     }
@@ -15670,6 +15700,15 @@ fn parse_queue_move_actor(actor: &str) -> std::result::Result<String, String> {
         parse_person_subject(actor)
     };
     parsed.map_err(|_| "a queue move needs a complete `person/NAME` or `agent/PATH` subject".into())
+}
+
+/// An explicit `agent/PATH` subject, for a command only an agent runs for itself.
+fn parse_agent_actor(actor: &str) -> std::result::Result<String, String> {
+    if actor.strip_prefix("agent/").is_some_and(|name| !name.is_empty() && !name.ends_with('/')) {
+        Ok(actor.to_owned())
+    } else {
+        Err("only an agent acts here: give its explicit `agent/PATH` subject".into())
+    }
 }
 
 fn parse_publication_actor(actor: &str) -> std::result::Result<String, String> {
