@@ -3822,16 +3822,20 @@ class PoolQueue(unittest.TestCase):
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)
         free, asked, waits, got = [False], [], {}, []
+        # Its third look, not a fixed 0.6 s: a waiter thread scheduled late on a loaded host had looked only twice by then (#4807).
+        third = threading.Event()
 
         def slot_ready():
             asked.append(time.monotonic())
+            if len(asked) >= 3:
+                third.set()
             return free[0], 'test: 1 of 1 heavy slots busy'
 
         said = io.StringIO()
         with contextlib.redirect_stderr(said):
             waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)))
             waiter.start()
-            time.sleep(0.6)
+            self.assertTrue(third.wait(30), f'the waiter looked {len(asked)} time(s) in 30 s')
             self.assertEqual(got, [])                                           # both trees are free, but its build would wait for a slot
             for n in range(2):                                                  # and it holds neither while it waits (only for its look)
                 with open(self.root / f'tree-{n}.lock', 'w') as probe:
