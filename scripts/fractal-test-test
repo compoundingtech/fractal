@@ -3,6 +3,7 @@
 import atexit
 import calendar
 import contextlib
+import errno
 import fcntl
 import hashlib
 import importlib.machinery
@@ -15,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import select
+import signal
 import shutil
 import socket
 import subprocess
@@ -1565,6 +1567,160 @@ class StTest(unittest.TestCase):
         self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
         time.sleep(2.2)
         self.assertFalse(marker.exists(), 'the web child must stop when its slot supervisor times out')
+
+    def test_group_kill_waits_for_a_grandchild_holding_an_inherited_slot_fd(self):
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        self.addCleanup(os.close, write)
+        lock = Path(self.tmp.name) / 'inherited-slot'
+        expire, progress, done = threading.Event(), threading.Event(), threading.Event()
+        state = {}
+        script = f"""import fcntl, os, signal
+slot = open({str(lock)!r}, 'w')
+fcntl.flock(slot, fcntl.LOCK_EX)
+child = os.fork()
+if child:
+    os.write({write}, (str(os.getpid()) + ' ' + str(child) + '\\n').encode())
+else:
+    os.close({write})
+while True:
+    signal.pause()
+"""
+        class ControlledLimit:
+            def remaining(self):
+                if not expire.wait(10):
+                    raise RuntimeError('fixture never reached timeout')
+                return 0
+        real_killpg, real_open = os.killpg, os.pidfd_open
+        def leader_first(pgid, sig):
+            # Force the real observed ordering: the leader dies while a group member still owns the inherited fd.
+            os.kill(pgid, sig)
+        def opened(pid):
+            fd = real_open(pid)
+            if pid == state.get('grandchild'):
+                progress.set()
+            return fd
+        def run():
+            try:
+                state['code'] = st_test.run_limited([sys.executable, '-c', script], ControlledLimit(),
+                                                   kill_group=True, pass_fds=(write,), stdout=subprocess.DEVNULL)
+            except BaseException as error:
+                state['error'] = error
+            finally:
+                done.set(); progress.set()
+        with mock.patch.object(st_test.os, 'killpg', side_effect=leader_first), \
+                mock.patch.object(st_test.os, 'pidfd_open', side_effect=opened):
+            thread = threading.Thread(target=run)
+            thread.start()
+            try:
+                self.assertTrue(select.select([read], [], [], 5)[0], 'fixture did not start')
+                state['leader'], state['grandchild'] = map(int, os.read(read, 128).split())
+                expire.set()
+                self.assertTrue(progress.wait(5), 'cleanup did not observe the grandchild')
+                self.assertFalse(done.is_set(), 'leader exit was mistaken for whole-group completion')
+                self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 1)
+            finally:
+                expire.set()
+                if 'leader' in state:
+                    with contextlib.suppress(ProcessLookupError):
+                        real_killpg(state['leader'], signal.SIGKILL)
+                thread.join(10)
+            self.assertFalse(thread.is_alive(), 'group cleanup did not finish')
+        if 'error' in state:
+            raise state['error']
+        self.assertEqual(state['code'], 124)
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
+
+    def test_group_drain_excludes_zombies_and_fails_visibly_for_a_live_survivor(self):
+        proc = Path(self.tmp.name) / 'group-proc'
+        def member(pid, state, group):
+            path = proc / str(pid)
+            path.mkdir(parents=True, exist_ok=True)
+            fields = [state, '1', str(group)] + ['0'] * 16 + ['99']
+            (path / 'stat').write_text(f'{pid} (fixture ) name) ' + ' '.join(fields))
+        member(101, 'Z', 77)
+        member(102, 'S', 78)
+        member(104, 'S', 77)
+        (proc / '104/stat').write_text('incomplete stat record')
+        self.assertEqual(st_test.live_group_members(77, proc), {})
+        st_test.wait_group_exit(77, seconds=0, proc=proc)
+        member(103, 'S', 77)
+        with self.assertRaisesRegex(st_test.Failure, r'group 77.*103.*cleanup did not complete'):
+            st_test.wait_group_exit(77, seconds=0, proc=proc)
+        # A pidfd that never becomes ready must also hit the bound, rather than return or wait forever.
+        read, write = os.pipe()
+        self.addCleanup(os.close, write)
+        with mock.patch.object(st_test.os, 'pidfd_open', return_value=read), \
+                mock.patch.object(st_test.os, 'killpg'):
+            with self.assertRaisesRegex(st_test.Failure, r'cleanup did not complete'):
+                st_test.wait_group_exit(77, seconds=0.05, proc=proc)
+        with self.assertRaises(OSError):
+            os.fstat(read)  # the pinned descriptor is closed on the failure path too
+
+    def test_a_failed_group_drain_does_not_restart_the_cleanup_deadline(self):
+        with mock.patch.object(st_test.subprocess, 'Popen') as started, \
+                mock.patch.object(st_test, 'kill_limited', side_effect=st_test.GroupExitFailure('cleanup incomplete')) as killed:
+            started.return_value.__exit__.return_value = False
+            with self.assertRaises(st_test.GroupExitFailure):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
+        self.assertEqual(killed.call_count, 1, 'an expired cleanup bound must not start again')
+
+    def test_group_drain_waits_on_proc_when_the_kernel_has_no_pidfds(self):
+        proc = Path(self.tmp.name) / 'old-kernel-proc'
+        (proc / '123').mkdir(parents=True)
+        stat = proc / '123/stat'
+        stat.write_text('123 (fixture) ' + ' '.join(['S', '1', '77'] + ['0'] * 16 + ['99']))
+        def exit_while_waiting(seconds):
+            stat.unlink()
+        with mock.patch.object(st_test.os, 'killpg'), \
+                mock.patch.object(st_test.os, 'pidfd_open', side_effect=OSError(errno.ENOSYS, 'no pidfds')), \
+                mock.patch.object(st_test.time, 'sleep', side_effect=exit_while_waiting) as slept:
+            st_test.wait_group_exit(77, proc=proc)
+        self.assertEqual(slept.call_count, 1)
+
+    def test_group_drain_without_proc_waits_for_group_disappearance(self):
+        gone = False
+        def kill(pgid, sig):
+            if gone and sig == 0:
+                raise ProcessLookupError()
+        def exit_while_waiting(seconds):
+            nonlocal gone
+            gone = True
+        with mock.patch.object(st_test.os, 'killpg', side_effect=kill) as killed, \
+                mock.patch.object(st_test.time, 'sleep', side_effect=exit_while_waiting):
+            st_test.wait_group_exit(77, proc=Path(self.tmp.name) / 'no-proc')
+        self.assertEqual([call.args[1] for call in killed.call_args_list], [0, signal.SIGKILL, 0])
+
+    def test_portable_group_drain_reaps_its_own_leader(self):
+        with subprocess.Popen(['sleep', '60'], start_new_session=True) as process:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                st_test.wait_group_exit(process.pid, seconds=2, proc=Path(self.tmp.name) / 'no-proc', reap=process.poll)
+                self.assertIsNotNone(process.returncode)
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(process.pid, 0)
+            finally:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+
+    def test_group_drain_signals_a_late_member_found_on_rescan(self):
+        proc = Path(self.tmp.name) / 'late-group-proc'
+        def member(pid):
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / 'stat').write_text(f'{pid} (fixture) ' + ' '.join(['S', '1', '77'] + ['0'] * 16 + ['99']))
+        member(123)
+        killed = []
+        def kill(pgid, sig):
+            killed.append((pgid, sig))
+            if len(killed) == 1:
+                (proc / '123/stat').unlink()
+                member(124)
+            else:
+                (proc / '124/stat').unlink()
+        with mock.patch.object(st_test.os, 'killpg', side_effect=kill), \
+                mock.patch.object(st_test.os, 'pidfd_open', side_effect=ProcessLookupError()):
+            st_test.wait_group_exit(77, proc=proc)
+        self.assertEqual(killed, [(77, signal.SIGKILL), (77, signal.SIGKILL)])
 
     def test_web_output_and_wrapper_diagnostics_follow_the_build_without_interleaving(self):
         printed = threading.Event()
