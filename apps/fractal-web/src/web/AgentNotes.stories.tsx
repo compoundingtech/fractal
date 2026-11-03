@@ -117,7 +117,7 @@ const feedCases = (negativeControl: boolean): readonly FeedCase[] => [
   { id: 'unavailable', label: 'Gateway without notes', feed: unavailable({ reason: 'unsupported', detail: 'This gateway does not serve notes.' }), actor: viewer },
   // Negative control: the stale window is published as live.
   { id: 'stale', label: 'Out of date', feed: observed({ value: [retireNote], freshness: negativeControl ? 'live' : 'stale' }), actor: viewer },
-  { id: 'partial', label: 'Bounded window', feed: { ...observed({ value: [retireNote] }), coverage: { _tag: 'Partial' } }, actor: viewer },
+  { id: 'partial', label: 'Bounded window', feed: { _tag: 'Observed', value: [retireNote], freshness: 'live', coverage: { _tag: 'Partial' } }, actor: viewer },
   { id: 'no-actor', label: 'Identity pending', feed: observed({ value: [retireNote] }), actor: undefined },
   { id: 'long', label: 'Long single words', feed: observed({ value: [publishedNote(longWord, target)] }), actor: viewer, targetLabel: longTitle },
 ]
