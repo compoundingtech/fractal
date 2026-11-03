@@ -6479,6 +6479,109 @@ async fn previous_release_beside_a_member_recording_message_marks() {
     }
 }
 
+/// A seat hosted on a member of the previous release is read from its lifecycle claims: the
+/// release advertises no seat-freshness reads, so a member of this build never asks it, and
+/// `conversations status` follows the claims the release writes, never `unknown`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "4c3b2a19-0f8e-4d7c-9b6a-5e4d3c2b1a09";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old;
+    let mut n1 = Node::new(root.path(), "n1");
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+    let declaration = root.path().join("old-host-seat.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"marks/old-host-seat\" {{ host \"o\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        o.root
+    )).unwrap();
+    n1.st_ok(&[
+        "apply",
+        "--no-gate-check",
+        declaration.to_str().unwrap(),
+        "--as",
+        PERSON,
+    ]);
+    let receipt: Value = n1
+        .client()
+        .post("/v1/messages", &json!({
+            "idempotency_key": "old-host-seat-mail", "from": PERSON, "to": "agent/marks/old-host-seat",
+            "content": "mail for a seat on the release",
+        }))
+        .await
+        .unwrap();
+    let subject = receipt["subject"].as_str().unwrap().to_owned();
+    let delivery = |node: &Node| {
+        let client = node.client();
+        let path = format!("/v1/messages/delivery/{subject}");
+        async move { client.get::<Value>(&path).await.unwrap()["delivery"].clone() }
+    };
+    let before = delivery(&n1).await;
+    assert_eq!(
+        before["phase"], "sent",
+        "the release's seat is read from claims, not asked: {before}"
+    );
+    // The mail reaches the release, which records its seat's delivery and read as claims.
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let reached: Result<Value, _> = o
+            .client()
+            .get(&format!("/v1/messages/read/{subject}"))
+            .await;
+        if reached.is_ok() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the mail did not reach the release"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    for lifecycle in ["delivered", "read"] {
+        let _: Value = o
+            .client()
+            .post(
+                &format!(
+                    "/v1/messages/{}/claims",
+                    subject.trim_start_matches("message/")
+                ),
+                &json!({
+                    "lifecycle": lifecycle, "actor": "agent/marks/old-host-seat",
+                    "idempotency_key": format!("old-host-seat-{lifecycle}"),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let now = delivery(&n1).await;
+        if now["phase"] == "read" {
+            break;
+        }
+        assert_ne!(now["phase"], "unknown", "{now}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the release's read claim did not reach the new member: {now}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// A seat's conversation and `conversations wait` across the previous release and this build, on
 /// one node upgraded in place and rolled back. The release's mail reads the same after the
 /// upgrade, a stream item joins the conversation behind the graph claim it arrived after, and a

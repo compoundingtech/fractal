@@ -2616,12 +2616,21 @@ impl Store {
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
-    /// Open a shared-memory store for sequential fixtures and short-lived tools.
-    /// Concurrent server tests should use [`Self::open`]: shared-cache read/write
-    /// contention returns `SQLITE_LOCKED` immediately instead of waiting.
+    /// Open an owned temporary WAL store through the normal file-backed path.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_memory(origin: impl Into<String>) -> Result<Self> {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open_memory(origin, fractal.clone())?;
+        Self::finish_open(graph, fractal)
+    }
+
+    /// Open shared-cache memory mode for tests of that mode itself.
+    /// Concurrent server tests should use [`Self::open`]: shared-cache read/write
+    /// contention returns `SQLITE_LOCKED` immediately instead of waiting.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_shared_memory(origin: impl Into<String>) -> Result<Self> {
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open_shared_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
@@ -11458,10 +11467,20 @@ fn select_actual_source(
     rows: &[(&str, &str, &str, &Value)],
     desired_host: Option<&str>,
 ) -> Option<(String, String, Vec<String>)> {
+    // A host the seat is not placed on can still record the end of its own old runtime, for
+    // instance after it restarts holding a seat that has moved (#4743). That end describes its
+    // copy, not the seat: once the desired host has observed the seat, it is never selected over
+    // the desired host's record. A non-owner that runs the seat is real state and still counts.
+    let owner_observed = desired_host.is_some_and(|host| {
+        rows.iter().any(|(_, kind, origin, _)| *kind == "runtime.observed" && *origin == host)
+    });
     let selected = rows
         .iter()
         .rev()
-        .find(|(_, kind, _, _)| *kind == "runtime.observed")
+        .filter(|(_, kind, _, _)| *kind == "runtime.observed")
+        .find(|(_, _, origin, body)| {
+            !(owner_observed && Some(*origin) != desired_host && terminal_observation(body))
+        })
         .or_else(|| rows.last());
     let &(selected_id, _, selected_origin, selected_body) = selected?;
     // An origin's newer runtime observation supersedes its older observations. In particular,
@@ -11543,6 +11562,13 @@ fn subject_descends_from_all(
     Ok(ancestors.iter().all(|ancestor| descends_from(ancestor)))
 }
 
+fn terminal_observation(body: &Value) -> bool {
+    matches!(
+        body.get("fields").unwrap_or(body).get("status").and_then(Value::as_str),
+        Some("stopped" | "absent" | "exited" | "vanished")
+    )
+}
+
 fn nonowner_terminal_observation(
     desired_host: Option<&str>,
     selected_origin: &str,
@@ -11558,13 +11584,7 @@ fn nonowner_terminal_observation(
             None
         }
     });
-    let other_fields = other_body.get("fields").unwrap_or(other_body);
-    owner == Some(selected_origin)
-        && other_origin != selected_origin
-        && matches!(
-            other_fields.get("status").and_then(Value::as_str),
-            Some("stopped" | "absent" | "exited" | "vanished")
-        )
+    owner == Some(selected_origin) && other_origin != selected_origin && terminal_observation(other_body)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -11909,6 +11929,84 @@ fn newest_mailbox_harness_state_query() -> String {
                THEN {INCARNATION_OF_CLAIM} END IS ?2
          ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
     )
+}
+
+/// What an incarnation's runtime records say about it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum IncarnationRuntime {
+    /// It runs, as observed by this record.
+    Running { claim: String },
+    /// It ended, or another incarnation replaced it.
+    Ended,
+    /// Nothing says either.
+    Unknown,
+}
+
+/// What `subject`'s `runtime.observed` records say about `incarnation`, newest first. A `running`
+/// record decides: this incarnation runs, or another replaced it. An end that names this
+/// incarnation ends it, whichever host recorded it. An end of another incarnation counts only
+/// while this one has not been seen running, and an end that names no incarnation counts only
+/// from the host where this one ran: a host that still holds a seat which has since moved records
+/// its own old runtime ending, not this one (#4743).
+pub fn runtime_incarnation_state(
+    connection: &Connection,
+    subject: &str,
+    incarnation: &str,
+) -> Result<IncarnationRuntime> {
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb6fac0d4d660 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT id, origin, body FROM claims
+         WHERE subject=?1 AND kind='runtime.observed'
+         ORDER BY CANONICAL_DESC(claims)",
+    ))?;
+    let rows = statement.query_map([subject], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })?;
+    // The hosts that recorded an end naming no incarnation, newer than any running record read.
+    let mut unnamed_ends = BTreeSet::new();
+    // Whether another incarnation's runtime ended, newer than any running record read so far.
+    let mut other_ended = false;
+    for row in rows {
+        let (claim, origin, body) = row?;
+        let body: Value = serde_json::from_str(&body)?;
+        let fields = body.get("fields").unwrap_or(&body);
+        let observed = fields.get("incarnation_id").and_then(Value::as_str);
+        match fields.get("status").and_then(Value::as_str) {
+            Some("running") => {
+                if let Some(current) = observed {
+                    return Ok(if current != incarnation || unnamed_ends.contains(&origin) {
+                        IncarnationRuntime::Ended
+                    } else {
+                        IncarnationRuntime::Running { claim }
+                    });
+                }
+            }
+            Some("exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
+                Some(ended) if ended == incarnation => return Ok(IncarnationRuntime::Ended),
+                Some(_) => other_ended = true,
+                None => {
+                    unnamed_ends.insert(origin);
+                }
+            },
+            _ => {}
+        }
+    }
+    // With no record that the incarnation ran, any end of the seat's runtime counts.
+    Ok(if other_ended || !unnamed_ends.is_empty() {
+        IncarnationRuntime::Ended
+    } else {
+        IncarnationRuntime::Unknown
+    })
+}
+
+/// Whether `incarnation` of `subject` is live for its work: its runtime records show it running,
+/// by [`runtime_incarnation_state`], and its own harness has not ended.
+pub fn work_incarnation_live(connection: &Connection, subject: &str, incarnation: &str) -> Result<bool> {
+    match runtime_incarnation_state(connection, subject, incarnation)? {
+        IncarnationRuntime::Running { claim } => {
+            Ok(!mailbox_harness_ended(connection, subject, incarnation, &claim)?)
+        }
+        IncarnationRuntime::Ended | IncarnationRuntime::Unknown => Ok(false),
+    }
 }
 
 fn mailbox_harness_ended(
@@ -16459,6 +16557,14 @@ pub fn try_project_simple_replication_tx(
                     | "step-run.carried"
                     | "step-run.state"
                     | "step-run.retried"
+                    | "planning-session.started"
+                    | "planning-session.candidate-submitted"
+                    | "planning-session.previewed"
+                    | "planning-session.revision-requested"
+                    | "planning-session.approved"
+                    | "planning-session.cancelled"
+                    | "planning-session.question-requested"
+                    | "planning-session.question-answered"
             )
             || (has_operation && operation_parts(&claim.body).is_none())
         {

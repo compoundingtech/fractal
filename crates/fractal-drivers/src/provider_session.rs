@@ -33,6 +33,18 @@ pub fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }
 
+/// Set once a driver can no longer serve its provider. Unlike a signal's stop, a wrapper that
+/// installs its handlers afterwards keeps it, so a provider not yet launched is stopped too.
+static DRIVER_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Stop the provider as a stop signal would: its wrapper ends the child, records the end and
+/// returns. A driver that can no longer serve its provider asks for this, possibly before the
+/// wrapper has started.
+pub fn request_stop() {
+    DRIVER_STOP.store(true, Ordering::SeqCst);
+    STOP.store(true, Ordering::SeqCst);
+}
+
 /// Set by a driver that is about to re-execute itself into a replaced st binary. Every wrapper
 /// loop that sees it returns [`Detached`] with what the next image needs to adopt its provider,
 /// and leaves the provider, its terminal, and its observed record exactly as they are.
@@ -185,8 +197,20 @@ extern "C" fn on_stop_signal(_signal: libc::c_int) {
 
 extern "C" fn on_interrupt_signal(_signal: libc::c_int) {}
 
+/// The stop flags are process-global: every test that reads or raises them holds this lock, so
+/// parallel readers never see another test's stop.
+#[cfg(test)]
+pub(crate) fn stop_flag_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(std::sync::Mutex::default);
+    match LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 pub(crate) fn install_signal_handler() {
-    STOP.store(false, Ordering::SeqCst);
+    STOP.store(DRIVER_STOP.load(Ordering::SeqCst), Ordering::SeqCst);
     install_stop_handlers();
 }
 
@@ -797,6 +821,18 @@ pub(crate) fn stop_provider_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_driver_stop_survives_a_wrapper_that_starts_after_it() {
+        // The driver can give up before its provider's wrapper reaches its handler install,
+        // for example when the daemon refuses the mailbox at once.
+        let _stop_exclusive = stop_flag_tests();
+        request_stop();
+        install_signal_handler();
+        assert!(stop_requested());
+        DRIVER_STOP.store(false, Ordering::SeqCst);
+        STOP.store(false, Ordering::SeqCst);
+    }
 
     #[test]
     fn native_supervision_keeps_observations_without_creating_status() {
