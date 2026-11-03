@@ -121,11 +121,12 @@ pub fn capture_effective(
         for path in std::env::split_paths(overlays) { paths.insert(normalize(workspace.join(path))); }
     }
     while let Some(path) = paths.pop_first() {
-        if !files.contains_key(&path) {
-            let bytes = std::fs::read(&path).with_context(|| format!("read launch input {}", path.display()))?;
-            context_imports(&path, &bytes, &mut paths)?;
-            let mode = std::fs::metadata(&path)?.permissions().mode() & 0o7777;
-            files.insert(path, (hex::encode(Sha256::digest(bytes)), mode));
+        if let std::collections::btree_map::Entry::Vacant(entry) = files.entry(path) {
+            let path = entry.key();
+            let bytes = std::fs::read(path).with_context(|| format!("read launch input {}", path.display()))?;
+            context_imports(path, &bytes, &mut paths)?;
+            let mode = std::fs::metadata(path)?.permissions().mode() & 0o7777;
+            entry.insert((hex::encode(Sha256::digest(bytes)), mode));
         }
     }
     let files: BTreeMap<_, _> = files.into_iter().map(|(path, value)| {
