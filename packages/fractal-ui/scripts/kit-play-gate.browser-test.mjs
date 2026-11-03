@@ -114,13 +114,15 @@ const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides 
         `]
     const child = spawn(process.execPath, args, {
       env: { ...inherited, ...env },
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'ignore'],
     })
+    let stdout = ''
+    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
     const code = await new Promise((resolve, reject) => {
       child.once('error', reject)
       child.once('close', resolve)
     })
-    return { code, receipt: JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8')) }
+    return { code, stdout, receipt: JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8')) }
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
@@ -159,25 +161,34 @@ test('receipts retain each worker predecessor despite receipt sorting', { timeou
     if (row.previousCase) {
       assert.ok(receipt.rows.some(previous => previous.id === row.previousCase.id
         && previous.scheme === row.previousCase.scheme && previous.width === row.previousCase.width))
-      assert.notDeepEqual(row.previousCase, { id: row.id, scheme: row.scheme, width: row.width })
+      const { id, scheme, width } = row.previousCase
+      assert.notDeepEqual({ id, scheme, width }, { id: row.id, scheme: row.scheme, width: row.width })
+      assert.ok(Number.isInteger(row.previousCase.closeMilliseconds))
     }
   }
 })
 
-test('reset failures keep key names and predecessor in the receipt without running the next play', { timeout: 60000 }, async () => {
-  const { code, receipt } = await runGate({
+test('reset failures keep key names, predecessor and re-audit in the receipt and the output without running the next play', { timeout: 60000 }, async () => {
+  const { code, stdout, receipt } = await runGate({
     env: { KIT_PLAY_SET: 'critical', KIT_PLAY_WORKERS: '1' }, navigation: 'storage', retainWebStorage: true,
   })
   assert.equal(code, 1)
   const passed = receipt.rows.find(row => row.pass)
   const failed = receipt.rows.find(row => !row.pass)
   assert.equal(receipt.rows.length, 2)
-  assert.deepEqual(failed.isolation, {
+  const isolation = {
     boundary: 'reset', origin: failed.isolation.origin,
     storage: [{ kind: 'localStorage', keys: ['fixture-private-key'] }],
-    workerId: 0, previousCase: { id: passed.id, scheme: passed.scheme, width: passed.width },
-  })
+    workerId: 0,
+    previousCase: { id: passed.id, scheme: passed.scheme, width: passed.width, closeMilliseconds: Math.round(passed.timings.closeMilliseconds) },
+    // Nothing cleared the key, so the second read still finds it.
+    reaudit: { localStorage: ['fixture-private-key'] },
+  }
+  assert.deepEqual(failed.isolation, isolation)
   assert.match(failed.isolation.origin, /^http:\/\/127\.0\.0\.1:\d+$/)
+  // The check's own output carries the same report, so a recurrence can be pasted from the log.
+  const printed = stdout.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line)).find(row => row.pass === false)
+  assert.ok(printed.error.includes(`residual Web Storage ${JSON.stringify(isolation)}`), printed.error)
   assert.deepEqual(failed.strict, [])
   assert.ok(!JSON.stringify(receipt).includes('private-storage-value'))
 })
