@@ -990,11 +990,14 @@ fn repeated_agent_list_reads_only_local_frontier_without_rebuilding() {
     // The former zero-reader cache hit missed same-index local activity. Correct warm
     // reads now perform one indexed frontier seek, but never reduce cards again.
     let builds = state.store.agent_resources_builds_for_test();
-    let work = smallclaims::sqlite::work::total();
+    // Count this thread's statements only: the read runs on it, and the process-wide total also
+    // takes in other tests' SQL when they share the process.
+    let work = smallclaims::sqlite::work::SqliteWorkScope::start();
     let rows = client_agent_resources(&state.store, false, "second", index).unwrap();
+    let work = work.finish();
     assert!(rows.is_empty());
     assert_eq!(state.store.agent_resources_builds_for_test(), builds);
-    assert!((smallclaims::sqlite::work::total() - work).vm_steps < 100);
+    assert!(work.vm_steps < 100, "{work:?}");
 }
 
 #[tokio::test]
@@ -1180,9 +1183,10 @@ fn agent_page_refs_reuse_warm_metadata_and_rebuild_for_new_membership() {
     let index = state.store.index().unwrap();
     let refs = client_agent_page_refs(&state.store, false, index).unwrap();
     assert_eq!(refs, client_agent_page_refs_uncached(&state.store, false, index).unwrap());
-    let work = smallclaims::sqlite::work::total();
+    // This thread's statements only, as above.
+    let work = smallclaims::sqlite::work::SqliteWorkScope::start();
     assert_eq!(client_agent_page_refs(&state.store, false, index).unwrap(), refs);
-    assert_eq!((smallclaims::sqlite::work::total() - work).statements, 0);
+    assert_eq!(work.finish().statements, 0);
     // A repeated live status has the same result; runtime changes still rebuild shallow refs.
     append("agent/refs-first");
     let index = state.store.index().unwrap();
@@ -6824,11 +6828,13 @@ fn terminal_retirement_agent_cards_follow_lifecycle_at_the_snapshot_cut() {
     ).unwrap();
     let after = store.index().unwrap();
     for cut in [before, after] {
-        let work = smallclaims::sqlite::work::total();
+        // This thread's statements only: the read runs on it, and the process-wide total also
+        // takes in other tests' SQL when they share the process.
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
         let terminal = crate::store::retirements::retired_subjects_at(
             &store.readers.get(), &[retired.into(), stopped.into()], cut,
         ).unwrap();
-        assert_eq!((smallclaims::sqlite::work::total() - work).statements, 1);
+        assert_eq!(work.finish().statements, 1);
         assert_eq!(terminal.contains(retired), cut == after);
         assert!(!terminal.contains(stopped));
         let cards = client_agent_resources_uncached(&store, true, cut).unwrap();
