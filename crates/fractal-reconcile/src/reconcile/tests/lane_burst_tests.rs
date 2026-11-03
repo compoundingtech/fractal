@@ -159,6 +159,14 @@ fn after_a_daemon_restart_a_raised_slice_counts_and_its_renewed_burst_holds_it_a
     assert_eq!(reconciler.seat_admission.status.state().lane_raised.get(builder), Some(&burst));
 }
 
+/// A seat declared on this host that is not running, waiting for room since `since`.
+fn waiting_seat(reconciler: &Reconciler<FakeRuntime>, store: &Store, name: &str, lane: &str, since: u64, at: u64) {
+    apply_source(store, &format!("version 2\nagent \"{name}\" {{ workspace \"/tmp\"; command \"true\"; capacity {lane} }}"), name);
+    let status = &reconciler.seat_admission.status;
+    status.lane_wait(&format!("agent/node.{name}"), "lane does not fit".into(), true, since);
+    status.state().lane_waits[0].checked = at;
+}
+
 #[test]
 fn a_burst_waits_behind_a_seat_that_has_waited_long_to_start() {
     let store = Arc::new(Store::open_memory("node").unwrap());
@@ -167,8 +175,7 @@ fn a_burst_waits_behind_a_seat_that_has_waited_long_to_start() {
     let status = &reconciler.seat_admission.status;
     let at = now();
     // A seat waiting for room since 10 minutes ago: a burst that fits is still granted.
-    status.lane_wait("agent/node.big", "lane 8 cores/48.0G does not fit".into(), true, at - 600);
-    status.state().lane_waits[0].checked = at;
+    waiting_seat(&reconciler, &store, "big", "cores=8 memory=\"40G\"", at - 600, at);
     status.burst_hold("agent/node.builder", Capacity { cores: 2, memory: 6 * G }, "st-test", at);
     reconciler.reconcile_lane_bursts().unwrap();
     assert_eq!(status.burst_granted("agent/node.builder"), Some(Capacity { cores: 2, memory: 6 * G }));
@@ -181,8 +188,24 @@ fn a_burst_waits_behind_a_seat_that_has_waited_long_to_start() {
     assert_eq!(status.burst_granted("agent/node.builder"), None);
     assert_eq!(status.state().lane_bursts[0].wait.as_deref(), Some(
         "burst lane 2 cores/6.0G for agent/node.builder waits behind agent/node.big, which has waited 15 min to start"));
-    // Its start leaves the line: the burst is served.
-    status.lane_admitted("agent/node.big", Capacity { cores: 8, memory: 4 * G }, at);
+    // Its start leaves the line: the burst is served beside it.
+    status.lane_admitted("agent/node.big", Capacity { cores: 8, memory: 40 * G }, at);
+    reconciler.reconcile_lane_bursts().unwrap();
+    assert_eq!(status.burst_granted("agent/node.builder"), Some(Capacity { cores: 2, memory: 6 * G }));
+}
+
+#[test]
+fn a_burst_does_not_wait_behind_a_seat_that_would_not_fit_once_every_raise_is_given_back() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let reconciler = laned(Arc::new(FakeRuntime::default()), &store);
+    seat(&store, "builder", "capacity cores=2 memory=\"4G\"");
+    seat(&store, "other", "capacity cores=2 memory=\"20G\"");
+    let status = &reconciler.seat_admission.status;
+    let at = now();
+    // 54G for lanes, less the two seats' own 24G and 2G outside lanes, leaves 28G: the 40G seat
+    // waits for a seat to stop, not for bursts to end.
+    waiting_seat(&reconciler, &store, "big", "cores=8 memory=\"40G\"", at - 15 * 60, at);
+    status.burst_hold("agent/node.builder", Capacity { cores: 2, memory: 6 * G }, "st-test", at);
     reconciler.reconcile_lane_bursts().unwrap();
     assert_eq!(status.burst_granted("agent/node.builder"), Some(Capacity { cores: 2, memory: 6 * G }));
 }
