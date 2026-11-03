@@ -49711,6 +49711,7 @@ mission "fresh" state="ready" {
 
     #[test]
     fn seat_queue_head_ignores_legacy_prefixed_manual_wakes() {
+        use serde_json::json;
         let seat = SeatQueueFixture::new();
         let first = seat.start("queued", "legacy-manual-held");
         let held = SeatQueueFixture::step(&first, "work");
@@ -49767,6 +49768,7 @@ mission "fresh" state="ready" {
 
     #[test]
     fn seat_queue_head_held_notice_does_not_consume_the_claim_wake() {
+        use serde_json::json;
         let seat = SeatQueueFixture::new();
         let first = seat.start("queued", "notice-held");
         let held = SeatQueueFixture::step(&first, "work");
