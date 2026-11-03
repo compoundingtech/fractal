@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const FILE_BYTES: u64 = 64 * 1024 * 1024;
-const LOCK_WAIT: Duration = Duration::from_secs(2);
+// Reserve the last 100 ms of the two-second contention budget for drop accounting.
+const LOCK_WAIT: Duration = Duration::from_millis(1900);
+const DROP_WAIT: Duration = Duration::from_millis(100);
 
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
@@ -32,6 +34,10 @@ fn lock(path: &Path, wait: Duration) -> io::Result<File> {
         .mode(0o600)
         .custom_flags(libc::O_NONBLOCK)
         .open(sibling(path, ".lock"))?;
+    acquire(file, wait)
+}
+
+fn acquire(file: File, wait: Duration) -> io::Result<File> {
     regular(&file)?;
     // SAFETY: file owns the descriptor. Closing it releases the flock, including on process exit.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -184,44 +190,32 @@ pub(super) fn snapshot(path: &Path) -> io::Result<Vec<(PathBuf, File, u64)>> {
     Ok(files)
 }
 
-/// An eight-byte native u64 counter: mmap atomics count concurrent drops without taking another
-/// possibly stuck lock or growing a second log. These state directories are local to one host.
+/// An eight-byte native u64 counter. Use ordinary fallible I/O: mmap writes can SIGBUS on a
+/// full filesystem, which would change the wrapped command's status. This independent inode
+/// serializes counters even while the log lock is stuck, within the remaining contention budget.
 fn count_drop(path: &Path) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    let Ok(file) = OpenOptions::new()
+    let _ = count_drop_with(path, DROP_WAIT);
+}
+
+fn count_drop_with(path: &Path, wait: Duration) -> io::Result<()> {
+    let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NONBLOCK)
-        .open(sibling(path, ".dropped"))
-    else {
-        return;
+        .open(sibling(path, ".dropped"))?;
+    let mut file = acquire(file, wait)?;
+    let mut bytes = [0; 8];
+    let count = match file.read_exact(&mut bytes) {
+        Ok(()) => u64::from_ne_bytes(bytes),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => 0,
+        Err(error) => return Err(error),
     };
-    if regular(&file).is_err() || file.set_len(8).is_err() {
-        return;
-    }
-    // SAFETY: the regular file has eight bytes; mmap returns a page-aligned shared mapping.
-    // Its only writers use AtomicU64, and no recorder shrinks the file below eight bytes.
-    let mapping = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            8,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            file.as_raw_fd(),
-            0,
-        )
-    };
-    if mapping == libc::MAP_FAILED {
-        return;
-    }
-    // SAFETY: mmap succeeded and its page alignment satisfies AtomicU64's alignment.
-    unsafe {
-        (&*mapping.cast::<AtomicU64>()).fetch_add(1, Ordering::Relaxed);
-        libc::munmap(mapping, 8);
-    }
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&count.saturating_add(1).to_ne_bytes())?;
+    file.set_len(8)
 }
 
 pub(super) fn dropped(path: &Path) -> u64 {
@@ -397,6 +391,24 @@ mod tests {
     }
 
     #[test]
+    fn a_stuck_counter_cannot_hold_up_a_timed_out_recorder() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("commands.jsonl");
+        count_drop_with(&path, LOCK_WAIT).unwrap();
+        let counter = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(sibling(&path, ".dropped"))
+            .unwrap();
+        let guard = acquire(counter, LOCK_WAIT).unwrap();
+        let error = count_drop_with(&path, Duration::from_millis(20)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        drop(guard);
+        count_drop_with(&path, LOCK_WAIT).unwrap();
+        assert_eq!(dropped(&path), 2);
+    }
+
+    #[test]
     fn concurrent_drop_counts_stay_in_one_fixed_size_file() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("commands.jsonl");
@@ -407,7 +419,7 @@ mod tests {
                 scope.spawn(move || {
                     barrier.wait();
                     for _ in 0..8 {
-                        count_drop(path);
+                        count_drop_with(path, LOCK_WAIT).unwrap();
                     }
                 });
             }

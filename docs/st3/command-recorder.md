@@ -84,9 +84,10 @@ successfully records. Claim retention and creation receipts are independent of t
 
 Writers serialize the size check, rotation, and append on `commands.jsonl.lock`, a separate stable
 inode. Never remove or replace that lock file while recorders are running. A lock wait expires
-after two seconds: that one record is dropped and counted in the fixed eight-byte
+within two seconds, including up to 100 ms reserved for drop accounting: that one record is
+dropped and counted in the fixed eight-byte
 `commands.jsonl.dropped` counter, while the wrapped command keeps its own output and status.
-`st doctor` displays the accumulated timeout drops. Other log failures remain silent. No file
+`st doctor` displays the accumulated timeout drops. Counter failures and other log failures remain silent. No file
 sync is forced; a crash can lose recent diagnostics.
 
 ```sh

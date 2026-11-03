@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "The default recorder report snapshots both retained generations. Explicit --log inputs still name individual files. Concurrent recorders serialize size checks, rotation and whole-line appends on a stable sidecar flock. A two-second lock timeout drops that record and counts the drop in st doctor without changing the wrapped command's output or exit status; creation receipts are published independently before logging. Older recorder binaries do not honor this lock or cap, so the bound applies once running recorders use this build."
+    "detail": "The default recorder report snapshots both retained generations. Explicit --log inputs still name individual files. Concurrent recorders serialize size checks, rotation and whole-line appends on a stable sidecar flock. A two-second contention budget (including up to 100 ms for an independently locked drop counter) drops that record and counts the drop in st doctor without changing the wrapped command's output or exit status; creation receipts are published independently before logging. Older recorder binaries do not honor this lock or cap, so the bound applies once running recorders use this build."
   },
   "downtime": {
     "status": "none",
