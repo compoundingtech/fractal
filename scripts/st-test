@@ -2702,10 +2702,103 @@ class Limit:
         return time.monotonic() - self.started if self.begins_at else self.pre_start
 
 
+GROUP_EXIT_SECONDS = 10.0
+
+
+class GroupExitFailure(Failure):
+    """The group was killed but cleanup failed; do not reset its bound by killing and waiting again."""
+
+
+def group_member(pid, pgid, proc='/proc'):
+    """The start ticks of a live member, or None. Zombies already closed their descriptors."""
+    try:
+        fields = Path(proc, str(pid), 'stat').read_text().rsplit(')', 1)[1].split()
+        return int(fields[19]) if fields[0] != 'Z' and int(fields[2]) == pgid else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def live_group_members(pgid, proc='/proc'):
+    members = {}
+    for path in Path(proc).iterdir():
+        if path.name.isdigit():
+            started = group_member(int(path.name), pgid, proc)
+            if started is not None:
+                members[int(path.name)] = started
+    return members
+
+
+def wait_group_exit(pgid, seconds=GROUP_EXIT_SECONDS, proc='/proc', reap=None):
+    """SIGKILL is asynchronous: wait for descriptor closure, not just the leader. Fail visibly if live members remain.
+
+    Pin identities before waiting, then rescan after exits for any late children. Without pidfds, inspect /proc at short
+    intervals; without /proc, check group existence and reap the leader. Both keep the same bound. Zombie-only groups
+    seen through /proc are already drained.
+    """
+    deadline, pidfds = time.monotonic() + seconds, hasattr(os, 'pidfd_open')
+    members = None
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            who = ", ".join(map(str, members)) if members else 'unknown (no /proc)'
+            raise GroupExitFailure(f'process group {pgid} still has live members {who} '
+                                   f'after SIGKILL and {seconds:g}s; cleanup did not complete')
+        return left
+    while True:
+        members = live_group_members(pgid, proc) if Path(proc).is_dir() else None
+        if members is None:
+            if reap is not None:
+                reap()  # Do not leave our own zombie leader making killpg(0) report an existing group forever.
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+        elif not members:
+            return
+        remaining()
+        # Catch a member that joined or forked while the previous SIGKILL was landing.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGKILL)
+        if members is None:  # Portable path without /proc: wait for the whole group to disappear under the same bound.
+            time.sleep(min(0.02, remaining()))
+            continue
+        with contextlib.ExitStack() as cleanup:
+            poller, pending = select.poll(), set()
+            if pidfds:
+                for pid, started in members.items():
+                    try:
+                        fd = os.pidfd_open(pid)
+                    except ProcessLookupError:
+                        continue
+                    except OSError as error:
+                        if error.errno != errno.ENOSYS:
+                            raise GroupExitFailure(f'process group {pgid}: cannot pin member {pid}: {error}; '
+                                                   'cleanup did not complete') from error
+                        pidfds = False
+                        break
+                    cleanup.callback(os.close, fd)
+                    # A reused PID must never make this wait on an unrelated process.
+                    if group_member(pid, pgid, proc) == started:
+                        poller.register(fd, select.POLLIN)
+                        pending.add(fd)
+            if not pidfds:
+                time.sleep(min(0.02, remaining()))
+                continue
+            while pending:
+                for fd, event in poller.poll(max(1, int(remaining() * 1000))):
+                    if event & (select.POLLIN | select.POLLHUP):
+                        poller.unregister(fd)
+                        pending.discard(fd)
+                    else:
+                        raise GroupExitFailure(f'process group {pgid}: exit readiness failed (event {event}); cleanup did not complete')
+
+
 def kill_limited(process, group=False):
     if group:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
+        process._st_group_kill_started = True
+        wait_group_exit(process.pid, reap=process.poll)
     else:
         process.kill()
 
@@ -2732,8 +2825,15 @@ class ProcessGroups:
         with self.lock:
             self.cancelled = True
             processes = tuple(self.processes)
+        failure = None
         for process in processes:
-            kill_limited(process, group=True)
+            try:
+                kill_limited(process, group=True)
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+        if failure is not None:
+            raise failure
 
 
 def join_lanes(lanes):
@@ -2773,12 +2873,17 @@ def run_limited(argv, limit, kill_group=False, groups=None, **options):
     if kill_group:
         options['start_new_session'] = True
     with subprocess.Popen(argv, **options) as process:
-        if kill_group and groups is not None:
-            groups.add(process)
+        process._st_group_kill_started = False
         try:
+            if kill_group and groups is not None:
+                groups.add(process)
             return wait_limited(process, limit, group=kill_group)
+        except GroupExitFailure:
+            raise
         except BaseException:
-            kill_limited(process, kill_group)
+            # A second signal during the drain must not restart its ten-second bound.
+            if not kill_group or not process._st_group_kill_started:
+                kill_limited(process, kill_group)
             raise
         finally:
             if kill_group and groups is not None:
@@ -3322,8 +3427,10 @@ def run_main(argv, cleanup):
                         try:
                             join_lanes(started_threads)  # never release the clean tree while a background lane still uses it
                         except BaseException:  # an interrupt can also arrive while the foreground waits for web
-                            web_groups.cancel()
-                            join_lanes(started_threads)
+                            try:
+                                web_groups.cancel()
+                            finally:
+                                join_lanes(started_threads)
                             raise
                     for name in background:
                         results.setdefault(name, ((name, 'FAILED (lane exited)', 0, 'lane exited without a result'), True, False))

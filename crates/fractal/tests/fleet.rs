@@ -5986,6 +5986,18 @@ mission "orchard/release" state="ready" {
 #[path = "fleet/schedule_standby.rs"]
 mod schedule_standby;
 
+/// Whether `node`'s running release advertises `seat_freshness_reads` in its newest
+/// daemon.started. No feature names reading stream items; this one was first advertised by a
+/// build that already had the timeline waits (#4481), stream items in lists (#4512) and the marks
+/// reader (#4696), so every release that advertises it reads stream and graph mail as one timeline.
+async fn reads_seat_freshness(node: &Node) -> bool {
+    node.claims().await.iter().any(|claim| {
+        claim["subject"] == format!("daemon/{}", node.name)
+            && claim["kind"] == "daemon.started"
+            && claim.pointer("/body/fields/features/seat_freshness_reads").and_then(Value::as_i64) == Some(1)
+    })
+}
+
 /// An agent's message written straight into `node`'s messages shard. Nothing in this build
 /// writes the shard yet; tests reach it through a test-support route.
 async fn append_stream_item(node: &Node, subject: &str) {
@@ -6179,6 +6191,8 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     let mut o = Node::new(root.path(), "o");
     o.binary = old.clone();
     o.start().await;
+    // seat_freshness_reads stands in for #4481/#4512: a release with it reads the stream items too.
+    let release_reads_stream = reads_seat_freshness(&o).await;
     let send = |node: &Node, key: &str| {
         let client = node.client();
         let key = key.to_owned();
@@ -6253,13 +6267,25 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     assert_eq!(listed(&o).await, merged);
     assert!(o.claims().await.iter().all(|claim| claim["subject"] != stream));
 
-    // Roll back: the release reads every graph receipt and ignores the shard beside it.
+    // Roll back: the release reads every graph receipt. One that reads stream items also lists the
+    // stream item, read from its local receipt, after its graph mail; an older one ignores the
+    // shard beside it.
     o.stop();
     o.binary = old;
     o.start().await;
-    assert_eq!(listed(&o).await, merged[..2]);
-    let third = send(&o, "rolled-back").await;
-    assert_eq!(listed(&o).await.last(), Some(&(third.clone(), "sent".to_owned())));
+    let third = if release_reads_stream {
+        assert_eq!(listed(&o).await, merged);
+        let third = send(&o, "rolled-back").await;
+        let mut expected = merged.clone();
+        expected.insert(2, (third.clone(), "sent".to_owned()));
+        assert_eq!(listed(&o).await, expected);
+        third
+    } else {
+        assert_eq!(listed(&o).await, merged[..2]);
+        let third = send(&o, "rolled-back").await;
+        assert_eq!(listed(&o).await.last(), Some(&(third.clone(), "sent".to_owned())));
+        third
+    };
 
     // Upgrade again: the stream item kept its local receipt and follows the newer graph mail.
     o.stop();
@@ -6284,9 +6310,10 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
 /// Delivery and read state this build records as local marks (db break-up step 4b) reads beside
 /// the lifecycle claims the previous release wrote, on one node upgraded in place, backed up and
 /// rolled back. The release's claims read the same throughout; a mark replicates nothing and
-/// writes no claim. A backup that carries marks is version 4, which the release refuses to restore
-/// with a clear error. Rolled back, the release runs on the same store and reads its own claims;
-/// upgraded again, the marks still count.
+/// writes no claim. A backup that carries marks is version 4: an older release refuses to restore
+/// it with a clear error, and one that reads marks restores it. Rolled back, the release runs on
+/// the same store and reads its own claims, and the marks too if it reads them; upgraded again,
+/// the marks still count.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_rollback() {
@@ -6298,6 +6325,8 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
     let mut o = Node::new(root.path(), "o");
     o.binary = old.clone();
     o.start().await;
+    // A release with seat-freshness reads (v0.3.25 on) also reads marks and their backups (4b-1).
+    let release_reads_marks = reads_seat_freshness(&o).await;
     let send = |node: &Node, key: &str| {
         let client = node.client();
         let key = key.to_owned();
@@ -6365,7 +6394,8 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
         "a mark wrote a lifecycle claim"
     );
 
-    // A backup with marks is version 4; the release refuses it, naming the version.
+    // A backup with marks is version 4: a release that reads marks restores it, and an older one
+    // refuses it, naming the version.
     let archive = root.path().join("marks.jsonl");
     let created = o.command(&["backup", "create", archive.to_str().unwrap()]).output().unwrap();
     assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
@@ -6378,20 +6408,26 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
         .output()
         .unwrap();
     o.binary = PathBuf::from(st3());
-    assert!(!refused.status.success());
-    let error = String::from_utf8_lossy(&refused.stderr);
-    assert!(error.contains("unsupported claim backup format/version"), "{error}");
-    assert!(!target.exists());
+    if release_reads_marks {
+        assert!(refused.status.success(), "{}", String::from_utf8_lossy(&refused.stderr));
+        assert!(target.exists());
+    } else {
+        assert!(!refused.status.success());
+        let error = String::from_utf8_lossy(&refused.stderr);
+        assert!(error.contains("unsupported claim backup format/version"), "{error}");
+        assert!(!target.exists());
+    }
 
-    // Roll back: the release runs on this store and reads its own claims. A mark is this build's
-    // record only, so the release sees that message as sent, as the release note says.
+    // Roll back: the release runs on this store. One that reads marks sees the marked message as
+    // read; an older one reads its own claims only, and sees it as sent, as the release note says.
     o.stop();
     o.binary = old;
     o.start().await;
-    assert_eq!(state(&listed(&o).await), ["read", "sent", "sent"]);
+    let marked = if release_reads_marks { "read" } else { "sent" };
+    assert_eq!(state(&listed(&o).await), ["read", marked, "sent"]);
     read(&o, &third, "rolled-back-read").await;
     let fourth = send(&o, "rolled-back-send").await;
-    assert_eq!(state(&listed(&o).await), ["read", "sent", "read", "sent"]);
+    assert_eq!(state(&listed(&o).await), ["read", marked, "read", "sent"]);
 
     // Upgrade again: the mark still counts beside every claim either build wrote.
     o.stop();
@@ -6595,8 +6631,8 @@ async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
 /// one node upgraded in place and rolled back. The release's mail reads the same after the
 /// upgrade, a stream item joins the conversation behind the graph claim it arrived after, and a
 /// wait ends on a stream reply. A cursor the release gave out resumes on this build; one this
-/// build gave out asks the release for a full read rather than skipping. A CLI of either build
-/// waits on a daemon of the other for graph mail.
+/// build gave out asks an older release for a full read rather than skipping, and resumes on a
+/// release that reads stream items. A CLI of either build waits on a daemon of the other.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_conversation_and_waits_read_stream_items_across_upgrade_and_rollback() {
@@ -6611,6 +6647,8 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     let mut o = Node::new(root.path(), "o");
     o.binary = old.clone();
     o.start().await;
+    // seat_freshness_reads stands in for #4481/#4512: a release with it merges stream and graph mail.
+    let release_reads_stream = reads_seat_freshness(&o).await;
     let reader = "agent/fleet-reader";
     let _: Value = o
         .client()
@@ -6702,29 +6740,47 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     append_stream_item(&o, this_reply).await;
     let this_build = wait(&o, &new, &["--after", &first]);
     assert_eq!(this_build["message"]["subject"], this_reply, "{this_build}");
-    // After a stream item, a graph reply counts for this build's CLI. The release's CLI
-    // compares indexes across the stores and misses it, as the release note says.
+    // After a stream item, a graph reply counts for this build's CLI. An older release's CLI
+    // compares indexes across the stores and misses it, as the release note says; one that reads
+    // stream items finds it.
     let graph_reply = send(&o, "graph-reply", "agent/fleet-sender", reader).await;
     let this_build = wait(&o, &new, &["--after", this_reply]);
     assert_eq!(this_build["message"]["subject"], graph_reply, "{this_build}");
     append_stream_item(&o, release_reply).await;
     let unseen = send(&o, "graph-unseen", "agent/fleet-sender", reader).await;
-    assert_eq!(wait(&o, &old, &["--after", release_reply])["reply"], false);
+    let release = wait(&o, &old, &["--after", release_reply]);
+    if release_reads_stream {
+        assert_eq!(release["message"]["subject"], unseen, "{release}");
+    } else {
+        assert_eq!(release["reply"], false, "{release}");
+    }
 
-    // Roll back: this build's cursor asks the release for a full read; the release's mail and
-    // the graph reply read as before.
+    // Roll back. An older release asks for a full read on this build's cursor; one that reads
+    // stream items resumes it, with the stream and graph mail since. The release's mail and the
+    // graph reply read as before.
     o.stop();
     o.binary = old.clone();
     o.start().await;
-    let refused = person(&o).get::<Value>(&changes_path(Some(&upgraded_cursor))).await.unwrap_err().to_string();
-    assert!(refused.contains("cursor-gap"), "{refused}");
+    if release_reads_stream {
+        let (_, resumed) = changes(&o, Some(upgraded_cursor.clone())).await;
+        assert_eq!(
+            resumed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            [this_reply, graph_reply.as_str(), release_reply, unseen.as_str()],
+            "{resumed:?}"
+        );
+    } else {
+        let refused = person(&o).get::<Value>(&changes_path(Some(&upgraded_cursor))).await.unwrap_err().to_string();
+        assert!(refused.contains("cursor-gap"), "{refused}");
+    }
     let (reopened, _) = changes(&o, None).await;
     let later = send(&o, "rolled-back", PERSON, reader).await;
     let (_, after_rollback) = changes(&o, Some(reopened)).await;
     assert_eq!(after_rollback.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [later]);
-    // Either build's CLI waits on the release for graph mail.
+    // Either build's CLI waits on the release. An older release's CLI finds the graph reply it
+    // missed; one that reads stream items found that reply already, and finds the stream reply.
     let release = wait(&o, &old, &["--after", &first]);
-    assert_eq!(release["message"]["subject"], unseen, "{release}");
+    let expected = if release_reads_stream { release_reply } else { unseen.as_str() };
+    assert_eq!(release["message"]["subject"], expected, "{release}");
     let last = send(&o, "graph-last", "agent/fleet-sender", reader).await;
     let this_build = wait(&o, &new, &["--after", &first]);
     assert_eq!(this_build["message"]["subject"], last, "this build's CLI on the release reads the graph: {this_build}");

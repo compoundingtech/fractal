@@ -3,6 +3,7 @@
 import atexit
 import calendar
 import contextlib
+import errno
 import fcntl
 import hashlib
 import importlib.machinery
@@ -15,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import select
+import signal
 import shutil
 import socket
 import subprocess
@@ -1508,7 +1510,7 @@ class StTest(unittest.TestCase):
             self.assertGreater(float(times['light-start']), float(times['build-end']))  # one after another, in the listed order
             self.assertNotIn('----- fractal-test:', out)
 
-    def web_lanes(self, run, serial=False):
+    def web_lanes(self, run, serial=False, ledger=True):
         """Exercise the real orchestration and ledger; replace only the measured subprocesses with controlled checks."""
         self.commit('b.txt', 'two')
         shim = self.home / '.local/bin/cargo'
@@ -1519,6 +1521,8 @@ class StTest(unittest.TestCase):
                 mock.patch.object(st_test, 'BUILDS', frozenset({'demo', st_test.WEB})), \
                 mock.patch.object(st_test, 'run_limited', side_effect=run):
             result = self.run_st_test(extra_env={'ST_EVIDENCE_SERIAL': '1' if serial else '0'})
+        if not ledger:
+            return result, None
         record = json.loads((self.home / '.local/state/st-test/runs.jsonl').read_text().splitlines()[-1])
         return result, record
 
@@ -1667,6 +1671,200 @@ class StTest(unittest.TestCase):
         time.sleep(2.2)
         self.assertFalse(marker.exists(), 'the web child must stop when its slot supervisor times out')
 
+    def test_group_kill_waits_for_a_grandchild_holding_an_inherited_slot_fd(self):
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        self.addCleanup(os.close, write)
+        lock = Path(self.tmp.name) / 'inherited-slot'
+        expire, progress, done = threading.Event(), threading.Event(), threading.Event()
+        state = {}
+        script = f"""import fcntl, os, signal
+slot = open({str(lock)!r}, 'w')
+fcntl.flock(slot, fcntl.LOCK_EX)
+child = os.fork()
+if child:
+    os.write({write}, (str(os.getpid()) + ' ' + str(child) + '\\n').encode())
+else:
+    os.close({write})
+while True:
+    signal.pause()
+"""
+        class ControlledLimit:
+            def remaining(self):
+                if not expire.wait(10):
+                    raise RuntimeError('fixture never reached timeout')
+                return 0
+        real_killpg, real_open = os.killpg, os.pidfd_open
+        def leader_first(pgid, sig):
+            # Force the real observed ordering: the leader dies while a group member still owns the inherited fd.
+            os.kill(pgid, sig)
+        def opened(pid):
+            fd = real_open(pid)
+            if pid == state.get('grandchild'):
+                progress.set()
+            return fd
+        def run():
+            try:
+                state['code'] = st_test.run_limited([sys.executable, '-c', script], ControlledLimit(),
+                                                   kill_group=True, pass_fds=(write,), stdout=subprocess.DEVNULL)
+            except BaseException as error:
+                state['error'] = error
+            finally:
+                done.set(); progress.set()
+        with mock.patch.object(st_test.os, 'killpg', side_effect=leader_first), \
+                mock.patch.object(st_test.os, 'pidfd_open', side_effect=opened):
+            thread = threading.Thread(target=run)
+            thread.start()
+            try:
+                self.assertTrue(select.select([read], [], [], 5)[0], 'fixture did not start')
+                state['leader'], state['grandchild'] = map(int, os.read(read, 128).split())
+                expire.set()
+                self.assertTrue(progress.wait(5), 'cleanup did not observe the grandchild')
+                self.assertFalse(done.is_set(), 'leader exit was mistaken for whole-group completion')
+                self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 1)
+            finally:
+                expire.set()
+                if 'leader' in state:
+                    with contextlib.suppress(ProcessLookupError):
+                        real_killpg(state['leader'], signal.SIGKILL)
+                thread.join(10)
+            self.assertFalse(thread.is_alive(), 'group cleanup did not finish')
+        if 'error' in state:
+            raise state['error']
+        self.assertEqual(state['code'], 124)
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
+
+    def test_group_drain_excludes_zombies_and_fails_visibly_for_a_live_survivor(self):
+        proc = Path(self.tmp.name) / 'group-proc'
+        def member(pid, state, group):
+            path = proc / str(pid)
+            path.mkdir(parents=True, exist_ok=True)
+            fields = [state, '1', str(group)] + ['0'] * 16 + ['99']
+            (path / 'stat').write_text(f'{pid} (fixture ) name) ' + ' '.join(fields))
+        member(101, 'Z', 77)
+        member(102, 'S', 78)
+        member(104, 'S', 77)
+        (proc / '104/stat').write_text('incomplete stat record')
+        self.assertEqual(st_test.live_group_members(77, proc), {})
+        st_test.wait_group_exit(77, seconds=0, proc=proc)
+        member(103, 'S', 77)
+        with self.assertRaisesRegex(st_test.Failure, r'group 77.*103.*cleanup did not complete'):
+            st_test.wait_group_exit(77, seconds=0, proc=proc)
+        # A pidfd that never becomes ready must also hit the bound, rather than return or wait forever.
+        read, write = os.pipe()
+        self.addCleanup(os.close, write)
+        with mock.patch.object(st_test.os, 'pidfd_open', return_value=read), \
+                mock.patch.object(st_test.os, 'killpg'):
+            with self.assertRaisesRegex(st_test.Failure, r'cleanup did not complete'):
+                st_test.wait_group_exit(77, seconds=0.05, proc=proc)
+        with self.assertRaises(OSError):
+            os.fstat(read)  # the pinned descriptor is closed on the failure path too
+
+    def test_a_failed_group_drain_does_not_restart_the_cleanup_deadline(self):
+        with mock.patch.object(st_test.subprocess, 'Popen') as started, \
+                mock.patch.object(st_test, 'kill_limited', side_effect=st_test.GroupExitFailure('cleanup incomplete')) as killed:
+            started.return_value.__exit__.return_value = False
+            with self.assertRaises(st_test.GroupExitFailure):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
+        self.assertEqual(killed.call_count, 1, 'an expired cleanup bound must not start again')
+
+    def test_a_signal_during_group_drain_does_not_start_another_drain(self):
+        with mock.patch.object(st_test.subprocess, 'Popen') as started, \
+                mock.patch.object(st_test.os, 'killpg'), \
+                mock.patch.object(st_test, 'wait_group_exit', side_effect=KeyboardInterrupt()) as drained:
+            started.return_value.__exit__.return_value = False
+            with self.assertRaises(KeyboardInterrupt):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
+        self.assertEqual(drained.call_count, 1, 'a second signal must not reset the cleanup bound')
+
+    def test_an_interrupt_before_sigkill_still_signals_and_drains_the_group(self):
+        with mock.patch.object(st_test.subprocess, 'Popen') as started, \
+                mock.patch.object(st_test.os, 'killpg', side_effect=[KeyboardInterrupt(), None]) as killed, \
+                mock.patch.object(st_test, 'wait_group_exit') as drained:
+            started.return_value.__exit__.return_value = False
+            with self.assertRaises(KeyboardInterrupt):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
+        self.assertEqual(killed.call_count, 2, 'the interrupted first SIGKILL must still be sent')
+        self.assertEqual(drained.call_count, 1)
+
+    def test_failed_cancellation_of_a_late_group_discards_its_registration(self):
+        groups = st_test.ProcessGroups()
+        groups.cancel()
+        with mock.patch.object(st_test.subprocess, 'Popen'), \
+                mock.patch.object(st_test, 'kill_limited', side_effect=st_test.GroupExitFailure('cleanup incomplete')) as killed:
+            with self.assertRaises(st_test.GroupExitFailure):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True, groups=groups)
+        self.assertEqual(groups.processes, set())
+        self.assertEqual(killed.call_count, 1)
+
+    def test_cancellation_attempts_every_group_before_raising_a_drain_failure(self):
+        groups = st_test.ProcessGroups()
+        processes = {mock.Mock(), mock.Mock()}
+        for process in processes:
+            groups.add(process)
+        with mock.patch.object(st_test, 'kill_limited', side_effect=[st_test.GroupExitFailure('cleanup incomplete'), None]) as killed:
+            with self.assertRaises(st_test.GroupExitFailure):
+                groups.cancel()
+        self.assertEqual({call.args[0] for call in killed.call_args_list}, processes)
+        self.assertTrue(groups.cancelled)
+
+    def test_group_drain_waits_on_proc_when_the_kernel_has_no_pidfds(self):
+        proc = Path(self.tmp.name) / 'old-kernel-proc'
+        (proc / '123').mkdir(parents=True)
+        stat = proc / '123/stat'
+        stat.write_text('123 (fixture) ' + ' '.join(['S', '1', '77'] + ['0'] * 16 + ['99']))
+        def exit_while_waiting(seconds):
+            stat.unlink()
+        with mock.patch.object(st_test.os, 'killpg'), \
+                mock.patch.object(st_test.os, 'pidfd_open', side_effect=OSError(errno.ENOSYS, 'no pidfds')), \
+                mock.patch.object(st_test.time, 'sleep', side_effect=exit_while_waiting) as slept:
+            st_test.wait_group_exit(77, proc=proc)
+        self.assertEqual(slept.call_count, 1)
+
+    def test_group_drain_without_proc_waits_for_group_disappearance(self):
+        gone = False
+        def kill(pgid, sig):
+            if gone and sig == 0:
+                raise ProcessLookupError()
+        def exit_while_waiting(seconds):
+            nonlocal gone
+            gone = True
+        with mock.patch.object(st_test.os, 'killpg', side_effect=kill) as killed, \
+                mock.patch.object(st_test.time, 'sleep', side_effect=exit_while_waiting):
+            st_test.wait_group_exit(77, proc=Path(self.tmp.name) / 'no-proc')
+        self.assertEqual([call.args[1] for call in killed.call_args_list], [0, signal.SIGKILL, 0])
+
+    def test_portable_group_drain_reaps_its_own_leader(self):
+        with subprocess.Popen(['sleep', '60'], start_new_session=True) as process:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                st_test.wait_group_exit(process.pid, seconds=2, proc=Path(self.tmp.name) / 'no-proc', reap=process.poll)
+                self.assertIsNotNone(process.returncode)
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(process.pid, 0)
+            finally:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+
+    def test_group_drain_signals_a_late_member_found_on_rescan(self):
+        proc = Path(self.tmp.name) / 'late-group-proc'
+        def member(pid):
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / 'stat').write_text(f'{pid} (fixture) ' + ' '.join(['S', '1', '77'] + ['0'] * 16 + ['99']))
+        member(123)
+        killed = []
+        def kill(pgid, sig):
+            killed.append((pgid, sig))
+            if len(killed) == 1:
+                (proc / '123/stat').unlink()
+                member(124)
+            else:
+                (proc / '124/stat').unlink()
+        with mock.patch.object(st_test.os, 'killpg', side_effect=kill), \
+                mock.patch.object(st_test.os, 'pidfd_open', side_effect=ProcessLookupError()):
+            st_test.wait_group_exit(77, proc=proc)
+        self.assertEqual(killed, [(77, signal.SIGKILL), (77, signal.SIGKILL)])
+
     def test_web_output_and_wrapper_diagnostics_follow_the_build_without_interleaving(self):
         printed = threading.Event()
 
@@ -1734,6 +1932,40 @@ class StTest(unittest.TestCase):
 
     def test_interrupting_the_join_cancels_web_and_releases_its_slot(self):
         self.interrupted_web(during_join=True)
+
+    def test_failed_group_cancellation_still_joins_every_lane_before_unwinding(self):
+        ready = {name: threading.Event() for name in (st_test.WEB, 'light')}
+        finish = threading.Event()
+        joins = []
+        real_join = st_test.join_lanes
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name in ready:
+                ready[name].set()
+                finish.wait(5)
+            else:
+                self.assertTrue(all(event.wait(5) for event in ready.values()), 'background lanes did not start')
+            return 0
+
+        def join(lanes):
+            joins.append(tuple(lanes))
+            if len(joins) == 1:
+                raise SystemExit(143)
+            finish.set()
+            real_join(lanes)
+
+        try:
+            with mock.patch.object(st_test, 'join_lanes', join), \
+                    mock.patch.object(st_test.ProcessGroups, 'cancel', side_effect=st_test.GroupExitFailure('cleanup incomplete')):
+                (code, out, err), _ = self.web_lanes(run, ledger=False)
+            self.assertEqual(code, 'failure: cleanup incomplete', out + err)
+            self.assertEqual(len(joins), 2, 'a failed cancellation skipped joining the lanes')
+            self.assertTrue(all(not thread.is_alive() for thread, _ in joins[-1]), 'a lane escaped cleanup')
+        finally:
+            finish.set()
+            if joins:
+                real_join(joins[0])
 
     def test_a_web_group_started_after_cancellation_is_stopped_too(self):
         groups = st_test.ProcessGroups()
@@ -3829,16 +4061,20 @@ class PoolQueue(unittest.TestCase):
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)
         free, asked, waits, got = [False], [], {}, []
+        # Its third look, not a fixed 0.6 s: a waiter thread scheduled late on a loaded host had looked only twice by then (#4807).
+        third = threading.Event()
 
         def slot_ready():
             asked.append(time.monotonic())
+            if len(asked) >= 3:
+                third.set()
             return free[0], 'test: 1 of 1 heavy slots busy'
 
         said = io.StringIO()
         with contextlib.redirect_stderr(said):
             waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)))
             waiter.start()
-            time.sleep(0.6)
+            self.assertTrue(third.wait(30), f'the waiter looked {len(asked)} time(s) in 30 s')
             self.assertEqual(got, [])                                           # both trees are free, but its build would wait for a slot
             for n in range(2):                                                  # and it holds neither while it waits (only for its look)
                 with open(self.root / f'tree-{n}.lock', 'w') as probe:
