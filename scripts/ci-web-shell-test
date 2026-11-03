@@ -24,6 +24,7 @@ HASHED_FILES = (
     'nix/web-shell-inputs.json',
     'scripts/ci-web-shell',
     'scripts/ci-web-shell-inputs.jq',
+    'scripts/prepare-pnpm-source-inputs.py',
 )
 TARGET = '.#devShells.x86_64-linux.web.drvPath'
 

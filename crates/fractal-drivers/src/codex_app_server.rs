@@ -36,7 +36,7 @@ const CODEX_CONTROL_MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 use crate::provider_session::ProviderProcess;
 use crate::{
-    delivery_ledger, ding, driver_diagnostic, harness_context, harness_state, message, run, status,
+    delivery_ledger, ding, driver_diagnostic, harness_context, harness_state, message, run,
 };
 
 const REQUIRED_CODEX_CLIENT_REQUESTS: &[&str] = &[
@@ -658,7 +658,6 @@ struct CodexInboxDelivery {
     next_presence_refresh: Instant,
     next_context_transcript_refresh: Instant,
     head: Option<message::Message>,
-    suppressed: bool,
     ledger: delivery_ledger::Ledger,
     pending: Option<PendingCodexDelivery>,
     pending_snapshot: Option<PendingCodexSnapshot>,
@@ -714,15 +713,11 @@ impl CodexInboxDelivery {
         }
         let (wake_tx, wake) = mpsc::channel();
         crate::push_mailbox::watch(&config.agent_dir, wake_tx.clone());
-        // Scoped to inbox + status: this pump's own process group writes runtime records (presence
-        // refreshes, harness-state transitions) into the same agent dir, and those must not wake it.
+        // Watch only inbox delivery inputs: this pump's own harness-state writes must not wake it.
         let watcher = crate::watch::watch_delivery_inputs_with_status(
             &config.agent_dir,
             wake_tx,
-            matches!(
-                config.control,
-                crate::session_control::SessionControl::Catalog
-            ),
+            false,
         );
         let identity = config.identity.clone();
         let ledger = delivery_ledger::Ledger::open(
@@ -770,22 +765,11 @@ impl CodexInboxDelivery {
         // sequence: HC-T04 leaves the numbers unfenced on purpose, because the worst a straggler
         // can publish here is a reading older than the reader thinks — which `observedAtMs`
         // already says — rather than a live state that is not live.
-        let context_writer = if matches!(
-            config.control,
-            crate::session_control::SessionControl::Graph(_)
-        ) {
-            harness_context::Writer::new_paths(
-                &config.agent_dir,
-                config.identity.clone(),
-                harness_context::Harness::Codex,
-            )
-        } else {
-            harness_context::Writer::new(
-                &config.agent_dir,
-                config.identity.clone(),
-                harness_context::Harness::Codex,
-            )
-        };
+        let context_writer = harness_context::Writer::new_paths(
+            &config.agent_dir,
+            config.identity.clone(),
+            harness_context::Harness::Codex,
+        );
         let context = match context_writer {
             Ok(writer) => Some(CodexContextProducer::new(
                 writer.with_session(runtime.incarnation()),
@@ -829,7 +813,6 @@ impl CodexInboxDelivery {
             next_presence_refresh: Instant::now(),
             next_context_transcript_refresh: Instant::now(),
             head: None,
-            suppressed: false,
             ledger,
             pending: None,
             pending_snapshot: None,
@@ -1326,10 +1309,6 @@ impl CodexInboxDelivery {
         }
         if now >= self.next_presence_refresh {
             // Session-owned observed state stays fresh only while this wrapper has evidence.
-            // Catalog control also preserves its product's status lease; graph control has no file.
-            self.config
-                .control
-                .refresh(&status::status_path(&self.config.agent_dir));
             if self.harness_evidence {
                 let _ = self.harness_writer.heartbeat();
             }
@@ -1369,22 +1348,12 @@ impl CodexInboxDelivery {
             self.snapshot_attempts = 0;
             self.verified_snapshot = None;
         }
-        self.suppressed = matches!(
-            self.config.control,
-            crate::session_control::SessionControl::Catalog
-        ) && self
-            .config
-            .control
-            .held(&status::status_path(&self.config.agent_dir));
         self.next_inbox_refresh = Instant::now() + INBOX_REFRESH_FALLBACK;
         Ok(())
     }
 
     fn delivery_held(&self) -> bool {
-        match &self.config.control {
-            crate::session_control::SessionControl::Catalog => self.suppressed,
-            crate::session_control::SessionControl::Graph(gate) => gate.held(),
-        }
+        self.config.control.held()
     }
 
     fn maybe_request(&mut self, state: &CodexControlState) -> Result<Option<Value>> {
@@ -1516,13 +1485,8 @@ impl CodexInboxDelivery {
 
     fn maybe_snapshot_request(&mut self, state: &CodexControlState) -> Result<Option<Value>> {
         self.refresh_if_due()?;
-        // A graph hold blocks input, not a read-only status snapshot. Catalog DND retains
-        // its historical suppression rule.
-        let catalog_held = matches!(
-            self.config.control,
-            crate::session_control::SessionControl::Catalog
-        ) && self.suppressed;
-        if self.pending.is_some() || !state.subscribed || catalog_held {
+        // A graph hold blocks input, not a read-only status snapshot.
+        if self.pending.is_some() || !state.subscribed {
             return Ok(None);
         }
         if self
@@ -2728,7 +2692,7 @@ pub fn run_controlled_paths(
     } else {
         codex_argv
     };
-    // Install before any protocol preflight child exists, exactly as the catalog entry point does.
+    // Install before any protocol preflight child exists.
     crate::provider_session::install_signal_handler();
     let producer_version = ensure_supported_protocol(&codex_argv[0])?;
     secure_dir(driver_root)?;
