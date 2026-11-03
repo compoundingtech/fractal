@@ -386,7 +386,7 @@ mod tests {
             + "\n";
         std::fs::write(&archive, &line).unwrap();
         let report = summarize_current(root.path(), since, until, 10).unwrap();
-        assert_eq!(report.files, [archive.clone()]);
+        assert_eq!(report.files.as_slice(), std::slice::from_ref(&archive));
         assert_eq!(report.calls, 1);
         std::fs::write(&current, &line).unwrap();
         let report = summarize_current(root.path(), since, until, 10).unwrap();
