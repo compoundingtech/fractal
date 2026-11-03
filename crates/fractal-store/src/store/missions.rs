@@ -281,7 +281,11 @@ impl Store {
             }))
             .map_err(internal)?,
         ));
+        // The lend records where its hold goes; scheduled starts at :00 and :30 queue every write
+        // behind it. Nothing in it asks this thread for another writer loan.
+        let stages = holds::Stages::begin();
         let mut connection = self.connection.write();
+        stages.enter("existing-occurrence");
         if let Some(subject) = occurrence_subject
             && let Some(run) = connection
                 .query_row(
@@ -292,8 +296,11 @@ impl Store {
                 .optional()
                 .map_err(internal)?
         {
-            return mission_run_view_tx(&connection, &run).map_err(internal);
+            // The occurrence's run is committed: build its view on a reader, not the writer.
+            drop(connection);
+            return mission_run_view_tx(&self.readers.get(), &run).map_err(internal);
         }
+        stages.enter("idempotency");
         smallclaims::store::idempotency::cached_response(&connection, &request.idempotency_key)?;
         if let Some((response, stored_hash)) = connection
             .query_row(
@@ -312,6 +319,7 @@ impl Store {
             }
             return serde_json::from_str(&response).map_err(internal);
         }
+        stages.enter("admission");
         let transaction = connection.transaction().map_err(internal)?;
         owned_sets::guard_mission_start(&transaction, mission_id)?;
         // Recheck naming availability under the writer lock; a conflicting replicated
@@ -321,6 +329,7 @@ impl Store {
             && let Some(reason) = stale_ref_request_tx(&transaction, resource, discovery).map_err(internal)? {
             return Err(St3Error::new("stale-ref-head", reason));
         }
+        stages.enter("inputs");
         let inputs = resolve_mission_run_inputs(&transaction, &mission, &request.inputs)?;
         if let Some((resource, discovery)) = latest_ref {
             if let Some(reason) = stale_pull_request_request_tx(&transaction, resource, discovery)
@@ -357,7 +366,9 @@ impl Store {
                 }
             }
         }
+        stages.enter("capacity");
         enforce_mission_run_capacity(&transaction, &mission)?;
+        stages.enter("run-rows");
         let subject = occurrence_subject.map(str::to_owned).unwrap_or_else(|| {
             self.mission_run_subject_for_idempotency_key(&request.idempotency_key)
         });
@@ -476,6 +487,7 @@ impl Store {
                 )
                 .map_err(internal)?;
         }
+        stages.enter("claims");
         let body = json!({
             "fields": {
                 "status": "running",
@@ -525,7 +537,9 @@ impl Store {
             None,
         )
         .map_err(internal)?;
-        let view = mission_run_view_tx(&transaction, &run_id).map_err(internal)?;
+        stages.enter("view");
+        let view = created_mission_run_view_tx(&transaction, &run_id).map_err(internal)?;
+        stages.enter("idempotency-record");
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-ha48fc9d01a74 owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
@@ -541,6 +555,7 @@ impl Store {
                 params![opaque_cache_key(&request.idempotency_key), request_hash],
             )
             .map_err(internal)?;
+        stages.enter("commit");
         transaction.commit().map_err(internal)?;
         Ok(view)
     }
