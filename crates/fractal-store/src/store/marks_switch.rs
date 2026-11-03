@@ -172,4 +172,68 @@ mod tests {
         assert!(!store.refresh_marks_switch(&[]).unwrap().0);
         assert!(!store.marks_switched().unwrap());
     }
+
+    /// Each statement a barrier check starts, with the full-scan steps it took.
+    type Traced = Mutex<Vec<(String, i32)>>;
+    unsafe extern "C" fn traced(event: u32, context: *mut std::ffi::c_void, statement: *mut std::ffi::c_void, _: *mut std::ffi::c_void) -> i32 {
+        if event == rusqlite::ffi::SQLITE_TRACE_PROFILE as u32 {
+            // SAFETY: for a profile event SQLite passes the statement, live for the callback, and
+            // `context` is the test's `Traced`, which outlives the registration.
+            let (sql, scans) = unsafe {
+                let statement = statement.cast::<rusqlite::ffi::sqlite3_stmt>();
+                (std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement)).to_string_lossy().into_owned(),
+                 rusqlite::ffi::sqlite3_stmt_status(statement, rusqlite::ffi::SQLITE_STMTSTATUS_FULLSCAN_STEP, 1))
+            };
+            unsafe { &*context.cast::<Traced>() }.lock().unwrap().push((sql, scans));
+        }
+        0
+    }
+    fn traced_blockers(store: &Store) -> Vec<(String, i32)> {
+        let connection = store.readers.get();
+        let statements: Traced = Mutex::new(Vec::new());
+        // SAFETY: `statements` outlives the registration, which ends before it drops.
+        unsafe {
+            rusqlite::ffi::sqlite3_trace_v2(connection.handle(), rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                Some(traced), std::ptr::from_ref(&statements).cast_mut().cast());
+        }
+        let result = blockers(&connection, &store.origin, &["cedar".to_owned()]);
+        unsafe { rusqlite::ffi::sqlite3_trace_v2(connection.handle(), 0, None, std::ptr::null_mut()) };
+        assert_eq!(result.unwrap().len(), 1, "cedar, configured, has not started");
+        statements.into_inner().unwrap()
+    }
+
+    /// The daemon checks the barrier every minute, so a check reads indexes only: each writer
+    /// seek and each member's start is one indexed step, none scans a table, and the check runs
+    /// as many statements over a long history as over a short one.
+    #[test]
+    fn a_barrier_check_seeks_each_writer_and_never_scans_the_history() {
+        let store = Store::open_memory("alder").unwrap();
+        enable(&store);
+        let peer = Store::open_memory("birch").unwrap();
+        started(&store, true);
+        started(&peer, true);
+        sync(&peer, &store);
+        let short = traced_blockers(&store);
+        for index in 0..300 {
+            for member in [&store, &peer] {
+                claim(member, &format!("message/{}-{index}", member.origin), "message.sent", Some("person/ash"),
+                    json!({"from": "person/ash", "to": "person/rowan", "content": "history", "status": "sent"}));
+            }
+        }
+        sync(&peer, &store);
+        let long = traced_blockers(&store);
+        assert_eq!(long.len(), short.len(), "{long:#?}");
+        for (table, column) in WRITER_TABLES {
+            let seek = writer_seek(table, column);
+            // birch, alder and the end of the table, at most.
+            assert!(long.iter().filter(|(sql, _)| *sql == seek).count() <= 3, "{long:#?}");
+        }
+        assert!(long.iter().all(|(_, scans)| *scans == 0), "a barrier statement scanned a table: {long:#?}");
+        let connection = store.readers.get();
+        for (table, column) in WRITER_TABLES {
+            let plans = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", writer_seek(table, column))).unwrap()
+                .query_map([""], |row| row.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert!(plans.iter().all(|plan| plan.starts_with("SEARCH") && plan.contains("INDEX")), "{table}: {plans:?}");
+        }
+    }
 }
