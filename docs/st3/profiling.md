@@ -124,6 +124,20 @@ has no executed-job sample. Individual submitters retain their profile CPU,
 I/O and SQL attribution. All accounting scopes finish before acknowledgements,
 so callers cannot snapshot their completed operations before samples arrive.
 
+`task_cpu::blocking` starts a profile operation only when task metrics are on, so with metrics off
+its work shows as `(unlabeled tokio-rt-worker)`, which is also what Tokio names its blocking
+threads. The loops whose work is otherwise unlabeled use `task_cpu::profiled_blocking`, which names the
+work in either mode:
+- the publication evidence loop (`publication.evidence_ready`, `publication.advance_evidence`);
+- the signature bootstrap, page by page:
+  - `maintenance.signature_bootstrap_page` (an inventory or migration page);
+  - `maintenance.signature_bootstrap_judgment` (a judging loan);
+  - `maintenance.signature_bootstrap_retire` (a legacy retirement page);
+  - `maintenance.signature_bootstrap_state` and `maintenance.signature_bootstrap_verdicts_pending`
+    (its progress reads).
+
+The bootstrap's quiet intervals between pages are in none of them.
+
 The batch `WriterHold` and telemetry `Holding` guard also drop before the first
 ACK is sent, after postcommit callbacks and sample publication. Previously they
 dropped when the batch function returned, after sending every ACK. The holds

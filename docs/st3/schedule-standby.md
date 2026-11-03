@@ -65,6 +65,11 @@ finishes where it started; there is no manual takeover or mid-run handback. The
 primary's cold/catch-up guard consumes available reached/run facts before
 admitting work. If it knows an occurrence already ran, it does not replay it.
 
+A standby never starts work the primary requested. A request the primary
+recorded but never started is not open work on the standby, so a primary that
+stops between requesting and starting its work does not hold the standby's later
+occurrences. That occurrence stays the primary's request.
+
 ## Catch-up, missing work, and inspection
 
 Existing catch-up policies apply: `latest` starts the current missed occurrence
