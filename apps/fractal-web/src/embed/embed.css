@@ -1,3 +1,0 @@
-.embed-wide { height: 100%; }
-.embed-narrow { width: min(100%, 440px); height: 100%; margin: 0 auto; }
-.capture-pending { box-sizing: border-box; height: 100%; padding: 32px; background: var(--ds-background-100); color: var(--ds-gray-1000); font: 14px/1.6 system-ui; }
