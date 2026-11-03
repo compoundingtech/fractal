@@ -128,6 +128,41 @@ typecheck, Storybook build, full play suite and controls cover those fixes.
 Times include shell startup but exclude admission queue waits. No dependency
 installation was needed.
 
+Re-review fixes #15–#17 were verified serially on dev3 on 2026-11-03 at
+`e5b40bc507441e3ecdb8283cc1733ca0583db25d`. Closing the disclosure restores
+**Add note** while retaining the draft; per-target create state survives pane
+unmounts, and a settled create does not steal focus from the transcript.
+Unavailable drafts remain editable with submit disabled. The selected-row menu
+names **Add note…** and describes its conversation-only N shortcut.
+All requested checks passed without further source changes or weakened tests.
+
+| Re-review verification run | Result | Peak RSS (KiB) | Elapsed |
+| --- | --- | ---: | ---: |
+| UI kit typecheck | Pass; 0 errors | 1,795,836 | 23.99 s |
+| Web typecheck | Pass; 0 errors | 2,061,432 | 37.79 s |
+| Notes/live-source Vitest | 82/82 passed in 2 files | 1,164,808 | 8.26 s |
+| Kit scenario story checks | 814/814 passed in 1 file | 2,311,124 | 2 m 45.47 s |
+| Storybook build | Pass; 3,321 modules | 2,274,780 | 31.26 s |
+| Complete notes play gate | 124/124 passed across 31 stories | 1,175,656 | 1 m 14.15 s |
+
+The complete gate used `^fractal-(plugins|explore)-notes-`, accessibility on,
+and no omissions; receipts are in dev3 `tmp/notes-2867-rr-play`.
+Each requested negative control used `negativeControl:true`, rejected all
+four scheme/width cases, and exited 1:
+
+| Re-review negative control (story suffix) | Exit / rejected cases | Peak RSS (KiB) | Elapsed |
+| --- | --- | ---: | ---: |
+| Note composer `all-states` | 1 / 4 of 4 | 1,169,700 | 10.74 s |
+| Explore keyboard N popover `all-states` | 1 / 4 of 4 | 1,163,492 | 16.16 s |
+| Web entry points `all-states` | 1 / 4 of 4 | 1,178,620 | 13.65 s |
+| Web entry points `feed-states-light-440` | 1 / 4 of 4 | 1,167,536 | 8.94 s |
+| Web entry points `touch-light-440` | 1 / 4 of 4 | 1,167,732 | 10.43 s |
+
+Measurements include the remote Nix shell startup, exclude admission waits,
+and report GNU time's maximum resident set size. Every remote run pulled the
+branch fast-forward first and used nice/gate-slot admission; all ran before
+15:00Z. No builds ran on dev5, and no commits were made on dev3.
+
 ## Scope
 
 Defines: the note resource, its claim, its projection, the HTTP API, the CLI,
