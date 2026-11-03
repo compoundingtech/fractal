@@ -2972,7 +2972,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let record = harness_state_path(tmp.path());
         let observer =
-            SessionObserver::new(tmp.path(), "example-linux.worker", "claude", "example-linux.worker").unwrap();
+            SessionObserver::new_claude_with_primary_ownership(
+            tmp.path(),
+            "example-linux.worker",
+            "example-linux.worker",
+            false,
+        ).unwrap();
 
         // A hook process wrote a blocked observation between wrapper ticks — carrying the
         // wrapper's exported token, exactly as the env plumbing arranges in a real seat.
@@ -3003,7 +3008,12 @@ mod tests {
         let presence = status::status_path(tmp.path());
         let record = harness_state_path(tmp.path());
         let observer =
-            SessionObserver::new(tmp.path(), "example-linux.worker", "claude", "example-linux.worker").unwrap();
+            SessionObserver::new_claude_with_primary_ownership(
+            tmp.path(),
+            "example-linux.worker",
+            "example-linux.worker",
+            false,
+        ).unwrap();
         let stop = AtomicBool::new(false);
 
         // A turn is in flight when the provider dies by signal.
@@ -3038,7 +3048,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let presence = status::status_path(tmp.path());
         let observer =
-            SessionObserver::new(tmp.path(), "example-linux.worker", "claude", "example-linux.worker").unwrap();
+            SessionObserver::new_claude_with_primary_ownership(
+            tmp.path(),
+            "example-linux.worker",
+            "example-linux.worker",
+            false,
+        ).unwrap();
         let stop = AtomicBool::new(false);
 
         run_provider(
@@ -3089,7 +3104,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let record = harness_state_path(tmp.path());
         let observer =
-            SessionObserver::new(tmp.path(), "example-linux.worker", "claude", "example-linux.worker").unwrap();
+            SessionObserver::new_claude_with_primary_ownership(
+            tmp.path(),
+            "example-linux.worker",
+            "example-linux.worker",
+            false,
+        ).unwrap();
         observer.ended("exit 0");
 
         // The straggler hook shares the session token (env plumbing) and is suppressed.
@@ -3136,7 +3156,12 @@ mod tests {
 
         // A claimed new session — the wrapper path — supersedes the old terminal record.
         let next =
-            SessionObserver::new(tmp.path(), "example-linux.worker", "claude", "example-linux.worker").unwrap();
+            SessionObserver::new_claude_with_primary_ownership(
+            tmp.path(),
+            "example-linux.worker",
+            "example-linux.worker",
+            false,
+        ).unwrap();
         let mut fresh = harness_state::Writer::new(
             tmp.path(),
             "example-linux.worker",
