@@ -84,12 +84,22 @@ pub fn capture_effective(
     }
     // Native instruction conventions: https://github.com/can1357/oh-my-pi/blob/main/docs/context-files.md
     // Include workspace and ancestor instructions even when no render operation owns them.
-    for ancestor in workspace.ancestors() {
+    for ancestor in workspace.ancestors().chain(Path::new(&member.cwd).ancestors()) {
         for name in ["AGENTS.md", "CLAUDE.md", "PERSONA.md", ".omp/AGENTS.md", ".omp/RULES.md",
             ".claude/CLAUDE.md", ".omp/config.yml", ".omp/config.yaml", ".omp/mcp.json",
             ".mcp.json", ".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml"] {
             let path = normalize(ancestor.join(name));
             if path.is_file() { paths.insert(path); }
+        }
+    }
+    for (variable, names) in [("HOME", &[".claude/CLAUDE.md", ".omp/AGENTS.md", ".omp/config.yml", ".codex/config.toml"][..]),
+        ("CLAUDE_CONFIG_DIR", &["CLAUDE.md", "settings.json"]), ("CODEX_HOME", &["AGENTS.md", "config.toml"]),
+        ("PI_CODING_AGENT_DIR", &["AGENTS.md", "settings.json", "mcp.json"])] {
+        if let Some(base) = environment.get(variable) {
+            for name in names {
+                let path = normalize(Path::new(base).join(name));
+                if path.is_file() { paths.insert(path); }
+            }
         }
     }
     let resolve = |value: &str| {
