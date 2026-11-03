@@ -1,6 +1,7 @@
 //! Launch-time evidence, independent of publication and restart policy.
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -33,33 +34,109 @@ impl Contract {
     }
 }
 
+/// Capture the next declaration, using its member environment.
+pub fn capture(store: &Store, desired: &DesiredSubject, binaries: &BTreeMap<String, String>) -> Result<Contract> {
+    let member = desired.member.as_ref().context("launch contract needs a member")?;
+    capture_effective(store, desired, binaries, &member.environment, false)
+}
 
-/// Resolve prompt bytes with the same planner that materializes the declaration.
-/// Only digests leave this boundary; prompts and tool configuration can contain secrets.
-pub fn capture(
+/// Only digests leave this boundary. Running evidence reads installed destinations, never sources.
+pub fn capture_effective(
     store: &Store,
     desired: &DesiredSubject,
     binaries: &BTreeMap<String, String>,
+    environment: &BTreeMap<String, String>,
+    running: bool,
 ) -> Result<Contract> {
     let member = desired.member.as_ref().context("launch contract needs a member")?;
     let workspace = Path::new(&member.workspace);
+    let launch = match &member.launch {
+        crate::model::LaunchSpec::Shell(source) => vec![source.as_str()],
+        crate::model::LaunchSpec::Argv(argv) => argv.iter().enumerate().map(|(i, arg)| {
+            // The wrapper executable belongs to binary identity, not prompt identity.
+            if i == 0 && argv.get(1).is_some_and(|arg| arg == "driver") { "driver-wrapper" } else { arg }
+        }).collect(),
+    };
+    let normalize = |path: PathBuf| path.components().filter(|c| *c != Component::CurDir).collect::<PathBuf>();
     let mut files = BTreeMap::new();
-    if let Some(render) = desired.desired["children"].as_array()
-        .and_then(|children| children.iter().find(|child| crate::render::name(child) == Some("render")))
+    let mut paths = BTreeSet::new();
+    if let Some(render) = crate::render::children(&desired.desired).iter()
+        .find(|child| crate::render::name(child) == Some("render"))
     {
-        let (writes, _) = crate::render::prepare_render(store, render, workspace)?;
-        for write in writes.into_iter().filter(|write| !write.append_lines) {
-            let path = write.destination.strip_prefix(workspace).unwrap_or(&write.destination);
-            files.insert(path.to_string_lossy().into_owned(),
-                (hex::encode(Sha256::digest(&write.bytes)), write.mode));
+        if running {
+            for operation in crate::render::children(render) {
+                let index = match crate::render::name(operation) {
+                    Some("copy") => 1,
+                    Some("file" | "json-upsert" | "ensure-line") => 0,
+                    Some("git-exclude") => continue,
+                    _ => anyhow::bail!("unknown render operation"),
+                };
+                let destination = operation["arguments"][index].as_str().context("render destination is not text")?;
+                paths.insert(normalize(workspace.join(destination)));
+            }
+        } else {
+            let (writes, _) = crate::render::prepare_render(store, render, workspace)?;
+            for write in writes.into_iter().filter(|write| !write.append_lines) {
+                context_imports(&write.destination, &write.bytes, &mut paths)?;
+                files.insert(normalize(write.destination), (hex::encode(Sha256::digest(&write.bytes)), write.mode));
+            }
         }
     }
-    let prompt = smallclaims::hash::canonical_hash(&(
-        "launch-prompt-v1", &member.driver, crate::model::authored_launch(&member.launch), files,
-    ))?;
+    // Native instruction conventions: https://github.com/can1357/oh-my-pi/blob/main/docs/context-files.md
+    // Include workspace and ancestor instructions even when no render operation owns them.
+    for ancestor in workspace.ancestors() {
+        for name in ["AGENTS.md", "CLAUDE.md", "PERSONA.md", ".omp/AGENTS.md", ".omp/RULES.md",
+            ".claude/CLAUDE.md", ".omp/config.yml", ".omp/config.yaml", ".omp/mcp.json",
+            ".mcp.json", ".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml"] {
+            let path = normalize(ancestor.join(name));
+            if path.is_file() { paths.insert(path); }
+        }
+    }
+    let resolve = |value: &str| {
+        if let Some(relative) = value.strip_prefix("~/") {
+            environment.get("HOME").map(|home| Path::new(home).join(relative))
+                .context("HOME is required for a launch input path")
+        } else { Ok(workspace.join(value)) }
+    };
+    // These native options accept files (Claude also accepts inline JSON).
+    for (i, argument) in launch.iter().enumerate() {
+        let (flag, value) = argument.split_once('=').unwrap_or((argument, launch.get(i + 1).copied().unwrap_or("")));
+        if matches!(flag, "--settings" | "--mcp-config" | "--config" | "--system-prompt-file" | "--append-system-prompt-file")
+            && !value.is_empty() && !value.starts_with('{')
+        {
+            paths.insert(normalize(resolve(value)?));
+        }
+    }
+    if let Some(overlays) = environment.get("PI_CONFIG_FILES") {
+        for path in std::env::split_paths(overlays) { paths.insert(normalize(workspace.join(path))); }
+    }
+    while let Some(path) = paths.pop_first() {
+        if !files.contains_key(&path) {
+            let bytes = std::fs::read(&path).with_context(|| format!("read launch input {}", path.display()))?;
+            context_imports(&path, &bytes, &mut paths)?;
+            let mode = std::fs::metadata(&path)?.permissions().mode() & 0o7777;
+            files.insert(path, (hex::encode(Sha256::digest(bytes)), mode));
+        }
+    }
+    let files: BTreeMap<_, _> = files.into_iter().map(|(path, value)| {
+        (path.strip_prefix(workspace).unwrap_or(&path).to_string_lossy().into_owned(), value)
+    }).collect();
+    let prompt = smallclaims::hash::canonical_hash(&("launch-prompt-v1", &member.driver, launch, files))?;
     let binary = smallclaims::hash::canonical_hash(&("launch-binary-v1", binaries))?;
     let digest = smallclaims::hash::canonical_hash(&("launch-contract-v1", &prompt, &binary))?;
     Ok(Contract { version: 1, digest, prompt, binary })
+}
+
+fn context_imports(path: &Path, bytes: &[u8], paths: &mut BTreeSet<PathBuf>) -> Result<()> {
+    if path.extension().is_some_and(|extension| extension == "md")
+        && let Ok(text) = std::str::from_utf8(bytes)
+    {
+        for import in text.split_whitespace().filter_map(|word| word.strip_prefix('@')) {
+            let imported = path.parent().unwrap_or(Path::new(".")).join(import);
+            if imported.is_file() { paths.insert(std::fs::canonicalize(imported)?); }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -120,6 +197,64 @@ mod tests {
             assert_eq!(new.drift(&old), Some(Drift { prompt: true, binary: false }));
             assert_eq!(new.drift(&new), Some(Drift { prompt: false, binary: false }));
         }
+    }
+
+    #[test]
+    fn authored_settings_and_channels_without_model_are_retained() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let mut desired = declaration(root.path());
+        desired.member.as_mut().unwrap().launch = crate::model::LaunchSpec::Argv(vec![
+            "/launch/one".into(), "driver".into(), "claude".into(), "--".into(),
+            "claude".into(), "--settings".into(), "{}".into(), "--channels".into(), "first".into(),
+        ]);
+        let old = capture(&store, &desired, &BTreeMap::new()).unwrap();
+        for (index, value) in [(6, "{\"tools\":[]}"), (8, "second")] {
+            let mut changed = desired.clone();
+            let crate::model::LaunchSpec::Argv(argv) = &mut changed.member.as_mut().unwrap().launch else { panic!() };
+            argv[index] = value.into();
+            assert_ne!(old.prompt, capture(&store, &changed, &BTreeMap::new()).unwrap().prompt);
+        }
+        let crate::model::LaunchSpec::Argv(argv) = &mut desired.member.as_mut().unwrap().launch else { panic!() };
+        argv[0] = "/launch/two".into();
+        assert_eq!(old, capture(&store, &desired, &BTreeMap::new()).unwrap());
+    }
+
+    #[test]
+    fn unrendered_ancestor_context_and_declared_tools_change_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let mut desired = declaration(&workspace);
+        let crate::model::LaunchSpec::Argv(argv) = &mut desired.member.as_mut().unwrap().launch else { panic!() };
+        argv.extend(["--mcp-config".into(), "tools.json".into()]);
+        std::fs::write(workspace.join("tools.json"), "{}").unwrap();
+        for path in [root.path().join("AGENTS.md"), workspace.join("CLAUDE.md"), workspace.join("tools.json")] {
+            std::fs::write(&path, "before").unwrap();
+            let old = capture(&store, &desired, &BTreeMap::new()).unwrap();
+            std::fs::write(&path, "after").unwrap();
+            assert_ne!(old.prompt, capture(&store, &desired, &BTreeMap::new()).unwrap().prompt);
+        }
+    }
+
+    #[test]
+    fn queued_source_changes_do_not_replace_installed_launch_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let source = root.path().join("source");
+        std::fs::write(&source, "A").unwrap();
+        let mut desired = declaration(root.path());
+        render(&mut desired, &source, "./AGENTS.md");
+        crate::render::atomic_write_mode(&root.path().join("AGENTS.md"), b"A", 0o644).unwrap();
+        let old = capture(&store, &desired, &BTreeMap::new()).unwrap();
+        std::fs::write(&source, "B").unwrap();
+        let next = capture(&store, &desired, &BTreeMap::new()).unwrap();
+        assert_ne!(old.prompt, next.prompt);
+        std::fs::remove_file(&source).unwrap();
+        assert_eq!(old, capture_effective(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), true).unwrap());
+        crate::render::atomic_write_mode(&root.path().join("AGENTS.md"), b"B", 0o644).unwrap();
+        assert_eq!(next, capture_effective(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), true).unwrap());
     }
 
     #[test]
