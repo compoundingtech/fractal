@@ -14,8 +14,10 @@ GitHub is only the transport. One `pull` (scripts/evidence-log.timer runs it eve
   3. appends one line per accepted record and check to the log, and one per accepted input-index ref;
   4. commits the log, ALWAYS, even with nothing new: the commit's message carries its time, and a verifier refuses a head older
      than its bound, so a deleted or rewound log costs skips and never makes an old one count;
-  5. with --publish, pushes the head to `refs/evidence-log/main` on the remote; with --restore, pushes back any logged record
-     the remote no longer has (and reports it: `missing`).
+  5. with --publish, pushes the head to `refs/evidence-log/main` on the remote, only as a fast-forward of the published head
+     this run fetched, and leased on it: a host whose chain does not continue the published one (a second publisher, or a copy
+     not seeded from the remote) refuses loudly and publishes nothing, so two publishers never overwrite each other's heads;
+     with --restore, pushes back any logged record the remote no longer has (and reports it: `missing`).
 `gc` appends a GC line for every tree and input key of an evidence-gc plan (`--plan-out`) and drops their copies: run it BEFORE
 the plan's deletions (evidence-gc --before-delete), so a pull does not restore what GC removed. It also keeps the names of the
 plan's refs as PENDING DELETIONS: a pull that runs between the GC lines and the deletions does not log them again after the GC
@@ -266,8 +268,29 @@ def write_pending(repo, value):
     os.replace(path + '.new', path)
 
 
-def publish(repo, remote, summary):
-    done = git(repo, 'push', '--porcelain', remote, f'+{LOG}:{LOG}', check=False)
+def published_head(repo, remote):
+    """The remote's log head now (None when it has none), fetched into REMOTE_LOG."""
+    listed = git(repo, 'ls-remote', remote, LOG).stdout.decode().split()
+    published = listed[0] if listed and OID.match(listed[0]) else None
+    if published and published != refs(repo, REMOTE_LOG).get(REMOTE_LOG):
+        git(repo, 'fetch', '--no-tags', '-q', remote, f'+{LOG}:{REMOTE_LOG}', check=False)
+    return published
+
+
+def publish(repo, remote, summary, published):
+    """Push the log head as a fast-forward of `published`, the remote's head this run fetched (None: the remote had none).
+    The push replaces refs/evidence-log/main, so a host whose head does not continue the published one would drop every head
+    another host published since: it refuses instead, and the lease refuses a head that moved after this run fetched it."""
+    head = refs(repo, LOG).get(LOG)
+    if published and (refs(repo, REMOTE_LOG).get(REMOTE_LOG) != published
+                      or git(repo, 'merge-base', '--is-ancestor', published, head, check=False).returncode != 0):
+        summary['published'] = False
+        summary['publish_refused'] = (f'the published log head {published} is not an ancestor of this host\'s head {head}: another host '
+                                      f'publishes a chain this copy does not continue. Nothing is published. Stop one publisher, or seed '
+                                      f'this copy from the remote (git fetch origin +{LOG}:{LOG}) before publishing from it')
+        print(f'evidence-log: refusing to publish: {summary["publish_refused"]}', file=sys.stderr)
+        return False
+    done = git(repo, 'push', '--porcelain', f'--force-with-lease={LOG}:{published or ""}', remote, f'{LOG}:{LOG}', check=False)
     summary['published'] = done.returncode == 0
     if done.returncode != 0:
         summary['publish_failed'] = (done.stdout + done.stderr).decode(errors='replace').strip()[-300:]
@@ -338,7 +361,7 @@ def pull(args):
     published_head = refs(repo, REMOTE_LOG).get(REMOTE_LOG)
     local_head = refs(repo, LOG).get(LOG)
     if published_head and local_head and published_head != local_head:
-        summary['published_head_differs'] = published_head  # someone else moved it, or our last publish failed: ours wins
+        summary['published_head_differs'] = published_head  # our last publish failed (ours continues it), or another host published
     extend(repo, additions, {}, args.signer_argv, args.log_keys, args.now, summary)
     git(repo, 'pack-refs', '--all')  # thousands of loose refs made one for-each-ref take 7 s
     status = 0
@@ -349,7 +372,7 @@ def pull(args):
             summary['restore_failed'] = (pushed.stdout + pushed.stderr).decode(errors='replace').strip()[-300:]
     if summary['missing']:
         status = 4
-    if args.publish and not publish(repo, remote, summary):
+    if args.publish and not publish(repo, remote, summary, published):
         status = status or 1
     return status, summary
 
@@ -369,6 +392,7 @@ def gc(args):
         if CHECK.match(check) and OID.match(key):
             removals[path_of(('index', check, key))] = line
     summary = {'mode': 'gc', 'gc_paths': len(removals)}
+    published = published_head(args.repo, args.remote) if args.publish else None
     # The pending names go first: if the log commit then fails, GC deletes nothing (its hook failed) and they expire unlogged-again
     # at worst a day later; the other order would leave a window where a pull logs them after the GC line.
     held = pending(args.repo)
@@ -385,7 +409,7 @@ def gc(args):
     if doomed:
         git(args.repo, 'update-ref', '--stdin', stdin=''.join(f'delete {ref}\n' for ref in doomed).encode())
     summary['copies_dropped'] = len(doomed)
-    if args.publish and not publish(args.repo, args.remote, summary):
+    if args.publish and not publish(args.repo, args.remote, summary, published):
         return 1, summary
     return 0, summary
 
