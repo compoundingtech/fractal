@@ -8052,7 +8052,18 @@ pub fn unread_current_seat_counts(
         }
     }
     drop(connection);
-    let (relayed_names, relayed) = relayed_overdue_mail(state, &seats, before, runtime)?;
+    // Each raw recipient's seat, by any of its names.
+    let seat_of = |to: &str| {
+        seats
+            .get(to)
+            .or_else(|| seats.get(&crate::store::normalize_message_party(to)))
+            .copied()
+    };
+    let addressed = overdue
+        .iter()
+        .filter_map(|(to, _, _)| seat_of(to).map(|seat| (to.as_str(), seat)))
+        .collect::<Vec<_>>();
+    let (relayed_names, relayed) = relayed_overdue_mail(state, &addressed, before, runtime)?;
     let mut reachable = BTreeMap::<&str, bool>::new();
     let (mut pending, mut accepted) = (0, 0);
     let mut unknown = BTreeMap::<String, usize>::new();
@@ -8061,11 +8072,7 @@ pub fn unread_current_seat_counts(
         if relayed_names.contains(&to) {
             continue;
         }
-        let Some(recipient) = seats
-            .get(&to)
-            .or_else(|| seats.get(&crate::store::normalize_message_party(&to)))
-            .copied()
-        else {
+        let Some(recipient) = seat_of(&to) else {
             continue;
         };
         if !match reachable.get(recipient) {
@@ -8086,8 +8093,8 @@ pub fn unread_current_seat_counts(
     }
     for (delivered_here, answer) in relayed {
         match answer {
-            message_reads::Relayed::Unknown { host, .. } => *unknown.entry(host).or_default() += 1,
-            answer => match answer.status() {
+            Some(message_reads::Relayed::Unknown { host, .. }) => *unknown.entry(host).or_default() += 1,
+            answer => match answer.as_ref().and_then(message_reads::Relayed::status) {
                 Some("read" | "closed") => {}
                 status => {
                     pending += 1;
@@ -8099,58 +8106,68 @@ pub fn unread_current_seat_counts(
     Ok((pending, accepted, unknown))
 }
 
-/// Overdue current-seat mail to seats whose host keeps their receipts, read from those hosts:
-/// the recipient names asked for, and for each message whether a native harness accepted it here
-/// and what its host said. A host with more of this mail than one read asks of a host is not
-/// asked, and its seats keep this member's own count. Nothing is asked while no host keeps its
-/// seats' receipts.
+/// Whether a native harness accepted a message here, and what its host said about it.
+type RelayedMail = (bool, Option<message_reads::Relayed>);
+
+/// Overdue current-seat mail to seats whose host keeps their receipts, read from those hosts.
+/// `addressed` is each raw recipient name with its seat. It returns the names asked for, and for
+/// each message asked, whether a native harness accepted it here and what its host said (`None`
+/// when the host's reply left it out). A host with more of this mail than one read asks of a host
+/// is not asked, and its seats keep this member's own count. Nothing is asked while no host keeps
+/// its seats' receipts.
 fn relayed_overdue_mail(
     state: &AppState,
-    seats: &BTreeMap<String, &str>,
+    addressed: &[(&str, &str)],
     before: u128,
     runtime: Option<&tokio::runtime::Handle>,
-) -> anyhow::Result<(BTreeSet<String>, Vec<(bool, message_reads::Relayed)>)> {
+) -> anyhow::Result<(BTreeSet<String>, Vec<RelayedMail>)> {
     let hosts = message_reads::relay_hosts(&state.store)?;
     if hosts.is_empty() {
         return Ok((BTreeSet::new(), Vec::new()));
     }
-    let mut names_on = BTreeMap::<&str, Vec<&str>>::new();
-    for (name, seat) in seats {
-        if let Some((host, _)) = hosts.iter().find(|(_, on)| on.contains(*seat)) {
-            names_on.entry(host).or_default().push(name);
+    let host_of = addressed
+        .iter()
+        .filter_map(|(name, seat)| {
+            hosts
+                .iter()
+                .find(|(_, on)| on.contains(*seat))
+                .map(|(host, _)| (*name, host.as_str()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if host_of.is_empty() {
+        return Ok((BTreeSet::new(), Vec::new()));
+    }
+    let names = host_of.keys().copied().collect::<Vec<_>>();
+    let mail = crate::store::unread_mail::overdue_to(&state.store.readers.get(), before, &names)?;
+    let mut on_host = BTreeMap::<&str, Vec<(String, bool)>>::new();
+    for (subject, to, delivered_here) in mail {
+        if let Some(host) = host_of.get(to.as_str()) {
+            on_host.entry(host).or_default().push((subject, delivered_here));
         }
     }
-    let mut asked = BTreeSet::new();
     let mut asks = BTreeMap::<String, Vec<String>>::new();
-    let mut delivered = BTreeMap::<String, bool>::new();
-    let connection = state.store.readers.get();
-    for (host, names) in names_on {
-        let mail = crate::store::unread_mail::overdue_to(
-            &connection,
-            before,
-            &names,
-            message_reads::MAX_MESSAGES_PER_HOST + 1,
-        )?;
+    let mut delivered = Vec::new();
+    for (host, mail) in on_host {
         if mail.len() > message_reads::MAX_MESSAGES_PER_HOST {
             continue;
         }
-        asked.extend(names.into_iter().map(str::to_owned));
-        for (subject, delivered_here) in mail {
-            asks.entry(host.to_owned()).or_default().push(subject.clone());
-            delivered.insert(subject, delivered_here);
-        }
+        asks.insert(host.to_owned(), mail.iter().map(|(subject, _)| subject.clone()).collect());
+        delivered.extend(mail);
     }
-    drop(connection);
-    let answers = message_reads::read_blocking(runtime, state, asks, message_reads::CHECK_DEADLINE);
+    let asked = host_of
+        .iter()
+        .filter(|(_, host)| asks.contains_key(**host))
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+    let mut answers = message_reads::read_blocking(runtime, state, asks, message_reads::CHECK_DEADLINE);
     Ok((
         asked,
-        answers
+        delivered
             .into_iter()
-            .map(|(subject, answer)| (delivered.get(&subject).copied().unwrap_or(false), answer))
+            .map(|(subject, delivered_here)| (delivered_here, answers.remove(&subject)))
             .collect(),
     ))
 }
-
 
 fn terminal_exec_gates_check(store: &Store) -> anyhow::Result<DoctorCheck> {
     fn has_exit_code_gate(mission: &crate::model::MissionSpec) -> bool {

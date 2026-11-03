@@ -118,12 +118,11 @@ pub const OVERDUE_BY_RECIPIENT: &str = concat!(
 
 pub const OVERDUE_TO: &str = concat!(
     unread_cte!(),
-    "SELECT unread.subject, idle.delivered
+    "SELECT unread.subject, idle.recipient, idle.delivered
      FROM unread JOIN local_idle_messages idle ON idle.subject=unread.subject
      LEFT JOIN coordination_sends sends ON sends.subject=unread.subject
      WHERE COALESCE(sends.held,0)=0 AND idle.sent_at<?1
-       AND idle.recipient IN (SELECT value FROM json_each(?2))
-     ORDER BY idle.sent_at LIMIT ?3"
+       AND idle.recipient IN (SELECT value FROM json_each(?2))"
 );
 
 /// Unread mail sent before `before_unix_ms` that waits for no turn, by its raw recipient:
@@ -140,25 +139,19 @@ pub fn overdue_by_recipient(connection: &Connection, before_unix_ms: u128) -> Re
     Ok(rows)
 }
 
-/// The first `limit` of the messages [`overdue_by_recipient`] counts whose raw recipient is one
-/// of `recipients`, oldest first: each subject, and whether a native harness accepted it.
+/// The messages [`overdue_by_recipient`] counts whose raw recipient is one of `recipients`:
+/// each subject, its raw recipient, and whether a native harness accepted it.
 pub fn overdue_to(
     connection: &Connection,
     before_unix_ms: u128,
     recipients: &[&str],
-    limit: usize,
-) -> Result<Vec<(String, bool)>> {
+) -> Result<Vec<(String, String, bool)>> {
     let before = i64::try_from(before_unix_ms).unwrap_or(i64::MAX);
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h330632e16a3b owner=fractal_store::store::unread_mail TODO=trace-statement-and-value-representation */ OVERDUE_TO)?;
     let rows = statement
-        .query_map(
-            rusqlite::params![
-                before,
-                serde_json::to_string(recipients)?,
-                i64::try_from(limit).unwrap_or(i64::MAX)
-            ],
-            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
-        )?
+        .query_map(rusqlite::params![before, serde_json::to_string(recipients)?], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
