@@ -12,10 +12,13 @@ use anyhow::{Context, Result};
 
 use crate::flock::{FileLock, Mode, Open, Wait};
 
-pub const CONTROL_DIR: &str = ".st2";
+pub use crate::catalog_generation::{CONTROL_DIR, GENERATION_FILE};
+pub(crate) use crate::catalog_generation::{
+    read_generation, read_generation_from_control, read_generation_token, retained_control,
+};
+
 pub const LOCK_FILE: &str = "catalog-authoring.lock";
 pub const APPLY_MARKER: &str = "catalog-apply-incomplete";
-pub const GENERATION_FILE: &str = "catalog-generation";
 pub const GENERATION_INTENT_FILE: &str = "catalog-generation-incomplete";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,44 +63,6 @@ fn advance_generation(control_file: &File) -> Result<()> {
     Ok(())
 }
 
-fn read_generation(catalog: &Path) -> Result<Option<u64>> {
-    let Some((control, _control_path)) = retained_control(catalog)? else {
-        return Ok(None);
-    };
-    read_generation_from_control(&control)
-}
-
-pub(crate) fn read_generation_token(catalog: &Path) -> Result<Option<u64>> {
-    read_generation(catalog)
-}
-
-fn read_generation_from_control(control: &File) -> Result<Option<u64>> {
-    let control_path = crate::directory::retained_dir_path(control)?;
-    let path = control_path.join(GENERATION_FILE);
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("open catalog generation"),
-    };
-    let metadata = file.metadata()?;
-    anyhow::ensure!(
-        metadata.is_file(),
-        "catalog generation is not a real regular file: {}",
-        path.display()
-    );
-    use std::io::Read as _;
-    let mut value = String::new();
-    file.read_to_string(&mut value)?;
-    let value = value
-        .strip_suffix('\n')
-        .context("catalog generation is missing its newline terminator")?;
-    Ok(Some(value.parse().context("parse catalog generation")?))
-}
-
 fn ensure_authoring_complete(catalog: &Path) -> Result<()> {
     let Some((_control, control_path)) = retained_control(catalog)? else {
         return Ok(());
@@ -120,20 +85,6 @@ fn ensure_authoring_complete(catalog: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn retained_control(catalog: &Path) -> Result<Option<(File, PathBuf)>> {
-    let root = crate::directory::open_dir_beneath(catalog, catalog)?;
-    let file = match crate::directory::openat_dir_nofollow(
-        &root,
-        std::ffi::OsStr::new(CONTROL_DIR),
-    ) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("open catalog control directory"),
-    };
-    let path = crate::directory::retained_dir_path(&file)?;
-    Ok(Some((file, path)))
 }
 
 /// An advisory catalog-authoring lock. Dropping the guard releases the kernel lock.

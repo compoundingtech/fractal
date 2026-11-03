@@ -124,6 +124,20 @@ has no executed-job sample. Individual submitters retain their profile CPU,
 I/O and SQL attribution. All accounting scopes finish before acknowledgements,
 so callers cannot snapshot their completed operations before samples arrive.
 
+`task_cpu::blocking` starts a profile operation only when task metrics are on, so with metrics off
+its work shows as `(unlabeled tokio-rt-worker)`, which is also what Tokio names its blocking
+threads. The loops whose work is otherwise unlabeled use `task_cpu::profiled_blocking`, which names the
+work in either mode:
+- the publication evidence loop (`publication.evidence_ready`, `publication.advance_evidence`);
+- the signature bootstrap, page by page:
+  - `maintenance.signature_bootstrap_page` (an inventory or migration page);
+  - `maintenance.signature_bootstrap_judgment` (a judging loan);
+  - `maintenance.signature_bootstrap_retire` (a legacy retirement page);
+  - `maintenance.signature_bootstrap_state` and `maintenance.signature_bootstrap_verdicts_pending`
+    (its progress reads).
+
+The bootstrap's quiet intervals between pages are in none of them.
+
 The batch `WriterHold` and telemetry `Holding` guard also drop before the first
 ACK is sent, after postcommit callbacks and sample publication. Previously they
 dropped when the batch function returned, after sending every ACK. The holds
@@ -477,7 +491,16 @@ synthetic fixture measurements, not measurements of a deployed daemon or transpo
 
 Conversation collection followers (`follow_conversation`) and standalone conversation sockets
 (`conversation_stream_socket`) use the existing conversation page/change reader. Mailbox reads
-already name `task mailbox-snapshot` and `task mailbox-update`. Attention's collection clock
+already name `task mailbox-snapshot` and `task mailbox-update`. The rest of a mailbox stream's
+store work after the upgrade names what it checks: `task mailbox-fence` (the binding's fence, on
+each dirty pass and each report without a peer), `task mailbox-report` (admitting a report),
+`task mailbox-replay` (a replay proof), `task mailbox-primary` (a Claude primary's generation),
+`task mailbox-rollout`, `task mailbox-attachment`, `task mailbox-own-post` and `task mailbox-loss`.
+With task metrics on, the stream's writes stay under `mailbox.write`, as before. A label shows only
+where no operation is already running on that thread.
+The background maintenance loops that run after commits name theirs
+`maintenance.client_message_selectors`, `maintenance.completion_health`,
+`maintenance.response_expiry_deadline` and `maintenance.response_expiry_clock`. Attention's collection clock
 handles grace and expiry without a claim; HTTP Home/now reads retain their route labels.
 Terminal sockets (`terminal_stream_socket`) follow the shared latest-screen source and periodically
 recheck their live fence; the existing fence span is `terminal/live-fence`. These are source
@@ -803,7 +826,7 @@ Each reader also maps the store file (`PRAGMA mmap_size`, 1 TiB by default, so t
 In WAL mode SQLite empties a reader's page cache whenever its next transaction sees any commit,
 and on a busy store nearly every request starts after one. Without the mapping that request
 fetched every page it touched again with one `read()` call each, from the kernel's file cache
-into the connection's private cache: on dev3, 87,500 calls a second across 73 readers, with 79%
+into the connection's private cache: on one host, 87,500 calls a second across 73 readers, with 79%
 of the daemon's CPU in the kernel (#3343). A mapped page needs no call and no copy, and all
 readers share the kernel's one copy of it. WAL frames are still read with `read()`. Mapped
 pages the daemon has touched count in its RSS as file-backed memory (`RssFile`), so VmRSS,

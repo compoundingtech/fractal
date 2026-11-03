@@ -52,6 +52,16 @@ async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()
 async fn counted_daemon(
     root: &Path,
 ) -> (PathBuf, Arc<Store>, Arc<Requests>, tokio::task::JoinHandle<()>) {
+    let (socket, store, requests, server, _) = stream_daemon(root, false).await;
+    (socket, store, requests, server)
+}
+
+/// The daemon, holding the messages stream when `stream` is set, and the sender that wakes its
+/// event waiters as the daemon does when the stream admits items.
+async fn stream_daemon(
+    root: &Path,
+    stream: bool,
+) -> (PathBuf, Arc<Store>, Arc<Requests>, tokio::task::JoinHandle<()>, watch::Sender<u64>) {
     let socket = root.join("st3.sock");
     let state = AppState {
         seat_admission: Default::default(),
@@ -75,6 +85,10 @@ async fn counted_daemon(
         private_notes: Default::default(),
     };
     let store = state.store.clone();
+    if stream {
+        fractal_store::store::messages_shard::open(&store, root).unwrap();
+    }
+    let events = state.event_notify.clone();
     let intent = fractal_daemon::parse_intent(
         "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\" }",
         store.origin(),
@@ -88,7 +102,29 @@ async fn counted_daemon(
         fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
     });
     wait_for(&socket).await;
-    (socket, store, requests, server)
+    (socket, store, requests, server, events)
+}
+
+/// A message from `from` to `to` written straight to the messages stream, as a member that writes
+/// the stream would; its arrival is recorded and the daemon's event waiters woken, as admission does.
+fn stream_message(store: &Arc<Store>, events: &watch::Sender<u64>, subject: &str, from: &str, to: &str, body: &str) {
+    let shard = fractal_store::store::messages_shard::shard(store).expect("the daemon holds the stream");
+    shard
+        .append_claim(&smallclaims::claim::ClaimInput {
+            subject: subject.into(),
+            kind: "message.sent".into(),
+            actor: Some(from.into()),
+            fields: serde_json::from_value(serde_json::json!({
+                "from": from, "to": to, "content": body, "status": "sent"
+            }))
+            .unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    fractal_store::store::messages_shard::stream_reads::record_arrivals(store).unwrap();
+    events.send_modify(|generation| *generation += 1);
 }
 
 async fn wait_for(socket: &Path) {
@@ -314,5 +350,47 @@ async fn a_wait_longer_than_ten_minutes_is_refused() {
     assert!(error.contains("at most 10m"), "{error}");
     let allowed = st(&socket, &[], &wait_args("0", &[])).await;
     assert!(allowed.status.success(), "{}", String::from_utf8_lossy(&allowed.stderr));
+    server.abort();
+}
+
+fn peer_wait_args<'a>(timeout: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "--json", "conversations", "wait", "--as", WORKER, "--from", PEER, "--timeout", timeout,
+    ];
+    args.extend_from_slice(extra);
+    args
+}
+
+/// An agent's reply on the messages stream ends the wait as a graph reply does: the wait reads
+/// the stream's message events beside the graph's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_on_the_messages_stream_returns_the_wait() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, _requests, server, events) = stream_daemon(root.path(), true).await;
+    let started = Instant::now();
+    let waiting = {
+        let socket = socket.clone();
+        tokio::spawn(async move { st(&socket, &[], &peer_wait_args("30s", &[])).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stream_message(&store, &events, "message/00000000000000b1", PEER, WORKER, "Done, on the stream.");
+    let answer = value(&waiting.await.unwrap());
+    assert!(started.elapsed() < Duration::from_secs(15), "waited {:?}", started.elapsed());
+    assert_eq!(answer["reply"], true, "{answer}");
+    assert_eq!(answer["message"]["subject"], "message/00000000000000b1");
+    server.abort();
+}
+
+/// `--after` naming a stream item still finds a reply in the graph. Its index is past every
+/// graph index, and used as one floor for both stores it hid every graph reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_stream_message_counts_a_graph_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, _requests, server, events) = stream_daemon(root.path(), true).await;
+    stream_message(&store, &events, "message/00000000000000a1", WORKER, PEER, "Shall I start?");
+    send(&socket, PEER, WORKER, "Yes, from the graph.").await;
+    let answer = value(&st(&socket, &[], &peer_wait_args("0", &["--after", "message/00000000000000a1"])).await);
+    assert_eq!(answer["reply"], true, "{answer}");
+    assert_eq!(answer["message"]["content"], "Yes, from the graph.");
     server.abort();
 }

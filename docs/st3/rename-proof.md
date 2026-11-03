@@ -13,6 +13,31 @@ complete co-batched claims and blobs of the required sealed envelopes.
 explicit `--include-co-batched-claims` consent; HTTP callers must set
 `include_co_batched_claims: true`. Missing consent is refused with an explanation.
 
+## Export the public fleet anchor
+
+On a trusted fleet member with its daemon running, print the pinned public key:
+
+```sh
+fractal fleet anchor show
+```
+
+The default output is the public key alone, suitable for the verifier's
+`--fleet-anchor` argument. `fractal --json fleet anchor show` returns JSON with
+the single field `fleet_anchor`. This command exports no private key or invite code.
+The anchor is the founding member's public trust key; other member keys are
+authorized by the signed membership history rooted in it.
+
+Distribute this key through an authenticated channel and pin it in the consumer's
+source or trusted configuration, independently of any proof bundle. For example,
+after authenticating the key, pass that pinned value to the offline verifier:
+
+```sh
+fractal agents rename-id proof verify agent-proof.json --fleet-anchor '<pinned-public-key>'
+```
+
+Do not populate the trusted argument from an untrusted bundle's `fleet_anchor`
+field: that field is informational and cannot authenticate itself.
+
 ## Commands
 
 ```sh

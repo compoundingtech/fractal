@@ -457,7 +457,7 @@ export const testArchiveProducer = {
 }
 
 /**
- * isolation-vm's work: the retained st2 controls and current-runtime scope proofs need a real systemd user manager, which the
+ * isolation-vm's work: the current-runtime scope proofs need a real systemd user manager, which the
  * runner image lacks, so a NixOS VM runs the shared producer's prebuilt test binary and compiles nothing; a
  * second VM runs the sekrets gateway. Workspace CI and the daily long-lane run share these steps.
  */
@@ -839,7 +839,7 @@ export const pnpmStoreEnv = { pnpm_config_store_dir: '${{ runner.temp }}/pnpm-st
 export const megarepoApplyStep = {
   name: 'Materialize megarepo members',
   env: { MEGAREPO_STORE: '${{ runner.temp }}/megarepo' },
-  run: `nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+  run: `python3 scripts/prepare-pnpm-source-inputs.py apply
 printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
 } as const
 
@@ -868,7 +868,7 @@ export const fractalWebShellKeyStep = {
   id: 'web-shell-key',
   shell: 'bash',
   env: {
-    CI_WEB_SHELL_SOURCE_HASH: "${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}",
+    CI_WEB_SHELL_SOURCE_HASH: "${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq', 'scripts/prepare-pnpm-source-inputs.py') }}",
   },
   run: 'bash scripts/ci-web-shell key',
 } as const

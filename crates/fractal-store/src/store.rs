@@ -36,6 +36,8 @@ pub mod identities;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
+#[cfg(test)]
+mod observation_trim_tests;
 pub mod directive_notes;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
@@ -105,6 +107,8 @@ pub mod agent_queue_values;
 pub mod backup_format;
 pub mod message_bodies;
 pub mod messages_shard;
+#[cfg(test)]
+mod planning_production_copy_tests;
 pub mod projectors;
 #[cfg(test)]
 pub mod projectors_tests;
@@ -201,6 +205,7 @@ pub mod roster_admission;
 pub mod adhoc_work;
 pub mod attention_history;
 pub mod attention_snapshot;
+pub mod fault_cache;
 pub use attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
     plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
@@ -236,6 +241,9 @@ pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
 pub mod subagents;
 pub mod idle_mail;
+pub mod message_marks;
+#[cfg(test)]
+mod message_marks_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -2177,6 +2185,16 @@ impl LocalSeats {
     }
 }
 
+/// What one local-observation trim pass deleted, and the longest it held the store's writer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ObservationTrim {
+    pub deleted: usize,
+    pub longest_writer_hold: std::time::Duration,
+}
+
+/// Rows past retention one reader read of the trim examines.
+const TRIM_SCAN_PAGE: i64 = 5_000;
+
 pub struct Store {
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
@@ -2191,6 +2209,48 @@ pub struct Store {
     /// The store index up to which person answers were checked for overriding a deadline's
     /// default; in memory, so a restart checks them again and the notice's key keeps it once.
     pub person_answers_checked: std::sync::atomic::AtomicU64,
+    /// The last operation audit and fleet admission residue this process finished, which doctor
+    /// reports instead of reading the whole store inline; in memory, so a restart has neither
+    /// until its startup audits finish.
+    pub last_operation_audit: Mutex<Option<OperationAuditRecord>>,
+    /// The residue count is kept with the `fleet_generation` its membership was read at, or
+    /// none when it could not start or stopped.
+    pub last_fleet_residue: Mutex<Option<(Option<i64>, FleetResidueRecord)>>,
+    /// Wakes the daemon's residue count when doctor finds membership moved since the last one.
+    pub fleet_residue_wanted: tokio::sync::Notify,
+}
+
+/// How often the daemon audits the operation projection against the claim log and counts the
+/// fleet admission residue. Doctor calls a result older than two periods stale.
+pub const OPERATION_AUDIT_PERIOD: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// One finished background audit: when it finished, how long it took and what it found.
+#[derive(Clone, Debug)]
+pub struct AuditRecord<T> {
+    pub finished_at_unix_ms: u128,
+    pub took: std::time::Duration,
+    pub result: std::result::Result<T, String>,
+}
+
+/// The operation keys whose projection drifted from the claim log.
+pub type OperationAuditRecord = AuditRecord<Vec<String>>;
+/// Envelopes admitted before this node knew their writer's key or end.
+pub type FleetResidueRecord = AuditRecord<Vec<FleetAdmissionResidue>>;
+
+impl<T: Clone> AuditRecord<T> {
+    fn finished(started: std::time::Instant, result: &Result<T>) -> Self {
+        Self {
+            finished_at_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            took: started.elapsed(),
+            result: match result {
+                Ok(value) => Ok(value.clone()),
+                Err(error) => Err(format!("{error:#}")),
+            },
+        }
+    }
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2212,6 +2272,7 @@ pub const ACTUAL_CACHE_LIMIT: usize = 4096;
 pub struct MessageCacheEntry {
     latest_claim_index: u64,
     desired_claim_id: Option<String>,
+    latest_mark: i64,
     view: MessageView,
 }
 
@@ -2575,7 +2636,8 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2596,20 +2658,31 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
-    /// Open a shared-memory store for sequential fixtures and short-lived tools.
-    /// Concurrent server tests should use [`Self::open`]: shared-cache read/write
-    /// contention returns `SQLITE_LOCKED` immediately instead of waiting.
+    /// Open an owned temporary WAL store through the normal file-backed path.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_memory(origin: impl Into<String>) -> Result<Self> {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open_memory(origin, fractal.clone())?;
+        Self::finish_open(graph, fractal)
+    }
+
+    /// Open shared-cache memory mode for tests of that mode itself.
+    /// Concurrent server tests should use [`Self::open`]: shared-cache read/write
+    /// contention returns `SQLITE_LOCKED` immediately instead of waiting.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_shared_memory(origin: impl Into<String>) -> Result<Self> {
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open_shared_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -2711,8 +2784,65 @@ impl Store {
         Ok((count, conflicts))
     }
 
+    /// Audit the operation projection against the claim log, and keep the result for doctor.
     pub fn operation_projection_drift(&self) -> Result<Vec<String>> {
-        self.operation_audit(&mut |_| {})
+        let started = std::time::Instant::now();
+        let drift = self.operation_audit(&mut |_| {});
+        *self.last_operation_audit.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(AuditRecord::finished(started, &drift));
+        drift
+    }
+
+    /// The last operation audit this process finished, if any.
+    pub fn last_operation_audit(&self) -> Option<OperationAuditRecord> {
+        self.last_operation_audit.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// Count the fleet admission residue, and keep the result for doctor with the membership
+    /// generation it was counted at. Residue grows only when membership changes, since every
+    /// later admission is judged by the membership in force, so a count stays exact until the
+    /// generation moves.
+    pub fn audit_fleet_admission_residue(&self) -> Result<Vec<FleetAdmissionResidue>> {
+        let started = std::time::Instant::now();
+        let generation = match smallclaims::store::FleetAuthority::fleet_generation(&self.graph) {
+            Ok(generation) => generation,
+            Err(error) => {
+                self.fleet_residue_stopped(format!("{error:#}"));
+                return Err(error);
+            }
+        };
+        let residue = self.graph.fleet_admission_residue();
+        *self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((Some(generation), AuditRecord::finished(started, &residue)));
+        residue
+    }
+
+    /// The last fleet admission residue count, and whether membership has moved since it was
+    /// made. When it has, this wakes the daemon to count again; nothing counts inline.
+    pub fn current_fleet_residue(&self) -> Result<Option<(FleetResidueRecord, bool)>> {
+        let generation = smallclaims::store::FleetAuthority::fleet_generation(&self.graph)?;
+        let last = self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        Ok(last.map(|(counted_at, record)| {
+            // A count that stopped says so itself; the next one comes at the daemon's period.
+            let moved = counted_at.is_some_and(|counted_at| counted_at != generation);
+            if moved {
+                self.fleet_residue_wanted.notify_one();
+            }
+            (record, moved)
+        }))
+    }
+
+    /// Keep a residue count that stopped before it could finish, so doctor reports it.
+    pub fn fleet_residue_stopped(&self, error: String) {
+        let record = AuditRecord {
+            finished_at_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            took: std::time::Duration::ZERO,
+            result: Err(error),
+        };
+        *self.last_fleet_residue.lock().unwrap_or_else(PoisonError::into_inner) = Some((None, record));
     }
 
     pub fn rebuild_claim_projections(&self) -> Result<()> {
@@ -4259,40 +4389,87 @@ impl Store {
         max_per_subject_kind: usize,
         chunk: usize,
     ) -> Result<usize> {
+        Ok(self.trim_local_observations_pass(older_than_unix_ms, max_per_subject_kind, chunk)?.deleted)
+    }
+
+    /// One trim pass, and the longest the store's writer was held for it.
+    pub fn trim_local_observations_pass(
+        &self,
+        older_than_unix_ms: u128,
+        max_per_subject_kind: usize,
+        chunk: usize,
+    ) -> Result<ObservationTrim> {
         self.flush_overdue_usage_rollups(now_ms())?;
         let chunk = chunk.max(1).min(i64::MAX as usize) as i64;
         let max_per_subject_kind = max_per_subject_kind.max(1).min(i64::MAX as usize) as i64;
+        let mut longest_writer_hold = std::time::Duration::ZERO;
         let mut deleted = 0;
         // A reading a usage slot still waits to replicate is never trimmed (below).
         // The newest observation of a subject and kind always stays. Rows past retention go
         // through the time index, and a row is "not the newest" when a later id exists for its
-        // subject and kind, one seek in `local_observations_subject_kind_index`. This used to
-        // rank every row of the table with a window function inside the writer's hold, every
-        // chunk of every pass, even when nothing was due.
+        // subject and kind, one seek in `local_observations_subject_kind_index`.
+        //
+        // The search runs on a reader, a page of the time index at a time, and the writer only
+        // deletes the ids it found, re-checking each. Searching inside the DELETE walked every
+        // row past retention that must stay, on every chunk of every pass, inside the writer's
+        // hold: 20 s on a 57 GB member right after a restart, while every seat reconnected (#4610).
+        // `local_latest_slots` has no index on `pending_local_id`, so its check is a list built
+        // once per statement, never a correlated scan per row (60 s over 26,000 rows on that member).
+        let mut after: (i64, i64) = (i64::MIN, i64::MIN);
         loop {
-            let connection = self.connection.write_background();
-            let removed = connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h315fe07938f4 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
-                    SELECT id FROM local_observations AS old
-                    WHERE observed_at_unix_ms < ?1
-                      AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
-                      AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
-                      AND NOT EXISTS (SELECT 1 FROM local_latest_slots WHERE pending_local_id=old.id)
-                      AND EXISTS (SELECT 1 FROM local_observations AS newer
-                                  WHERE newer.subject=old.subject AND newer.kind=old.kind
-                                    AND newer.id>old.id)
-                    ORDER BY observed_at_unix_ms
-                    LIMIT ?2
-                 )",
-                params![
-                    older_than_unix_ms.min(i64::MAX as u128) as i64,
-                    chunk
-                ],
-            )?;
-            drop(connection);
-            deleted += removed;
-            if (removed as i64) < chunk {
-                break;
+            let (due, scanned, last) = {
+                let connection = self.readers.get();
+                let mut statement = connection.prepare_cached(
+                    "SELECT id, observed_at_unix_ms,
+                            kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
+                            AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
+                            AND old.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
+                            AND EXISTS (SELECT 1 FROM local_observations AS newer
+                                        WHERE newer.subject=old.subject AND newer.kind=old.kind
+                                          AND newer.id>old.id)
+                     FROM local_observations AS old
+                     WHERE observed_at_unix_ms < ?1 AND (observed_at_unix_ms, id) > (?2, ?3)
+                     ORDER BY observed_at_unix_ms, id
+                     LIMIT ?4",
+                )?;
+                let rows = statement
+                    .query_map(
+                        params![older_than_unix_ms.min(i64::MAX as u128) as i64, after.0, after.1, TRIM_SCAN_PAGE],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?)),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let last = rows.last().map(|(id, at, _)| (*at, *id));
+                let due: Vec<i64> = rows.iter().filter(|(_, _, due)| *due).map(|(id, _, _)| *id).collect();
+                (due, rows.len() as i64, last)
+            };
+            #[cfg(test)]
+            if let Some(change) = observation_trim_tests::AFTER_SEARCH.with(|change| change.borrow_mut().take()) {
+                change(self);
+            }
+            for ids in due.chunks(chunk as usize) {
+                let connection = self.connection.write_background();
+                let started = std::time::Instant::now();
+                // Every condition again, under the writer: a row may have become a pending slot or
+                // start evidence since the search.
+                let removed = connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-h0b1b867066d2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations
+                     WHERE id IN (SELECT value FROM json_each(?1))
+                       AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
+                       AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
+                       AND local_observations.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
+                       AND EXISTS (SELECT 1 FROM local_observations AS newer
+                                   WHERE newer.subject=local_observations.subject
+                                     AND newer.kind=local_observations.kind
+                                     AND newer.id>local_observations.id)",
+                    [serde_json::to_string(ids)?],
+                )?;
+                drop(connection);
+                longest_writer_hold = longest_writer_hold.max(started.elapsed());
+                deleted += removed;
+            }
+            match last {
+                Some(last) if scanned == TRIM_SCAN_PAGE => after = last,
+                _ => break,
             }
         }
         // The cap: only a subject and kind with more rows than the cap has any. Find them on a
@@ -4312,6 +4489,7 @@ impl Store {
         for (subject, kind) in over_cap {
             loop {
                 let connection = self.connection.write_background();
+                let started = std::time::Instant::now();
                 // The newest id past the cap: rank `cap + 1` from the newest.
                 let boundary: Option<i64> = connection
                     .query_row(
@@ -4322,27 +4500,30 @@ impl Store {
                     )
                     .optional()?;
                 let Some(boundary) = boundary else {
+                    drop(connection);
+                    longest_writer_hold = longest_writer_hold.max(started.elapsed());
                     break;
                 };
                 let removed = connection.execute(
-                    /* sqlite-large-value: allow-for-now lv-ha3460e7a5f9d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                    /* sqlite-large-value: allow-for-now lv-haf85b2aa5c24 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                         SELECT id FROM local_observations
                         WHERE subject=?1 AND kind=?2 AND id<=?3
                           AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                           AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
-                          AND NOT EXISTS (SELECT 1 FROM local_latest_slots WHERE pending_local_id=local_observations.id)
+                          AND local_observations.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
                         ORDER BY id LIMIT ?4
                      )",
                     params![subject, kind, boundary, chunk],
                 )?;
                 drop(connection);
+                longest_writer_hold = longest_writer_hold.max(started.elapsed());
                 deleted += removed;
                 if (removed as i64) < chunk {
                     break;
                 }
             }
         }
-        Ok(deleted)
+        Ok(ObservationTrim { deleted, longest_writer_hold })
     }
 
     pub fn idempotent_claim(&self, key: &str) -> Result<Option<ClaimRecord>> {
@@ -5860,14 +6041,18 @@ impl Store {
     /// fault is a person's: the owning agent retries, revises or cancels, and asks a person
     /// only for what only a person can give.
     pub fn fault_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
+        // One read cut for every family, so a run, step, declaration or failure that many
+        // faults share is read once.
+        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of)))
+    }
+
+    fn fault_snapshot_in_cut(&self, as_of: u128) -> Result<Vec<FaultView>> {
         let mut items = self.subscription_fault_items(as_of)?;
-        let (operational, failures) = self.operational_attention_items_with_failures(None, as_of)?;
+        items.extend(self.operational_fault_families(None, as_of)?);
+        // Failure episodes come from the fault cache, read again only where something changed.
+        let (operational, gates) = self.cached_failure_faults(as_of)?;
         items.extend(operational);
-        items.extend(
-            self.broken_gate_items_from_failures(None, as_of, failures)?
-                .into_iter()
-                .filter(|item| !item.person.starts_with("person/")),
-        );
+        items.extend(gates);
         items.extend(self.checkpoint_attention_items(None, as_of)?);
         items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
@@ -10350,8 +10535,12 @@ pub fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    holds::rebuilt(claim_ids.len());
     clear_quarantined_claims_tx(transaction, "projection:planning")?;
+    project_planning_claims_tx(transaction, claim_ids)
+}
+
+fn project_planning_claims_tx(transaction: &Transaction<'_>, claim_ids: Vec<String>) -> Result<()> {
+    holds::rebuilt(claim_ids.len());
     for id in claim_ids {
         let claim = claim_by_id_tx(transaction, &id)?
             .context("a planning claim disappeared during replay")?;
@@ -10484,6 +10673,33 @@ fn project_planning_claim_tx(transaction: &Transaction<'_>, claim: &ClaimRecord)
         _ => {}
     }
     Ok(())
+}
+
+/// Rebuild one planning session from its own claims. Every planning claim writes only the rows of
+/// the session its subject names, so this gives what `rebuild_planning_tx` gives for that session
+/// and leaves the others as they are. It costs what the session's history costs: rebuilding every
+/// session for each planning claim grew with all the planning the store had ever done.
+pub fn rebuild_planning_session_tx(transaction: &Transaction<'_>, session: &str) -> Result<()> {
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hd29260726759 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews WHERE session_id=?1", [session])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h0604d904ed35 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_candidates WHERE session_id=?1", [session])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hde78ac1818e2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_sessions WHERE id=?1", [session])?;
+    let mut statement = transaction.prepare(
+        /* sqlite-large-value: allow-for-now lv-hc251ec015da5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id
+         FROM claims WHERE subject=?1 AND kind >= 'planning-session.' AND kind < 'planning-session/'
+         ORDER BY CANONICAL_ASC(claims)"),
+    )?;
+    let claim_ids = statement
+        .query_map([format!("planning-session/{session}")], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    // Only this session's claims are decided again, so only their quarantine is forgotten.
+    for id in &claim_ids {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h7241d7e424fd owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:planning:'||?1",
+            [id],
+        )?;
+    }
+    project_planning_claims_tx(transaction, claim_ids)
 }
 
 fn known_replicated_claim_kind(kind: &str) -> bool {
@@ -10628,6 +10844,13 @@ fn validate_message_transition(
         "message.closed" => "closed",
         _ => unreachable!("the SQL query selects message lifecycle kinds"),
     });
+    // A local mark (message_marks.rs) is this member's record of the same lifecycle: the
+    // message stands wherever the further along of the two puts it.
+    let current = match (current, message_marks::status(transaction, &input.subject).map_err(internal)?) {
+        (Some(claimed), Some(marked)) if message_marks::rank(marked) > message_marks::rank(claimed) => Some(marked),
+        (None, Some(marked)) => Some(marked),
+        (current, _) => current,
+    };
     let current = if current.is_some() {
         current
     } else {
@@ -11192,7 +11415,18 @@ fn message_view_at_with_desired(
     through: Option<u64>,
     desired_row: impl FnOnce() -> Result<Option<DesiredRow>>,
 ) -> Result<MessageView> {
-    let actual = latest_actual_at(connection, subject, through)?.unwrap_or(Value::Null);
+    let mut actual = latest_actual_at(connection, subject, through)?.unwrap_or(Value::Null);
+    // A consumer's local mark (message_marks.rs) counts as its lifecycle claim would: the view
+    // reads whichever is further along. Marks are this member's current record, at any `through`.
+    if let Some(marked) = message_marks::status(connection, subject)? {
+        let claimed = actual.get("status").and_then(Value::as_str).unwrap_or("sent");
+        if message_marks::rank(marked) > message_marks::rank(claimed) {
+            if !actual.is_object() {
+                actual = json!({});
+            }
+            actual["status"] = json!(marked);
+        }
+    }
     // Deletion of the current projection retires the declaration. A retained
     // intent.desired claim is not permission to resurrect it in a fresh page.
     let desired = if through.is_some() && !connection.prepare_cached(
@@ -11368,10 +11602,20 @@ fn select_actual_source(
     rows: &[(&str, &str, &str, &Value)],
     desired_host: Option<&str>,
 ) -> Option<(String, String, Vec<String>)> {
+    // A host the seat is not placed on can still record the end of its own old runtime, for
+    // instance after it restarts holding a seat that has moved (#4743). That end describes its
+    // copy, not the seat: once the desired host has observed the seat, it is never selected over
+    // the desired host's record. A non-owner that runs the seat is real state and still counts.
+    let owner_observed = desired_host.is_some_and(|host| {
+        rows.iter().any(|(_, kind, origin, _)| *kind == "runtime.observed" && *origin == host)
+    });
     let selected = rows
         .iter()
         .rev()
-        .find(|(_, kind, _, _)| *kind == "runtime.observed")
+        .filter(|(_, kind, _, _)| *kind == "runtime.observed")
+        .find(|(_, _, origin, body)| {
+            !(owner_observed && Some(*origin) != desired_host && terminal_observation(body))
+        })
         .or_else(|| rows.last());
     let &(selected_id, _, selected_origin, selected_body) = selected?;
     // An origin's newer runtime observation supersedes its older observations. In particular,
@@ -11453,6 +11697,13 @@ fn subject_descends_from_all(
     Ok(ancestors.iter().all(|ancestor| descends_from(ancestor)))
 }
 
+fn terminal_observation(body: &Value) -> bool {
+    matches!(
+        body.get("fields").unwrap_or(body).get("status").and_then(Value::as_str),
+        Some("stopped" | "absent" | "exited" | "vanished")
+    )
+}
+
 fn nonowner_terminal_observation(
     desired_host: Option<&str>,
     selected_origin: &str,
@@ -11468,13 +11719,7 @@ fn nonowner_terminal_observation(
             None
         }
     });
-    let other_fields = other_body.get("fields").unwrap_or(other_body);
-    owner == Some(selected_origin)
-        && other_origin != selected_origin
-        && matches!(
-            other_fields.get("status").and_then(Value::as_str),
-            Some("stopped" | "absent" | "exited" | "vanished")
-        )
+    owner == Some(selected_origin) && other_origin != selected_origin && terminal_observation(other_body)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -11819,6 +12064,84 @@ fn newest_mailbox_harness_state_query() -> String {
                THEN {INCARNATION_OF_CLAIM} END IS ?2
          ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
     )
+}
+
+/// What an incarnation's runtime records say about it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum IncarnationRuntime {
+    /// It runs, as observed by this record.
+    Running { claim: String },
+    /// It ended, or another incarnation replaced it.
+    Ended,
+    /// Nothing says either.
+    Unknown,
+}
+
+/// What `subject`'s `runtime.observed` records say about `incarnation`, newest first. A `running`
+/// record decides: this incarnation runs, or another replaced it. An end that names this
+/// incarnation ends it, whichever host recorded it. An end of another incarnation counts only
+/// while this one has not been seen running, and an end that names no incarnation counts only
+/// from the host where this one ran: a host that still holds a seat which has since moved records
+/// its own old runtime ending, not this one (#4743).
+pub fn runtime_incarnation_state(
+    connection: &Connection,
+    subject: &str,
+    incarnation: &str,
+) -> Result<IncarnationRuntime> {
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb6fac0d4d660 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT id, origin, body FROM claims
+         WHERE subject=?1 AND kind='runtime.observed'
+         ORDER BY CANONICAL_DESC(claims)",
+    ))?;
+    let rows = statement.query_map([subject], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })?;
+    // The hosts that recorded an end naming no incarnation, newer than any running record read.
+    let mut unnamed_ends = BTreeSet::new();
+    // Whether another incarnation's runtime ended, newer than any running record read so far.
+    let mut other_ended = false;
+    for row in rows {
+        let (claim, origin, body) = row?;
+        let body: Value = serde_json::from_str(&body)?;
+        let fields = body.get("fields").unwrap_or(&body);
+        let observed = fields.get("incarnation_id").and_then(Value::as_str);
+        match fields.get("status").and_then(Value::as_str) {
+            Some("running") => {
+                if let Some(current) = observed {
+                    return Ok(if current != incarnation || unnamed_ends.contains(&origin) {
+                        IncarnationRuntime::Ended
+                    } else {
+                        IncarnationRuntime::Running { claim }
+                    });
+                }
+            }
+            Some("exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
+                Some(ended) if ended == incarnation => return Ok(IncarnationRuntime::Ended),
+                Some(_) => other_ended = true,
+                None => {
+                    unnamed_ends.insert(origin);
+                }
+            },
+            _ => {}
+        }
+    }
+    // With no record that the incarnation ran, any end of the seat's runtime counts.
+    Ok(if other_ended || !unnamed_ends.is_empty() {
+        IncarnationRuntime::Ended
+    } else {
+        IncarnationRuntime::Unknown
+    })
+}
+
+/// Whether `incarnation` of `subject` is live for its work: its runtime records show it running,
+/// by [`runtime_incarnation_state`], and its own harness has not ended.
+pub fn work_incarnation_live(connection: &Connection, subject: &str, incarnation: &str) -> Result<bool> {
+    match runtime_incarnation_state(connection, subject, incarnation)? {
+        IncarnationRuntime::Running { claim } => {
+            Ok(!mailbox_harness_ended(connection, subject, incarnation, &claim)?)
+        }
+        IncarnationRuntime::Ended | IncarnationRuntime::Unknown => Ok(false),
+    }
 }
 
 fn mailbox_harness_ended(
@@ -16281,7 +16604,9 @@ pub fn try_project_simple_replication_tx(
     // A claim that reaches a part of the graph out of the replay's order marks that part to be
     // rebuilt from its own claims; everything else extends the graph as it arrives.
     let mut dirty = BTreeSet::<Aggregate>::new();
-    let mut rebuild_planning = false;
+    // The planning sessions this range's claims are about, or `None` when one names no session
+    // and only the whole planning projection can say where it belongs.
+    let mut planning_sessions = Some(BTreeSet::<&str>::new());
     // A run tree needs rebuilding for this node's own claims only when another writer's claims
     // about the same tree arrived in the same range, since only then can the two be out of the
     // replay's order. A tree that holds this node's claims alone already has them: they were
@@ -16341,7 +16666,10 @@ pub fn try_project_simple_replication_tx(
         // nor that ordering. Validate its shape here and its digest/state in the registry
         // below; do not force a full-store replay based on the identity's prefix.
         if claim.kind.starts_with("planning-session.") {
-            rebuild_planning = true;
+            planning_sessions = planning_sessions.and_then(|mut sessions| {
+                sessions.insert(claim.subject.strip_prefix("planning-session/")?);
+                Some(sessions)
+            });
         }
         if replay_projects_kind(&claim.kind)
             && !Store::simple_replication_kind(&claim.kind)
@@ -16369,6 +16697,14 @@ pub fn try_project_simple_replication_tx(
                     | "step-run.carried"
                     | "step-run.state"
                     | "step-run.retried"
+                    | "planning-session.started"
+                    | "planning-session.candidate-submitted"
+                    | "planning-session.previewed"
+                    | "planning-session.revision-requested"
+                    | "planning-session.approved"
+                    | "planning-session.cancelled"
+                    | "planning-session.question-requested"
+                    | "planning-session.question-answered"
             )
             || (has_operation && operation_parts(&claim.body).is_none())
         {
@@ -16781,9 +17117,21 @@ pub fn try_project_simple_replication_tx(
                 .with_detail("projection_subject", format!("mission-run/{root}"))
         })?;
     }
-    if rebuild_planning {
-        holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
-            .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?;
+    match planning_sessions {
+        Some(sessions) => {
+            for session in sessions {
+                holds::stage("rebuild-planning-session", || {
+                    rebuild_planning_session_tx(transaction, session)
+                })
+                .map_err(|error| {
+                    internal(error)
+                        .with_detail("projection_stage", "planning-rebuild")
+                        .with_detail("projection_subject", format!("planning-session/{session}"))
+                })?;
+            }
+        }
+        None => holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
+            .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?,
     }
     owned_sets::project_tx(transaction)
         .map_err(|error| error.with_detail("projection_stage", "owned-set-project"))?;
@@ -19499,16 +19847,24 @@ pub fn enrich_step_wake_at(
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h193b5e906715 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h98fccb80a458 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.body, claims.accepted_at_unix_ms,
                 EXISTS(SELECT 1 FROM claims consumed
                        WHERE consumed.subject=claims.subject
                          AND consumed.kind IN ('message.read','message.closed')
-                         AND consumed.accepted_at_unix_ms<=?1),
+                         AND consumed.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks consumed
+                       WHERE consumed.message=claims.subject
+                         AND consumed.kind IN ('message.read','message.closed')
+                         AND consumed.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
                 EXISTS(SELECT 1 FROM claims delivered
                        WHERE delivered.subject=claims.subject
                          AND delivered.kind='message.delivered'
-                         AND delivered.accepted_at_unix_ms<=?1),
+                         AND delivered.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks delivered
+                       WHERE delivered.message=claims.subject
+                         AND delivered.kind='message.delivered'
+                         AND delivered.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
                 EXISTS(SELECT 1 FROM claims staged
                        WHERE staged.subject=claims.subject
                          AND staged.kind='message.staged'

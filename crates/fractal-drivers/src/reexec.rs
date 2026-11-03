@@ -421,7 +421,9 @@ fn exec_checked(
     }
     let mut envp = Vec::new();
     for (key, value) in std::env::vars_os() {
-        if key == DRIVER_RESUME_ENV || key == CHANNEL_RESUME_ENV {
+        if key == DRIVER_RESUME_ENV || key == CHANNEL_RESUME_ENV
+            || key == "FRACTAL_SUPPRESS_DEPRECATION"
+        {
             continue;
         }
         let mut entry = key.as_bytes().to_vec();
@@ -446,6 +448,8 @@ fn exec_checked(
     let envp_pointers = envp
         .iter()
         .map(|entry| entry.as_ptr())
+        // The watched replacement path can still be named st3; this is an internal restart.
+        .chain(std::iter::once(c"FRACTAL_SUPPRESS_DEPRECATION=1".as_ptr()))
         .chain(std::iter::once(std::ptr::null()))
         .collect::<Vec<_>>();
 
@@ -831,7 +835,7 @@ mod tests {
         write_script(
             &script,
             &format!(
-                "echo \"$$ $1 ${{{DRIVER_RESUME_ENV}}} $ST3_TEST_KEEP\" > {}; \
+                "echo \"$$ $1 ${{{DRIVER_RESUME_ENV}}} $ST3_TEST_KEEP $FRACTAL_SUPPRESS_DEPRECATION\" > {}; \
                  cat <&7 >> {}",
                 report.display(),
                 report.display()
@@ -850,6 +854,7 @@ mod tests {
             .env("ST3_REEXEC_TEST_SCRIPT", &script)
             .env("ST3_REEXEC_TEST_STATE", &state)
             .env("ST3_TEST_KEEP", "kept")
+            .env("FRACTAL_SUPPRESS_DEPRECATION", "0")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let child = command.spawn().unwrap();
@@ -860,7 +865,7 @@ mod tests {
         let mut lines = report.lines();
         assert_eq!(
             lines.next().unwrap(),
-            format!("{pid} first {} kept", state.display())
+            format!("{pid} first {} kept 1", state.display())
         );
         assert_eq!(lines.next().unwrap(), "through the kept descriptor");
     }

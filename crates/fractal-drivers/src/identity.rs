@@ -265,8 +265,8 @@ mod tests {
     #[test]
     fn a_bare_address_resolves_within_the_selected_catalog() {
         let entries = vec![
-            entry("id-1", "dev3", "chat"),
-            entry("id-2", "dev4", "notes"),
+            entry("id-1", "devbox-a", "chat"),
+            entry("id-2", "devbox-b", "notes"),
         ];
         assert_eq!(resolve_address(&entries, "chat", None).unwrap().id, "id-1");
         assert_eq!(resolve_address(&entries, "notes", None).unwrap().id, "id-2");
@@ -277,8 +277,8 @@ mod tests {
     #[test]
     fn a_dotted_reference_is_decided_by_the_candidate_set_not_by_precedence() {
         let entries = vec![
-            entry("id-1", "dev3", "fractal.chat"),
-            entry("id-2", "dev4", "notes"),
+            entry("id-1", "devbox-a", "fractal.chat"),
+            entry("id-2", "devbox-b", "notes"),
         ];
         // Only the bare reading exists.
         assert_eq!(
@@ -287,13 +287,13 @@ mod tests {
         );
         // Only the qualified reading exists.
         assert_eq!(
-            resolve_address(&entries, "dev4.notes", None).unwrap().id,
+            resolve_address(&entries, "devbox-b.notes", None).unwrap().id,
             "id-2"
         );
-        // The qualified reading of a dotted address also resolves, because `dev3` is an admitted
+        // The qualified reading of a dotted address also resolves, because `devbox-a` is an admitted
         // host and `fractal.chat` is an address in it.
         assert_eq!(
-            resolve_address(&entries, "dev3.fractal.chat", None)
+            resolve_address(&entries, "devbox-a.fractal.chat", None)
                 .unwrap()
                 .id,
             "id-1"
@@ -304,12 +304,12 @@ mod tests {
     #[test]
     fn two_readings_of_one_reference_fail_closed() {
         let entries = vec![
-            // The bare reading: host `dev3` has the dotted address `dev4.notes`.
-            entry("id-1", "dev3", "dev4.notes"),
-            // The qualified reading: host `dev4` has the address `notes`.
-            entry("id-2", "dev4", "notes"),
+            // The bare reading: host `devbox-a` has the dotted address `devbox-b.notes`.
+            entry("id-1", "devbox-a", "devbox-b.notes"),
+            // The qualified reading: host `devbox-b` has the address `notes`.
+            entry("id-2", "devbox-b", "notes"),
         ];
-        let error = resolve_address(&entries, "dev4.notes", None).unwrap_err();
+        let error = resolve_address(&entries, "devbox-b.notes", None).unwrap_err();
         match error {
             ResolveError::Ambiguous { ids, .. } => assert_eq!(ids, vec!["id-1", "id-2"]),
             other => panic!("expected ambiguity, got {other:?}"),
@@ -320,17 +320,17 @@ mod tests {
     /// qualified one is exact.
     #[test]
     fn one_address_on_two_hosts_needs_a_host_to_be_decidable() {
-        let entries = vec![entry("id-1", "dev3", "chat"), entry("id-2", "dev4", "chat")];
+        let entries = vec![entry("id-1", "devbox-a", "chat"), entry("id-2", "devbox-b", "chat")];
         assert!(matches!(
             resolve_address(&entries, "chat", None),
             Err(ResolveError::Ambiguous { .. })
         ));
         assert_eq!(
-            resolve_address(&entries, "dev3.chat", None).unwrap().id,
+            resolve_address(&entries, "devbox-a.chat", None).unwrap().id,
             "id-1"
         );
         assert_eq!(
-            resolve_address(&entries, "chat", Some("dev4")).unwrap().id,
+            resolve_address(&entries, "chat", Some("devbox-b")).unwrap().id,
             "id-2"
         );
     }
@@ -338,15 +338,15 @@ mod tests {
     /// A pinned host is a boundary: a reference cannot reach another host by spelling it.
     #[test]
     fn a_pinned_host_admits_only_its_own_qualified_split() {
-        let entries = vec![entry("id-1", "dev3", "chat"), entry("id-2", "dev4", "chat")];
+        let entries = vec![entry("id-1", "devbox-a", "chat"), entry("id-2", "devbox-b", "chat")];
         assert_eq!(
-            resolve_address(&entries, "dev3.chat", Some("dev3"))
+            resolve_address(&entries, "devbox-a.chat", Some("devbox-a"))
                 .unwrap()
                 .id,
             "id-1"
         );
         assert!(matches!(
-            resolve_address(&entries, "dev4.chat", Some("dev3")),
+            resolve_address(&entries, "devbox-b.chat", Some("devbox-a")),
             Err(ResolveError::Unknown { .. })
         ));
     }
@@ -355,15 +355,15 @@ mod tests {
     /// ambiguous with itself.
     #[test]
     fn one_subject_reached_twice_is_not_ambiguous() {
-        // `dev3` has an address that literally reads `dev3.chat`, so the bare reading and the
+        // `devbox-a` has an address that literally reads `devbox-a.chat`, so the bare reading and the
         // qualified reading are the same subject only if the host also has `chat`.
-        let entries = vec![entry("id-1", "dev3", "chat")];
+        let entries = vec![entry("id-1", "devbox-a", "chat")];
         assert_eq!(
-            resolve_address(&entries, "dev3.chat", None).unwrap().id,
+            resolve_address(&entries, "devbox-a.chat", None).unwrap().id,
             "id-1"
         );
         assert_eq!(
-            resolve_address(&entries, "dev3.chat", Some("dev3"))
+            resolve_address(&entries, "devbox-a.chat", Some("devbox-a"))
                 .unwrap()
                 .id,
             "id-1"
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn an_unknown_address_fails_with_an_address_specific_diagnostic() {
-        let entries = vec![entry("id-1", "dev3", "chat")];
+        let entries = vec![entry("id-1", "devbox-a", "chat")];
         let error = resolve_address(&entries, "ghost", None).unwrap_err();
         assert!(
             format!("{error}").contains("no routable agent has the address 'ghost'"),
@@ -385,22 +385,22 @@ mod tests {
     #[test]
     fn exact_id_selection_never_falls_through_to_address_lookup() {
         let entries = vec![
-            entry("0199b8f4-8d3a-7c21-9a44-6f85b7320ea1", "dev3", "chat"),
-            entry("id-2", "dev4", "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1"),
+            entry("0199b8f4-8d3a-7c21-9a44-6f85b7320ea1", "devbox-a", "chat"),
+            entry("id-2", "devbox-b", "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1"),
         ];
         // The ID namespace answers with the subject that owns the ID.
         assert_eq!(
             resolve_id(&entries, "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1")
                 .unwrap()
                 .host,
-            "dev3"
+            "devbox-a"
         );
         // The address namespace answers with the subject that owns the address.
         assert_eq!(
             resolve_address(&entries, "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1", None)
                 .unwrap()
                 .host,
-            "dev4"
+            "devbox-b"
         );
         // An ID that is not an ID does not become an address.
         assert!(matches!(
@@ -415,18 +415,18 @@ mod tests {
     fn an_exact_selector_answers_to_the_positional_key_after_an_address_moves() {
         let moved = AddressBookEntry {
             id: "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1".to_owned(),
-            bus_identity: "dev3.verifier".to_owned(),
-            host: "dev3".to_owned(),
+            bus_identity: "devbox-a.verifier".to_owned(),
+            host: "devbox-a".to_owned(),
             address: "keymap.verifier".to_owned(),
         };
         let entries = vec![moved];
         // The route moved, so the old spelling is not an address any more.
         assert!(matches!(
-            resolve_address(&entries, "dev3.verifier", None),
+            resolve_address(&entries, "devbox-a.verifier", None),
             Err(ResolveError::Unknown { .. })
         ));
         // Both immutable keys still name the subject exactly.
-        for key in ["0199b8f4-8d3a-7c21-9a44-6f85b7320ea1", "dev3.verifier"] {
+        for key in ["0199b8f4-8d3a-7c21-9a44-6f85b7320ea1", "devbox-a.verifier"] {
             assert_eq!(
                 resolve(&entries, &AgentSelector::Id(key.to_owned()), None)
                     .unwrap()
@@ -435,7 +435,7 @@ mod tests {
             );
         }
         // The new route resolves, bare and host-qualified.
-        for reference in ["keymap.verifier", "dev3.keymap.verifier"] {
+        for reference in ["keymap.verifier", "devbox-a.keymap.verifier"] {
             assert_eq!(
                 resolve_address(&entries, reference, None).unwrap().id,
                 "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1"
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn the_selector_forms_route_to_their_own_namespace() {
-        let entries = vec![entry("id-1", "dev3", "chat")];
+        let entries = vec![entry("id-1", "devbox-a", "chat")];
         assert_eq!(
             resolve(&entries, &AgentSelector::Id("id-1".to_owned()), None)
                 .unwrap()

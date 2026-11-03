@@ -565,6 +565,7 @@ pub(super) async fn run_agents(
                 "idempotency_key":uuid::Uuid::now_v7().to_string()})).await?;
             return print_value(&response, json_output);
         }
+        AgentsCommand::Burst(args) => return hold_lane_burst(&cli_client(endpoint), args).await,
         AgentsCommand::Restart(args) => {
             let timeout = fractal_daemon::graph::parse_duration(&args.timeout, false)?;
             let subject = normalize_agent_subject(&args.subject);
@@ -578,6 +579,8 @@ pub(super) async fn run_agents(
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
                         "now": args.now,
                         "fresh_session": args.fresh_session,
+                        "ignore_fit": args.ignore_fit,
+                        "reason": args.reason,
                     }),
                 )
                 .await?;
@@ -748,6 +751,80 @@ pub(super) fn admission_start_message(subject: &str, admission: &Value) -> Strin
     } else {
         format!("{subject}: {reason}")
     }
+}
+
+/// Holds an agent's lane burst while standard input stays open (docs/st3/seat-lanes.md, "Bursts"):
+/// one line per answer on standard output for the command that started it, then a renewal of its
+/// lease every half minute. Standard input closing, or a stop signal, gives it back. A daemon
+/// without bursts answers with an empty 404, which is `none`.
+async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
+    const WAITING_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+    const RENEW: std::time::Duration = std::time::Duration::from_secs(30);
+    let subject = normalize_agent_subject(&args.subject);
+    let body = json!({"agent": subject, "actor": args.actor, "cores": args.cores, "memory": args.memory, "reason": args.reason});
+    let (closed_tx, mut closed) = tokio::sync::oneshot::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+        let _ = closed_tx.send(());
+    });
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let say = |line: String| -> Result<()> {
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{line}")?;
+        out.flush()?;
+        Ok(())
+    };
+    let (mut told, mut granted) = (None::<String>, false);
+    loop {
+        match client.post::<_, Value>("/v1/agents/lane/burst", &body).await {
+            Ok(answer) => {
+                let why = answer["why"].as_str().unwrap_or_default().to_owned();
+                match answer["state"].as_str() {
+                    Some("granted") if !granted => {
+                        say(format!("granted {} {}", args.cores, args.memory))?;
+                        granted = true;
+                    }
+                    Some("granted") => {}
+                    Some("waiting") if told.as_deref() != Some(why.as_str()) => {
+                        say(format!("waiting {why}"))?;
+                        told = Some(why);
+                    }
+                    Some("waiting") => {}
+                    Some("none") => return say(format!("none {why}")),
+                    Some("refused") => {
+                        say(format!("refused {why}"))?;
+                        anyhow::bail!("lane burst refused: {why}");
+                    }
+                    other => anyhow::bail!("the daemon answered a lane burst with {other:?}"),
+                }
+            }
+            Err(error) if fractal_daemon::client::is_absent_route(&error) => {
+                return say("none this host's daemon has no lane bursts".into());
+            }
+            // A daemon restarting is waited for, as a full host is: the run that asked bounds the
+            // wait, and never goes on in a lane it did not get.
+            Err(error) if !granted && fractal_daemon::client::daemon_unreachable(&error).is_some() => {
+                let why = format!("this host's daemon is not reachable ({}); asking again", error.root_cause());
+                if told.as_deref() != Some(why.as_str()) {
+                    say(format!("waiting {why}"))?;
+                    told = Some(why);
+                }
+            }
+            // Held, a renewal that fails (a daemon restarting) is tried again: the lease outlasts a
+            // few, and the raised slice still counts meanwhile.
+            Err(error) if granted => eprintln!("fractal: WARN renewing the lane burst: {error:#}"),
+            Err(error) => return Err(error),
+        }
+        tokio::select! {
+            _ = &mut closed => break,
+            _ = terminate.recv() => break,
+            _ = tokio::signal::ctrl_c() => break,
+            () = tokio::time::sleep(if granted { RENEW } else { WAITING_POLL }) => {}
+        }
+    }
+    let _: Value = client.request("DELETE", "/v1/agents/lane/burst", Some(&json!({"agent": subject, "actor": args.actor}))).await?;
+    Ok(())
 }
 
 async fn agent_start_status(
@@ -1265,6 +1342,7 @@ async fn run_agent_inspection(
         | AgentsCommand::Retire(_)
         | AgentsCommand::Rollout(_)
         | AgentsCommand::Restart(_)
+        | AgentsCommand::Burst(_)
         | AgentsCommand::AcknowledgeSeed(_)
         | AgentsCommand::Suspend(_)
         | AgentsCommand::Resume(_)
