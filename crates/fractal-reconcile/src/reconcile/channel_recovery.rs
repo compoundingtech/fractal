@@ -43,7 +43,10 @@ const CAUSE_MARKER: &str = " cause=";
 
 /// The cause a reason ends with, if it names one.
 fn reason_cause(reason: &str) -> Option<Value> {
-    reason.rsplit_once(CAUSE_MARKER).and_then(|(_, cause)| serde_json::from_str(cause).ok())
+    // The first marker: the reason's own text comes before it, and a marker inside the cause (in a
+    // plugin error, say) is inside its JSON.
+    let (_, cause) = reason.split_once(CAUSE_MARKER)?;
+    serde_json::Deserializer::from_str(cause).into_iter::<Value>().next()?.ok()
 }
 
 /// What makes two causes the same: what failed and what the driver chose, not when.
@@ -309,7 +312,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         let repeated = signature.is_some()
             && attempts.iter().max_by_key(|claim| claim.store_index).and_then(|claim| claim_signature(claim)) == signature;
         if stalled || repeated {
-            return self.restart_uncharged(subject, member, incarnation, &token, &harness, &uncharged, signature, stalled, blocked, now);
+            let charged_since = attempts.iter().map(|claim| claim.store_index).max();
+            return self.restart_uncharged(subject, member, incarnation, &token, &harness, &uncharged, charged_since, signature, stalled, blocked, now);
         }
         // The attachment report may be newer than the driver's diagnostic. Recheck the live
         // current delivery fence directly before charging a retry or parking the seat.
@@ -404,14 +408,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         token: &str,
         harness: &crate::model::CurrentHarnessView,
         uncharged: &[&crate::model::ClaimRecord],
+        charged_since: Option<u64>,
         signature: Option<Value>,
         stalled: bool,
         blocked: Option<&anyhow::Error>,
         now: u128,
     ) -> Result<bool> {
         // The uncharged restarts in a row for this cause: a charged attempt or another cause ends the run.
+        let charged = charged_since.unwrap_or(0);
         let in_row = uncharged.iter().rev()
-            .take_while(|claim| claim_signature(claim) == signature)
+            .take_while(|claim| claim.store_index > charged && claim_signature(claim) == signature)
             .count();
         let backoff = (LONG_BACKOFF_MS << in_row.min(8)).min(LONG_BACKOFF_MAX_MS);
         let due = harness.since_unix_ms.saturating_add(backoff);

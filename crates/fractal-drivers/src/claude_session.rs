@@ -185,7 +185,10 @@ pub fn run_controlled_paths_with_primary_ownership(
         managed_claude_argv(crate::access::AccessMode::from_environment()?, &workspace, claude_argv);
     // One Claude for the plugin check and the provider: resolved once, on this seat's own PATH.
     let claude_argv = resolve_claude_program(claude_argv)?;
-    crate::claude_channel::use_claude_program(PathBuf::from(&claude_argv[0]));
+    // Only Claude itself: a declaration may start its provider argv with a wrapper.
+    if Path::new(&claude_argv[0]).file_name().is_some_and(|name| name == "claude") {
+        crate::claude_channel::use_claude_program(PathBuf::from(&claude_argv[0]));
+    }
     let claude_argv = prepare_fractal_channel_argv(&paths.root, &identity, claude_argv)?;
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
         .with_context(|| format!("admitting Claude driver workspace {}", workspace.display()))?;

@@ -1095,3 +1095,35 @@ fn a_repeat_of_the_last_charged_cause_is_not_charged_but_another_cause_is() {
     assert!(recover(&reconciler, &desired, "three", since + 20_000).unwrap());
     assert_eq!(attempts(&store).len(), 2, "another cause is charged");
 }
+
+/// A charged attempt between uncharged restarts ends their run: the count, its backoff and the
+/// fault start again.
+#[test]
+fn a_charged_attempt_ends_a_run_of_uncharged_restarts() {
+    let (store, _runtime, reconciler, desired) = setup();
+    for incarnation in ["one", "two"] {
+        let since = unattached_with(&store, incarnation, "stalled", cause("claude-not-started", "approved-plugin", 1));
+        let before = uncharged(&store).len();
+        let backoff = if before == 0 { 5 } else { 10 };
+        assert_eq!(recover_any(&reconciler, &desired, incarnation, since + backoff * 60_000), before + 1);
+    }
+    let since = unattached_with(&store, "three", "blocked", cause("channel-not-initialized", "inline-development", 1));
+    assert!(recover(&reconciler, &desired, "three", since + 10_000).unwrap());
+    // Stalled again: the first of a new run, 5 min, no fault.
+    let since = unattached_with(&store, "four", "stalled", cause("claude-not-started", "approved-plugin", 1));
+    assert_eq!(recover_any(&reconciler, &desired, "four", since + 5 * 60_000), 3);
+    assert!(uncharged(&store).pop().unwrap().body["fields"]["reason"].as_str().unwrap().contains("restart 1 in a row"));
+    assert!(store.operational_failure(&super::super::channel_recovery::channel_cause_attention(SEAT)).unwrap().is_none());
+}
+
+#[test]
+fn a_cause_marker_inside_the_cause_is_part_of_its_json() {
+    let (store, _runtime, reconciler, desired) = setup();
+    let tricky = json!({"kind": "channel-not-initialized", "route": "inline-development", "plugin_check_error": "x cause={y}",
+        "project_st_server": false, "plugin_check_ms": 1, "driver_started_at_ms": 1, "launched_at_ms": 1, "session_started_at_ms": 1});
+    let since = unattached_with(&store, "one", "blocked", tricky.clone());
+    assert!(recover(&reconciler, &desired, "one", since + 10_000).unwrap());
+    let since = unattached_with(&store, "two", "blocked", tricky);
+    assert_eq!(recover_any(&reconciler, &desired, "two", since + 20_000), 0, "the same cause, read whole, is a repeat");
+    assert_eq!(attempts(&store).len(), 1);
+}
