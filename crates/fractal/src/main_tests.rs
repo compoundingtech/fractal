@@ -2125,6 +2125,9 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             claude_attachment_reconciled: false,
             claude_attachment_terminal: None,
             claude_readiness_fallback: ClaudeReadinessFallback::default(),
+            claude_channel_launch: None,
+            claude_attach_started_ms: None,
+            claude_session_started_ms: None,
             claude_attachment_admissions: AdmissionBucket {
                 binding: Some(("incarnation".into(), 4, "token".into())),
                 tokens: 0,
