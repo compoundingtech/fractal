@@ -11521,6 +11521,7 @@ pub(crate) fn message_view_from(
         body_bytes: body.as_ref().map(|body| body.size),
         body_origin: body.map(|body| body.origin),
         created_index,
+        status_from: None,
     })
 }
 

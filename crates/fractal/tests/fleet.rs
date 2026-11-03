@@ -6625,6 +6625,29 @@ async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    // The new member's message view and lists read the same claims, and ask the release nothing:
+    // no `status_from`.
+    let read: Value = n1.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!((&read["status"], read.get("status_from")), (&json!("read"), None), "{read}");
+    let listed: Value = n1
+        .client()
+        .get("/v1/messages?to=agent/marks/old-host-seat&include_closed=true")
+        .await
+        .unwrap();
+    let page: Value = n1
+        .client()
+        .get(&format!("/v1/messages/page?from={PERSON}&include_closed=true"))
+        .await
+        .unwrap();
+    for messages in [&listed, &page["items"]] {
+        let message = messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["subject"] == subject.as_str())
+            .unwrap_or_else(|| panic!("{messages}"));
+        assert_eq!((&message["status"], message.get("status_from")), (&json!("read"), None), "{message}");
+    }
 }
 
 /// One node of the previous release, upgraded in place with mail mid-delivery to a seat it hosts:
