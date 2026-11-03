@@ -4469,6 +4469,55 @@ fn insert_attention_target_states(
     Ok(())
 }
 
+/// Raise the `target_states` of messages whose seat's host keeps their receipts by what that
+/// host says, within a second, as a message view does: a fault about mail another host delivered,
+/// read or closed shows it so. Patched at serve time, after any cached or stored row, and never
+/// part of a revision: a client sees the host's answer on its next read.
+pub async fn relay_attention_target_states(state: &AppState, items: &mut [Value]) -> anyhow::Result<()> {
+    let messages = items
+        .iter()
+        .flat_map(|item| item["target_states"].as_array().into_iter().flatten())
+        .filter_map(|target| target["id"].as_str().filter(|id| id.starts_with("message/")).map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    if messages.is_empty() {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let messages = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<crate::model::MessageView>> {
+        let mut views = Vec::new();
+        for message in messages {
+            views.extend(store.message(&message)?);
+        }
+        Ok(views)
+    })
+    .await??;
+    let relayed = message_reads::read_for_views(state, &messages).await?;
+    for target in items
+        .iter_mut()
+        .flat_map(|item| item["target_states"].as_array_mut().into_iter().flatten())
+    {
+        let Some(message_reads::Relayed::Answered { status: Some(status), latest, .. }) =
+            target["id"].as_str().and_then(|id| relayed.get(id))
+        else {
+            continue;
+        };
+        if crate::store::message_marks::rank(status)
+            > crate::store::message_marks::rank(target["state"].as_str().unwrap_or_default())
+        {
+            target["state"] = json!(status);
+            match latest {
+                Some((_, at)) => target["since"] = json!(client_timestamp(u128::from(*at))),
+                None => {
+                    if let Some(target) = target.as_object_mut() {
+                        target.remove("since");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn client_attention_resources(
     store: &Store,
     person: Option<&str>,

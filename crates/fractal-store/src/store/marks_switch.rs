@@ -6,8 +6,8 @@
 //! delivery status, doctor and the mail-backlog check, but its message view and lists read only
 //! its own records, where another host's mark is missing and the mail would show as sent. So
 //! this member writes marks only while every other member advertises [`FEATURE`], which a build
-//! advertises once those reads ask the relay too (4b-4); no build does yet, so until then a
-//! member with others keeps claims. The barrier is read the strict way the standby barrier reads
+//! advertises once those reads ask the relay too (4b-4): its message view and lists, the targets
+//! of its faults and its work wakes. A member beside one that does not keeps claims. The barrier is read the strict way the standby barrier reads
 //! its own: the newest `daemon.started` of each current incarnation, any ambiguous membership
 //! counting as not ready, and no writer outside the membership. A member alone switches at once:
 //! no other member's view can be wrong. The barrier is checked while the daemon runs

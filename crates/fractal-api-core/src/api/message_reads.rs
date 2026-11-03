@@ -522,3 +522,123 @@ pub fn take_in(message: &mut MessageView, relayed: &Relayed) {
         },
     });
 }
+
+/// Ask the assignees' hosts, within [`VIEW_DEADLINE`], about the wake messages of `steps` that
+/// this member has not seen consumed, and count what they say as this member counts its own
+/// records: read or closed acknowledges the wake as `consumed`, and delivered as `delivery` while
+/// the assignee works in the wake's incarnation. It only raises `acknowledged_by`: a claim still
+/// wins, and a host that does not answer leaves the wake as this member counted it. What it says
+/// is never part of a revision. Asks nobody and reads no message when no host keeps its seats'
+/// receipts, or no wake waits on a seat of one.
+pub async fn read_work_wakes<'a>(
+    state: &AppState,
+    steps: impl IntoIterator<Item = &'a mut crate::model::StepRunView>,
+) -> anyhow::Result<()> {
+    let mut steps = steps
+        .into_iter()
+        .filter(|step| {
+            step.wake.as_ref().is_some_and(|wake| {
+                !wake.asks.messages.is_empty()
+                    && !matches!(wake.acknowledged_by.as_deref(), Some("claim" | "consumed"))
+            })
+        })
+        .collect::<Vec<_>>();
+    if steps.is_empty() {
+        return Ok(());
+    }
+    let waiting = steps
+        .iter()
+        .filter_map(|step| step.wake.as_ref())
+        .map(|wake| (wake.assignee.clone(), wake.asks.messages.clone()))
+        .collect::<Vec<_>>();
+    let store = state.store.clone();
+    let messages = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MessageView>> {
+        let seats = relay_hosts(&store)?.into_values().flatten().collect::<BTreeSet<_>>();
+        let subjects = waiting
+            .into_iter()
+            .filter(|(assignee, _)| seats.contains(assignee))
+            .flat_map(|(_, messages)| messages)
+            .collect::<BTreeSet<_>>();
+        let mut messages = Vec::new();
+        for subject in subjects {
+            messages.extend(store.message(&subject)?);
+        }
+        Ok(messages)
+    })
+    .await??;
+    let relayed = read_for_views(state, &messages).await?;
+    if relayed.is_empty() {
+        return Ok(());
+    }
+    for step in &mut steps {
+        let Some(wake) = step.wake.as_mut() else {
+            continue;
+        };
+        let furthest = wake
+            .asks
+            .messages
+            .iter()
+            .filter_map(|message| relayed.get(message)?.status())
+            .max_by_key(|status| message_marks::rank(status));
+        let acknowledged = match furthest {
+            Some("read" | "closed") => "consumed",
+            Some("delivered")
+                if wake.asks.delivery_acknowledges
+                    && !matches!(wake.acknowledged_by.as_deref(), Some("delivery")) =>
+            {
+                "delivery"
+            }
+            _ => continue,
+        };
+        wake.acknowledged_by = Some(acknowledged.to_owned());
+    }
+    Ok(())
+}
+
+/// [`read_work_wakes`] for client resources whose steps carry wakes (`steps[].wake`): a step whose
+/// wake is not yet acknowledged by a claim or consumption, and whose assignee is a seat of a host
+/// that keeps its receipts, is read again and its `acknowledged_by` raised by that host's answer.
+/// Asks nobody and reads no step when no host keeps receipts.
+pub async fn relay_client_wakes(state: &AppState, items: &mut [Value]) -> anyhow::Result<()> {
+    let waiting = |step: &Value| {
+        step["wake"].is_object()
+            && !matches!(step["wake"]["acknowledged_by"].as_str(), Some("claim" | "consumed"))
+    };
+    if !items.iter().any(|item| item["steps"].as_array().is_some_and(|steps| steps.iter().any(waiting))) {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let assignees = items
+        .iter()
+        .flat_map(|item| item["steps"].as_array().into_iter().flatten())
+        .filter(|step| waiting(step))
+        .filter_map(|step| Some((step["id"].as_str()?.to_owned(), step["wake"]["assignee"].as_str()?.to_owned())))
+        .collect::<Vec<_>>();
+    let mut steps = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<crate::model::StepRunView>> {
+        let seats = relay_hosts(&store)?.into_values().flatten().collect::<BTreeSet<_>>();
+        let mut steps = Vec::new();
+        for (step, assignee) in assignees {
+            if seats.contains(&assignee) {
+                steps.extend(store.step_run(&step)?);
+            }
+        }
+        Ok(steps)
+    })
+    .await??;
+    if steps.is_empty() {
+        return Ok(());
+    }
+    read_work_wakes(state, steps.iter_mut()).await?;
+    let acknowledged = steps
+        .into_iter()
+        .filter_map(|step| Some((step.subject, step.wake?.acknowledged_by?)))
+        .collect::<BTreeMap<_, _>>();
+    for step in items.iter_mut().flat_map(|item| item["steps"].as_array_mut().into_iter().flatten()) {
+        if waiting(step)
+            && let Some(by) = step["id"].as_str().and_then(|id| acknowledged.get(id))
+        {
+            step["wake"]["acknowledged_by"] = json!(by);
+        }
+    }
+    Ok(())
+}
