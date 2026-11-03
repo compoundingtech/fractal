@@ -291,7 +291,12 @@ fn note_channel_launch(change: impl FnOnce(&mut ChannelLaunch)) {
 fn resolve_claude_program(mut argv: Vec<String>) -> Result<Vec<String>> {
     let program = argv.first().context("the Claude provider argv is empty")?;
     if !program.contains('/') {
-        let resolved = crate::harness_admission::resolve_executable(program)
+        // The PATH entry as it is, not its symlink's target: Claude reads its own install from it.
+        use std::os::unix::fs::PermissionsExt as _;
+        let resolved = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|root| root.join(program))
+            .find(|candidate| candidate.is_file()
+                && candidate.metadata().is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0))
             .with_context(|| format!("resolving the Claude executable `{program}` on this seat's PATH"))?;
         argv[0] = resolved.to_string_lossy().into_owned();
     }
@@ -2305,6 +2310,27 @@ fn provider_auth_edge(event: &str, payload: &serde_json::Value) -> Option<Provid
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_claude_program_is_resolved_once_on_this_path_and_a_path_is_kept() {
+        let resolved = resolve_claude_program(vec!["sh".into(), "--flag".into()]).unwrap();
+        assert!(resolved[0].starts_with('/') && resolved[0].ends_with("/sh"), "the PATH entry, not its target: {resolved:?}");
+        assert_eq!(resolved[1], "--flag");
+        let kept = resolve_claude_program(vec!["/opt/claude/bin/claude".into()]).unwrap();
+        assert_eq!(kept, ["/opt/claude/bin/claude"]);
+        let missing = resolve_claude_program(vec!["no-such-claude-on-path".into()]).unwrap_err();
+        assert!(format!("{missing:#}").contains("resolving the Claude executable `no-such-claude-on-path` on this seat's PATH"), "{missing:#}");
+    }
+
+    #[test]
+    fn a_workspace_declaring_its_own_st_server_is_noted() {
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(!project_declares_st_server(workspace.path()));
+        fs::write(workspace.path().join(".mcp.json"), r#"{"mcpServers": {"other": {"command": "x"}}}"#).unwrap();
+        assert!(!project_declares_st_server(workspace.path()));
+        fs::write(workspace.path().join(".mcp.json"), r#"{"mcpServers": {"st": {"command": "/Volumes/gone/st"}}}"#).unwrap();
+        assert!(project_declares_st_server(workspace.path()));
+    }
     use std::fs;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
