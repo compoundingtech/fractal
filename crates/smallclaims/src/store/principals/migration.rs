@@ -205,6 +205,22 @@ pub fn transient_storage_error(error: &anyhow::Error) -> bool {
     })
 }
 
+/// The caller's read budget ended (a request deadline or a dropped stream) and its reads were
+/// interrupted or refused. Judgment runs on whichever request's pass found work, so this is
+/// that request's cancellation, not damaged state: the paced job, which has no request
+/// budget, does the same work.
+pub(super) fn cancelled_by_caller(error: &anyhow::Error) -> bool {
+    crate::read_budget::check().is_err()
+        && error.chain().any(|cause| {
+            matches!(cause.downcast_ref::<rusqlite::Error>(),
+                Some(rusqlite::Error::SqliteFailure(code, _))
+                    if code.code == rusqlite::ErrorCode::OperationInterrupted)
+                || cause
+                    .downcast_ref::<crate::error::Error>()
+                    .is_some_and(|error| error.code == "read-deadline")
+        })
+}
+
 /// How long a transient storage error may keep recurring before doctor reports it.
 pub(super) const SIGNATURE_RETRY_VISIBLE_MS: u128 = 300_000;
 
