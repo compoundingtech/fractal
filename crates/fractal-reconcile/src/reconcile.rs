@@ -41864,17 +41864,23 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
     fn the_look_fixture_store_takes_a_write_while_a_reader_holds_a_snapshot() {
         let (_root, store, _) = one_look_fixture("reader-writer");
         store.read_snapshot(|_| {
-            store.append_claim(&ClaimInput {
-                subject: "agent/reader-writer".into(),
-                kind: "runtime.observed".into(),
-                actor: Some("agent/reader-writer".into()),
-                fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            })?;
+            assert!(store.latest_claim("agent/reader-writer", None)?.is_none());
+            // Join the other thread's commit while this thread still holds its read snapshot.
+            std::thread::scope(|scope| scope.spawn(|| {
+                store.append_claim(&ClaimInput {
+                    subject: "agent/reader-writer".into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some("agent/reader-writer".into()),
+                    fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+            }).join().unwrap())?;
+            assert!(store.latest_claim("agent/reader-writer", None)?.is_none());
             Ok(())
         }).unwrap();
+        assert!(store.latest_claim("agent/reader-writer", None).unwrap().is_some());
     }
 
     /// One look's listing: issue 1 titled `title`, and the cursor `cursor`.
