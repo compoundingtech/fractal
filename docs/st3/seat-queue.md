@@ -21,6 +21,8 @@ it. Each seat has one ordered queue of mission runs:
   seat is free. When a move, a new run, or a readiness change selects a different first eligible
   step, the daemon sends the seat a work wake even if `work wait` keeps its current claim.
   An unchanged head sends no additional queue-head wake; the held claim remains intact.
+  Held-seat notices do not consume claim-wake attempts or reset the runtime for fresh context.
+  Once the seat is free, normal claim waking and fresh-context preparation apply.
 - A revision does not take a held step's place either. A revision carries a claimed step into the
   new generation as a ready step with a new subject, so the seat must claim it again. Until it
   does, that step is the seat's next work, ahead of any earlier run's ready step, and the seat is

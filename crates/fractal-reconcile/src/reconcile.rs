@@ -6042,13 +6042,16 @@ impl<R: RuntimeControl> Reconciler<R> {
             if defers_inherited_work_wake(step, &work, harness.as_ref()) {
                 return Ok(());
             }
-            if let Some(member) = member
+            if selection.held.is_empty()
+                && let Some(member) = member
                 && !self.prepare_fresh_context(agent, incarnation, step, member)?
             {
                 return Ok(());
             }
             append_work_wake_message(
-                &self.store, step, agent, incarnation, 1, "queue-head", "daemon/runtime",
+                &self.store, step, agent, incarnation, 1,
+                if selection.held.is_empty() { "queue-head" } else { "queue-head-held" },
+                "daemon/runtime",
                 "the first eligible queue entry changed",
                 format!("st3-queue-head:{agent}:{incarnation_key}:{}:{head}:{}:{}",
                     last_wake.map_or("initial", |message| message.subject.as_str()),
@@ -6081,7 +6084,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         message.tags.iter().map(String::as_str),
                         "wake-source:",
                     )
-                    .any(|value| value == "manual")
+                    .any(|value| matches!(value, "manual" | "queue-head-held"))
                 })
                 .filter(|message| {
                     work_message_target(message).is_some_and(
@@ -49054,6 +49057,11 @@ mission "gated" state="ready" {
     depends-on { step "prepare" completed }
   }
 }
+mission "fresh" state="ready" {
+  concurrent-runs
+  goal "Start queued work in a fresh context."
+  step "work" { assigned-to "agent/node.worker"; fresh-context }
+}
 "#;
 
     mod ready_wake_fault_notice;
@@ -49697,6 +49705,64 @@ mission "gated" state="ready" {
         assert!(seat.woken().contains(&SeatQueueFixture::step(&gated, "work")));
         seat.reconciler.reconcile_once().unwrap();
         assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), before + 1);
+    }
+
+    #[test]
+    fn seat_queue_head_notice_defers_fresh_context_until_the_seat_is_free() {
+        for mission in ["fresh", "queued"] {
+            let seat = SeatQueueFixture::new();
+            let first = seat.start("queued", "context-held");
+            let held = SeatQueueFixture::step(&first, "work");
+            seat.work(&held, "claim", "context-claim").unwrap();
+            let second = seat.start(mission, "context-next");
+            let third = seat.start(mission, "context-promoted");
+            let mut member = seat.store.desired_subjects().unwrap().into_iter()
+                .find(|subject| subject.subject == SEAT).unwrap().member.unwrap();
+            if mission == "queued" {
+                member.tags.insert("st3.fresh_context".into(), "true".into());
+            }
+            seat.move_run(&third.subject, "top", None, "person/operator", "context-top").unwrap();
+            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member)).unwrap();
+            assert!(seat.woken().contains(&SeatQueueFixture::step(&third, "work")));
+            assert!(seat.reconciler.runtime.stops.lock().unwrap().is_empty());
+            assert!(seat.store.observations_for(SEAT, "runtime.action.requested").unwrap().is_empty());
+            assert_eq!(seat.store.step_run(&held).unwrap().unwrap().status, "claimed");
+            seat.work(&held, "complete", "context-complete").unwrap();
+            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member)).unwrap();
+            assert_eq!(seat.reconciler.runtime.stops.lock().unwrap().len(), 1);
+            assert!(seat.store.step_run(&SeatQueueFixture::step(&second, "work")).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn seat_queue_head_held_notice_does_not_consume_the_claim_wake() {
+        let seat = SeatQueueFixture::new();
+        let first = seat.start("queued", "notice-held");
+        let held = SeatQueueFixture::step(&first, "work");
+        seat.work(&held, "claim", "notice-claim").unwrap();
+        let second = seat.start("queued", "notice-next");
+        let subject = SeatQueueFixture::step(&second, "work");
+        let notice = seat.store.messages(Some(SEAT), true).unwrap().into_iter()
+            .find(|message| work_message_target(message).is_some_and(|(target, ..)| target == subject))
+            .unwrap();
+        for (kind, status) in [("message.delivered", "delivered"), ("message.read", "read"), ("message.closed", "closed")] {
+            seat.store.append_claim(&ClaimInput {
+                subject: notice.subject.clone(), kind: kind.into(), actor: Some(SEAT.into()),
+                fields: BTreeMap::from([("status".into(), json!(status))]),
+                evidence: Vec::new(), expected_subject: None,
+                idempotency_key: Some(format!("notice-{status}")),
+            }).unwrap();
+        }
+        assert_eq!(seat.store.step_run(&subject).unwrap().unwrap().wake.unwrap().attempts, 0);
+        seat.work(&held, "complete", "notice-complete").unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        let messages = seat.store.messages(Some(SEAT), true).unwrap();
+        assert!(messages.iter().any(|message| message.subject != notice.subject
+            && message.tags.iter().any(|tag| tag == "st3-wake-source:automatic")
+            && work_message_target(message).is_some_and(|(target, ..)| target == subject)));
+        let wake = seat.store.step_run(&subject).unwrap().unwrap().wake.unwrap();
+        assert_eq!(wake.attempts, 1);
+        assert!(wake.failure.is_none());
     }
 
     #[test]
