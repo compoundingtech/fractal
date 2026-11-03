@@ -1659,8 +1659,9 @@ pub fn refresh_operation_report(
     startup_audit: Option<tokio::sync::oneshot::Sender<anyhow::Result<Vec<String>>>>,
 ) {
     let report = if let Some(sender) = startup_audit {
+        // The store keeps this audit's result, which the report's operation check reads.
         let drift = state.store.operation_projection_drift();
-        let report = doctor_report_with_operation_drift(state, &drift);
+        let report = doctor_report(state);
         // The repair owns these findings, including any scan error. It re-derives just the
         // drifted rows from current claims, never reuses expected values from this snapshot.
         let _ = sender.send(drift);

@@ -2887,14 +2887,23 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
     // Replication can advance between CLI calls and make coverage pending again. Assert
     // against the settled comparison that satisfied the wait, including its table diff.
     let diff = settled_diff.unwrap();
-    let doctor = c.st(&["--json", "doctor"]);
-    let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
-    let admission = doctor["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["name"] == "fleet-admission")
-        .unwrap();
+    // The membership change wakes the daemon to count the admission residue again; doctor
+    // reports the new count once it is made.
+    let mut admission = Value::Null;
+    wait_until("doctor reports the admissions from before the rejoin", 120, || {
+        let doctor = c.st(&["--json", "doctor"]);
+        let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+        admission = doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "fleet-admission")
+            .cloned()
+            .unwrap();
+        let counted = admission["message"].as_str().unwrap().contains("admitted beyond high water");
+        async move { counted }
+    })
+    .await;
     let waited = c.st(&["fleet", "wait", "--timeout", "5s"]);
     eprintln!(
         "rejoin receipt: {}",
@@ -4633,7 +4642,7 @@ async fn an_invitation_only_fabric_could_carry_fails_before_it_exists() {
         assert!(!output.status.success(), "{delivery:?} succeeded");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("Fabric invitations need st-fabric-adapter installed"),
+            stderr.contains("Fabric invitations need fractal-fabric-adapter installed"),
             "{delivery:?}: {stderr}"
         );
         assert!(output.stdout.is_empty(), "{delivery:?} printed a code");
@@ -6270,6 +6279,316 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     assert_eq!(page("include_closed=true").await, subjects);
     assert_eq!(page("from=agent/fleet-sender&include_closed=true").await, [stream]);
     assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
+}
+
+/// Delivery and read state this build records as local marks (db break-up step 4b) reads beside
+/// the lifecycle claims the previous release wrote, on one node upgraded in place, backed up and
+/// rolled back. The release's claims read the same throughout; a mark replicates nothing and
+/// writes no claim. A backup that carries marks is version 4, which the release refuses to restore
+/// with a clear error. Rolled back, the release runs on the same store and reads its own claims;
+/// upgraded again, the marks still count.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    let send = |node: &Node, key: &str| {
+        let client = node.client();
+        let key = key.to_owned();
+        async move {
+            let receipt: Value = client
+                .post("/v1/messages", &json!({
+                    "idempotency_key": key, "from": PERSON, "to": "agent/fleet-reader",
+                    "content": format!("graph mail {key}"),
+                }))
+                .await
+                .unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    let read = |node: &Node, subject: &str, key: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+        let key = key.to_owned();
+        async move {
+            for lifecycle in ["delivered", "read"] {
+                let _: Value = client
+                    .post(&path, &json!({
+                        "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                        "idempotency_key": format!("{key}-{lifecycle}"),
+                    }))
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+    let listed = |node: &Node| {
+        let client = node.client();
+        async move {
+            let page: MessagePage = client
+                .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true")
+                .await
+                .unwrap();
+            page.items.into_iter().map(|item| (item.subject, item.status)).collect::<Vec<_>>()
+        }
+    };
+    let state = |listed: &[(String, String)]| listed.iter().map(|(_, status)| status.clone()).collect::<Vec<_>>();
+    let first = send(&o, "release-first").await;
+    let second = send(&o, "release-second").await;
+    let third = send(&o, "release-third").await;
+    read(&o, &first, "release-read").await;
+    let before = listed(&o).await;
+    assert_eq!(state(&before), ["read", "sent", "sent"]);
+
+    // Upgrade in place: the release's claims read the same; marks count beside them.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
+    for kind in ["message.delivered", "message.read"] {
+        let receipt: Value = o
+            .client()
+            .post("/v1/internal/test/message-marks", &json!({"message": second, "kind": kind, "consumer": "agent/fleet-reader"}))
+            .await
+            .unwrap();
+        assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{receipt}");
+    }
+    assert_eq!(state(&listed(&o).await), ["read", "read", "sent"]);
+    assert!(
+        o.claims().await.iter().all(|claim| !(claim["subject"] == second && claim["kind"] != "message.sent")),
+        "a mark wrote a lifecycle claim"
+    );
+
+    // A backup with marks is version 4; the release refuses it, naming the version.
+    let archive = root.path().join("marks.jsonl");
+    let created = o.command(&["backup", "create", archive.to_str().unwrap()]).output().unwrap();
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let header: Value = serde_json::from_str(fs::read_to_string(&archive).unwrap().lines().next().unwrap()).unwrap();
+    assert_eq!(header["data"]["version"], 4, "{header}");
+    o.binary = old.clone();
+    let target = root.path().join("restored-by-release.db");
+    let refused = o
+        .command(&["backup", "restore", "--database", target.to_str().unwrap(), archive.to_str().unwrap()])
+        .output()
+        .unwrap();
+    o.binary = PathBuf::from(st3());
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(error.contains("unsupported claim backup format/version"), "{error}");
+    assert!(!target.exists());
+
+    // Roll back: the release runs on this store and reads its own claims. A mark is this build's
+    // record only, so the release sees that message as sent, as the release note says.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    assert_eq!(state(&listed(&o).await), ["read", "sent", "sent"]);
+    read(&o, &third, "rolled-back-read").await;
+    let fourth = send(&o, "rolled-back-send").await;
+    assert_eq!(state(&listed(&o).await), ["read", "sent", "read", "sent"]);
+
+    // Upgrade again: the mark still counts beside every claim either build wrote.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    let after = listed(&o).await;
+    assert_eq!(state(&after), ["read", "read", "read", "sent"]);
+    assert_eq!(after.last().map(|(subject, _)| subject.clone()), Some(fourth));
+}
+
+/// A member of the previous release and one of this build, side by side: delivery and read state
+/// the release writes as lifecycle claims reaches the new member and reads the same there, and a
+/// mark the new member records stays its own: it writes no claim, the release never sees it, and
+/// replication between the two stays valid.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_a_member_recording_message_marks() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "7b6c5d4e-3f2a-4b1c-8d9e-0f1a2b3c4d5e";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old;
+    let mut n1 = Node::new(root.path(), "n1");
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+    let status_of = |node: &Node, subject: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/read/{subject}");
+        async move { client.get::<Value>(&path).await.ok().and_then(|view| view["status"].as_str().map(str::to_owned)) }
+    };
+    let mut subjects = Vec::new();
+    for key in ["claimed", "marked"] {
+        let receipt: Value = o
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("side-by-side-{key}"), "from": PERSON, "to": "agent/fleet-reader",
+                "content": format!("mail to be {key}"),
+            }))
+            .await
+            .unwrap();
+        subjects.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (claimed, marked) = (subjects[0].clone(), subjects[1].clone());
+    // The release delivers and reads one message by claims.
+    for lifecycle in ["delivered", "read"] {
+        let _: Value = o
+            .client()
+            .post(&format!("/v1/messages/{}/claims", claimed.trim_start_matches("message/")), &json!({
+                "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                "idempotency_key": format!("side-by-side-{lifecycle}"),
+            }))
+            .await
+            .unwrap();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    while status_of(&n1, &claimed).await.as_deref() != Some("read") || status_of(&n1, &marked).await.is_none() {
+        assert!(std::time::Instant::now() < deadline, "the release's mail and claims did not reach the new member");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // The new member records its marks for the other message.
+    for kind in ["message.delivered", "message.read"] {
+        let _: Value = n1
+            .client()
+            .post("/v1/internal/test/message-marks", &json!({"message": marked, "kind": kind, "consumer": "agent/fleet-reader"}))
+            .await
+            .unwrap();
+    }
+    assert_eq!(status_of(&n1, &marked).await.as_deref(), Some("read"));
+    // A later write on each member still replicates, and the marks never do.
+    o.note("o-after-marks").await;
+    n1.note("n1-after-marks").await;
+    let expected = BTreeSet::from(["custom/fleet-test/o-after-marks".to_owned(), "custom/fleet-test/n1-after-marks".to_owned()]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert_eq!(status_of(&o, &marked).await.as_deref(), Some("sent"), "a mark reached the release");
+    assert_eq!(status_of(&o, &claimed).await.as_deref(), Some("read"));
+    for node in [&o, &n1] {
+        assert!(
+            node.claims().await.iter().all(|claim| !(claim["subject"] == marked && claim["kind"] != "message.sent")),
+            "{}: a mark became a lifecycle claim", node.name
+        );
+    }
+}
+
+/// A seat hosted on a member of the previous release is read from its lifecycle claims: the
+/// release advertises no seat-freshness reads, so a member of this build never asks it, and
+/// `conversations status` follows the claims the release writes, never `unknown`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "4c3b2a19-0f8e-4d7c-9b6a-5e4d3c2b1a09";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old;
+    let mut n1 = Node::new(root.path(), "n1");
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+    let declaration = root.path().join("old-host-seat.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"marks/old-host-seat\" {{ host \"o\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        o.root
+    )).unwrap();
+    n1.st_ok(&[
+        "apply",
+        "--no-gate-check",
+        declaration.to_str().unwrap(),
+        "--as",
+        PERSON,
+    ]);
+    let receipt: Value = n1
+        .client()
+        .post("/v1/messages", &json!({
+            "idempotency_key": "old-host-seat-mail", "from": PERSON, "to": "agent/marks/old-host-seat",
+            "content": "mail for a seat on the release",
+        }))
+        .await
+        .unwrap();
+    let subject = receipt["subject"].as_str().unwrap().to_owned();
+    let delivery = |node: &Node| {
+        let client = node.client();
+        let path = format!("/v1/messages/delivery/{subject}");
+        async move { client.get::<Value>(&path).await.unwrap()["delivery"].clone() }
+    };
+    let before = delivery(&n1).await;
+    assert_eq!(
+        before["phase"], "sent",
+        "the release's seat is read from claims, not asked: {before}"
+    );
+    // The mail reaches the release, which records its seat's delivery and read as claims.
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let reached: Result<Value, _> = o
+            .client()
+            .get(&format!("/v1/messages/read/{subject}"))
+            .await;
+        if reached.is_ok() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the mail did not reach the release"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    for lifecycle in ["delivered", "read"] {
+        let _: Value = o
+            .client()
+            .post(
+                &format!(
+                    "/v1/messages/{}/claims",
+                    subject.trim_start_matches("message/")
+                ),
+                &json!({
+                    "lifecycle": lifecycle, "actor": "agent/marks/old-host-seat",
+                    "idempotency_key": format!("old-host-seat-{lifecycle}"),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let now = delivery(&n1).await;
+        if now["phase"] == "read" {
+            break;
+        }
+        assert_ne!(now["phase"], "unknown", "{now}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the release's read claim did not reach the new member: {now}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// A seat's conversation and `conversations wait` across the previous release and this build, on

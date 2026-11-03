@@ -159,7 +159,8 @@ pub fn sync(
     let held = tagged_held
         && transaction.query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM claims WHERE subject=?1
-         AND kind IN ('message.staged','message.delivered','message.read','message.closed'))",
+         AND kind IN ('message.staged','message.delivered','message.read','message.closed'))
+         AND NOT EXISTS(SELECT 1 FROM local_message_marks WHERE message=?1)",
             [subject],
             |row| row.get::<_, bool>(0),
         )?;

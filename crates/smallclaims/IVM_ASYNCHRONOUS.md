@@ -139,7 +139,7 @@ lagged notices and repeated poison-input panic rollback. Stop completes the curr
 returning; the next queued input stays durable and unavailable until a later explicit page.
 
 ```sh
-cargo run --locked -p smallclaims --example ivm_asynchronous
+cargo run --locked -p smallclaims --features test-support --example ivm_asynchronous
 cargo test --locked -p smallclaims --test ivm_async
 cargo test --locked -p smallclaims --features test-support --test ivm_async \
   unchanged_answer_writer_cost_and_retained_candidate_growth -- --ignored --exact --nocapture

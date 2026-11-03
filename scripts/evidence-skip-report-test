@@ -30,6 +30,18 @@ class FakeGitHub:
 
     def __init__(self):
         self.runs, self.jobs, self.lines, self.files = [], {}, {}, {}
+        self.release_runs = []
+        self.release(9000, 9, [], hours_ago=100)  # the listing holds some run, as GitHub's does: an empty first page is unreadable
+
+    def release(self, run_id, number, jobs, actor='bot', hours_ago=2):
+        created = (NOW - datetime.timedelta(hours=hours_ago)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.release_runs.append({'id': run_id, 'status': 'completed', 'created_at': created, 'actor': {'login': actor},
+                                  'pull_requests': [{'number': number}]})
+        start = NOW - datetime.timedelta(hours=hours_ago)
+        self.jobs[run_id] = [{'id': run_id * 100 + offset, 'name': name, 'conclusion': conclusion, 'labels': [label],
+                              'started_at': start.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                              'completed_at': (start + datetime.timedelta(minutes=minutes)).strftime('%Y-%m-%dT%H:%M:%SZ')}
+                             for offset, (name, label, conclusion, minutes) in enumerate(jobs)]
 
     def run(self, run_id, number, branch, decisions, files, actor='bot', hours_ago=2):
         created = (NOW - datetime.timedelta(hours=hours_ago)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -44,8 +56,9 @@ class FakeGitHub:
 
     def gh(self, *args):
         path = args[-1]
-        if '/workflows/fleet.yml/runs' in path:
-            return json.dumps({'total_count': len(self.runs), 'workflow_runs': sorted(self.runs, key=lambda r: r['created_at'], reverse=True)}).encode()
+        for workflow, runs in (('fleet.yml', self.runs), ('release-fractal.yml', self.release_runs)):
+            if f'/workflows/{workflow}/runs' in path:
+                return json.dumps({'total_count': len(runs), 'workflow_runs': sorted(runs, key=lambda r: r['created_at'], reverse=True)}).encode()
         if '/pulls/' in path and path.split('/pulls/')[1].split('/')[0].isdigit():
             return json.dumps([[{'filename': name} for name in self.files[int(path.split('/pulls/')[1].split('/')[0])]]]).encode()
         raise AssertionError(path)
@@ -170,6 +183,22 @@ class SkipReport(unittest.TestCase):
         self.assertEqual(result['checks']['typescript-client']['not_signed'], 1, 'a check the policy does not name stays not_signed')
         self.assertEqual([(e['pr'], e['checks']) for e in result['not_signed']], [(101, ['linux-gate', 'typescript-client'])])
         self.assertIn('| linux-fleet-compat | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |', report.markdown(result))
+
+    def test_release_surface_pull_request_runs_are_counted_apart_with_their_minutes(self):
+        gh = FakeGitHub()
+        gh.run(1, 101, 'agent/a', {'linux-gate': line('linux-gate')}, ['crates/x.rs'], hours_ago=100)  # no suite run in the window
+        gh.release(7, 4629, [('release-build (x86_64-unknown-linux-gnu)', 'ubuntu-latest', 'success', 8),
+                             ('release-build (aarch64-apple-darwin)', 'macos-15', 'success', 20),
+                             ('installer (macos-15)', 'macos-15', 'failure', 2.5),
+                             ('pick-runner', 'ubuntu-latest', 'skipped', 0)])
+        gh.release(8, 4630, [('installer (ubuntu-latest)', 'ubuntu-latest', 'success', 1)], actor='someone-else')  # not ours
+        gh.release(6, 4600, [('installer (ubuntu-latest)', 'ubuntu-latest', 'success', 1)], hours_ago=30)  # outside the window
+        result = report.report(gh, ROOT, git_runner, NOW - datetime.timedelta(hours=24), NOW, {'bot'}, [])
+        self.assertEqual(result['runs'], 0)  # the suite's own count is untouched
+        self.assertEqual(result['release_surface'], {'workflow': 'release-fractal.yml', 'runs': 1, 'minutes': 30.5,
+                                                     'macos_minutes': 22.5, 'prs': [4629]})
+        self.assertIn('**Release-surface PR runs** (release-fractal.yml on pull_request, real release builds): 1 runs, '
+                      '30.5 job minutes (22.5 on macOS): #4629', report.markdown(result))
 
     def test_unreadable_github_exits_two(self):
         def broken(command, **kwargs):

@@ -241,7 +241,7 @@ until a separately planned recovery accounts for writes since the snapshot.
 
 ## Format and verification
 
-The archive is UTF-8 JSON Lines, format `st3.claim-backup`, version `1`, `2` or `3`. Each record is limited
+The archive is UTF-8 JSON Lines, format `st3.claim-backup`, version `1`, `2`, `3` or `4`. Each record is limited
 to 128 MiB; export refuses a larger record before publishing a file:
 
 - `header`: format version, exporting build, database schema and claim registry digest, fleet ID
@@ -259,9 +259,20 @@ to 128 MiB; export refuses a larger record before publishing a file:
 - `end`: envelope count and SHA-256 of all preceding bytes, including line endings.
 
 An archive that carries the long-message texts of its member is version `2`. An archive that
-carries permanent ledger rows is version `3`. A build that predates a version refuses its
-archives cleanly instead of restoring part of them; an archive with neither keeps version `1`,
-so every build restores it.
+carries permanent ledger rows is version `3`. An archive that carries local message marks is
+version `4`. A build that predates a version refuses its archives cleanly ("unsupported claim
+backup format/version") instead of restoring part of them; an archive with none of these keeps
+version `1`, so every build restores it.
+
+### Message marks
+
+A consumer's delivery, read and close of a message can be a local mark instead of a lifecycle
+claim (`local_message_marks`, db break-up step 4b): it never replicates, so only a backup can
+carry it. Version `4` lists the table among its ledgers and restores its rows by union, after the
+claims, so each mark folds into the member's local projections as it did when it was recorded;
+without them a restore would redeliver every message a mark covers. A build older than marks
+refuses the archive, and marks inside an archive that declares an earlier version are refused
+before restore.
 
 ### Permanent ledgers
 

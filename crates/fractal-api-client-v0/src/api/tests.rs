@@ -83,9 +83,11 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         "/v1/agents/restart",
         "/v1/agents/rollout",
         "/v1/agents/start",
+        "/v1/fleet/admission-override",
         "/v1/agents/suspend",
         "/v1/agents/resume",
         "/v1/agents/native-session",
+        "/v1/agents/lane/burst",
         "/v1/work/revision/approve/proposal",
         "/v1/work/delegation",
         "/v1/messages/example/claims",
@@ -147,6 +149,48 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn admission_override_rejects_foreign_requester() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for requester in ["agent/peer", "person/operator"] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/fleet/admission-override")
+            .body(Body::from(json!({"actor": "agent/own", "requester": requester}).to_string()))
+            .unwrap();
+        let error = guard_bound_request(request, Some("agent/own"), &state.store)
+            .await.unwrap_err();
+        assert_eq!(error.code, "foreign-agent-actor", "{requester}");
+    }
+}
+
+#[tokio::test]
+async fn admission_override_preserves_bound_own_and_unbound_person_requests() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (bound, actor) in [
+        (Some("agent/own"), "agent/own"),
+        (None, "person/operator"),
+        (None, "agent/peer"),
+    ] {
+        let payload = json!({
+            "actor": actor,
+            "peers": ["peer"],
+            "reason": "peer unavailable",
+            "idempotency_key": "override-test",
+        }).to_string();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/fleet/admission-override")
+            .body(Body::from(payload.clone()))
+            .unwrap();
+        let request = guard_bound_request(request, bound, &state.store).await.unwrap();
+        let bytes = axum::body::to_bytes(request.into_body(), 16 * 1024).await.unwrap();
+        assert_eq!(bytes.as_ref(), payload.as_bytes());
+    }
 }
 
 #[tokio::test]
