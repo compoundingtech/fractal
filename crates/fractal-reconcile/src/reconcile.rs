@@ -534,6 +534,13 @@ pub trait RuntimeControl: Send + Sync + 'static {
         guard()?;
         self.start(member)
     }
+    fn launch_contract(
+        &self,
+        store: &Store,
+        desired: &DesiredSubject,
+    ) -> Result<crate::launch_contract::Contract> {
+        crate::launch_contract::capture(store, desired, &BTreeMap::new())
+    }
     /// Proof for the operation in this prepared launch: no operation-owned runtime
     /// remains and no producer can launch later. A returned error or absence alone
     /// is insufficient. Controls do not wait for launch admission to obtain this proof.
@@ -886,6 +893,13 @@ impl RuntimeControl for NativeRuntime {
     }
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         self.start_checked(member, Some(guard))
+    }
+    fn launch_contract(
+        &self,
+        store: &Store,
+        desired: &DesiredSubject,
+    ) -> Result<crate::launch_contract::Contract> {
+        crate::contract::declared(store, desired)
     }
 
     fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
@@ -7869,6 +7883,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         operation_id: &str,
         prepared: &start_jobs::PreparedStart,
         result: Result<Option<String>>,
+        contract: Option<&Value>,
     ) -> Result<start_jobs::StartCompletion> {
         let subject = &prepared.subject;
         let member = &prepared.member;
@@ -7928,6 +7943,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             ),
             ("reason".into(), Value::String(reason.into())),
         ]);
+        if let Some(contract) = contract {
+            fields.insert("launch_contract".into(), contract.clone());
+        }
         if let Some(harness) = crate::accounts::harness_driver(&subject.desired) {
             fields.insert("harness".into(), Value::String(harness.into()));
             if let Some(variable) = crate::accounts::login_environment_name(harness)

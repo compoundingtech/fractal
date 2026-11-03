@@ -87,7 +87,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open_memory("node").unwrap();
         let desired = declaration(root.path());
-        let binaries = BTreeMap::from([("launcher".into(), "binary-a".into())]);
+        let binaries = BTreeMap::from([
+            ("launcher".into(), "binary-a".into()), ("provider".into(), "provider-a".into()),
+        ]);
         let old = capture(&store, &desired, &binaries).unwrap();
         assert_eq!(old, capture(&store, &desired, &binaries).unwrap());
         for (from, to) in [("model-a", "model-b"), ("read,write", "read")] {
@@ -98,10 +100,16 @@ mod tests {
             assert_ne!(new.digest, old.digest);
             assert_eq!(new.drift(&old), Some(Drift { prompt: true, binary: false }));
         }
-        let changed = BTreeMap::from([("launcher".into(), "binary-b".into())]);
-        let new = capture(&store, &desired, &changed).unwrap();
-        assert_ne!(new.digest, old.digest);
-        assert_eq!(new.drift(&old), Some(Drift { prompt: false, binary: true }));
+        let mut changed = desired.clone();
+        changed.member.as_mut().unwrap().driver = Some("pi".into());
+        assert_ne!(old.digest, capture(&store, &changed, &binaries).unwrap().digest);
+        for role in ["launcher", "provider"] {
+            let mut changed = binaries.clone();
+            changed.insert(role.into(), "binary-b".into());
+            let new = capture(&store, &desired, &changed).unwrap();
+            assert_ne!(new.digest, old.digest);
+            assert_eq!(new.drift(&old), Some(Drift { prompt: false, binary: true }));
+        }
     }
 
     #[test]

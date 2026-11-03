@@ -348,6 +348,21 @@ delivery presence is independent of whether the harness can start another turn:
 A stale seat shows as `waiting` instead of `running`, and `st agents show` prints the reason on its
 `DELIVERY` line. Remote seats carry no `delivery` object; only their own daemon can see their reports.
 
+## Launch-contract identity
+
+On the owning daemon, `fractal agents show SUBJECT --json` includes `value.launch_contract`.
+Its `declared` contract describes the current harness launch (model and tool arguments),
+planned render contents (persona, context and tool configuration), and installed launcher/provider
+identity. Binary identity uses the same executable, interpreter and installation-metadata hashing
+as harness admission. Git excludes, process IDs and runtime bookkeeping are not prompt inputs.
+
+`running` is captured before launch and retained on the successful start receipt for that exact
+incarnation. Publishing a declaration or editing a render source never rewrites it. Independent
+`drift.prompt` and `drift.binary` flags distinguish the changes; a successful replacement records
+the new contract and clears drift. Missing historical launch evidence or unreadable current inputs
+produce unknown drift, not a false claim of convergence. This is a live host-local diagnostic:
+it is omitted from cached roster rows and reads on non-owning daemons.
+
 ## Deploys
 
 A deploy only needs to install the binary and restart the daemon. Drivers with reexec support
