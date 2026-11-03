@@ -7227,6 +7227,7 @@ pub async fn guard_bound_request(
         "/v1/agents/rollout",
         "/v1/agents/start",
         "/v1/agents/source-offline",
+        "/v1/fleet/admission-override",
         "/v1/agents/suspend",
         "/v1/agents/resume",
         "/v1/agents/native-session",
