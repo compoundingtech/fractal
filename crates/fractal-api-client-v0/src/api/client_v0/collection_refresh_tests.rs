@@ -916,9 +916,23 @@ async fn sessions_inventory_follows_files_process_exit_and_reconnect() {
             let _ = self.0.wait();
         }
     }
+    // Other tests' fake harnesses share this host's process table. This unrelated one stands for
+    // them: it is in the first snapshot and exits while the fixture's session is live.
+    let mut unrelated = NativeProcess(
+        std::process::Command::new("bash")
+            .args(["-c", "exec -a codex bash -c 'printf r; read -r value'", "native-inventory-fixture"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    unrelated.0.stdout.as_mut().unwrap().read_exact(&mut [0; 1]).unwrap();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("native");
     std::fs::create_dir_all(&home).unwrap();
+    // Discovery under this home sees only the processes this fixture marks.
+    let marker = root.path().display().to_string();
+    let _scope = crate::external_sessions::fixture_scope::scope(&home, &marker);
     let mut state = super::tests::test_state_named(root.path(), "sessions-inventory-fixture");
     state.native_session_home = Some(home.clone());
     let mut fixture = Fixture::open(state.clone(), true, None, &["sessions"]).await;
@@ -935,6 +949,7 @@ async fn sessions_inventory_follows_files_process_exit_and_reconnect() {
                 "native-inventory-fixture",
             ])
             .arg(&transcript)
+            .env(crate::external_sessions::fixture_scope::MARKER, &marker)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -965,6 +980,7 @@ async fn sessions_inventory_follows_files_process_exit_and_reconnect() {
         &changed["order"],
     )
     .await;
+    drop(unrelated);
     drop(fake);
     let changed = fixture.frame().await;
     assert_eq!(changed["kind"], "changes");
