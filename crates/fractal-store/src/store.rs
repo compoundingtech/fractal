@@ -113,6 +113,8 @@ mod planning_production_copy_tests;
 pub mod projectors;
 #[cfg(test)]
 pub mod projectors_tests;
+#[cfg(test)]
+mod mission_start_production_copy_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -125,7 +127,7 @@ pub use crate::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALL
 pub use crate::store::shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use crate::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
+pub use crate::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS, WAKE_HISTORY_READS};
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::shared::*;
@@ -19565,6 +19567,16 @@ pub fn enrich_step_queue_cached(
     snapshot_unix_ms: u128,
     definitions: &mut PinnedDefinitions,
 ) -> rusqlite::Result<()> {
+    enrich_step_queue_with(connection, view, snapshot_unix_ms, definitions, WakeHistory::Read)
+}
+
+fn enrich_step_queue_with(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+    definitions: &mut PinnedDefinitions,
+    history: WakeHistory,
+) -> rusqlite::Result<()> {
     #[cfg(any(test, feature = "test-support"))]
     STEPS_ENRICHED.with(|enriched| enriched.set(enriched.get() + 1));
     apply_effective_step_state(connection, view, snapshot_unix_ms)?;
@@ -19583,7 +19595,7 @@ pub fn enrich_step_queue_cached(
         step_timeout_extension_at(connection, &view.subject, view.attempt, snapshot_unix_ms)?;
     enrich_step_summaries_at(connection, view, snapshot_unix_ms)?;
     enrich_step_nudge_at(connection, view, snapshot_unix_ms)?;
-    enrich_step_wake_at(connection, view, snapshot_unix_ms)?;
+    enrich_step_wake_with(connection, view, snapshot_unix_ms, history)?;
     enrich_step_definition_cached(connection, view, definitions)?;
     adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;
     person_work::enrich_responses(connection, view)
@@ -19823,16 +19835,38 @@ pub fn fresh_context_ready_tx(
     )
 }
 
+/// Whether a step's wake view reads its wake history. A step created in the open transaction has
+/// none: its wake messages and wake-exhausted diagnostics name it, so none can predate it. Reading
+/// them means scanning every message its assignee was ever sent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WakeHistory {
+    Read,
+    NewStep,
+}
+
 pub fn enrich_step_wake_at(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
+) -> rusqlite::Result<()> {
+    enrich_step_wake_with(connection, view, snapshot_unix_ms, WakeHistory::Read)
+}
+
+fn enrich_step_wake_with(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+    history: WakeHistory,
 ) -> rusqlite::Result<()> {
     view.ready_age_ms =
         (view.status == "ready").then(|| snapshot_unix_ms.saturating_sub(view.updated_at_unix_ms));
     let Some(assignee) = view.assigned_to.as_deref() else {
         return Ok(());
     };
+    // A new step shows a wake only once it is ready; until then its assignee's harness is unread.
+    if history == WakeHistory::NewStep && view.status != "ready" {
+        return Ok(());
+    }
     let harness = current_harness_at(connection, assignee, None).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             0,
@@ -19850,6 +19884,29 @@ pub fn enrich_step_wake_at(
         .unwrap_or_else(|| "unknown".into());
     let current_incarnation_key =
         hex::encode(Sha256::digest(current_incarnation_id.as_bytes()))[..12].to_owned();
+    if history == WakeHistory::NewStep {
+        // What the reads below find for a ready step with no history: no attempts, no failure,
+        // and the assignee's current incarnation.
+        let incarnation_id = harness_incarnation_for_key_at(
+            connection,
+            assignee,
+            &current_incarnation_key,
+            snapshot_unix_ms,
+        )?
+        .unwrap_or(current_incarnation_id);
+        view.wake = Some(WorkWakeView {
+            assignee: assignee.into(),
+            assignee_state,
+            incarnation_id,
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
+            acknowledged_by: None,
+            failure: None,
+        });
+        return Ok(());
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    WAKE_HISTORY_READS.with(|reads| reads.set(reads.get() + 1));
     let mut attempts = Vec::new();
     let wake_tag_prefix = format!(
         "{}@{}@{}@",
@@ -21369,6 +21426,12 @@ pub fn mission_run_view_tx(connection: &Connection, run_id: &str) -> rusqlite::R
     mission_run_view_with_enrichment_tx(connection, run_id, true)
 }
 
+/// The presentation view of a run created in the open transaction, whose steps have no wake
+/// history to read.
+pub fn created_mission_run_view_tx(connection: &Connection, run_id: &str) -> rusqlite::Result<MissionRunView> {
+    mission_run_view_and_definition_tx(connection, run_id, MissionRunEnrichment::Created).map(|(view, _)| view)
+}
+
 pub fn mission_run_view_for_reconcile_tx(
     connection: &Connection,
     run_id: &str,
@@ -21441,6 +21504,8 @@ fn mission_run_view_with_enrichment_tx(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MissionRunEnrichment {
     Presentation,
+    /// [`Self::Presentation`] for a run created in the open transaction.
+    Created,
     Reconcile,
     Evaluation,
 }
@@ -21450,7 +21515,8 @@ pub fn mission_run_view_and_definition_tx(
     run_id: &str,
     enrichment: MissionRunEnrichment,
 ) -> rusqlite::Result<(MissionRunView, Option<MissionSpec>)> {
-    let presentation = enrichment == MissionRunEnrichment::Presentation;
+    let presentation = matches!(enrichment, MissionRunEnrichment::Presentation | MissionRunEnrichment::Created);
+    let history = if enrichment == MissionRunEnrichment::Created { WakeHistory::NewStep } else { WakeHistory::Read };
     let mut view = mission_run_header_tx(connection, run_id)?;
     let mut statement = connection.prepare(
         "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -21471,7 +21537,7 @@ pub fn mission_run_view_and_definition_tx(
     let mut definitions = PinnedDefinitions::default();
     for step in &mut view.steps {
         if presentation {
-            enrich_step_queue_cached(connection, step, now_ms(), &mut definitions)?;
+            enrich_step_queue_with(connection, step, now_ms(), &mut definitions, history)?;
         } else {
             let snapshot_unix_ms = now_ms();
             apply_effective_step_state(connection, step, snapshot_unix_ms)?;
