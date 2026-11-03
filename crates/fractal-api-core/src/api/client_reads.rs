@@ -1120,11 +1120,18 @@ pub(super) async fn client_messages_sql_page_with_envelope(
         .await
         .map_err(ApiError::internal)?;
     let selected = resources.len();
-    if !history {
-        resources.retain(|(_, resource)| {
-            !resource.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id))
-        });
-    }
+    // Each kept row's position among the rows selected, so the cursor's offset counts them all.
+    let mut positions = Vec::with_capacity(selected);
+    let mut position = 0;
+    resources.retain(|(_, resource)| {
+        position += 1;
+        let keep = history
+            || !resource.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id));
+        if keep {
+            positions.push(position);
+        }
+        keep
+    });
     let dropped = selected - resources.len();
     let mut keys = Vec::with_capacity(resources.len());
     let mut item_sizes = Vec::with_capacity(resources.len());
@@ -1159,7 +1166,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
         let cursor = if has_more && (!page.items.is_empty() || (whole && dropped > 0)) {
             Some(ClientPageCursor {
                 snapshot: snapshot.clone(), collection: "messages".into(),
-                offset: offset.saturating_add(page.items.len()).saturating_add(if whole { dropped } else { 0 }),
+                offset: offset.saturating_add(if whole { selected } else { positions[page.items.len() - 1] }),
                 limit, history,
                 person: query.person.clone(), actor: query.actor.clone(),
                 owner_run: query.owner_run.clone(), status: query.status.clone(),
