@@ -3261,13 +3261,13 @@ struct LaneMarkArgs {
 
 #[derive(Args)]
 struct ApplyRestartArgs {
-    /// Restart changed running seats only at a proven idle point with no open ask.
+    /// Restart changed running agents only at a proven idle point with no open ask.
     #[arg(long, conflicts_with = "restart_now")]
     defer_restart: bool,
-    /// Restart launch changes immediately, even while a seat is working.
+    /// Restart launch changes immediately, even while an agent is working.
     #[arg(long)]
     restart_now: bool,
-    /// Alert and hold after this safe-point wait; never force a busy seat to restart.
+    /// Alert and hold after this safe-point wait; never force a busy agent to restart.
     #[arg(long, default_value = "30m")]
     restart_max_wait: String,
 }
