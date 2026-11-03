@@ -20,6 +20,26 @@ python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": 
 '''
 
 
+def kill_tree(process):
+    """SIGKILL a test's run and everything under it (read from /proc's PPid lines), then reap it: killed alone, a run frozen
+    mid-stop leaves its lane stopped for good (20 stopped lanes after a day of failing runs of the worker test, 2026-11-03)."""
+    tree, grew = {process.pid}, True
+    while grew:
+        grew = False
+        for status in Path('/proc').glob('[0-9]*/status'):
+            try:
+                parent = int(next(line.split()[1] for line in status.read_text().splitlines() if line.startswith('PPid:')))
+            except (OSError, StopIteration, ValueError):
+                continue
+            if parent in tree and int(status.parent.name) not in tree:
+                tree.add(int(status.parent.name))
+                grew = True
+    for pid in tree:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    process.wait()
+
+
 class CiLocal(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -445,25 +465,7 @@ class CiLocal(unittest.TestCase):
                'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
         run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
-        def kill_run():
-            # The whole tree, not the run alone: a run killed while it or its stop is frozen leaves its lane stopped for good
-            # (20 stopped lanes after a day of failing runs of this test, 2026-11-03).
-            tree, grew = {run.pid}, True
-            while grew:
-                grew = False
-                for status in Path('/proc').glob('[0-9]*/status'):
-                    try:
-                        parent = int(next(line.split()[1] for line in status.read_text().splitlines() if line.startswith('PPid:')))
-                    except (OSError, StopIteration, ValueError):
-                        continue
-                    if parent in tree and int(status.parent.name) not in tree:
-                        tree.add(int(status.parent.name))
-                        grew = True
-            for pid in tree:
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
-            run.wait()
-        self.addCleanup(lambda: run.poll() is None and kill_run())
+        self.addCleanup(lambda: run.poll() is None and kill_tree(run))
         workers = Path(f'{self.log}.workers')
 
         def alive():
@@ -559,6 +561,27 @@ class CiLocal(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(alive(), [], 'a worker the lane started after the stop listed /proc outlived the run')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
+
+    def test_a_failing_tests_cleanup_kills_a_frozen_run_and_its_frozen_lane(self):
+        # A run, its lane and the lane's stage, all frozen as a stop leaves them: killing the run alone leaves the other two stopped.
+        run = subprocess.Popen(['bash', '-c', '( sleep 300 & echo $!; wait ) & wait'], stdout=subprocess.PIPE, text=True)
+        stage = int(run.stdout.readline())
+        lane = int(Path(f'/proc/{stage}/stat').read_text().rsplit(')', 1)[1].split()[1])
+        for pid in (run.pid, lane, stage):
+            os.kill(pid, signal.SIGSTOP)
+
+        def gone(pid):
+            try:
+                return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z'
+            except OSError:
+                return True
+        self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in (lane, stage) if not gone(pid)])
+        kill_tree(run)
+        for _ in range(200):
+            if gone(lane) and gone(stage):
+                break
+            time.sleep(0.01)
+        self.assertTrue(gone(lane) and gone(stage), 'the frozen lane outlived the cleanup of its run')
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
         self.stage_exits = [0, 3, 5]
