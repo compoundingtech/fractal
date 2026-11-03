@@ -11133,3 +11133,77 @@ mission "snapshot-cutover" state="ready" {{
     assert_eq!(current.phase, "normal");
     assert_eq!(current.steps[0].status, "pending");
 }
+
+#[test]
+fn starting_a_run_reads_no_wake_history_and_shows_the_wake_a_read_shows() {
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(
+        &store,
+        r#"version 2
+agent "worker" { workspace "/tmp"; command "true" }
+mission "wake-history" state="ready" {
+  goal "Start a run whose assignee already has wake history."
+  concurrent-runs max=2
+  step "first" { assigned-to "agent/node.worker" }
+  step "second" { assigned-to "agent/node.worker" }
+}"#,
+        "wake-history-publish",
+    );
+    let request = |key: &str| MissionRunRequest {
+        mission: "wake-history".into(),
+        revision: None,
+        workspace: "/tmp".into(),
+        requester: Some("person/operator".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: key.into(),
+    };
+    let append = |subject: &str, kind: &str, fields: Value, key: &str| {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: Some("daemon/runtime".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key.into()),
+        }).unwrap();
+    };
+    append("agent/node.worker", "runtime.observed",
+        json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "worker-current"}), "runtime");
+    append("agent/node.worker", "harness.observed",
+        json!({"state": "idle", "driver": "codex", "incarnation_id": "worker-current"}), "harness");
+    // The assignee's history: a wake for an earlier run's step and an exhausted-wake diagnostic.
+    let earlier = store.create_mission_run(&request("wake-history-earlier")).unwrap();
+    let step = &earlier.steps[0];
+    append("message/earlier-wake", "message.sent", json!({
+        "from": "daemon/runtime", "to": "agent/node.worker", "content": "A mission step is ready.",
+        "status": "sent", "in_reply_to": null,
+        "tags": [format!("st3-work:{}@{}@{}@worker", step.subject, step.attempt, step.readiness_epoch)],
+    }), "earlier-wake");
+    append("agent/node.worker", "harness.diagnostic", json!({
+        "code": "work-wake-exhausted", "status": "failed", "incarnation_id": "worker-current",
+        "step_run": step.subject, "attempt": step.attempt, "readiness_epoch": step.readiness_epoch,
+        "reason": "the earlier wake went unanswered",
+    }), "earlier-diagnostic");
+    assert_eq!(store.mission_run(&earlier.id).unwrap().unwrap().steps[0].wake.as_ref().map(|wake| wake.attempts), Some(1));
+
+    WAKE_HISTORY_READS.with(|reads| reads.set(0));
+    let run = store.create_mission_run(&request("wake-history-run")).unwrap();
+    assert_eq!(WAKE_HISTORY_READS.with(std::cell::Cell::get), 0, "a new run's steps have no wake history to read");
+    let read = store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(WAKE_HISTORY_READS.with(std::cell::Cell::get), 2, "a read of the same run scans each step's history");
+    assert_eq!(run.steps.len(), 2);
+    assert_eq!(serde_json::to_value(&run.steps).unwrap(), serde_json::to_value(&read.steps).unwrap());
+
+    // A ready step's wake, built without its history, is the one a read finds.
+    for step in &run.steps {
+        store.set_step_state(&step.subject, "ready", None).unwrap();
+    }
+    let ready = store.mission_run(&run.id).unwrap().unwrap();
+    let created = fractal_store::store::created_mission_run_view_tx(&store.readers.get(), &run.id).unwrap();
+    for (created, read) in created.steps.iter().zip(&ready.steps) {
+        assert!(created.wake.is_some());
+        assert_eq!(created.wake, read.wake);
+    }
+}
