@@ -7172,19 +7172,9 @@ async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
         let answer = gh_prs(&poller, PERSON);
         async move { answer["source"]["kind"] == "mirror" }
     }).await;
-    wait_until("the elder holds the repository's observer", 90, || async {
-        elder.claims().await.iter().any(|claim| claim["subject"] == "observer/github/fixture/app")
-    }).await;
-    // The elder depends on the repository: a seat on it watches the pull request. The poller's
-    // observer is already running, so the watch is the elder's subscription on it.
-    watch_fixture_app(&elder);
-    wait_until("the poller holds the elder's watch", 90, || async {
-        poller.claims().await.iter().any(|claim| {
-            claim["subject"].as_str().is_some_and(|subject| subject.starts_with("subscription/watch/fixture/app/12/"))
-                && claim["origin"] == "fixture-elder"
-        })
-    }).await;
-
+    // Compact mode depends on every current fleet member's capability, regardless of its
+    // subscriptions. The elder reads the replicated item; it need not declare another watch
+    // against the poller's shared observer while the previous release is running.
     let release_has_plugin = elder.claims().await.iter().any(|claim| {
         claim["subject"] == "daemon/fixture-elder" && claim["kind"] == "daemon.started"
             && claim.pointer("/body/fields/features/github_plugin").and_then(Value::as_i64)
@@ -7205,6 +7195,21 @@ async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
     wait_until("the elder receives head c", 120, || async {
         item_claim_with_head(&elder, item_kind, &"c".repeat(40)).await
     }).await;
+
+    if release_has_plugin {
+        let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+        assert_eq!(pull["pull"]["facts"]["head_sha"], "c".repeat(40), "{pull}");
+    } else {
+        // Pre-plugin releases have no `gh pr`; read their full snapshot through their API.
+        let snapshots: Value = elder.client().get(
+            "/v1/claims?subject=resource/github/fixture/app/pull-request/12&limit=500",
+        ).await.unwrap();
+        let snapshot = snapshots["claims"].as_array().unwrap().iter().find(|claim| {
+            claim["kind"] == "resource.observed"
+                && claim.pointer("/body/fields/facts/head_sha") == Some(&json!("c".repeat(40)))
+        }).expect("the previous release serves its head-c snapshot");
+        assert_eq!(snapshot["body"]["fields"]["facts"]["title"], "Copper proof", "{snapshot}");
+    }
 
     // The elder upgrades in place and advertises the plugin: the next head is compact state alone.
     elder.stop();
