@@ -558,6 +558,116 @@ fn a_trim_that_cannot_restart_the_wal_stops_until_the_next_step_and_resumes() {
     assert!(observer_ids(&store).len() < 10, "the cut dropped the observations");
 }
 
+/// Send `to` what `from` holds and `to` lacks, `to` describing itself with range digests.
+fn sync_into(from: &Store, to: &Store) -> usize {
+    let remote = to.export_replication_summary(TEST_FLEET).unwrap().inventory;
+    let exchange = from.export_replication_exchange(TEST_FLEET, &remote).unwrap();
+    let received = to.receive_replication_exchange(&from.origin, TEST_FLEET, &exchange).unwrap().received;
+    to.validate_replication_backlog().unwrap();
+    to.project_replication_backlog().unwrap();
+    received
+}
+
+fn inventory_generation(store: &Store) -> i64 {
+    store
+        .readers
+        .get()
+        .query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='replication_inventory_generation'),0)", [], |row| row.get(0))
+        .unwrap()
+}
+
+/// A local cut deletes payloads of envelopes it still lists, so the inventory's identities and
+/// digests do not change while it runs: the replication snapshot is not rebuilt chunk after
+/// chunk, which made every exchange wait behind an inventory build the next chunk made stale.
+/// A peer that syncs in the middle of the run and after it ends with the same inventory, and
+/// the snapshot built on through the run matches one built from nothing.
+#[test]
+fn a_local_cut_keeps_the_replication_snapshot_and_a_peer_syncing_through_it_agrees() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = Arc::new(local_member("alder"));
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    // No catch-up within the run, so any rebuild the run causes shows.
+    store.set_trim_view_refold_interval(std::time::Duration::from_secs(3_600));
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let peer = Arc::new(Store::open_memory("birch").unwrap());
+    peer.bind_fleet(TEST_FLEET).unwrap();
+    while sync_into(&store, &peer) != 0 {}
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (hook_store, hook_peer, hook_seen) = (Arc::clone(&store), Arc::clone(&peer), Arc::clone(&seen));
+    let mut first = None;
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        let snapshot = hook_store.replication_snapshot().unwrap();
+        let first = first.get_or_insert_with(|| (Arc::clone(&snapshot), inventory_generation(&hook_store)));
+        hook_seen.lock().unwrap().push((chunk, Arc::ptr_eq(&first.0, &snapshot), inventory_generation(&hook_store) == first.1));
+        if chunk == 3 {
+            sync_into(&hook_store, &hook_peer);
+            sync_into(&hook_peer, &hook_store);
+        }
+    }));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() > 4, "the cut deletes in many chunks ({})", seen.len());
+    assert!(seen.iter().all(|(_, same, _)| *same), "a chunk rebuilt the replication snapshot: {seen:?}");
+    assert!(seen.iter().all(|(_, _, same)| *same), "a chunk moved the inventory generation: {seen:?}");
+    while sync_into(&store, &peer) != 0 {}
+    while sync_into(&peer, &store) != 0 {}
+    let built_on = store.replication_snapshot().unwrap();
+    store.forget_replication_snapshot();
+    let from_nothing = store.replication_snapshot().unwrap();
+    assert!(!Arc::ptr_eq(&built_on, &from_nothing));
+    assert_eq!(built_on.inventory.digest, from_nothing.inventory.digest, "the snapshot built on through the run matches one built from nothing");
+    assert_eq!(built_on.inventory.payloadless, from_nothing.inventory.payloadless, "the run's stop rebuilt which payloads it holds");
+    assert_eq!(peer.replication_snapshot().unwrap().inventory.digest, from_nothing.inventory.digest, "the peer lists the same identities");
+}
+
+fn triggers(store: &Store) -> BTreeSet<String> {
+    store
+        .readers
+        .get()
+        .prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '%_inventory_%'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// Opening a store replaces the inventory triggers that counted every trimmed payload with ones
+/// that count only identities the inventory stops or starts listing. An older build that opens
+/// it recreates its own trigger beside the new one and counts every row again, which is what it
+/// always did; the next open of this build drops it again.
+#[test]
+fn opening_a_store_replaces_the_inventory_triggers_and_an_older_build_s_come_back_beside_them() {
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("claims.sqlite3");
+    let store = Store::open(&path, "node").unwrap();
+    let names = triggers(&store);
+    assert!(names.contains("replica_envelopes_inventory_DELETE_v2") && names.contains("retired_envelopes_inventory_INSERT_v2"), "{names:?}");
+    assert!(!names.contains("replica_envelopes_inventory_DELETE") && !names.contains("retired_envelopes_inventory_INSERT"), "{names:?}");
+    // As an older build's open creates it.
+    store
+        .connection
+        .write()
+        .execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h5f1625904b9b owner=fractal_store::store::local_trim_tests TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS replica_envelopes_inventory_DELETE AFTER DELETE ON replica_envelopes
+             BEGIN
+                 INSERT INTO meta(key,value) VALUES('replication_inventory_generation','1')
+                 ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1;
+             END;",
+        )
+        .unwrap();
+    assert!(triggers(&store).contains("replica_envelopes_inventory_DELETE"));
+    drop(store);
+    let store = Store::open(&path, "node").unwrap();
+    let names = triggers(&store);
+    assert!(!names.contains("replica_envelopes_inventory_DELETE"), "this build's open drops it again: {names:?}");
+    assert!(names.contains("replica_envelopes_inventory_DELETE_v2"), "{names:?}");
+}
+
 /// The claims sequence a page cursor carries, which the final mark of a trim moves on.
 fn claims_sequence(store: &Store) -> i64 {
     store
