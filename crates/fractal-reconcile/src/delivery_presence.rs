@@ -417,6 +417,50 @@ fn stale_after(recipient: &str) -> Duration {
     CHANNEL_STALE_AFTER
 }
 
+/// How long ago the daemon started, as the assessments on this thread read it.
+fn uptime(presence: &Presence) -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(uptime) = uptime_pin::PINNED.get() {
+        return uptime;
+    }
+    presence.started.elapsed()
+}
+
+/// A seat that has not polled its mailbox is described by the daemon's uptime, a live age read
+/// from a process-wide start. A test that reads the same seat twice, or one whose verdict depends
+/// on the startup grace, pins the uptime its own thread's assessments read. Production always
+/// reads the real clock.
+#[cfg(any(test, feature = "test-support"))]
+pub mod uptime_pin {
+    use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static PINNED: Cell<Option<Duration>> = const { Cell::new(None) };
+    }
+
+    /// Assessments on this thread read `uptime` until the returned pin drops.
+    pub fn pin(uptime: Duration) -> Pin {
+        Pin(PINNED.replace(Some(uptime)))
+    }
+
+    /// Restores the uptime this thread read before it was pinned.
+    pub struct Pin(Option<Duration>);
+
+    impl Pin {
+        /// Move this thread's pinned uptime, as the daemon ageing between two reads would.
+        pub fn set(&self, uptime: Duration) {
+            PINNED.set(Some(uptime));
+        }
+    }
+
+    impl Drop for Pin {
+        fn drop(&mut self) {
+            PINNED.set(self.0);
+        }
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 static WINDOW_OVERRIDES: std::sync::LazyLock<Mutex<HashMap<String, Duration>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -797,7 +841,7 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
         beat = Some(captured(monitor));
     }
     let assessment = assess_beat(
-        presence.started.elapsed(),
+        uptime(presence),
         presence.image.as_deref(),
         beat.map(|(at, mut report)| {
             report.follows_image = report.follows.as_deref().and_then(|path| {
