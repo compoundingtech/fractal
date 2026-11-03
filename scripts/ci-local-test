@@ -448,12 +448,17 @@ class CiLocal(unittest.TestCase):
         workers = Path(f'{self.log}.workers')
 
         def alive():
-            # This test's own workers only: each carries its CI_LOCAL_TEST_LOG.
+            # This test's own workers only: each carries its CI_LOCAL_TEST_LOG, or is still clippy's child. A worker in the middle of
+            # its exec has an empty environ for a moment (seen once in 800 runs, and in a merge group, 2026-11-03), so the parent counts too.
             pids = [int(line) for line in workers.read_text().split()] if workers.exists() else []
+            parent = Path(f'{self.log}.clippy').read_text().strip() if Path(f'{self.log}.clippy').exists() else None
             def ours(pid):
                 try:
-                    return f'CI_LOCAL_TEST_LOG={self.log}\0'.encode() in Path(f'/proc/{pid}/environ').read_bytes()
-                except OSError:
+                    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+                    if fields[0] == 'Z':
+                        return False
+                    return fields[1] == parent or f'CI_LOCAL_TEST_LOG={self.log}\0'.encode() in Path(f'/proc/{pid}/environ').read_bytes()
+                except (OSError, IndexError):
                     return False
             return [pid for pid in pids if ours(pid)]
         self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in alive()])
