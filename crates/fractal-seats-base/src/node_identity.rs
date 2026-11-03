@@ -140,10 +140,7 @@ pub fn lock_directory(directory: &Path) -> Result<File> {
 pub fn wait_for_release(directory: &Path, deadline: std::time::Instant) -> Result<()> {
     loop {
         match try_stop_locks(directory) {
-            Ok(lock) => {
-                drop(lock);
-                return Ok(());
-            }
+            Ok(()) => return Ok(()),
             Err(error) => match error.downcast_ref::<std::io::Error>().map(|e| e.kind()) {
                 Some(std::io::ErrorKind::NotFound) => return Ok(()),
                 Some(std::io::ErrorKind::WouldBlock) => {

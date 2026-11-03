@@ -605,7 +605,16 @@ fn is_daemon_argv(argv: &[String]) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    matches!(name, "fractal" | "st3" | "st") && argv[1..].iter().any(|argument| argument == "up")
+    // The test-only CLI runs this same daemon entry point without a build stamp.
+    let daemon_name = matches!(name, "fractal" | "st3" | "st")
+        || (cfg!(feature = "test-support") && name == "fractal-unstamped");
+    daemon_name && argv[1..].iter().any(|argument| argument == "up")
+}
+
+/// Whether this pid currently names a live Fractal daemon.
+/// Callers must verify its identity again before signalling it.
+pub fn is_daemon_process(pid: u32) -> bool {
+    process_identity(pid).is_some_and(|identity| !identity.ended && is_daemon_argv(&identity.argv))
 }
 
 /// Stop the daemon that listens on `socket` when no service manager owns it: ask it to end,
@@ -1464,6 +1473,11 @@ mod tests {
         let argv = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
         assert!(is_daemon_argv(&argv("/opt/example/bin/fractal up --config c")));
         assert!(!is_daemon_argv(&argv("fractal agents ls")));
+        #[cfg(feature = "test-support")]
+        {
+            assert!(is_daemon_argv(&argv("/opt/example/bin/fractal-unstamped up")));
+            assert!(!is_daemon_argv(&argv("fractal-unstamped agents ls")));
+        }
         assert!(is_daemon_argv(&argv("/opt/example/bin/st3 up --config c")));
         assert!(is_daemon_argv(&argv("st up")));
         assert!(!is_daemon_argv(&argv("st3 agents ls")));

@@ -1021,6 +1021,7 @@ fn stop_daemon(dir: &Path, state_dir: &Path, deadline: Instant) -> Result<()> {
     let pid_file = dir.join("daemon.pid");
     if let Ok(pid) = fs::read_to_string(&pid_file)
         && let Ok(pid) = pid.trim().parse::<u32>()
+        && fractal_daemon::service::is_daemon_process(pid)
     {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let kill_wait = remaining.min(Duration::from_secs(1));
@@ -1774,6 +1775,21 @@ fn wait_for_exit(pid: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stale_demo_receipt_leaves_a_live_unrelated_process_alone() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let dir = root.path().join("demo");
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(&state)?;
+        let receipt = dir.join("daemon.pid");
+        // This test process pins its own PID and does not run the daemon verb.
+        std::fs::write(&receipt, std::process::id().to_string())?;
+        super::stop_daemon(&dir, &state, std::time::Instant::now())?;
+        assert!(!receipt.exists(), "an unrelated live PID must not strand demo cleanup");
+        Ok(())
+    }
+
     #[test]
     fn stop_waits_for_inherited_state_lock() -> anyhow::Result<()> {
         use fractal_daemon::node_identity::stop_fixture::{self, RetainedLock};
