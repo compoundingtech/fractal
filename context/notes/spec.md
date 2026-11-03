@@ -75,6 +75,59 @@ Button's public props omitted its underlying ref. The codegen regression suite
 also required the existing eight-case pairing scope enum to follow the schema's
 one-case-per-line invariant. No tests or gates were weakened.
 
+The kit/UX review verification on 2026-11-03 uses target-labelled note
+landmarks (`Notes for {display label}`), including the composer's existing
+safe fallback label. Feed-state fixtures give each displayed target a
+distinct label. The kit declares the ES2024 library used by story promise
+resolvers, and partial-feed fixtures explicitly construct an observed feed.
+Play isolation finishes pagehide persistence writes before clearing origin
+storage; its regression includes a pagehide storage writer. The quiet byte
+hint is checked for clipped assistive-only geometry, not DOM visibility
+(which does not account for CSS clipping).
+
+| Review verification run | Result | Peak RSS (KiB) | Elapsed |
+| --- | --- | ---: | ---: |
+| Initial UI typecheck | Failed: ES2024 promise resolver library missing | 1,819,740 | 25.86 s |
+| Corrected UI typecheck | Pass | 1,798,044 | 29.26 s |
+| Initial web typecheck | Failed: partial fixture spread retained the feed union | 2,051,852 | 34.37 s |
+| Corrected web typecheck | Pass | 2,060,708 | 40.71 s |
+| Notes/live-source Vitest | 82 passed in 2 files | 1,166,268 | 9.51 s |
+| Kit scenario story checks (including notes) | 814 passed in 1 file | 2,262,608 | 2 m 26.23 s |
+| Initial Storybook build | Pass; 3,321 modules | 2,238,448 | 31.62 s |
+| Initial notes play gate | 96/124 passed; hint matcher and storage reset failures | 1,620,304 | 1 m 24.16 s |
+| Pagehide isolation browser regression | 1 passed | 1,168,772 | 11.80 s |
+| Corrected Storybook build | Pass; 3,321 modules | 2,181,664 | 52.91 s |
+| Second notes play gate | 112/124 passed; repeated feed-state landmark names | 1,631,832 | 49.32 s |
+| Target-labelled web typecheck | Pass | 2,061,784 | 53.26 s |
+| Target-labelled Storybook build | Pass; 3,321 modules | 2,172,604 | 29.31 s |
+| Final notes play gate | 124/124 cases across 31 stories passed | 1,629,792 | 53.52 s |
+
+The final play suite covers all 31 matching stories at both schemes and
+widths (124 cases), with accessibility checks enabled and no omitted cases.
+The following controls all used `negativeControl:true`; every required
+control rejected all four scheme/width cases with exit 1. The touch-only
+Explore control exited 0 as expected: its injected defect affects keyboard
+paths, which that story does not exercise.
+
+| Negative control (story suffix) | Result | Peak RSS (KiB) | Elapsed |
+| --- | --- | ---: | ---: |
+| Note badge `all-states` | Exit 1; 4/4 rejected | 1,634,144 | 7.98 s |
+| Note composer `all-states` | Exit 1; 4/4 rejected | 1,628,608 | 9.96 s |
+| Note list `all-states` | Exit 1; 4/4 rejected | 1,616,184 | 13.14 s |
+| Explore inline quick composer `all-states` | Exit 1; 4/4 rejected | 1,631,852 | 9.85 s |
+| Explore keyboard N popover `all-states` | Exit 1; 4/4 rejected | 1,625,428 | 6.98 s |
+| Web entry points `all-states` | Exit 1; 4/4 rejected | 1,598,980 | 8.82 s |
+| Web entry points `touch-light-440` | Exit 1; 4/4 rejected | 1,629,192 | 7.26 s |
+| Web entry points `feed-states-light-440` | Exit 1; 4/4 rejected | 1,624,236 | 6.76 s |
+| Explore keyboard N popover `touch-light-440` | Exit 0; 4/4 passed (keyboard-only injection) | 1,620,020 | 8.52 s |
+
+The final UI evidence covers implementation head
+`e4b8f3649d07e0f3d9a58ff9e84a7be1b184d74c`. The source tests passed
+before the subsequent story/isolation and landmark fixes; the final web
+typecheck, Storybook build, full play suite and controls cover those fixes.
+Times include shell startup but exclude admission queue waits. No dependency
+installation was needed.
+
 ## Scope
 
 Defines: the note resource, its claim, its projection, the HTTP API, the CLI,
