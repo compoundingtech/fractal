@@ -209,14 +209,14 @@ fn malformed_and_oversized_descriptors_are_contained() {
 fn demo_module_resolves_through_the_registry_seam_with_its_declared_class() {
     let resolved = demo_registry()
         .try_resolve(
-            Path::new("/cat/agents/dev3/janitor"),
-            "dev.schickling.agent-goal://dev3/janitor",
+            Path::new("/cat/agents/devbox-a/janitor"),
+            "dev.schickling.agent-goal://devbox-a/janitor",
         )
         .expect("demo resolver succeeds")
         .expect("goal scheme resolves");
     assert_eq!(
         resolved.path,
-        PathBuf::from("/cat/agents/dev3/janitor/resources/goal.md")
+        PathBuf::from("/cat/agents/devbox-a/janitor/resources/goal.md")
     );
     assert_eq!(resolved.class, ProfileClass::Immediate);
 }

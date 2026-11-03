@@ -107,6 +107,8 @@ pub mod agent_queue_values;
 pub mod backup_format;
 pub mod message_bodies;
 pub mod messages_shard;
+#[cfg(test)]
+mod planning_production_copy_tests;
 pub mod projectors;
 #[cfg(test)]
 pub mod projectors_tests;
@@ -10535,8 +10537,12 @@ pub fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    holds::rebuilt(claim_ids.len());
     clear_quarantined_claims_tx(transaction, "projection:planning")?;
+    project_planning_claims_tx(transaction, claim_ids)
+}
+
+fn project_planning_claims_tx(transaction: &Transaction<'_>, claim_ids: Vec<String>) -> Result<()> {
+    holds::rebuilt(claim_ids.len());
     for id in claim_ids {
         let claim = claim_by_id_tx(transaction, &id)?
             .context("a planning claim disappeared during replay")?;
@@ -10669,6 +10675,33 @@ fn project_planning_claim_tx(transaction: &Transaction<'_>, claim: &ClaimRecord)
         _ => {}
     }
     Ok(())
+}
+
+/// Rebuild one planning session from its own claims. Every planning claim writes only the rows of
+/// the session its subject names, so this gives what `rebuild_planning_tx` gives for that session
+/// and leaves the others as they are. It costs what the session's history costs: rebuilding every
+/// session for each planning claim grew with all the planning the store had ever done.
+pub fn rebuild_planning_session_tx(transaction: &Transaction<'_>, session: &str) -> Result<()> {
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hd29260726759 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews WHERE session_id=?1", [session])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h0604d904ed35 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_candidates WHERE session_id=?1", [session])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hde78ac1818e2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_sessions WHERE id=?1", [session])?;
+    let mut statement = transaction.prepare(
+        /* sqlite-large-value: allow-for-now lv-hc251ec015da5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id
+         FROM claims WHERE subject=?1 AND kind >= 'planning-session.' AND kind < 'planning-session/'
+         ORDER BY CANONICAL_ASC(claims)"),
+    )?;
+    let claim_ids = statement
+        .query_map([format!("planning-session/{session}")], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    // Only this session's claims are decided again, so only their quarantine is forgotten.
+    for id in &claim_ids {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h7241d7e424fd owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:planning:'||?1",
+            [id],
+        )?;
+    }
+    project_planning_claims_tx(transaction, claim_ids)
 }
 
 fn known_replicated_claim_kind(kind: &str) -> bool {
@@ -16573,7 +16606,9 @@ pub fn try_project_simple_replication_tx(
     // A claim that reaches a part of the graph out of the replay's order marks that part to be
     // rebuilt from its own claims; everything else extends the graph as it arrives.
     let mut dirty = BTreeSet::<Aggregate>::new();
-    let mut rebuild_planning = false;
+    // The planning sessions this range's claims are about, or `None` when one names no session
+    // and only the whole planning projection can say where it belongs.
+    let mut planning_sessions = Some(BTreeSet::<&str>::new());
     // A run tree needs rebuilding for this node's own claims only when another writer's claims
     // about the same tree arrived in the same range, since only then can the two be out of the
     // replay's order. A tree that holds this node's claims alone already has them: they were
@@ -16633,7 +16668,10 @@ pub fn try_project_simple_replication_tx(
         // nor that ordering. Validate its shape here and its digest/state in the registry
         // below; do not force a full-store replay based on the identity's prefix.
         if claim.kind.starts_with("planning-session.") {
-            rebuild_planning = true;
+            planning_sessions = planning_sessions.and_then(|mut sessions| {
+                sessions.insert(claim.subject.strip_prefix("planning-session/")?);
+                Some(sessions)
+            });
         }
         if replay_projects_kind(&claim.kind)
             && !Store::simple_replication_kind(&claim.kind)
@@ -17081,9 +17119,21 @@ pub fn try_project_simple_replication_tx(
                 .with_detail("projection_subject", format!("mission-run/{root}"))
         })?;
     }
-    if rebuild_planning {
-        holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
-            .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?;
+    match planning_sessions {
+        Some(sessions) => {
+            for session in sessions {
+                holds::stage("rebuild-planning-session", || {
+                    rebuild_planning_session_tx(transaction, session)
+                })
+                .map_err(|error| {
+                    internal(error)
+                        .with_detail("projection_stage", "planning-rebuild")
+                        .with_detail("projection_subject", format!("planning-session/{session}"))
+                })?;
+            }
+        }
+        None => holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
+            .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?,
     }
     owned_sets::project_tx(transaction)
         .map_err(|error| error.with_detail("projection_stage", "owned-set-project"))?;

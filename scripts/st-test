@@ -1411,7 +1411,7 @@ def evict_to_cap(base, limit_gb, keep=None):
 
 
 PRIORITY_AGING_SECONDS, PRIORITY_FLOOR = 120, 5  # the cargo shim's rank aging: a waiting ticket's rank improves by 1 per 120 s, never below 5 (ranks under 5 never age)
-PRIORITY_MAX_WAIT_SECONDS = 2 * 3600  # a pool-tree ticket that has waited this long is served before every younger ticket whatever its rank (oldest first): ranks under the floor never age, so without a limit a steady stream of them starves rank-50 runs indefinitely (hetz2, 2026-10-29: five rank-50 tickets waited 4 to 12.5 hours)
+PRIORITY_MAX_WAIT_SECONDS = 2 * 3600  # a pool-tree ticket that has waited this long is served before every younger ticket whatever its rank (oldest first): ranks under the floor never age, so without a limit a steady stream of them starves rank-50 runs indefinitely (a build host, 2026-10-29: five rank-50 tickets waited 4 to 12.5 hours)
 
 
 # Last in the pool (2026-11-01, Factory, from the 10-31 st-test SLO report: on one build host the shadow queue signer's seed held 18% of the

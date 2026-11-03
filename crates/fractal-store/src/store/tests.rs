@@ -2114,6 +2114,149 @@ fn planning_replication_rebuilds_only_planning_and_matches_canonical_replay() {
     );
 }
 
+/// Write one planning claim as `writer` would, chained after `predecessors`.
+fn planning_claim(
+    store: &Store,
+    writer: &str,
+    session: &str,
+    event: &str,
+    fields: Value,
+    predecessors: &[String],
+) -> ClaimRecord {
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    let claim = append_claim_record_tx(
+        &transaction, writer, &format!("planning-session/{session}"), &format!("planning-session.{event}"),
+        Some("person/operator"),
+        &json!({"fields":fields, "_operation":{"id":format!("op/{session}-{event}"), "request_digest":event}}),
+        predecessors, None,
+    ).unwrap();
+    transaction.commit().unwrap();
+    claim
+}
+
+fn planning_started(session: &str) -> Value {
+    json!({"mission":format!("mission/{session}"), "request":"doc/request", "workspace":"workspace",
+        "requester":"person/operator", "planner":"agent/planner"})
+}
+
+fn planning_candidate(revision: u64) -> Value {
+    json!({"variant":"default", "candidate_revision":revision, "markdown":"doc/candidate",
+        "kdl":"doc/definition", "mission_revision":format!("revision-{revision}")})
+}
+
+/// The planning claims the last staged projection lend rebuilt, by stage.
+fn planning_rebuilt_in_last_projection() -> Vec<(&'static str, u64)> {
+    smallclaims::windows::holds::recent_staged()
+        .into_iter()
+        .rev()
+        .find(|(stages, _)| stages.iter().any(|(stage, _)| *stage == "incremental"))
+        .expect("a staged projection lend")
+        .1
+        .into_iter()
+        .filter(|(stage, _)| stage.contains("planning"))
+        .map(|(stage, rebuilt)| (stage, rebuilt.claims))
+        .collect()
+}
+
+/// One planning claim costs the writer what its own session's history costs. A replica that holds
+/// many other sessions, each with several claims, rebuilds none of them when a claim about one
+/// more arrives, and the result still matches canonical replay. Before, every planning claim
+/// replayed every planning claim the store held (and, on the deployed revision, the whole graph).
+/// The staged lends are kept process-wide; CI runs each test in its own process (nextest).
+#[test]
+fn a_planning_claim_rebuilds_only_its_own_session() {
+    let source = Store::open_memory("source").unwrap();
+    let target = Store::open_memory("target").unwrap();
+    target.project_replication_backlog().unwrap();
+    let sessions = 40;
+    for index in 0..sessions {
+        let session = format!("earlier-{index}");
+        let started = planning_claim(&source, "source", &session, "started", planning_started(&session), &[]);
+        let candidate = planning_claim(&source, "source", &session, "candidate-submitted", planning_candidate(1), &[started.id]);
+        planning_claim(&source, "source", &session, "cancelled", json!({"reason":"finished"}), &[candidate.id]);
+    }
+    receive_and_project(&target, "source", &exchange_from(&source, &target.replication_inventory().unwrap()));
+    let started = planning_claim(&source, "source", "late", "started", planning_started("late"), &[]);
+    FULL_REPLAYS.with(|count| count.set(0));
+    receive_and_project(&target, "source", &exchange_from(&source, &target.replication_inventory().unwrap()));
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert_eq!(planning_rebuilt_in_last_projection(), [("rebuild-planning-session", 1)]);
+    planning_claim(&source, "source", "late", "candidate-submitted", planning_candidate(1), &[started.id]);
+    receive_and_project(&target, "source", &exchange_from(&source, &target.replication_inventory().unwrap()));
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert_eq!(planning_rebuilt_in_last_projection(), [("rebuild-planning-session", 2)]);
+    let statuses = |store: &Store| {
+        store.readers.get()
+            .prepare("SELECT id, status FROM planning_sessions ORDER BY id").unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap()
+    };
+    let incremental = (graph_digest_of(&target), statuses(&target));
+    assert_eq!(incremental.1.len(), sessions + 1);
+    assert!(incremental.1.contains(&("late".into(), "review".into())));
+    target.replay_replication_graph().unwrap();
+    assert_eq!((graph_digest_of(&target), statuses(&target)), incremental);
+}
+
+/// A session rebuild keeps what it does not own: another session's quarantined claim stays
+/// quarantined until a full rebuild decides it again, its own claims are decided again, and a
+/// duplicate delivery or a local write of the session's next claim gives what canonical replay
+/// gives.
+#[test]
+fn a_planning_session_rebuild_matches_canonical_replay_for_local_duplicate_and_quarantined_claims() {
+    let source = Store::open_memory("source").unwrap();
+    let target = Store::open_memory("target").unwrap();
+    target.project_replication_backlog().unwrap();
+    // A started claim without a planner cannot be projected and is quarantined alone.
+    planning_claim(&source, "source", "broken", "started", json!({"mission":"mission/broken"}), &[]);
+    planning_claim(&source, "source", "example", "started", planning_started("example"), &[]);
+    let exchange = exchange_from(&source, &target.replication_inventory().unwrap());
+    receive_and_project(&target, "source", &exchange);
+    let quarantined = |store: &Store| {
+        store.readers.get()
+            .prepare("SELECT aggregate, updated_at_unix_ms FROM projection_health WHERE aggregate LIKE 'projection:planning:%' ORDER BY aggregate").unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap()
+    };
+    assert_eq!(quarantined(&target).len(), 1);
+    // The row's time shows the session rebuild kept it, rather than clearing and writing it again.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let before = (graph_digest_of(&target), quarantined(&target));
+    FULL_REPLAYS.with(|count| count.set(0));
+    receive_and_project(&target, "source", &exchange);
+    assert_eq!((graph_digest_of(&target), quarantined(&target)), before, "a duplicate delivery changed the graph");
+    // The target writes the session's next claim itself, as the launch API does.
+    target
+        .append_claim(&ClaimInput {
+            subject: "planning-session/example".into(),
+            kind: "planning-session.candidate-submitted".into(),
+            actor: Some("person/operator".into()),
+            fields: serde_json::from_value(planning_candidate(1)).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some("example-candidate".into()),
+        })
+        .unwrap();
+    {
+        let mut connection = target.connection.write();
+        let transaction = connection.transaction().unwrap();
+        rebuild_planning_session_tx(&transaction, "example").unwrap();
+        transaction.commit().unwrap();
+    }
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert_eq!(quarantined(&target), before.1, "the session rebuild forgot another session's quarantine");
+    let status = |store: &Store| {
+        store.readers.get()
+            .query_row("SELECT status FROM planning_sessions WHERE id='example'", [], |row| row.get::<_, String>(0))
+            .unwrap()
+    };
+    assert_eq!(status(&target), "review");
+    let incremental = (graph_digest_of(&target), quarantined(&target).len(), status(&target));
+    target.replay_replication_graph().unwrap();
+    assert_eq!((graph_digest_of(&target), quarantined(&target).len(), status(&target)), incremental);
+}
+
 #[test]
 fn planning_replication_keeps_malformed_operation_and_unknown_kind_guards() {
     for (kind, operation, expected) in [
