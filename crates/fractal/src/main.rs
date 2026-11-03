@@ -15867,6 +15867,17 @@ struct NativeLoopState {
     claude_attachment_terminal: Option<ClaudeAttachmentTerminal>,
     #[serde(default)]
     claude_readiness_fallback: ClaudeReadinessFallback,
+    /// What this driver chose when it launched Claude's channel, carried across re-exec with the
+    /// provider it launched, for the cause an unattached diagnostic names.
+    #[serde(default)]
+    claude_channel_launch: Option<fractal_drivers::claude_session::ChannelLaunch>,
+    /// When the attach clock first started for this incarnation (Unix ms): the driver's settle.
+    #[serde(default)]
+    claude_attach_started_ms: Option<u64>,
+    /// When Claude's first native hook (SessionStart) was seen for this incarnation (Unix ms). The
+    /// attach window counts from it; until then Claude is still starting.
+    #[serde(default)]
+    claude_session_started_ms: Option<u64>,
     /// Admissions for attachment-dependent writes, carried across re-exec with the binding.
     #[serde(default)]
     claude_attachment_admissions: AdmissionBucket,
@@ -18683,19 +18694,39 @@ async fn check_claude_attachment(
     } else {
         state.claude_attachment_answered = None;
     }
+    let now_ms = current_unix_ms()? as u64;
+    let started_ms = *state.claude_attach_started_ms.get_or_insert_with(|| {
+        now_ms.saturating_sub(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
+    });
+    if state.claude_channel_launch.is_none() {
+        state.claude_channel_launch = fractal_drivers::claude_session::channel_launch();
+    }
+    // Claude's first native hook is its SessionStart: the attach window counts from it, since a
+    // loaded host's Claude can take half a minute to start and half a minute more to bring its
+    // channel server up (#4789).
+    if state.claude_readiness_fallback.native_state_seen {
+        state.claude_session_started_ms.get_or_insert(now_ms);
+    }
+    let answered = state.claude_attachment_answered;
+    let session = state.claude_session_started_ms.map(|at| {
+        Instant::now() - Duration::from_millis(now_ms.saturating_sub(at))
+    });
     let phase = match &checked {
         Ok(attachment) if attachment.attached => "attached",
-        Ok(_)
-            if state.claude_attachment_phase == "blocked"
-                || state.claude_attachment_answered.is_some_and(|answered| {
-                    started.max(answered).elapsed() >= claude_attachment_window()
-                }) =>
-        {
-            "blocked"
+        Ok(_) if state.claude_attachment_phase == "blocked" => "blocked",
+        Ok(_) => match session {
+            Some(session) if answered.is_some_and(|answered| session.max(answered).elapsed() >= claude_attachment_window()) => "blocked",
+            Some(_) => "starting",
+            None if answered.is_some() && started.elapsed() >= claude_start_bound() => "stalled",
+            None => "starting",
+        },
+        Err(_) if matches!(state.claude_attachment_phase.as_str(), "attached" | "blocked" | "stalled") => {
+            match state.claude_attachment_phase.as_str() {
+                "attached" => "attached",
+                "blocked" => "blocked",
+                _ => "stalled",
+            }
         }
-        Ok(_) => "starting",
-        Err(_) if state.claude_attachment_phase == "attached" => "attached",
-        Err(_) if state.claude_attachment_phase == "blocked" => "blocked",
         Err(_) => "starting",
     };
     // Its reason would describe the daemon, so a failed check never republishes a settled phase.
@@ -18713,7 +18744,7 @@ async fn check_claude_attachment(
         // Not reconciled: a later tick publishes whatever the phase is by then.
         return Ok(());
     }
-    let reason = claude_attachment_reason(&checked);
+    let reason = claude_attachment_reason(&checked, phase, &claude_attachment_cause(phase, started_ms, state));
     let input =
         claude_attachment_diagnostic(fence, state.claude_attachment_episode, phase, &reason);
     let input_digest = claude_attachment_input_digest(&input)?;
@@ -18756,12 +18787,14 @@ fn finish_claude_attachment_publication(
     published
 }
 
-/// How long a Claude seat may start before an unattached channel is reported as blocked, counted
-/// from the later of the driver's settle and the daemon's first answer to its checks.
+/// How long a started Claude has to bring its channel up before an unattached channel is reported
+/// as blocked, counted from the later of Claude's SessionStart and the daemon's first answer to
+/// the driver's checks. Measured on a loaded host: the channel server came about 23 s after
+/// Claude started (#4789).
 /// `ST3_CLAUDE_ATTACH_WINDOW_MS` can only shorten it, as `ST3_SUBAGENT_LEASE_MS` does a lease, so
 /// the boot canaries need not wait out the production window.
 fn claude_attachment_window() -> Duration {
-    const DEFAULT_MS: u64 = 20_000;
+    const DEFAULT_MS: u64 = 60_000;
     let cap = std::env::var("ST3_CLAUDE_ATTACH_WINDOW_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -18807,12 +18840,55 @@ async fn checked_claude_attachment(
     .context("the channel attachment check exceeded two seconds")?
 }
 
-fn claude_attachment_reason(checked: &Result<fractal_daemon::mailbox::Attachment>) -> String {
-    match checked {
+fn claude_attachment_reason(checked: &Result<fractal_daemon::mailbox::Attachment>, phase: &str, cause: &Option<Value>) -> String {
+    let reason = match checked {
         Ok(attachment) if attachment.attached => "claude-channel-attached: the current Claude channel is initialized and subscribed.".into(),
+        Ok(_) if phase == "stalled" => format!("claude-channel-unattached: Claude did not start (no SessionStart) within {} s of the driver's start; mail is held in the graph, and st restarts the harness on a long backoff.", claude_start_bound().as_secs()),
         Ok(_) => "claude-channel-unattached: the current Claude session has no live, initialized channel subscription; mail is held in the graph until attachment. The driver rechecks attachment and st will restart the harness with bounded retries if the channel stays missing.".into(),
         Err(error) => format!("claude-channel-unattached: attachment could not be verified; mail is held while the driver retries: {error:#}"),
+    };
+    // The cause rides at the end of the reason as JSON, inside the closed diagnostic schema (an
+    // older member holds a claim with an unknown field until it upgrades): channel recovery reads
+    // it back (fractal-reconcile channel_recovery.rs, CAUSE_MARKER).
+    match cause {
+        Some(cause) => format!("{reason} {CLAUDE_CAUSE_MARKER}{cause}"),
+        None => reason,
     }
+}
+
+/// Where the cause JSON starts in an unattached diagnostic's reason.
+const CLAUDE_CAUSE_MARKER: &str = "cause=";
+
+/// Why the channel is not up, for a blocked or stalled phase: what this driver chose at launch and
+/// when each step happened. Only values fixed for the episode, so a retried publication carries
+/// the same reason.
+fn claude_attachment_cause(phase: &str, started_ms: u64, state: &NativeLoopState) -> Option<Value> {
+    if !matches!(phase, "blocked" | "stalled") {
+        return None;
+    }
+    let launch = state.claude_channel_launch.clone().unwrap_or_default();
+    Some(json!({
+        "kind": if phase == "stalled" { "claude-not-started" } else { "channel-not-initialized" },
+        "route": if launch.route.is_empty() { "unknown" } else { launch.route.as_str() },
+        "plugin_check_error": launch.plugin_check_error,
+        "project_st_server": launch.project_st_server,
+        "plugin_check_ms": launch.plugin_check_ms,
+        "driver_started_at_ms": started_ms,
+        "launched_at_ms": launch.launched_at_ms,
+        "session_started_at_ms": state.claude_session_started_ms,
+    }))
+}
+
+/// How long a Claude may take to start (its SessionStart) before the seat is reported stalled:
+/// the driver's preparation took up to 33 s on a loaded host, Claude's own start after it more
+/// (#4789). `ST3_CLAUDE_START_BOUND_MS` can only shorten it.
+fn claude_start_bound() -> Duration {
+    const DEFAULT_MS: u64 = 5 * 60_000;
+    let cap = std::env::var("ST3_CLAUDE_START_BOUND_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|cap| *cap > 0);
+    Duration::from_millis(cap.map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS)))
 }
 
 fn report_claude_attachment(
@@ -18830,10 +18906,10 @@ fn report_claude_attachment(
     report["reason"] = json!(match terminal {
         Some(fault) => format!(
             "{}; attachment diagnostic publication is parked: {}. The durable graph fence has not been corrected; recovery requires an authorized replacement binding.",
-            claude_attachment_reason(checked),
+            claude_attachment_reason(checked, "", &None),
             fault.reason
         ),
-        None => claude_attachment_reason(checked),
+        None => claude_attachment_reason(checked, "", &None),
     });
     report["attachment_diagnostic_publication"] = match terminal {
         Some(fault) => {
@@ -18869,7 +18945,7 @@ fn claude_attachment_diagnostic(
         fields: BTreeMap::from([
             (
                 "severity".into(),
-                json!(if phase == "blocked" {
+                json!(if matches!(phase, "blocked" | "stalled") {
                     "error"
                 } else {
                     "warning"
@@ -18946,7 +19022,7 @@ async fn publish_pending_claude_attachment(
             .and_then(Value::as_str)
             .context("the pending Claude attachment diagnostic has no reason")?;
         Ok(
-            matches!(pending.phase.as_str(), "starting" | "blocked" | "attached")
+            matches!(pending.phase.as_str(), "starting" | "blocked" | "stalled" | "attached")
                 && pending.input_digest == claude_attachment_input_digest(&pending.input)?
                 && serde_json::to_value(&pending.input)?
                     == serde_json::to_value(claude_attachment_diagnostic(

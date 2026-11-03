@@ -67,7 +67,9 @@ def content_key(repo, commit, identity):
     trees = {package: git(repo, "rev-parse", f"{commit}:{package}")
              for package in local_packages(repo, commit)}
     workspace = git(repo, "ls-tree", commit, "--", "package.json",
-                    "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs")
+                    "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs",
+                    "megarepo.lock", "flake.lock", "pnpm-source-inputs.json",
+                    "scripts/prepare-pnpm-source-inputs.py")
     return hashlib.sha256(json.dumps({"trees": trees, "workspace": workspace,
                                      "inputs": identity}, sort_keys=True).encode()).hexdigest()
 
@@ -170,8 +172,17 @@ def build_release(args):
     manifest_paths = ["package.json", *[f"{package}/package.json"
         for package in sorted(set(root["workspaces"]) | set(local_packages(repo, args.commit)))]]
     identity = hashlib.sha256((git(repo, "ls-tree", args.commit, "--",
-        *manifest_paths, "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs")
+        *manifest_paths, "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs",
+        "megarepo.lock", "flake.lock", "pnpm-source-inputs.json",
+        "scripts/prepare-pnpm-source-inputs.py")
         + str(shutil.which("node")) + str(shutil.which("pnpm"))).encode()).hexdigest()
+    try:
+        run([sys.executable, str(repo / "scripts/prepare-pnpm-source-inputs.py"), "prepare"],
+            cwd=repo, env=env)
+    except (OSError, subprocess.SubprocessError) as error:
+        save(output / "failure.json", {"reason": "source_inputs_preparation_failed",
+                                     "detail": str(error)})
+        raise
     identities = {"workspace": identity}
     if (inputs.get("packages") != identities
             or not (repo / "node_modules").is_dir()):
@@ -560,6 +571,7 @@ class Delivery:
         # receipt is invalidated; failed products are never installable.
         output.mkdir(parents=True, exist_ok=True)
         (output / "success.json").unlink(missing_ok=True)
+        (output / "failure.json").unlink(missing_ok=True)
         self.record("build_started", commit=commit, build_version=version)
         command = [gate, "--class", "heavy", "--max-hold", "2700", "--",
                    "taskpolicy", "-c", "utility", "nice", "-n", "19", sys.executable,
@@ -572,7 +584,9 @@ class Delivery:
         if result.returncode or not (output / "success.json").exists():
             self.data["failed_build"] = {"key": key, "attempts": attempts, "at": time.time()}
             self.persist()
+            failure = output / "failure.json"
             self.record("build_failed", commit=commit, exit=result.returncode,
+                        reason=json.loads(failure.read_text())["reason"] if failure.exists() else "build_command_failed",
                         log=str(output / "build.log"))
             return None
         self.data["last_build_version"] = version

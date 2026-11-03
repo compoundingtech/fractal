@@ -160,6 +160,31 @@ branch checked out for review, must not be a seat workspace; the same goes for a
 (`st: approved project MCP server NAME in DIR (definition sha256 HASH)`), so a changed definition is
 visible after the fact.
 
+The driver resolves `claude` once, on the seat's own PATH, and uses that path both for the plugin check
+(`claude plugin marketplace list`, `claude plugin list`) and to launch Claude, so the two cannot mean
+different Claudes. When the approved plugin cannot be used, the seat still starts on Claude's development
+channel, whose consent Fractal accepts; the check's error is kept in the attachment diagnostic's cause
+(below) rather than only printed on a screen Claude repaints.
+
+A Claude seat's channel is judged from Claude's own start, not the driver's. On a loaded host the driver's
+preparation (the plugin check and the workspace's admission) took up to half a minute and Claude about
+another half minute to bring its channel server up. Until Claude's first native hook (its SessionStart)
+the seat is `starting`; a Claude that has not reached it within 5 minutes of the driver's start is
+reported `stalled`. After SessionStart, the channel has 60 seconds to initialize before the seat is
+`blocked` (`ST3_CLAUDE_ATTACH_WINDOW_MS` and `ST3_CLAUDE_START_BOUND_MS` can only shorten these). Both
+publish `claude-channel-unattached`; every member folds a status other than `starting` to blocked. The
+reason ends with the cause as JSON after ` cause=`: its kind (`channel-not-initialized` or
+`claude-not-started`), the route the driver chose (`approved-plugin`, `plugin-development-consent`,
+`inline-development`), the plugin check's error and time, whether the workspace declares its own project
+server named `st`, and when the driver started, launched Claude and saw SessionStart.
+
+Automatic channel recovery restarts a blocked seat and parks it after 3 attempts within 6 hours. Only a
+new channel failure spends that budget. A `stalled` seat, or one blocked again for the cause the last
+charged attempt named (the same kind, route, plugin error and project server, whatever the times), is
+restarted without charging it, on a long backoff of 5 minutes that doubles to at most 30. After 3 such
+restarts in a row for one cause, an operational fault names the seat and the cause, so it is seen; it
+clears when the channel attaches.
+
 A Claude seat in auto mode also gets Read rules in its settings, merged with any authored settings. Auto
 mode's classifier treats a read in another repository as scope escalation and asks a person, which stalls
 an unattended seat on "Read outside the working directories" (a release builder reading a sibling worktree
