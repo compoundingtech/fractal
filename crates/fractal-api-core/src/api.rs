@@ -6625,6 +6625,8 @@ pub fn start_agent_roster(state: &AppState) {
     };
     let store = state.store.clone();
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
+        #[cfg(feature = "test-support")]
+        hold_first_agent_roster().await;
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
@@ -6655,6 +6657,27 @@ pub fn start_agent_roster(state: &AppState) {
             wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+/// An isolated startup test reads a serving daemon whose refresher runs but has published no
+/// roster yet, as every daemon is for a moment after it starts serving.
+#[cfg(feature = "test-support")]
+async fn hold_first_agent_roster() {
+    let Some(directory) = std::env::var_os("ST3_TEST_AGENT_ROSTER_BARRIER") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(directory.join("entered"), b"first roster held")
+            .expect("publish agents roster barrier");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !directory.join("release").exists() {
+            assert!(Instant::now() < deadline, "startup test did not release the agents roster");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })
+    .await
+    .expect("agents roster barrier");
 }
 
 /// One owner iteration, including both queues that can outlive its readers.
