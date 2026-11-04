@@ -886,6 +886,9 @@ pub struct Store {
     /// For a shard, the default store whose fleet identity and membership it uses: a shard
     /// holds no fleet claims of its own. See `bind_fleet_authority`.
     fleet_authority: std::sync::OnceLock<Arc<dyn FleetAuthority>>,
+    /// For a shard, its authority's fleet generation when its last admission began. Membership
+    /// that changes later can decide envelopes the shard held. See `fleet_moved_since_admission`.
+    admitted_fleet_generation: AtomicI64,
     /// This node's fleet member key. Set, it signs every envelope of this node's writer.
     pub member_key: std::sync::RwLock<Option<Arc<crate::fleet::MemberKey>>>,
     /// The keys this node signs claims with. See `principals`.
@@ -1313,6 +1316,7 @@ impl Store {
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
             fleet_authority: std::sync::OnceLock::new(),
+            admitted_fleet_generation: AtomicI64::new(i64::MIN),
             signature_backfill: Mutex::default(),
             sealed_fleet_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
@@ -8021,7 +8025,32 @@ impl Store {
         self.admit_replication_backlog(AdmissionAuthority::Source)
     }
 
+    /// Whether a shard's fleet authority changed its membership since the shard last admitted
+    /// its backlog. The graph admits membership claims on its own schedule, at startup after the
+    /// shard and later as they replicate, so a shard asks this before it skips an admission pass
+    /// for want of new data: a leaver's bounds, admitted after its envelopes, decide them. A
+    /// default store judges its own membership claims within each pass and answers false.
+    pub fn fleet_moved_since_admission(&self) -> Result<bool> {
+        match self.fleet_authority.get() {
+            Some(authority) => Ok(authority.fleet_generation()? != self.admitted_fleet_generation.load(Ordering::Acquire)),
+            None => Ok(false),
+        }
+    }
+
     fn admit_replication_backlog(
+        &self,
+        authority: AdmissionAuthority,
+    ) -> Result<ReplicationAdmission> {
+        // Read before the pass, so membership that changes during it is judged by the next one.
+        let generation = self.fleet_authority.get().map(|fleet| fleet.fleet_generation()).transpose()?;
+        let admission = self.admit_replication_backlog_now(authority)?;
+        if let Some(generation) = generation {
+            self.admitted_fleet_generation.store(generation, Ordering::Release);
+        }
+        Ok(admission)
+    }
+
+    fn admit_replication_backlog_now(
         &self,
         authority: AdmissionAuthority,
     ) -> Result<ReplicationAdmission> {

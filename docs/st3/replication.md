@@ -430,7 +430,10 @@ exchange names it with `shard_id = "messages"`; the default store's exchanges om
   that left counts at or below its N, and at none without bounds. A key superseded without a
   leave, or removed, never counts. An older build holds the bounds as `unknown-claim-kind`
   (one record per leave), fences that key at every shard sequence until it upgrades, and then
-  admits the bounds on retry. A reset that loses the old key without a leave strands the old
+  admits the bounds on retry. The graph admits membership on its own schedule (at startup after
+  the shard, and as its claims replicate), so the shard records the graph's fleet generation at
+  each admission pass and passes over its held envelopes again once it moves: at startup after
+  the graph's pass, and at the next shard exchange even when that brings no new data. A reset that loses the old key without a leave strands the old
   key's shard envelopes that no peer holds yet, as before.
 - **Contents.** One immutable `message.sent` per message, written by an agent or the daemon.
   A person's device-signed message and an external assistant's message stay graph claims.

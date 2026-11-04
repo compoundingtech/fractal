@@ -870,6 +870,68 @@ mod tests {
         ));
     }
 
+    /// After an upgrade, the shard judges its backlog at startup before the graph admits the
+    /// leaver's bounds that the older build held, so the leaver's envelopes stay held. The
+    /// graph's membership then moves, and the shard's next pass admits them with no new shard
+    /// data. Seen before: they waited for some unrelated stream item to arrive.
+    #[test]
+    fn a_leavers_held_envelopes_are_admitted_once_the_graph_admits_its_bounds() {
+        use crate::store::fleet_admission_tests_shared_seats::{admit, key, sync};
+        let on_disk = |root: &Path, name: &str, member: &Arc<smallclaims::fleet::MemberKey>, anchor: &smallclaims::fleet::MemberKey| {
+            let store = Arc::new(Store::open(&root.join("claims.sqlite3"), name).unwrap());
+            store.bind_fleet(FLEET).unwrap();
+            store.pin_fleet_anchor(anchor.public()).unwrap();
+            store.set_member_key(Some(member.clone())).unwrap();
+            store
+        };
+        let (anchor_key, laptop_key, older_key) = (key(), key(), key());
+        let anchor_root = tempfile::tempdir().unwrap();
+        let anchor = on_disk(anchor_root.path(), "anchor", &anchor_key, &anchor_key);
+        anchor.admit_fleet_anchor(FLEET, anchor_key.public(), "listening").unwrap();
+        admit(&anchor, "laptop", &laptop_key, "invite", None);
+        admit(&anchor, "older", &older_key, "invite", None);
+        let laptop_root = tempfile::tempdir().unwrap();
+        let laptop = on_disk(laptop_root.path(), "laptop", &laptop_key, &anchor_key);
+        sync(&anchor, &laptop);
+        let laptop_shard = open(&laptop, laptop_root.path()).unwrap();
+        laptop_shard
+            .append_claim(&input("message.sent", Some("agent/birch"), sent("agent/birch")))
+            .unwrap();
+        laptop.leave_fleet("person/test", &leave_high_water(&laptop).unwrap()).unwrap();
+
+        // An older build holds the bounds as an unknown kind.
+        let older_root = tempfile::tempdir().unwrap();
+        let older = on_disk(older_root.path(), "older", &older_key, &anchor_key);
+        let mut registry = fractal_schema::registry().clone();
+        registry.claims.remove("fleet.shard-bounds").unwrap();
+        older.set_claim_registry(registry);
+        sync(&anchor, &older);
+        assert_eq!(sync(&laptop, &older).unknown, 1);
+        drop(older);
+
+        // Upgraded, the shard judges the leaver's envelopes before the graph's own pass.
+        let upgraded = Arc::new(Store::open(&older_root.path().join("claims.sqlite3"), "older").unwrap());
+        upgraded.set_member_key(Some(older_key)).unwrap();
+        let shard = open(&upgraded, older_root.path()).unwrap();
+        let exchange = laptop_shard
+            .export_replication_exchange(FLEET, &shard.replication_inventory().unwrap())
+            .unwrap();
+        shard.receive_replication_exchange("laptop", FLEET, &exchange).unwrap();
+        shard.validate_replication_backlog().unwrap();
+        shard.project_replication_backlog().unwrap();
+        let subject = "message/0123456789abcdef";
+        assert!(shard.claims_for(subject, None).unwrap().is_empty(), "held: the graph has no bounds yet");
+        assert!(!shard.fleet_moved_since_admission().unwrap());
+        assert_eq!(upgraded.validate_replication_backlog().unwrap().unknown, 0);
+        upgraded.project_replication_backlog().unwrap();
+        assert!(shard.fleet_moved_since_admission().unwrap(), "the bounds moved the graph's membership");
+        shard.validate_replication_backlog().unwrap();
+        shard.apply_replication_repairs().unwrap();
+        shard.project_replication_backlog().unwrap();
+        assert_eq!(shard.claims_for(subject, None).unwrap().len(), 1);
+        assert!(!shard.fleet_moved_since_admission().unwrap());
+    }
+
     /// A member's leave first bounds its key in the shard at its own last shard sequence, in a
     /// `fleet.shard-bounds` of its own; the leave itself is as before. Without an open shard,
     /// or before the shard is written, there is nothing to bound.

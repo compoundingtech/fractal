@@ -575,7 +575,10 @@ pub async fn shard_replication_receive(
             request.round_trip_ms.is_some(),
             request.carrier,
         )?;
-        if replication_receive_has_new_data(receipt.received + receipt.signatures) {
+        // Held envelopes get another pass when the graph's membership moved since the last one.
+        if replication_receive_has_new_data(receipt.received + receipt.signatures)
+            || store.fleet_moved_since_admission().map_err(internal)?
+        {
             store.validate_replication_backlog().map_err(internal)?;
             store.apply_replication_repairs().map_err(internal)?;
             store.project_replication_backlog().map_err(internal)?;
