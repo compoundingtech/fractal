@@ -312,8 +312,33 @@ impl Store {
         self.messages_page_from(recipient, include_closed, after, through, limit, delivery, !delivery)
     }
 
+    /// [`Self::messages_page_once`], read on past a page that lists nothing yet has a cursor. The
+    /// recipient and closed checks run on the query's rows, after its LIMIT, so every row of a
+    /// page can drop out; a page is then read again from its cursor, so a page is empty only at
+    /// the end.
     #[allow(clippy::too_many_arguments)]
     fn messages_page_from(
+        &self,
+        recipient: Option<&str>,
+        include_closed: bool,
+        mut after: Option<u64>,
+        through: u64,
+        limit: usize,
+        delivery: bool,
+        stream: bool,
+    ) -> Result<(Vec<MessageView>, Option<u64>)> {
+        loop {
+            let (page, next) =
+                self.messages_page_once(recipient, include_closed, after, through, limit, delivery, stream)?;
+            if !page.is_empty() || next.is_none() || next == after {
+                return Ok((page, next));
+            }
+            after = next;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn messages_page_once(
         &self,
         recipient: Option<&str>,
         include_closed: bool,
@@ -420,7 +445,6 @@ impl Store {
                 .then(|| subjects.last().map(|(_, index, _)| *index))
                 .flatten();
             let mut output = Vec::new();
-            let listed = subjects.len();
             let last_listed = subjects.last().map(|(_, index, _)| *index);
             for (subject, created_index, remaining) in subjects {
                 let mut message = self.message_view_cached(&connection, &subject, created_index)?;
@@ -437,15 +461,16 @@ impl Store {
             if has_more || !stream || super::messages_shard::shard(self).is_none() {
                 return Ok((output, next_after));
             }
-            // The graph's messages are all listed; the page goes on into the stream. A page the
-            // graph filled ends at its last graph message, and the next page starts the stream.
+            // The graph's messages are all listed; the page goes on into the stream, filling what
+            // the graph's rows left, those the checks above dropped included. A page the graph
+            // filled ends at its last graph message, and the next page starts the stream.
             let names = recipient_names(&connection, recipient, bare_recipient)?;
             let filter = super::messages_shard::Filter {
                 recipients: Some(&names),
                 senders: None,
                 open_only: !include_closed,
             };
-            let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - listed, None)?;
+            let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - output.len(), None)?;
             output.extend(stream);
             let next = stream_cursor(more, &output, last_listed);
             return Ok((output, next));
@@ -476,7 +501,6 @@ impl Store {
         let next_after = has_more
             .then(|| subjects.last().map(|(_, index)| *index))
             .flatten();
-        let listed = subjects.len();
         let last_listed = subjects.last().map(|(_, index)| *index);
         let mut output = Vec::new();
         for (subject, created_index) in subjects {
@@ -494,7 +518,7 @@ impl Store {
         }
         // Every message, as the graph's are listed: the page goes on into the whole stream.
         let filter = super::messages_shard::Filter { recipients: None, senders: None, open_only: !include_closed };
-        let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - listed, None)?;
+        let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - output.len(), None)?;
         output.extend(stream);
         let next = stream_cursor(more, &output, last_listed);
         Ok((output, next))
