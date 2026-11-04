@@ -146,6 +146,7 @@ async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
     for (let node: HTMLElement | null = target; node !== null; node = node.parentElement) await expect(node.hasAttribute('title')).toBe(false)
     await userEvent.hover(target)
     await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1), { timeout: hoverSettleTimeout })
+    await expect(within(document.body).getByRole('tooltip')).toHaveAccessibleName(`Reported details for ${row.querySelector('[data-row-column="title-text"]')!.textContent}`)
   }
   await userEvent.unhover(row)
   await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(0), { timeout: hoverSettleTimeout })
@@ -460,6 +461,7 @@ export const ThemedOverlaysAndFocus: StoryObj<{ scheme: Scheme }> = {
     await userEvent.keyboard('{Shift}')
     await waitFor(() => expect(rowButton).toHaveAttribute('data-focus-visible'))
     await assertNeutralRing(rowButton, focus)
+    await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveAccessibleName(`Reported details for ${row.querySelector('[data-row-column="title-text"]')!.textContent}`))
   },
 }
 
