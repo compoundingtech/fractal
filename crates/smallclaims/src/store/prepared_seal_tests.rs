@@ -490,8 +490,8 @@ fn a_batch_sealed_by_another_pass_after_preparation_is_not_sealed_again() {
     assert_eq!(seal(&store), 1);
     let reader = store.readers.get();
     assert_eq!(payloads(&reader).len(), 3, "one envelope per batch");
-    // The other pass did not sign envelopes; sealing signs the envelopes it finds unsigned.
-    assert_eq!(envelopes_signed_by(&reader, &key, FLEET), 3);
+    // Another pass sealed these without a key; re-preparation cannot prove their local origin.
+    assert_eq!(envelopes_signed_by(&reader, &key, FLEET), 0);
     assert_eq!(
         store.seeded_batch_rowid.load(Ordering::Acquire),
         max_batch_rowid(&reader).unwrap()
