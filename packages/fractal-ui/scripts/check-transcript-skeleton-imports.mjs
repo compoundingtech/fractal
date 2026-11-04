@@ -1,4 +1,4 @@
-// Fails when TranscriptSkeleton's static or dynamic import graph reaches Markdown, refractor or the assistant-ui runtime.
+// Fails when TranscriptSkeleton's static or dynamic import graph reaches Markdown, Highlights or the assistant-ui runtime.
 // Walks package-relative modules; bare package specifiers are checked, not traversed.
 import { readFileSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
@@ -9,7 +9,7 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const entry = resolve(packageRoot, 'src/assistant-ui/composition/TranscriptSkeleton.tsx')
 const forbidden = [
   { reason: 'Markdown', test: (specifier, file) => file?.endsWith('/composition/Markdown.tsx') === true },
-  { reason: 'refractor', test: specifier => specifier === 'refractor' || specifier.startsWith('refractor/') },
+  { reason: 'Highlights', test: specifier => specifier === '@pierre/highlights' || specifier.startsWith('@pierre/highlights/') },
   { reason: 'assistant-ui runtime', test: (specifier, file) => specifier === '@assistant-ui/react' || specifier.startsWith('@assistant-ui/') || file?.endsWith('/EmbraceRuntime.tsx') === true },
 ]
 const resolveRelative = (from, specifier) => {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integrate open Fractal PRs and publish an immutable production build.
 
-Version 12: attribute failures using fresh, validated probe builds.
+Version 13: resolve attribution probe roots against the build helper's cwd.
 """
 import contextlib, datetime, fcntl, hashlib, json, math, os, pathlib, re, shutil, subprocess, tempfile, time
 import sys
@@ -50,7 +50,7 @@ try:
 except (ValueError, TypeError) as error:
     raise SystemExit(f'invalid integrator trust configuration: {error}')
 PR_METADATA_FIELDS = 'number,headRefName,headRefOid,baseRefName,baseRefOid,changedFiles,isDraft,author,isCrossRepository,headRepositoryOwner'
-INTEGRATOR_VERSION = 12
+INTEGRATOR_VERSION = 13
 DEPENDENCY_SANDBOX_VERSION = candidate_sandbox.DEPENDENCY_POLICY
 try:
     SELECTION_BUDGET_SECONDS = float(os.environ.get('FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS', '60'))
@@ -410,8 +410,11 @@ def probe_revision(revision):
     # A raw receipt does not prove host validation completed, and a prior output
     # for this commit may have used different ignored private/vendor overlays.
     # Keep publication's immutable-output guard and build every probe afresh.
+    # The build helper runs with cwd=SCRIPT_DIR, including for relative roots.
+    build_root=SCRIPT_DIR/required_input('FRACTAL_BUILD_ROOT')
+    snapshot_root=SCRIPT_DIR/required_input('FRACTAL_BUILD_SNAPSHOT_ROOT')
     with tempfile.TemporaryDirectory(prefix='live-r3-probe-',
-            dir=required_input('FRACTAL_BUILD_ROOT')) as output:
+            dir=build_root) as output:
         name=pathlib.Path(output).name
         try:
             return build(name).returncode == 0
@@ -419,9 +422,19 @@ def probe_revision(revision):
             # The helper removes its snapshots. Remove only an empty namespace;
             # never delete a leftover snapshot that might still hold a lease.
             with contextlib.suppress(OSError):
-                (pathlib.Path(required_input('FRACTAL_BUILD_SNAPSHOT_ROOT'))/name).rmdir()
+                (snapshot_root/name).rmdir()
 
 def build_candidate(row, private_hash, checkpoints):
+    included, skipped = list(row['included']), list(row['skipped'])
+    try:
+        return build_candidate_attempt(row, private_hash, checkpoints)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 75:
+            # Even a reduced-candidate refusal must not publish an ejection.
+            row.update(included=included, skipped=skipped)
+        raise
+
+def build_candidate_attempt(row, private_hash, checkpoints):
     cache=L/'live-r3-tree-cache.json'
     known=json.loads(cache.read_text()) if cache.exists() else {}
     key=candidate_key(private_hash)
@@ -445,17 +458,17 @@ def build_candidate(row, private_hash, checkpoints):
         known[key]={'outcome':'built','sha':row['sha']}
         atomic_json(cache,known)
         return True
-    known[key]={'outcome':'failed','sha':row['sha']}
-    atomic_json(cache,known)
     full=text('rev-parse','HEAD')
+    # A refused probe must abort without poisoning the tree cache or ejecting a PR.
     failed=first_break([c['sha'] for c in checkpoints],probe_revision)
+    known[key]={'outcome':'failed','sha':row['sha']}
     git('checkout','-B','live-r3',full)
     if failed is None:
+        atomic_json(cache,known)
         raise RuntimeError('integrated build failed; no attributable single PR; previous build retained')
     culprit=checkpoints[failed]['pr']
     row['skipped'].append({'pr':culprit,'reason':'build-break','files':[]})
     known[key]['ejected']=culprit
-    atomic_json(cache,known)
     # Reintegrate every later accepted head, rather than silently publishing a prefix.
     git('checkout','-B','live-r3',checkpoints[failed-1]['sha'])
     row['included']=[h for h in row['included'] if h['pr']!=culprit]
@@ -584,7 +597,11 @@ def install():
             cwd=C, timeout=900, sandbox_shell='web', network=True)
         state.write_text(lockhash)
 def build(name):
-    return run(['bash',BUILD_SCRIPT,C,text('rev-parse','HEAD'),name],check=False)
+    result=run(['bash',BUILD_SCRIPT,C,text('rev-parse','HEAD'),name],check=False)
+    # EX_TEMPFAIL is host capacity, never evidence about the candidate (or probe).
+    if result.returncode == 75:
+        result.check_returncode()
+    return result
 def recovery_select_build(sha):
     if not isinstance(sha,str) or not re.fullmatch(r'[0-9a-f]{40}',sha):
         raise ValueError('cached build has no full revision')
@@ -932,6 +949,9 @@ def tick():
         print('selection deadline:', error, flush=True)
     except Exception as e:
         row['error']=str(e)
+        if isinstance(e,subprocess.CalledProcessError) and e.returncode == 75:
+            row.update(build='error', reason='capacity-refused', retryable=True,
+                       error=f'capacity-refused: retryable host capacity refusal; previous build retained: {e}')
         if isinstance(e,subprocess.CalledProcessError):
             detail=((e.stdout or '') + '\n' + (e.stderr or '')).strip()
             # Host Git refusals must name every rejected key, without truncation.

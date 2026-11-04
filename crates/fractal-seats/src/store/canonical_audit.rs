@@ -90,6 +90,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_work_lease_renewals",
         "local_git_change_records",
         "local_git_change_latest",
+        "local_harness_question_generations",
         "local_mailbox_owners",
         "local_mailbox_bindings",
         "local_mailbox_argv_bindings",
@@ -147,6 +148,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_preparation_pending",
         "local_resource_preparation_dirty",
         "local_resource_preparation_deferred",
+        "local_resource_preparation_rebuild",
         // Member-local completion-health candidates and hydration progress, rebuilt from claims.
         "local_completion_health_v1_claims",
         "local_completion_health_v1_fields",
