@@ -10,6 +10,18 @@ shows the mode that daemon actually started with.
 Auto is not a security boundary. It reduces accidents; it does not isolate seats.
 Codex hook trust is bypassed in both modes.
 
+## Seat temporary files
+
+Newly started seats receive `TMPDIR=/var/tmp` when the login-shell environment has
+no TMPDIR or an empty one. On Linux an inherited TMPDIR on tmpfs is replaced too,
+including a path through a symlink. This keeps large session scratch files off a
+RAM-backed `/tmp`. An inherited TMPDIR on disk is preserved, and a seat's explicit
+`env { TMPDIR "/chosen/scratch"; }` declaration takes precedence.
+
+Running seats keep their existing environment. This does not sweep session scratch
+from ended sessions or remove files earlier launches left in `/tmp`; existing host
+cleanup still governs those files.
+
 ## Choosing and changing the mode
 
 This section is written for a person's own agent to read and act on at their request. The

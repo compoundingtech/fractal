@@ -91,33 +91,49 @@ fn canonical_temp_base() -> PathBuf {
 
 /// Called once, before threads start, exclusively by the fixture executable.
 #[cfg(feature = "test-support")]
-pub fn initialize_fixture() -> tempfile::TempDir {
+pub fn initialize_fixture() {
+    let home = std::env::var_os("HOME").expect("fixture HOME");
+    let shell = fixture_shell(Path::new(&home));
+    crate::startup::set_login_shell(shell);
+}
+
+/// The test owns HOME, so even SIGKILL and exec leave the shell inside its cleanup boundary.
+/// Content-addressing also bounds storage when a caller inherits the account's HOME. Publish
+/// atomically: concurrent fixture processes must never execute a partially written shell.
+#[cfg(feature = "test-support")]
+fn fixture_shell(home: &Path) -> PathBuf {
+    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
 
-    let root = tempfile::tempdir().expect("fixture shell directory");
-    let shell = root.path().join("login-shell");
-    // Bypass both /etc startup files and the real account's passwd shell. Fixture profiles
-    // still exercise PATH capture, credential changes, and slow-start retry behavior.
     let bash = env!("ST3_FIXTURE_BASH");
+    // Bypass /etc startup files and the account's passwd shell. Choose the default before
+    // launching Bash, which itself supplies a PATH when the caller has none.
     let default_path = if std::env::var_os("PATH").is_none() {
-        format!(
-            "export PATH='{}'\n",
-            env!("ST3_FIXTURE_PATH").replace('\'', "'\\''")
-        )
+        format!("export PATH='{}'\n", env!("ST3_FIXTURE_PATH").replace('\'', "'\\''"))
     } else {
         String::new()
     };
-    std::fs::write(
-        &shell,
-        format!(
-            "#!{bash}\n{default_path}[ ! -f \"$HOME/.bash_profile\" ] || . \"$HOME/.bash_profile\"\nexec '{bash}' --noprofile --norc \"$@\"\n"
-        ),
-    )
-    .expect("write fixture shell");
-    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700))
-        .expect("executable fixture shell");
-    crate::startup::set_login_shell(shell);
-    root
+    let source = format!(
+        "#!{bash}\n{default_path}[ ! -f \"$HOME/.bash_profile\" ] || . \"$HOME/.bash_profile\"\nexec '{bash}' --noprofile --norc \"$@\"\n"
+    );
+    let mut hash = DefaultHasher::new();
+    source.hash(&mut hash);
+    let root = home.join(".cache/fractal-fixture");
+    std::fs::create_dir_all(&root).expect("fixture shell directory");
+    let shell = root.join(format!("login-shell-{:016x}", hash.finish()));
+    if !shell.exists() {
+        let mut pending = tempfile::NamedTempFile::new_in(&root).expect("fixture shell file");
+        pending
+            .write_all(source.as_bytes())
+            .expect("write fixture shell");
+        pending
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .expect("executable fixture shell");
+        pending.persist(&shell).expect("publish fixture shell");
+    }
+    shell
 }
 
 /// Remove the launching seat's identity without changing the test runner's own environment.

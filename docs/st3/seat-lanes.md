@@ -306,8 +306,12 @@ The live lane is the largest, in each dimension, of the seat's own lane, each st
 burst. A burst fits as a step's raise does: the raised lane must fit the host's room for lanes
 beside the other lanes and what seats outside lanes hold. Bursts wait in the order they asked, so a
 small one does not pass the first in line; one larger than the host can ever give is refused at
-once. A waiting burst's reason starts `burst lane`. While held, admission counts the seat at the
-raised lane. Released, its cores come back at once and its memory once the lane holds less than it
+once. A seat that has waited 15 minutes or more to start, first in line for room, is served before
+more bursts: a new burst waits behind it, so a stream of bursts cannot keep it from starting. It
+does so only while that seat would fit once every step's raise and burst on the host were given
+back; one that waits for another seat to stop gains nothing from it, so bursts go on beside it. A
+waiting burst's reason starts `burst lane`. While held, admission counts the seat at the raised
+lane. Released, its cores come back at once and its memory once the lane holds less than it
 will allow, as a step's lowering does. Bursts live in the daemon's memory: after a daemon restart
 the slice is still raised and counts, as any raise does, and the holder's next renewal holds it
 again.

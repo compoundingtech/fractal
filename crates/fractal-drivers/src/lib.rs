@@ -68,10 +68,11 @@ pub mod migrations;
 /// The stdio framing shared by the native channels; crate-internal.
 mod native_channel;
 pub mod omp_session;
+pub mod omp_questions;
 pub mod opencode_session;
 pub mod pi_channel;
 /// The launch body shared by the pi-family wrappers; crate-internal, reached through
-/// `pi_session::run` and `omp_session::run`.
+/// `pi_session::run_native` and `omp_session::run_native`.
 mod pi_family_session;
 pub mod pi_session;
 pub mod pretrust;

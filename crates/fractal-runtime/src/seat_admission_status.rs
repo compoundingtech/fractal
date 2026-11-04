@@ -174,6 +174,17 @@ impl Status {
         true
     }
 
+    /// The first seat in line for room once it has waited at least `aged` seconds: bursts wait
+    /// behind it, so a stream of bursts cannot keep a seat from starting (docs/st3/seat-lanes.md,
+    /// "Bursts").
+    pub fn aged_lane_head(&self, now: u64, aged: u64) -> Option<(String, u64)> {
+        let state = self.state();
+        state.lane_waits.iter()
+            .find(|wait| wait.queued && now.saturating_sub(wait.checked) <= LANE_WAIT_STALE_SECS)
+            .filter(|wait| now.saturating_sub(wait.since) >= aged)
+            .map(|wait| (wait.subject.clone(), now.saturating_sub(wait.since)))
+    }
+
     /// `subject` was tried for a start and its lane fit, but something else held it: it keeps its
     /// place in line.
     pub fn lane_tried(&self, subject: &str, now: u64) {
@@ -223,7 +234,7 @@ impl Status {
         released
     }
 
-    /// The burst `subject` holds or waits for and can be held, if any.
+    /// The lane `subject`'s granted burst holds, if it holds one.
     pub fn burst_granted(&self, subject: &str) -> Option<crate::Capacity> {
         self.state().lane_bursts.iter()
             .find(|burst| burst.subject == subject && burst.granted)

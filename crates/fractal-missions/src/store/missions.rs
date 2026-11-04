@@ -1301,11 +1301,11 @@ fn apply_step_states_tx(
 pub trait MissionsStore {
     /// Whether a refresher keeps the roster published, so readers must never fold it.
     fn agent_roster_refresher_running(&self) -> bool;
-    /// Rebuild only the planning tables. A planning claim written through the generic claim path
-    /// is projected by this rebuild alone; the other projections already took it at the append,
-    /// and rebuilding all of them re-derived every operation (about 240,000 rows) under the
-    /// writer for each planning write.
-    fn rebuild_planning_projection(&self) -> Result<()>;
+    /// Rebuild only the planning tables of one session. A planning claim written through the
+    /// generic claim path is projected by this rebuild alone; the other projections already took
+    /// it at the append, and rebuilding all of them re-derived every operation (about 240,000
+    /// rows) under the writer for each planning write.
+    fn rebuild_planning_projection(&self, session: &str) -> Result<()>;
     fn mission_provenance(
             &self,
             mission: &str,
@@ -2090,10 +2090,10 @@ impl MissionsStore for Store {
         self.fractal.agent_roster_refresh.get().is_some()
     }
 
-    fn rebuild_planning_projection(&self) -> Result<()> {
+    fn rebuild_planning_projection(&self, session: &str) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
-        rebuild_planning_tx(&transaction)?;
+        rebuild_planning_session_tx(&transaction, session)?;
         transaction.commit()?;
         Ok(())
     }

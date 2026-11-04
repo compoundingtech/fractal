@@ -53,7 +53,8 @@ fn open_memory_takes_a_write_while_a_reader_holds_a_snapshot() {
     let store = Store::open_memory("reader-writer", Arc::new(Plain)).unwrap();
     store.read_snapshot(|_| {
         assert_eq!(claims(&store.readers.get()), 0);
-        append(&store);
+        // A concurrent writer owns another thread; the pinned reader never writes.
+        std::thread::scope(|scope| scope.spawn(|| append(&store)).join().unwrap());
         assert_eq!(claims(&store.readers.get()), 0, "the held snapshot keeps its original cut");
         Ok(())
     }).unwrap();

@@ -24,6 +24,9 @@ use crate::client::{Client, api_error_code};
 use crate::model::{ClaimInput, ClaimRecord, StepRunView};
 use crate::store::SUBAGENT_LEASE_MS;
 
+#[cfg(test)]
+mod tests;
+
 const PUBLISHED_FILE: &str = ".harness-subagents-published";
 
 /// Codex writes a run's last token count just before the parent hears that it completed, so its
@@ -210,7 +213,7 @@ impl Publisher {
         if !appearing.is_empty() {
             let step = self.held_step(client).await;
             for subagent in appearing {
-                match self.appear(client, &subagent, step.as_deref(), now).await {
+                match self.appear(client, &subagent, step.as_deref()).await {
                     Ok(lease) => {
                         self.published.open.insert(subagent.id.clone(), lease);
                     }
@@ -253,17 +256,20 @@ impl Publisher {
             }
             recorded.insert(id.clone());
         }
+        // Attribution and preceding claims may have waited since the ledger was read.
+        let renewal_now = ledger::now_ms();
         let renewing = self
             .published
             .open
             .iter()
             .filter(|(id, lease)| {
-                current.running.contains_key(*id) && lease.saturating_sub(now) <= self.lease_ms / 2
+                current.running.contains_key(*id)
+                    && lease.saturating_sub(renewal_now) <= self.lease_ms / 2
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         for id in renewing {
-            match self.renew(client, &id, now).await {
+            match self.renew(client, &id).await {
                 Ok(lease) => {
                     self.published.open.insert(id, lease);
                 }
@@ -430,7 +436,6 @@ impl Publisher {
         client: &Client,
         subagent: &Subagent,
         step: Option<&str>,
-        now: u64,
     ) -> Result<u64> {
         let mut subagent_type = subagent.subagent_type.clone();
         let mut description = subagent.description.clone();
@@ -444,7 +449,8 @@ impl Publisher {
             description = meta_description.or(description);
             subagent_type = meta_type.or(subagent_type);
         }
-        let lease = now.saturating_add(self.lease_ms);
+        // Start this lease at issuance, after attribution, metadata reads and earlier requests.
+        let lease = ledger::now_ms().saturating_add(self.lease_ms);
         let mut fields = BTreeMap::from([
             ("subagent_id".into(), Value::String(subagent.id.clone())),
             ("driver".into(), Value::String(self.driver.clone())),
@@ -475,8 +481,8 @@ impl Publisher {
         Ok(lease)
     }
 
-    async fn renew(&self, client: &Client, id: &str, now: u64) -> Result<u64> {
-        let lease = now.saturating_add(self.lease_ms);
+    async fn renew(&self, client: &Client, id: &str) -> Result<u64> {
+        let lease = ledger::now_ms().saturating_add(self.lease_ms);
         let input = self.claim(
             "subagent.renewed",
             BTreeMap::from([

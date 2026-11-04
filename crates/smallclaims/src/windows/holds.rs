@@ -292,8 +292,12 @@ impl Record {
                     row["held_ms"] = json!(ms(long.held));
                     if let Some(kind) = long.kind {
                         row["kind"] = json!(kind.name());
-                        row["writes"] = json!(long.writes);
-                        row["longest_write_ms"] = json!(ms(long.longest_write));
+                        // A lend's borrower writes on the connection itself, uncounted; only a
+                        // batch knows its writes, so a lend reports none rather than 0.
+                        if kind == HoldKind::Batch {
+                            row["writes"] = json!(long.writes);
+                            row["longest_write_ms"] = json!(ms(long.longest_write));
+                        }
                     }
                     if let Some(stages) = &long.stages {
                         let staged = stages.iter().map(|(_, spent)| *spent).sum::<Duration>();
@@ -321,7 +325,9 @@ impl Record {
                 row["kind"] = json!(current.kind.name());
                 row["started_unix_ms"] = json!(wall_ms.saturating_sub(us(held) / 1000));
                 row["held_ms"] = json!(ms(held));
-                row["writes"] = json!(current.writes);
+                if current.kind == HoldKind::Batch {
+                    row["writes"] = json!(current.writes);
+                }
                 if let Some(stage) = current.stage() {
                     row["stage"] = json!(stage);
                 }
@@ -424,7 +430,10 @@ impl WriterHold {
             kind = self.kind.name(),
             held_ms = ms(held).round() as u64,
             waited_ms = ms(self.started.saturating_duration_since(holder.asked)).round() as u64,
-            writes = self.writes,
+            writes = %match self.kind {
+                HoldKind::Batch => self.writes.to_string(),
+                HoldKind::Lend => "-".to_owned(),
+            },
             stages = stages.as_deref().unwrap_or("-"),
             "a write held the store's writer over 1 s",
         );
@@ -939,6 +948,7 @@ mod tests {
         assert_eq!(line["kind"], "lend");
         assert!(line["held_ms"].parse::<u64>().unwrap() >= 1_200, "{line:?}");
         assert_eq!(line["waited_ms"], "300");
+        assert_eq!(line["writes"], "-", "a lend does not count the writes its borrower makes");
         // A batch names its longest write, not the first one in it.
         let mut batch = hold(HoldKind::Batch, "POST /v1/messages");
         batch.ran(&holder("task replication.receive"), Duration::from_millis(1_100));
@@ -1096,6 +1106,7 @@ mod tests {
         assert_eq!(oldest["kind"], "lend");
         assert_eq!(oldest["held_ms"], 101_800.0);
         assert_eq!(oldest["started_unix_ms"], 9_000_000 - 101_800);
+        assert!(oldest.get("writes").is_none(), "a lend does not count the writes its borrower makes");
         assert_eq!(report["in_progress"][1]["writes"], 3);
     }
 

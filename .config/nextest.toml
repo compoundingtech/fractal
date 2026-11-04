@@ -25,7 +25,7 @@ filter = '''
 '''
 priority = 100
 
-# Then the tests of 15 to 75 seconds that started late. A warm hetz2 run of main f1d0414f
+# Then the tests of 15 to 75 seconds that started late. A warm build-host run of main f1d0414f
 # (2026-10-25, 16 threads, nextest 429 s for 4924 test-seconds) started these 55 tests 30 to
 # 400 seconds in, so the run ended on a tail of 20 to 30 second tests (smallclaims' sync worker
 # tests started at 400 s) while most threads were idle. Each is named exactly, so a renamed test
