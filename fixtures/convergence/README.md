@@ -206,3 +206,14 @@ summaries.
 With v13 every fixed seed converges. The new kind shifts the draws: seeds 2, 34 and 106 now trim,
 and seed 1597 is the exact never-trim set. Characterization used
 `cargo nextest run -p fractal --features test-support -E 'test(/convergence::/)'`.
+
+`claims-v14.json` captures the registry that adds `fleet.shard-bounds` (a leaving member's signed
+record of how far it wrote in the messages shard). Versions 1 through 13 stay frozen. Generate v14
+from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v14.json`;
+do not hand-edit or overwrite v13. The simulation selects v14 and records its filename in audit
+summaries.
+
+With v14 every fixed seed converges. The new kind shifts the draws: seed 1597 now trims, so every
+fixed seed trims and the never-trim set is empty. Characterization used
+`cargo nextest run -p fractal --features test-support --no-fail-fast -E 'test(/convergence::/)'`.
