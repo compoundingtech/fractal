@@ -51,7 +51,8 @@ pub(super) fn unavailable(connection: &Connection, claim_id: &str) -> Result<Opt
     // A grant's own inputs, such as its nonce or its candidates, are not this claim's links. Until
     // the grant is judged again and any change queues `delegation:GRANT`, this claim's cached
     // verdict can predate it, so it reads as held while the grant does. A claim links every
-    // grant in its chain, so one level covers the whole chain.
+    // grant its judgment visited, so one level covers its whole chain; a grant it visited and
+    // did not choose holds it too, which errs toward held.
     let grants = connection
         .prepare_cached("SELECT substr(link,?2) FROM claim_verdict_links WHERE claim_id=?1 AND link>='delegation:' AND link<'delegation;' ORDER BY link")?
         .query_map(params![claim_id, "delegation:".len() + 1], |row| row.get::<_, String>(0))?
