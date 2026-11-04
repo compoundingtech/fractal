@@ -19,13 +19,13 @@ const readyManifest = (manifest: unknown): ChangelogLoad => ({
 const manifest = Atom.make<ChangelogLoad>((get) => {
   const prefetched = loadedChangelog()
   if (prefetched !== undefined) {
-    try { return readyManifest(prefetched.changelogManifest) }
+    try { return readyManifest(prefetched.getChangelogManifest(buildIdentity.machineVersion)) }
     catch { return { _tag: 'Failed' } }
   }
   let active = true
   get.addFinalizer(() => { active = false })
   void loadChangelog().then((module) => {
-    if (active) get.setSelf(readyManifest(module.changelogManifest))
+    if (active) get.setSelf(readyManifest(module.getChangelogManifest(buildIdentity.machineVersion)))
   }).catch(() => { if (active) get.setSelf({ _tag: 'Failed' }) })
   return { _tag: 'Loading' }
 }).pipe(Atom.keepAlive)

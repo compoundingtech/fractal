@@ -67,7 +67,7 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
         if (manifest === undefined && typeof info?.code === 'string') await compile(info.code)
         if (manifest === undefined) throw new Error('virtual:build-identity produced no code to compile the changelog manifest against')
       }
-      return `export const changelogManifest = ${JSON.stringify(manifest)};\nexport const changelogDeployment = ${JSON.stringify(changelog.deployment)};\n`
+      return `const manifest = ${JSON.stringify(manifest)};\nexport const getChangelogManifest = () => manifest;\nexport const changelogDeployment = ${JSON.stringify(changelog.deployment)};\n`
     },
     generateBundle(_options, bundle) {
       const modules = [...this.getModuleIds()]

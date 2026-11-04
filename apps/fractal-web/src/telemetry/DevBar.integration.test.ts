@@ -43,12 +43,12 @@ vi.mock('../changelog/load.ts', () => ({
 }))
 vi.mock('../changelog/build.ts', () => ({
   changelogDeployment: 'main',
-  changelogManifest: {
+  getChangelogManifest: () => ({
     schemaVersion: 1,
     product: 'fractal-web',
     build: { machineVersion: fixture.machineVersion },
     entries: [{ id: fixture.entryId, date: '2026-10-14', visibility: 'public', title: fixture.title, summary: 'Diagnostics use the shared kit.' }],
-  },
+  }),
 }))
 
 let unmount: (() => Promise<void>) | undefined
