@@ -175,14 +175,20 @@ until its replacement is Ready and the edge cuts over. A previous registration
 is stopped first only when Devnet status positively reports it is not running
 or its lifecycle is starting/terminal. Missing or failed observations never
 authorize stopping a server; Devnet decides whether replacement can proceed.
-If replacement fails, Devnet owns server recovery. The integrator restores the
-previous build pointer only if the edge confirms that previous revision serves;
-if the candidate serves or the observation is inconclusive, the pointer stays
-unchanged. Neither generation is stopped or relaunched, and the original error
-is propagated. In particular, `ReplacementRecoveryRequired` needs operator
-recovery: the integrator never runs `--abandon-replace`. If replacement succeeds
-but subsequent publication verification fails, the integrator stops the new
-server and relaunches the previous build as before.
+After a nonzero replacement exit, the integrator verifies the published candidate
+build identity; neither the exit code nor stderr text establishes whether the
+switch committed. If the candidate serves, activation succeeds and the tick
+records the last 4000 stderr characters in `replaceWarning` (or the command error
+if stderr is empty). The current pointer is preserved and normal retention runs.
+Otherwise Devnet owns server recovery. The integrator restores the previous build
+pointer only if the edge confirms that previous revision serves; an inconclusive
+observation leaves the pointer unchanged. Neither generation is stopped or
+relaunched, and the original error is propagated with the last 4000 diagnostic
+characters in the tick's `detail`. `ReplacementRecoveryRequired` remains a Devnet
+recovery diagnostic, not a success/failure discriminator; the integrator never runs
+`--abandon-replace`. If replacement exits successfully but subsequent publication
+verification fails, the integrator stops the new server and relaunches the previous
+build as before.
 
 After confirmed activation, the integrator keeps the current build and one previous
 rollback build and deletes older build directories. `integrator-activation.json`

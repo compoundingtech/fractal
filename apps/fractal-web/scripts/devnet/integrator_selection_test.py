@@ -169,7 +169,7 @@ class SelectionTest(unittest.TestCase):
                     patch.object(self.module, 'registration_not_ready', return_value=False), \
                     patch.object(self.module.subprocess, 'run') as run, \
                     patch.object(self.module, 'recovery_retain_builds') as retain:
-                self.assertEqual(self.module.activate(rollback), 'https://new.invalid')
+                self.assertEqual(self.module.activate(rollback, {}), 'https://new.invalid')
                 commands = [call.args[0] for call in run.call_args_list]
                 self.assertEqual(commands, [
                     ['devnet', 'up', '--replace', 'test', '--ready-path', '/', '--',
@@ -184,7 +184,7 @@ class SelectionTest(unittest.TestCase):
                 patch.object(self.module, 'registration_not_ready', return_value=True), \
                 patch.object(self.module.subprocess, 'run') as run, \
                 patch.object(self.module, 'recovery_retain_builds'):
-            self.module.activate(previous)
+            self.module.activate(previous, {})
         self.assertEqual([call.args[0][:3] for call in run.call_args_list],
                          [['devnet', 'down', 'test'], ['devnet', 'up', '--replace'],
                           ['devnet', 'url', 'test']])
@@ -201,7 +201,7 @@ class SelectionTest(unittest.TestCase):
                     patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
                     patch.object(self.module, 'recovery_retain_builds') as retain:
                 with self.assertRaises(subprocess.CalledProcessError) as raised:
-                    self.module.activate(previous)
+                    self.module.activate(previous, {})
                 self.assertIs(raised.exception, error)
                 self.assertEqual(run.call_count, 1)
                 self.assertEqual(run.call_args.args[0][:3], ['devnet', 'up', '--replace'])
@@ -216,7 +216,7 @@ class SelectionTest(unittest.TestCase):
                 patch.object(self.module.subprocess, 'run') as run, \
                 patch.object(self.module, 'recovery_retain_builds') as retain:
             with self.assertRaisesRegex(RuntimeError, 'previous build rolled back'):
-                self.module.activate(previous)
+                self.module.activate(previous, {})
         self.assertEqual([call.args[0][:3] for call in run.call_args_list],
                          [['devnet', 'up', '--replace'], ['devnet', 'url', 'test'],
                           ['devnet', 'down', 'test'], ['devnet', 'up', 'test']])
@@ -255,31 +255,41 @@ class SelectionTest(unittest.TestCase):
                     patch.object(self.module.subprocess, 'run',
                                  side_effect=[status, self.response({}), self.response({})]) as run, \
                     patch.object(self.module, 'recovery_retain_builds'):
-                self.module.activate(previous)
+                self.module.activate(previous, {})
                 self.assertEqual([call.args[0][:3] for call in run.call_args_list],
                                  [['devnet', 'status', 'test'], ['devnet', 'up', '--replace'],
                                   ['devnet', 'url', 'test']])
 
-    def test_failed_replace_preserves_candidate_or_unknown_publication_pointer(self):
+    def test_nonzero_replace_classifies_only_by_published_candidate_identity(self):
         previous = self.activation_builds()
-        for message in ('old generation retirement failed', 'ReplacementRecoveryRequired'):
-            for published in ('https://candidate.invalid', None):
-                error = subprocess.CalledProcessError(1, ['devnet', 'up', '--replace'], stderr=message)
-                observations = [None, published] + ([] if published else [None])
-                with self.subTest(error=message, published=published), \
-                        patch.object(self.module, 'registration_not_ready', return_value=False), \
-                        patch.object(self.module, 'current_server_url', side_effect=observations) as probe, \
-                        patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
-                        patch.object(self.module, 'recovery_retain_builds') as retain:
-                    with self.assertRaises(subprocess.CalledProcessError) as raised:
-                        self.module.activate(previous)
-                    self.assertIs(raised.exception, error)
-                    self.assertEqual(run.call_count, 1)
-                    self.assertEqual(probe.call_args_list[1].args[1], 'b' * 40)
-                    if not published:
-                        self.assertEqual(probe.call_args_list[2].args[1], 'a' * 40)
-                    self.assertEqual((self.module.P / 'current').resolve().name, 'b' * 40)
-                    retain.assert_not_called()
+        for code in (1, 3):
+            for message in ('old generation retirement failed', 'ReplacementRecoveryRequired', ''):
+                for published in ('https://candidate.invalid', None):
+                    row = {}
+                    error = subprocess.CalledProcessError(code, ['devnet', 'up', '--replace'],
+                                                          stderr=message + 'x' * 4100 if message else '')
+                    observations = [None, published] + ([] if published else [None])
+                    with self.subTest(code=code, error=message, published=published), \
+                            patch.object(self.module, 'registration_not_ready', return_value=False), \
+                            patch.object(self.module, 'current_server_url', side_effect=observations) as probe, \
+                            patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
+                            patch.object(self.module, 'recovery_retain_builds') as retain:
+                        if published:
+                            self.assertEqual(self.module.activate(previous, row), published)
+                            self.assertEqual(row, {'replaceWarning': (error.stderr or str(error))[-4000:]})
+                            retain.assert_called_once_with(previous)
+                        else:
+                            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                                self.module.activate(previous, row)
+                            self.assertIs(raised.exception, error)
+                            self.assertEqual(row, {})
+                            self.assertEqual(probe.call_args_list[2].args[1], 'a' * 40)
+                            retain.assert_not_called()
+                        self.assertEqual(run.call_count, 1)
+                        self.assertEqual(run.call_args.kwargs['stderr'], subprocess.PIPE)
+                        self.assertTrue(run.call_args.kwargs['text'])
+                        self.assertEqual(probe.call_args_list[1].args[1], 'b' * 40)
+                        self.assertEqual((self.module.P / 'current').resolve().name, 'b' * 40)
 
     def test_miss_fetches_complete_paths_then_hit_does_not_call_api(self):
         with patch.object(self.module, 'run', side_effect=self.responses()) as run:
@@ -409,6 +419,33 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(current.read_text(), 'f' * 40)
         self.assertIsNone(self.module.SELECTION_DEADLINE)
         self.assertFalse(self.module.C.exists())
+
+    def test_failed_replace_stderr_tail_reaches_tick_receipt(self):
+        previous = self.activation_builds()
+        info = self.module.C / '.git/info'
+        info.mkdir(parents=True)
+        (info / 'exclude').write_text('')
+        diagnostic = 'prelude' + 'x' * 4100 + 'strict PTY inventory incomplete'
+        error = subprocess.CalledProcessError(3, ['devnet', 'up', '--replace'],
+                                              stderr=diagnostic)
+        with patch.object(self.module, 'run', return_value=self.response([])), \
+                patch.object(self.module, 'prepare_clone',
+                             side_effect=lambda: self.module.activate(previous, {})), \
+                patch.object(self.module, 'registration_not_ready', return_value=False), \
+                patch.object(self.module, 'current_server_url',
+                             side_effect=[None, None, 'https://old.invalid']), \
+                patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
+                patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.module.tick()
+        row = json.loads((self.module.L / 'live-r3.jsonl').read_text())
+        self.assertEqual(row['build'], 'failed')
+        self.assertEqual(row['detail'], diagnostic[-4000:])
+        self.assertNotIn('replaceWarning', row)
+        self.assertEqual(run.call_args.kwargs['stderr'], subprocess.PIPE)
+        self.assertTrue(run.call_args.kwargs['text'])
+        self.assertEqual((self.module.P / 'current').resolve(), Path(previous))
 
     def test_clone_config_refusal_is_preserved_in_tick_receipt(self):
         subprocess.run(['git', 'init', '-q', str(self.module.C)], check=True)
