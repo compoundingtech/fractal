@@ -8,19 +8,19 @@ fn private_state_and_socket_derive_a_private_gateway() {
     select_private_gateway(&mut config, true, false).unwrap();
     assert_eq!(
         config.client_gateway_socket,
-        PathBuf::from("/tmp/private-state/st3-client.sock")
+        PathBuf::from("/tmp/private-state/fractal-client.sock")
     );
     config.socket = "/tmp/private-socket/api.sock".into();
     select_private_gateway(&mut config, true, true).unwrap();
     assert_eq!(
         config.client_gateway_socket,
-        PathBuf::from("/tmp/private-state/st3-client.sock")
+        PathBuf::from("/tmp/private-state/fractal-client.sock")
     );
     assert_ne!(config.client_gateway_socket, default_gateway);
     select_private_gateway(&mut config, false, true).unwrap();
     assert_eq!(
         config.client_gateway_socket,
-        PathBuf::from("/tmp/private-socket/st3-client.sock")
+        PathBuf::from("/tmp/private-socket/fractal-client.sock")
     );
 }
 
@@ -51,7 +51,7 @@ fn private_state_takes_priority_over_runtime_socket() {
     select_private_gateway(&mut config, true, true).unwrap();
     assert_eq!(
         config.client_gateway_socket,
-        config.state_dir.join("st3-client.sock")
+        config.state_dir.join("fractal-client.sock")
     );
     assert!(!config.state_dir.exists());
 }

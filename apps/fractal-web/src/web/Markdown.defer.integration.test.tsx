@@ -13,7 +13,7 @@ const grammar = vi.hoisted(() => {
   const finished = new Promise<void>(resolve => { loaded = resolve })
   return { ready, release, finished, loaded, requested: false }
 })
-vi.mock('../../../../packages/fractal-ui/src/assistant-ui/composition/syntaxGrammar', async importOriginal => {
+vi.mock('@pierre/highlights', async importOriginal => {
   grammar.requested = true
   await grammar.ready
   const actual = await importOriginal()
@@ -21,8 +21,10 @@ vi.mock('../../../../packages/fractal-ui/src/assistant-ui/composition/syntaxGram
   return actual
 })
 
-it('keeps readable prose, code, focus and wrap state while the real grammar module loads', async () => {
+it('keeps readable prose, code, focus and wrap state while the real highlighter loads', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  let paint!: FrameRequestCallback
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { paint = callback; return 1 })
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
@@ -33,6 +35,7 @@ it('keeps readable prose, code, focus and wrap state while the real grammar modu
     expect(container.querySelector('strong')?.textContent).toBe('prose')
     expect(container.querySelector('code')?.textContent).toBe('literal <script>\n')
     await act(async () => root.render(<Markdown text={'## Ready now\n\n```typescript\nconst answer = 42\n```'} />))
+    await act(async () => { paint(0); await vi.waitFor(() => expect(grammar.requested).toBe(true)) })
     expect(grammar.requested).toBe(true)
     const pre = container.querySelector('pre')!
     const code = pre.querySelector('code')!

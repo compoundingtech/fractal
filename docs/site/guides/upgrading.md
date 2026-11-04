@@ -23,11 +23,24 @@ absent. It records the executable's SHA-256, schema, canonical name, installer, 
 incoming build's version and commit. Before replacing bytes, installers publish
 `.fractal-install.json.pending`; a retry can recognize those exact incoming bytes
 if interrupted before the receipt is finalized. Keep both files with the executable;
-do not delete them or copy them between builds. An invalid, symlinked, or mismatched
-receipt without a matching pending intent stops an upgrade with its path and
-reinstall guidance; restore the matching executable and receipt together before
-reinstalling through the original installer. The separate `RELEASE.json` is release
-display metadata, not an ownership receipt.
+do not delete them or copy them between builds. Except for the narrow Home Manager
+rollback case below, an invalid, symlinked, or mismatched receipt without a matching
+pending intent stops an upgrade with its path and reinstall guidance; restore the
+matching executable and receipt together before reinstalling through the original
+installer. The separate `RELEASE.json` is release display metadata, not an ownership
+receipt.
+
+Home Manager can recover after activating an older generation that predates
+ownership receipts: that activation can replace the executable while leaving the
+newer receipt behind. After strict verification fails, HM accepts only a well-formed,
+regular, non-symlink finalized receipt marked `installer: hm`, with no pending
+receipt (including dangling links), both `st` and `st3` aliases still pointing to
+`fractal`, and an executable whose bytes equal the prior active generation's
+`oldGenPath/home-path/bin/fractal`, resolved to an immutable `/nix/store` path.
+The executable may be a copy or a link. This trusts the same user's previous
+generation metadata and intact aliases, not the stale digest alone. Script- or
+setup-owned mismatches, unknown replacements, and missing generation proof still
+fail closed. Valid matching receipts remain accepted regardless of installer.
 
 The downloader verifies ownership receipts with Python 3, independently of the
 selected release's CLI protocol, so retained tags remain installable. It never
