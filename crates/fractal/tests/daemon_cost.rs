@@ -834,6 +834,10 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/publication-definition",
         "/v1/client/publication-definition?subject=agent%2Fbench%2Fcost%2Fmover",
     ),
+    get(
+        "GET /v1/client/mission-declaration",
+        "/v1/client/mission-declaration?mission={mission}",
+    ),
     get("GET /v1/client/now", "/v1/client/now"),
     get("GET /v1/client/machines", "/v1/client/machines"),
     get("GET /v1/client/hosts/{*id}", "/v1/client/hosts/local/repositories"),
