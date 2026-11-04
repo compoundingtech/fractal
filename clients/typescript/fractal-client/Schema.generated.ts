@@ -3535,6 +3535,8 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "definition_id": Revision,
   "execution_elapsed_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))),
   "execution_started_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE),
+  /** Accumulated execution wait against this attempt's wait budget. */
+  "execution_waited_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))).annotate({ description: "Accumulated execution wait against this attempt's wait budget." }),
   "gate_kind": Schema.OptionFromOptionalNullOr(Schema.Literals(["watch","predicate","command","llm","human","mixed","run"]), NULL_NONE),
   "generation_id": Id,
   "goals": Schema.Array(Schema.String),

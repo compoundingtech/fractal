@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Managed OMP and pi channels renew their own incarnation's held work independently of mailbox admission and delivery. Work wait and work show display the absolute UTC lease deadline and seconds remaining beside the separate wait budget, with driver renewal ownership guidance.",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "changed", "detail": "The client work resource adds optional execution_waited_ms; existing storage and claims are unchanged."},
+  "rules": {"status": "none", "detail": "Claim ownership and the ten-minute lease are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Human-readable work wait and held work show output includes wait budget and lease deadline. Work show reads these fields through the supported client resource, including client-only endpoints. Client work JSON adds execution_waited_ms; older resources default the field to zero in the Rust client."},
+  "downtime": {"status": "none", "detail": "No startup work."},
+  "manual": {"status": "none", "detail": "Managed agents must not start their own renewal loop."},
+  "recovery": {"status": "none", "detail": "Renewal failures retain the existing bounded retry backoff."}
+}
