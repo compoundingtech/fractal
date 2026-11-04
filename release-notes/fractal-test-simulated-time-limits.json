@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test only: the fractal-test-test time-limit tests no longer race a real 1 or 2 s --time-limit. Six checks that ran real sleeps against those limits now simulate 100 s of running, or of waiting for a build slot, against a 50 s limit, so a loaded host's time to start its commands cannot decide the outcome (#4879).",
+  "replay": {"status": "none", "detail": "No stored data is read or written differently."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination version change."},
+  "compatibility": {"status": "none", "detail": "Tests only; st-test and ci-local are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "Nothing to do."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}
