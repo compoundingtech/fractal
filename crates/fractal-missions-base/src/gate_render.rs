@@ -104,17 +104,17 @@ mod tests {
     #[test]
     fn canonical_gate_variants_round_trip_and_redact() {
         let sources = [
-            r#"gate "exists" { exists "file/test"; }"#,
+            r#"gate "exists" { exists "file/node:/test"; }"#,
             r#"gate "empty" { empty "mission-run/test/run"; }"#,
-            r#"gate "has" { has "file/test" "line\n\"quoted\""; }"#,
+            r#"gate "has" { has "file/node:/test" "line\n\"quoted\""; }"#,
             r#"gate "lacks" { lacks "doc/test" "missing"; }"#,
-            r#"gate "field" { field "state" "file/test" "is" #null; }"#,
-            r#"gate "every" { every "items" "file/test" { field "ok" "is" #true; }; }"#,
-            r#"gate "not-every" { not-every "items" "file/test" { field "n" "is" 42; }; }"#,
+            r#"gate "field" { field "state" "file/node:/test" "is" #null; }"#,
+            r#"gate "every" { every "items" "file/node:/test" { field "ok" "is" #true; }; }"#,
+            r#"gate "not-every" { not-every "items" "file/node:/test" { field "n" "is" 42; }; }"#,
             r#"gate "deadline" { deadline "123ms"; }"#,
             r#"gate "exec" { exec "true"; host "node"; workspace "."; env { TOKEN "secret"; }; }"#,
             r#"gate "llm" type="llm" { model "model"; host "node"; workspace "."; tools "shell"; env { TOKEN "secret"; }; token-budget 12; time-limit "1s"; prompt "check"; }"#,
-            r#"gate "human" type="human" mode="feedback" { reviewer "person/test"; question "ready?"; review "file/test"; }"#,
+            r#"gate "human" type="human" mode="feedback" { reviewer "person/test"; question "ready?"; review "file/node:/test"; }"#,
         ];
         for source in sources {
             let document: KdlDocument = source.parse().unwrap();
@@ -132,7 +132,7 @@ mod tests {
     #[test]
     fn structured_predicate_values_are_not_silently_lost() {
         let gate = GateSpec::Field { name: "structured".into(), path: "data".into(),
-            subject: "file/test".into(), operator: "is".into(), value: serde_json::json!([1, 2]) };
+            subject: "file/node:/test".into(), operator: "is".into(), value: serde_json::json!([1, 2]) };
         assert!(render_gate_node(&gate).is_err());
         assert_eq!(scalar(&serde_json::json!(u64::MAX)).unwrap(), KdlValue::Integer(i128::from(u64::MAX)));
     }
