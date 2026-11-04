@@ -1196,6 +1196,21 @@ pub struct Message {
     pub body_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_bytes: Option<u64>,
+    /// When the recipient's seat runs on another host that keeps its receipts: whether that host
+    /// answered. Absent when this host's own records are the whole answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_from: Option<MessageStatusFrom>,
+}
+
+/// The host a message's `state` was asked of. With `state` `answered`, the message's `state` is
+/// the further of this host's records and that host's answer; with any other word, such as
+/// `unknown`, that host did not answer and `state` is only this host's own records.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MessageStatusFrom {
+    pub host: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A file a message carries. The bytes stay on `origin`; read them with `Client::blob`.

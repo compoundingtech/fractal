@@ -11521,6 +11521,7 @@ pub(crate) fn message_view_from(
         body_bytes: body.as_ref().map(|body| body.size),
         body_origin: body.map(|body| body.origin),
         created_index,
+        status_from: None,
     })
 }
 
@@ -19902,6 +19903,7 @@ fn enrich_step_wake_with(
             last_attempt_at_unix_ms: None,
             acknowledged_by: None,
             failure: None,
+            asks: Default::default(),
         });
         return Ok(());
     }
@@ -19916,8 +19918,8 @@ fn enrich_step_wake_with(
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-he0a6137d85fc owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-        "SELECT claims.body, claims.accepted_at_unix_ms,
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-habf9fbe214b0 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT claims.body, claims.accepted_at_unix_ms, claims.subject,
                 EXISTS(SELECT 1 FROM claims consumed
                        WHERE consumed.subject=claims.subject
                          AND consumed.kind IN ('message.read','message.closed')
@@ -19958,14 +19960,15 @@ fn enrich_step_wake_with(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, bool>(2)?,
+                row.get::<_, String>(2)?,
                 row.get::<_, bool>(3)?,
                 row.get::<_, bool>(4)?,
+                row.get::<_, bool>(5)?,
             ))
         },
     )?;
     for row in rows {
-        let (body, accepted, consumed, delivered, staged) = row?;
+        let (body, accepted, message, consumed, delivered, staged) = row?;
         let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
         let fields = body.get("fields").unwrap_or(&body);
         if fields
@@ -19999,6 +20002,7 @@ fn enrich_step_wake_with(
                 consumed,
                 delivered,
                 staged,
+                message,
             ));
         }
     }
@@ -20029,14 +20033,14 @@ fn enrich_step_wake_with(
         Some("claim".into())
     } else if attempts
         .iter()
-        .any(|(_, incarnation, consumed, _, _)| *consumed && incarnation == wake_incarnation_key)
+        .any(|(_, incarnation, consumed, ..)| *consumed && incarnation == wake_incarnation_key)
     {
         Some("consumed".into())
     } else if harness.as_ref().is_some_and(|harness| {
         harness.state == "working" && current_incarnation_key == wake_incarnation_key
     }) && attempts
         .iter()
-        .any(|(_, incarnation, _, delivered, staged)| {
+        .any(|(_, incarnation, _, delivered, staged, _)| {
             incarnation == wake_incarnation_key
                 && (*delivered
                     || *staged
@@ -20056,6 +20060,18 @@ fn enrich_step_wake_with(
         Some("turn".into())
     } else {
         None
+    };
+    // What the assignee's host would have to say for the wake to be acknowledged, when it keeps
+    // its seats' receipts: the API asks it (db break-up step 4b).
+    let asks = crate::model::WakeAsks {
+        messages: attempts
+            .iter()
+            .filter(|(_, incarnation, consumed, ..)| !consumed && incarnation == wake_incarnation_key)
+            .map(|(.., message)| message.clone())
+            .collect(),
+        delivery_acknowledges: harness.as_ref().is_some_and(|harness| {
+            harness.state == "working" && current_incarnation_key == wake_incarnation_key
+        }),
     };
     let failure = connection
         .query_row(
@@ -20101,6 +20117,7 @@ fn enrich_step_wake_with(
             last_attempt_at_unix_ms,
             acknowledged_by,
             failure,
+            asks,
         });
     }
     Ok(())
