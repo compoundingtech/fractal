@@ -67,12 +67,12 @@ const Usage = ({ source, label }: { readonly source: ObjectivesSource; readonly 
                   const expanded = open === row.id
                   return (
                     <li key={row.id} data-slo={row.id} data-tone={tone}>
-                      <Aria.Button aria-label={row.about ?? row.id} aria-expanded={expanded} onPress={() => setOpen(expanded ? undefined : row.id)} {...stylex.props(styles.row)}>
+                      <div {...stylex.props(styles.row)}>
                         <span aria-hidden="true" {...stylex.props(styles.dot, tones[tone])}>●</span>
-                        <span {...stylex.props(styles.name)}>{row.about ?? row.id}</span>
+                        <Aria.Button aria-expanded={expanded} onPress={() => setOpen(expanded ? undefined : row.id)} {...stylex.props(styles.name, styles.rowButton)}>{row.about ?? row.id}</Aria.Button>
                         <span {...stylex.props(styles.left, tones[tone])}>{leftText(row)}</span>
                         <span {...stylex.props(styles.second)}>{line.text}{line.forecast ? <span {...stylex.props(line.forecast.runsOut && tones.yellow)}>{line.forecast.short}</span> : null}</span>
-                      </Aria.Button>
+                      </div>
                       {expanded ? <Detail row={row} source={source} now={now} /> : null}
                     </li>
                   )
@@ -161,6 +161,7 @@ const styles = stylex.create({
   section: { margin: 0, paddingInline: s.md, paddingBlock: s.sm, fontSize: t.metaSize, fontWeight: t.weightSemibold, color: c.fgMuted },
   list: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2 },
   row: { width: '100%', display: 'grid', gridTemplateColumns: '1rem minmax(0, 1fr) auto', alignItems: 'baseline', columnGap: s.md, rowGap: 2, padding: s.md, borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fg, textAlign: 'start', fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` } },
+  rowButton: { padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: c.fg, font: 'inherit', textAlign: 'start', cursor: 'pointer', ':focus-visible': { outline: `2px solid ${c.primary}` } },
   dot: { textAlign: 'center' },
   name: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: t.weightMedium },
   left: { fontWeight: t.weightSemibold, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
