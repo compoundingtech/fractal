@@ -1384,6 +1384,44 @@ class CommittedPolicy(unittest.TestCase):
                 self.assertEqual(rules['tree_inputs'], declared, lane)  # what the lane tests is what the policy declares as inputs
         self.assertEqual(set(json.loads(text)['lanes']), set(module.LOCAL))
 
+    def test_config_lanes_sign_a_preferred_only_accepted_base_and_reject_old_definition_paths(self):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — definition directories are literal, not fallback selectors.
+        text = root_config('required-lanes.json').read_text()
+        for lane in ('ci-script-tests', 'genie-freshness'):
+            with self.subTest(lane=lane):
+                f = Fixture()
+                self.addCleanup(f.tmp.cleanup)
+                config = f.repo / '.fractal/required-lanes.json'
+                config.parent.mkdir()
+                config.write_text(text)
+                rules = evidence_verify.lane_rules(text, lane)
+                for path in rules['definition_paths']:
+                    if path in ('.st', '.fractal'):
+                        continue  # Never synthesize a legacy directory from an obsolete declaration.
+                    target = f.repo / path / 'file' if (ROOT / path).is_dir() else f.repo / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(f'{path}\n')
+                f.git('add', '-A')
+                f.git('commit', '-q', '-m', f'preferred-only accepted base for {lane}')
+                base_tree = f.git('rev-parse', 'HEAD^{tree}')
+                self.assertEqual(f.git('ls-tree', base_tree, '--', '.st'), '')
+                definition = evidence_verify.lane_definition(str(f.repo), base_tree, base_tree, rules)
+                self.assertEqual(definition['changed'], [])
+                old_rules = dict(rules, definition_paths=tuple(
+                    '.st' if path == '.fractal' else path for path in rules['definition_paths']))
+                with self.assertRaises(evidence_verify.Failure) as caught:
+                    evidence_verify.lane_definition(str(f.repo), base_tree, base_tree, old_rules)
+                self.assertIn('lane definition path .st does not exist at the accepted base', str(caught.exception))
+                config.write_text(text + '\n')
+                f.git('add', '-A')
+                f.git('commit', '-q', '-m', 'change preferred configuration')
+                tree = f.git('rev-parse', 'HEAD^{tree}')
+                changed = evidence_verify.lane_definition(str(f.repo), base_tree, tree, rules)
+                self.assertIn('.fractal/required-lanes.json', changed['changed'])
+                self.assertNotEqual(
+                    definition['sha256'],
+                    evidence_verify.lane_definition(str(f.repo), tree, tree, rules)['sha256'])
+
     def test_every_absent_path_of_the_committed_lanes_is_refused_when_it_appears_in_a_tree(self):
         """The mutation control: add one file at each path a lane looks for and does not find; the lane must be refused for that tree."""
         doc = json.loads(root_config('required-lanes.json').read_text())
