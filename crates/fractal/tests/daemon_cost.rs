@@ -167,6 +167,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
     ),
     (
+        "POST /v1/internal/fleet/fabric-rekey",
+        "requires a genuinely signed local fleet member and exact live transition metadata, absent from generated cost stores; an operator transition or adapter receipt folds current fleet membership and publishes one signed endpoint announcement; membership-history growth is not measured here; api::fleet::tests::signed_rekey_route_commits_preserves_refresh_and_rolls_back covers the real route",
+    ),
+    (
         "POST /v1/internal/fleet/pairing-admission",
         "explicit one-use fleet admission proxies the bounded signed request to the live worker; uses the existing invite redemption and verified membership fold, not a polling read path",
     ),
