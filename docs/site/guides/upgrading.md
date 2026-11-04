@@ -115,9 +115,12 @@ nix-store --add-root "$HOME/fractal-cutover-archive/hm-gen-N" --realise <generat
 nix-env --profile <home-manager-profile> --delete-generations N ...
 ```
 
-Create that archive directory first and use a unique root name for each preserved
-generation (including the profile identity if numbers overlap). Recording paths
-alone does not protect closures from GC. Remove **only** the unsafe retained links
+Create that archive directory first on a persistent path that Nix GC scans for
+roots, including registered indirect roots; do not use tmpfs or a path that will
+be removed. Use a unique root name for each preserved generation (including the
+profile identity if numbers overlap). Before cutover, check the preserved
+closures' disk cost against the host's free-space floor. Recording paths alone
+does not protect closures from GC. Remove **only** the unsafe retained links
 reported by dry-run, through their owning profiles; record what was removed and
 keep the active staged generation. Do not use broad expiration or garbage
 collection. Preserved pre-cutover generations are recovery material, not
@@ -200,8 +203,8 @@ API for the same node before committing readiness. It then retires legacy
 service-definition links, enables target units and starts recognized auxiliaries.
 Other adapters or carriers remain their owner's responsibility.
 
-After a successful migration, immediately activate the prebuilt `"completed"`
-Home Manager generation in this same window, before any other roll; see step 5
+For Home Manager, after a successful migration, immediately activate the prebuilt
+`"completed"` generation in this same window, before any other roll; see step 5
 for its ownership checks. Do not defer building it until after the move.
 
 **Service restart is not seat restart.** The mover deliberately restarts daemon
