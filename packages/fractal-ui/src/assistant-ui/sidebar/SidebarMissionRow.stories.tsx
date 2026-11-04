@@ -151,6 +151,10 @@ export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
+  'EtaAbsent:contract-fixture',
+  'EtaNull:contract-fixture',
+  'EtaRange:contract-fixture',
+  'EtaSingle:contract-fixture',
   'EtaStates:contract-fixture',
   'EtaStatesLight:contract-fixture',
   'MissionRows:contract-fixture',

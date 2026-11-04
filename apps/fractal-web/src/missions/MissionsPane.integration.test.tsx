@@ -3,6 +3,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
 import { DateTime, Option } from 'effect'
+import type { MissionEta } from '@fractal/ui/assistant-ui/shell'
 
 const data = vi.hoisted(() => ({ missions: { _tag: 'Waiting' } as unknown, agents: { _tag: 'Observed', value: [], freshness: 'live' } as unknown, attention: { _tag: 'Observed', value: [], freshness: 'live' } as unknown }))
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'test-animation', props: () => ({}) }))
@@ -17,7 +18,7 @@ import { MissionsPane } from './MissionsPane.tsx'
 const at = DateTime.makeUnsafe('2026-10-14T11:00:00Z')
 const mission = (id: string, title: string, state: string, steps: unknown[], fields: Record<string, unknown> = {}) => ({
   id, kind: 'mission', title, state, runs: [`${id}/run`], updated_at: at,
-  run_details: [{ id: `${id}/run`, status: state === 'completed' ? 'completed' : 'running', steps: Option.some(steps), outcome: Option.none() }],
+  run_details: [{ id: `${id}/run`, status: state === 'completed' ? 'completed' : 'running', steps: Option.some(steps), outcome: Option.none(), completed_at: Option.none(), eta: Option.none<MissionEta>() }],
   ...fields,
 })
 const step = (path: string, state: string, claimant?: string) => ({
@@ -52,6 +53,16 @@ it('lists missions by word with who must act, folds away Fractal\'s own, and ope
   expect(detail.textContent).toContain('Do parse')
   await act(async () => [...detail.querySelectorAll('button')].find((each) => each.textContent === 'builder')!.click())
   expect(onOpenAgent).toHaveBeenCalledWith('agent/example/builder')
+  const eta = { remaining_low_ms: 720_000, remaining_high_ms: 1_080_000,
+    basis: { method: 'critical-path' as const, samples: 12 }, as_of: Date.parse('2026-10-14T11:58:00Z') }
+  const served = mission('mission/example/eta', 'Estimated mission', 'running', [])
+  served.run_details[0]!.eta = Option.some(eta)
+  data.missions = { _tag: 'Observed', freshness: 'live', value: [served] }
+  await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
+  expect(container.querySelector('[data-mission-eta]')?.textContent).toContain('~12–18 min left')
+  served.run_details[0]!.status = 'completed'
+  await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
+  expect(container.querySelector('[data-mission-eta]')).toBeNull()
   act(() => root.unmount())
   container.remove()
 })
