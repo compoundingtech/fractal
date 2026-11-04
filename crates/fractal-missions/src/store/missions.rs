@@ -4735,7 +4735,7 @@ impl MissionsStore for Store {
         }
         let runs = runs.iter().map(|run| run.trim_start_matches("mission-run/")).collect::<Vec<_>>();
         let connection = self.readers.get();
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h6cdf9d3f4aed owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &format!(
             "SELECT claims.subject, s.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
              FROM claims JOIN batches ON batches.id=claims.batch_id
              JOIN step_runs s ON s.subject=claims.subject
