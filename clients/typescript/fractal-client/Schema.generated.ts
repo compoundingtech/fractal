@@ -3081,6 +3081,8 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "blockers": optionalKey(Schema.Array(Id)),
   "claim_expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   "claimant": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE),
+  /** Authoritative terminal transition of the selected attempt, in Unix milliseconds. */
+  "completed_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Authoritative terminal transition of the selected attempt, in Unix milliseconds." }),
   "constraints": optionalKey(Schema.Array(Schema.String)),
   "goals": optionalKey(Schema.Array(Schema.String)),
   "id": Id,
@@ -3099,6 +3101,8 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
   "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }),
   "since": Timestamp,
+  /** First execution opening of the selected attempt, in Unix milliseconds. */
+  "started_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "First execution opening of the selected attempt, in Unix milliseconds." }),
   "state": WorkState,
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "wake": Schema.OptionFromOptionalNullOr(MissionWake, NULL_NONE),
@@ -3116,6 +3120,8 @@ export type MustActEncoded = typeof MustAct.Encoded
 export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "after": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
   "blocker": Schema.OptionFromOptionalNullOr(Schema.Record(Schema.String, Schema.Unknown), NULL_NONE),
+  /** First terminal transition, in Unix milliseconds; unaffected by outcome edits. */
+  "completed_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "First terminal transition, in Unix milliseconds; unaffected by outcome edits." }),
   "current_steps": Schema.Array(Schema.Struct({ "assignee": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE), "claimant": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE), "id": StepRunId, /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
 "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }), "since": Timestamp, "state": WorkState, "title": Schema.OptionFromNullOr(Schema.String) })),
   "deadline": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
@@ -3128,6 +3134,8 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "phase": Schema.String,
   "progress": Schema.Struct({ "done": Schema.Int, "total": Schema.Int }),
   "requester": ActorRef,
+  /** Run creation, in Unix milliseconds. */
+  "started_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Run creation, in Unix milliseconds." }),
   "state_since": Timestamp,
   "status": Schema.String,
   /** The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read. */
@@ -5044,6 +5052,154 @@ export const MessageBody = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "MessageBody" }))()
 export type MessageBody = typeof MessageBody.Type
 export type MessageBodyEncoded = typeof MessageBody.Encoded
+
+export const NoticeActor = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|person)/[^\\s]+$", "u"), "agent", "person").annotate({ identifier: "NoticeActor" }))()
+export type NoticeActor = typeof NoticeActor.Type
+export type NoticeActorEncoded = typeof NoticeActor.Encoded
+
+export const NoticeClaimId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))).annotate({ identifier: "NoticeClaimId" }))()
+export type NoticeClaimId = typeof NoticeClaimId.Type
+export type NoticeClaimIdEncoded = typeof NoticeClaimId.Encoded
+
+export const NoticeLink = /*#__PURE__*/ (() => Schema.Struct({
+  "label": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinCodePoints(1)),
+  "url": Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z][A-Za-z0-9+.-]*:", "u"))).check(Schema.isPattern(URI_REFERENCE, { expected: "an RFC 3986 URI reference" }))
+}).annotate({ identifier: "NoticeLink" }))()
+export type NoticeLink = typeof NoticeLink.Type
+export type NoticeLinkEncoded = typeof NoticeLink.Encoded
+
+export const NoticePerson = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:person)/[^\\s]+$", "u"), "person").annotate({ identifier: "NoticePerson" }))()
+export type NoticePerson = typeof NoticePerson.Type
+export type NoticePersonEncoded = typeof NoticePerson.Encoded
+
+export const NoticeRuntime = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent)/[^\\s]+$", "u"), "agent").annotate({ identifier: "NoticeRuntime" }))()
+export type NoticeRuntime = typeof NoticeRuntime.Type
+export type NoticeRuntimeEncoded = typeof NoticeRuntime.Encoded
+
+/** Execution-context provenance; repository and cwd are informational, never authenticated sender evidence. */
+export const NoticeSource = /*#__PURE__*/ (() => Schema.Struct({
+  "agent": optionalKey(NoticeRuntime),
+  "cwd": optionalKey(Schema.String),
+  "host": subjectRef(new RegExp("^(?:host)/[^\\s]+$", "u"), "host"),
+  "pty": optionalKey(subjectRef(new RegExp("^(?:pty)/[^\\s]+$", "u"), "pty")),
+  "repo": optionalKey(Schema.String)
+}).annotate({ identifier: "NoticeSource", description: "Execution-context provenance; repository and cwd are informational, never authenticated sender evidence." }))()
+export type NoticeSource = typeof NoticeSource.Type
+export type NoticeSourceEncoded = typeof NoticeSource.Encoded
+
+/** RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission. */
+export const NoticeTimestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$", "u"))).check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "NoticeTimestamp", description: "RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission." }))()
+export type NoticeTimestamp = typeof NoticeTimestamp.Type
+export type NoticeTimestampEncoded = typeof NoticeTimestamp.Encoded
+
+/** Immutable producer input. Lengths count Unicode characters. Admission additionally caps serialized claim fields at 65536 UTF-8 bytes; JSON Schema cannot express an encoded-object byte budget. Logical identity is (authenticated producer, dedupe_key). Informational even at confirm urgency; an answer requires a native ask. */
+export const NoticeCreated = /*#__PURE__*/ (() => Schema.Struct({
+  "body": optionalKey(Schema.String.check(Schema.isMaxCodePoints(20000))),
+  "created_at": NoticeTimestamp,
+  "dedupe_key": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(200)),
+  "expires_at": optionalKey(NoticeTimestamp),
+  "intent": Schema.Literals(["done","failed","blocked","fyi"]),
+  "links": Schema.Array(NoticeLink).check(Schema.isMaxLength(10)),
+  "recipient": NoticePerson,
+  "requested": Schema.Boolean,
+  "resource": subjectRef(new RegExp("^(?:resource)/[^\\s]+$", "u"), "resource"),
+  "schema_version": Schema.Literal(1),
+  "source": NoticeSource,
+  "speech": optionalKey(Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(300))),
+  "summary": Schema.String.check(Schema.isPattern(new RegExp("^[^\\r\\n\\u0085\\u2028\\u2029]+$", "u"))).check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(200)),
+  "urgency": Schema.Literals(["info","attention","confirm"])
+}).annotate({ identifier: "NoticeCreated", description: "Immutable producer input. Lengths count Unicode characters. Admission additionally caps serialized claim fields at 65536 UTF-8 bytes; JSON Schema cannot express an encoded-object byte budget. Logical identity is (authenticated producer, dedupe_key). Informational even at confirm urgency; an answer requires a native ask." }))()
+export type NoticeCreated = typeof NoticeCreated.Type
+export type NoticeCreatedEncoded = typeof NoticeCreated.Encoded
+
+/** Per-adapter evidence, not physical audibility or person acknowledgement. Delivered requires an adapter outcome receipt. */
+export const NoticeDelivery = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "state": Schema.Literal("pending"), "surface": Schema.Literals(["tray","speech","push","log"]), "completed_at": Schema.optionalKey(Schema.Never), "evidence": Schema.optionalKey(Schema.Never), "outcome_claim": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "completed_at": NoticeTimestamp, "evidence": Schema.Literals(["spoken","shown","logged"]), "outcome_claim": NoticeClaimId, "state": Schema.Literal("delivered"), "surface": Schema.Literals(["tray","speech","push","log"]), "reason": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "outcome_claim": NoticeClaimId, "reason": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinCodePoints(1)), "state": Schema.Literal("failed"), "surface": Schema.Literals(["tray","speech","push","log"]), "completed_at": Schema.optionalKey(Schema.Never), "evidence": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "reason": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinCodePoints(1)), "state": Schema.Literal("suppressed"), "surface": Schema.Literals(["tray","speech","push","log"]), "completed_at": Schema.optionalKey(Schema.Never), "evidence": Schema.optionalKey(Schema.Never), "outcome_claim": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("state")).annotate({ identifier: "NoticeDelivery", description: "Per-adapter evidence, not physical audibility or person acknowledgement. Delivered requires an adapter outcome receipt." }))()
+export type NoticeDelivery = typeof NoticeDelivery.Type
+export type NoticeDeliveryEncoded = typeof NoticeDelivery.Encoded
+
+export const NoticeId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "u"))).annotate({ identifier: "NoticeId" }))()
+export type NoticeId = typeof NoticeId.Type
+export type NoticeIdEncoded = typeof NoticeId.Encoded
+
+export const NoticeDismissParameters = /*#__PURE__*/ (() => Schema.Struct({
+  "notice_id": NoticeId
+}).annotate({ identifier: "NoticeDismissParameters" }))()
+export type NoticeDismissParameters = typeof NoticeDismissParameters.Type
+export type NoticeDismissParametersEncoded = typeof NoticeDismissParameters.Encoded
+
+/** Notice-domain fence; delivery-only changes do not invalidate person controls. Null means no control has been accepted. */
+export const NoticeFence = /*#__PURE__*/ (() => Schema.Struct({
+  "control_revision": Schema.OptionFromNullOr(Revision),
+  "notice_id": NoticeId,
+  "source_revision": Revision
+}).annotate({ identifier: "NoticeFence", description: "Notice-domain fence; delivery-only changes do not invalidate person controls. Null means no control has been accepted." }))()
+export type NoticeFence = typeof NoticeFence.Type
+export type NoticeFenceEncoded = typeof NoticeFence.Encoded
+
+/** Unavailable/conflicted is never an actionable empty-success substitute. Manifest projection state remains explicit. */
+export const NoticeIntegrity = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "manifest_claim": NoticeClaimId, "manifest_state": Schema.Literal("ready"), "state": Schema.Literal("ready"), "creation_claims": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "manifest_state": Schema.Literals(["ready","missing","invalid","rebuilding","stale"]), "reason": Schema.Literals(["invalid-source","missing-source","missing-registration","rebuilding","stale"]), "state": Schema.Literal("unavailable"), "creation_claims": Schema.optionalKey(Schema.Never), "manifest_claim": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "creation_claims": Schema.Array(NoticeClaimId).check(Schema.isMinLength(2)).check(Schema.isUnique()), "manifest_state": Schema.Literals(["ready","conflicted"]), "state": Schema.Literal("conflicted"), "manifest_claim": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("state")).annotate({ identifier: "NoticeIntegrity", description: "Unavailable/conflicted is never an actionable empty-success substitute. Manifest projection state remains explicit." }))()
+export type NoticeIntegrity = typeof NoticeIntegrity.Type
+export type NoticeIntegrityEncoded = typeof NoticeIntegrity.Encoded
+
+export const NoticePolicy = /*#__PURE__*/ (() => Schema.Struct({
+  "availability_basis": NoticeClaimId,
+  "disposition": Schema.Literals(["deliver","held","suppressed"]),
+  "reason": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinCodePoints(1)),
+  "revision": Revision
+}).annotate({ identifier: "NoticePolicy" }))()
+export type NoticePolicy = typeof NoticePolicy.Type
+export type NoticePolicyEncoded = typeof NoticePolicy.Encoded
+
+export const NoticeSeenParameters = /*#__PURE__*/ (() => Schema.Struct({
+  "notice_id": NoticeId
+}).annotate({ identifier: "NoticeSeenParameters" }))()
+export type NoticeSeenParameters = typeof NoticeSeenParameters.Type
+export type NoticeSeenParametersEncoded = typeof NoticeSeenParameters.Encoded
+
+export const NoticeSourceId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "u"))).annotate({ identifier: "NoticeSourceId" }))()
+export type NoticeSourceId = typeof NoticeSourceId.Type
+export type NoticeSourceIdEncoded = typeof NoticeSourceId.Encoded
+
+/** Internal joined read model, not a registered Resource arm. Producer input and lineage are immutable; runtime owns policy/delivery, person owns controls. Null snooze is cleared/absent and never revives earlier values. */
+export const NoticeSnapshot = /*#__PURE__*/ (() => Schema.Struct({
+  "basis_claim": NoticeClaimId,
+  "control_revision": Schema.OptionFromNullOr(Revision),
+  "creation_claims": Schema.Array(NoticeClaimId).check(Schema.isMinLength(1)).check(Schema.isUnique()),
+  "delivery": Schema.Array(NoticeDelivery).check(Schema.isMaxLength(4)),
+  "dismissed_at": Schema.OptionFromNullOr(NoticeTimestamp),
+  "id": NoticeId,
+  "input": NoticeCreated,
+  "integrity": NoticeIntegrity,
+  "kind": Schema.Literal("attention-notice"),
+  "policy": NoticePolicy,
+  "producer": NoticeActor,
+  "revision": Revision,
+  "runtime": NoticeRuntime,
+  "schema_version": Schema.Literal(1),
+  "seen_at": Schema.OptionFromNullOr(NoticeTimestamp),
+  "snoozed_until": Schema.OptionFromNullOr(NoticeTimestamp),
+  "source_id": NoticeSourceId,
+  "source_revision": Revision,
+  "updated_at": NoticeTimestamp
+}).annotate({ identifier: "NoticeSnapshot", description: "Internal joined read model, not a registered Resource arm. Producer input and lineage are immutable; runtime owns policy/delivery, person owns controls. Null snooze is cleared/absent and never revives earlier values." }))()
+export type NoticeSnapshot = typeof NoticeSnapshot.Type
+export type NoticeSnapshotEncoded = typeof NoticeSnapshot.Encoded
+
+export const NoticeSnoozeParameters = /*#__PURE__*/ (() => Schema.Struct({
+  "notice_id": NoticeId,
+  "until": Schema.OptionFromNullOr(NoticeTimestamp)
+}).annotate({ identifier: "NoticeSnoozeParameters" }))()
+export type NoticeSnoozeParameters = typeof NoticeSnoozeParameters.Type
+export type NoticeSnoozeParametersEncoded = typeof NoticeSnoozeParameters.Encoded
 
 export const ObservationAccepted = /*#__PURE__*/ (() => Schema.Struct({
   "accepted": Schema.Literal(true)

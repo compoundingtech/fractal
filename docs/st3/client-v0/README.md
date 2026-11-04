@@ -23,6 +23,14 @@ Generated Effect string length checks count Unicode code points, matching JSON S
 URI-reference format checks validate RFC3986 syntax, including relative references,
 without URL-constructor normalization of malformed input.
 
+The standalone `NoticeCreated`, `NoticeSnapshot`, `NoticeFence` and notice parameter
+definitions are internal contract models, not server support: no notice Resource,
+operation, action, collection or capability is registered. `NoticeSnapshot.input`
+preserves full immutable producer input; its recipient is the addressed person.
+Delivery/integrity use tagged states, and person controls are explicitly nullable.
+Unicode limits are schema-enforced; admission must additionally enforce the 64 KiB
+serialized claim-field budget and cross-field provenance/receipt consistency.
+
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
 WebSocket senders now offer only the corresponding `fractal.client.*` protocol
@@ -209,6 +217,18 @@ run-detail endpoint. The detail uses the same enriched `Store::mission_run` read
 `GET /v1/mission-runs/{run}` only for open runs and the latest finished run. Older finished
 runs keep lightweight effective-step summaries. Headers and enrichment share one reader
 snapshot; mission lists retain their lightweight summary reads.
+
+Run summaries and steps expose nullable `started_at` and `completed_at` as integer Unix
+milliseconds (unlike the RFC 3339 `state_since` / `since` fields). A run starts at creation
+and completes at its first terminal transition; later outcome edits do not move completion.
+A step starts at the first execution opening of its selected attempt, including agentless
+execution, and completes only at an authoritative terminal state. Release, lease expiry,
+and submission awaiting verification do not complete it. Reclaim keeps the first opening;
+retry (including reviewer feedback) selects a new attempt. Unknown edges are null.
+Step timing events are read in one batch for the selected runs, not once per step, bounded to
+open runs and the latest finished run. Published cards restrict that batch to their actual
+20-step previews; detail retains all steps. Older detail steps retain null timing. These are
+lifecycle timestamps, not elapsed execution time or an ETA.
 
 Mission `run_details[].steps[]` and `run_details[].current_steps[]` expose nullable
 `assignee` and `claimant` actor references (`agent/...`, `daemon/...`, or `person/...`),
