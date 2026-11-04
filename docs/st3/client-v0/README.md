@@ -218,6 +218,18 @@ run-detail endpoint. The detail uses the same enriched `Store::mission_run` read
 runs keep lightweight effective-step summaries. Headers and enrichment share one reader
 snapshot; mission lists retain their lightweight summary reads.
 
+Run summaries and steps expose nullable `started_at` and `completed_at` as integer Unix
+milliseconds (unlike the RFC 3339 `state_since` / `since` fields). A run starts at creation
+and completes at its first terminal transition; later outcome edits do not move completion.
+A step starts at the first execution opening of its selected attempt, including agentless
+execution, and completes only at an authoritative terminal state. Release, lease expiry,
+and submission awaiting verification do not complete it. Reclaim keeps the first opening;
+retry (including reviewer feedback) selects a new attempt. Unknown edges are null.
+Step timing events are read in one batch for the selected runs, not once per step, bounded to
+open runs and the latest finished run. Published cards restrict that batch to their actual
+20-step previews; detail retains all steps. Older detail steps retain null timing. These are
+lifecycle timestamps, not elapsed execution time or an ETA.
+
 Mission `run_details[].steps[]` and `run_details[].current_steps[]` expose nullable
 `assignee` and `claimant` actor references (`agent/...`, `daemon/...`, or `person/...`),
 not agent-only IDs. A person-ask mission therefore retains its assigned person in both
