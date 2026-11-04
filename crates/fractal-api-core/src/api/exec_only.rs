@@ -40,8 +40,8 @@ pub(super) fn cards(
         "SELECT {} FROM claims actual JOIN claims desired ON desired.id=?2 WHERE actual.id=?1",
         smallclaims::store::canonical::after_sql("actual", "desired"),
     ));
-    /* sqlite-large-value: allow-for-now lv-hd3cb6ce1aa41 owner=fractal_api_core::api::exec_only TODO=trace-statement-and-value-representation */
-    let mut fresh_receipt = connection.prepare_cached(&FRESH_RECEIPT)?;
+    let mut fresh_receipt = connection.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-hd3cb6ce1aa41 owner=fractal_api_core::api::exec_only TODO=trace-statement-and-value-representation */ &FRESH_RECEIPT)?;
     let mut cards = BTreeMap::new();
     for (name, (root, tasks)) in declarations {
         let mut runtimes = Vec::with_capacity(tasks.len());
@@ -73,8 +73,8 @@ pub(super) fn cards(
             let fresh = if let Some((actual, desired)) = status.and_then(|status| {
                 status.actual_claim.as_deref().zip(status.desired_token.as_deref())
             }) {
-                /* sqlite-large-value: allow-for-now lv-h87b7d863902e owner=fractal_api_core::api::exec_only TODO=trace-statement-and-value-representation */
-                fresh_receipt.query_row([actual, desired], |row| row.get::<_, bool>(0))
+                fresh_receipt.query_row(
+                    /* sqlite-large-value: allow-for-now lv-h87b7d863902e owner=fractal_api_core::api::exec_only TODO=trace-statement-and-value-representation */ [actual, desired], |row| row.get::<_, bool>(0))
                     .optional()?.unwrap_or(false)
             } else { false };
             let fields = fields.filter(|fields| fresh && member.is_some_and(|member| {
