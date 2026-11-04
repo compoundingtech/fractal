@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use agent-facing question text and make Open terminal the sole primary action while web answer delivery is unavailable.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "none", "detail": "Options remain locally selectable, with an explicit selections-not-sent explanation. The disabled Send control and its unreachable submission seam are removed; native terminal answering is unchanged." },
+  "downtime": { "status": "none", "detail": "No downtime required." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Revert the terminal-first presentation change; no backend delivery or stored answer state is affected." }
+}

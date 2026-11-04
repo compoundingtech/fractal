@@ -48,6 +48,11 @@ export const MERGE_ONLY = [
 ]
 export const BOTH_WIDTHS = [
   'fractal-app-composer-images--several-images',
+  'fractal-app-conversation-harness-answer--narrow-light',
+  'fractal-app-conversation-harness-answer--narrow-dark',
+  'fractal-app-conversation-harness-answer--desktop-light',
+  'fractal-app-conversation-harness-answer--desktop-dark',
+  'fractal-app-conversation-harness-answer--all-states',
   'fractal-app-transcript-images--loaded',
   'fractal-ui-composer--footer-width-budget-narrow',
   'fractal-ui-composer--footer-width-budget-medium',

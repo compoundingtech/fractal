@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Register pending OMP question stories in kit Storybook and exercise visible questions from an initialized synthetic conversation at both widths.",
+  "replay": { "status": "none", "detail": "Story coverage only; production projection is unchanged." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Stories now use a world with a conversation present at the initial scenario clock; a regression checks the same fixture through SDK decoding and timeline projection." },
+  "downtime": { "status": "none", "detail": "No runtime downtime." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Revert story registration and fixture coverage changes; native terminal answering is unaffected." }
+}

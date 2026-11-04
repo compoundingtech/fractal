@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Match the preserved native preview newline in the OMP question accessible-description play assertion.",
+  "replay": { "status": "none", "detail": "Story assertion only." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "none", "detail": "The assertion now reflects the unchanged multiline native preview in the accessible description." },
+  "downtime": { "status": "none", "detail": "No downtime required." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Revert the assertion-only correction; production rendering is unchanged." }
+}

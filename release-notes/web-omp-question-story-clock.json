@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Start OMP question stories at the onboarding thread-create event and show the real scenario conversation as visible context.",
+  "replay": { "status": "none", "detail": "No production replay changes." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint changes." },
+  "compatibility": { "status": "none", "detail": "The scenario clock advances to 5000 ms before constructing the pending ask through the SDK and production timeline projection. The scenario content remains visible and variant-dependent without scanner exemptions." },
+  "downtime": { "status": "none", "detail": "No downtime required." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Revert this story-only clock/context change; native answering is unaffected." }
+}

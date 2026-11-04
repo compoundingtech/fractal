@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Assert native choice positional values with value attributes in OMP question Storybook plays.",
+  "replay": { "status": "none", "detail": "Test-only change." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "none", "detail": "The matcher now supports radio and checkbox inputs while retaining the exact zero-based positional assertions." },
+  "downtime": { "status": "none", "detail": "No downtime required." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Revert this test-only change; production controls are unaffected." }
+}

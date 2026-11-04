@@ -22,6 +22,8 @@ import { tokens } from '../../ui-compat/tokens.stylex.ts'
 import { AlertButton } from './AlertButton.tsx'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { AnswerAlert } from './AnswerAlert.tsx'
+import { HarnessAnswerAlert } from './HarnessAnswerAlert.tsx'
+import { projectHarnessAsks, type HarnessAsk } from './harness-question.ts'
 
 /** What the strip reads of a conversation's items: its tool calls, joined with their results. */
 export type ConversationCall = { readonly _tag: string; readonly id: string } & Partial<{
@@ -30,6 +32,7 @@ export type ConversationCall = { readonly _tag: string; readonly id: string } & 
   readonly input: unknown
   readonly result: unknown
   readonly callSeen: boolean
+  readonly status: string
 }>
 import type { PromptAnswerResult } from './prompt-answer-port.ts'
 
@@ -109,13 +112,17 @@ export const AgentAlerts = ({
   calls,
   onAnswer,
   onAct,
+  asks = [],
+  onOpenTerminal,
 }: {
   readonly alerts: readonly Native.Attention[]
   readonly calls: readonly PendingCall[]
   readonly onAnswer?: Answer
   readonly onAct?: Act
+  readonly asks?: readonly HarnessAsk[]
+  readonly onOpenTerminal?: () => void
 }): React.ReactNode => {
-  if (alerts.length === 0) return null
+  if (alerts.length === 0 && asks.length === 0) return null
   const one = (alert: Native.Attention) =>
     alert.attention_kind === 'harness-prompt'
       // A new prompt or revision behind the same alert starts with nothing chosen.
@@ -125,8 +132,9 @@ export const AgentAlerts = ({
   return (
     <div {...stylex.props(styles.pinned)} data-testid="conversation-alerts">
       <div {...stylex.props(styles.strip)}>
+        {asks.map(ask => <HarnessAnswerAlert key={JSON.stringify(ask)} ask={ask} onOpenTerminal={onOpenTerminal} />)}
         {alerts.length > 1 ? <div {...stylex.props(styles.count)}>◆ {alerts.length} alerts</div> : null}
-        {one(first!)}
+        {first === undefined ? null : one(first)}
         {/* The first alert is open; the others open on a click, as on the phone. */}
         {rest.map((alert) => (
           <details key={alert.id} {...stylex.props(styles.folded)}>
@@ -236,14 +244,17 @@ export const LiveAgentAlerts = ({
   agentRef,
   items,
   ux,
+  onOpenTerminal,
 }: {
   readonly agentRef: string
   readonly items: readonly ConversationCall[]
   readonly ux?: UxTelemetry
+  readonly onOpenTerminal?: () => void
 }): React.ReactNode => {
   const source = useDataSource()
   const attention = useAttention()
   const calls = React.useMemo(() => waitingCalls(items), [items])
+  const asks = React.useMemo(() => projectHarnessAsks(items), [items])
   const alerts = React.useMemo(
     () => (attention._tag === 'Observed' ? conversationAlerts(attention.value, agentRef) : []),
     [attention, agentRef],
@@ -289,5 +300,5 @@ export const LiveAgentAlerts = ({
                 answer: sent,
               })
         }
-  return <AgentAlerts alerts={alerts} calls={calls} onAnswer={onAnswer} onAct={onAct} />
+  return <AgentAlerts alerts={alerts} asks={asks} calls={calls} onAnswer={onAnswer} onAct={onAct} onOpenTerminal={onOpenTerminal} />
 }
