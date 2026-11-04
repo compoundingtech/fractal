@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Register the Highlights user-facing changelog in the dated TypeScript entry format",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No persistent data changes." },
+  "rules": { "status": "none", "detail": "No coordinated upgrade changes." },
+  "compatibility": { "status": "none", "detail": "Replaces an invalid Markdown changelog filename with the existing dated TypeScript source format." },
+  "downtime": { "status": "none", "detail": "No expected interruption." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Presentation metadata only; no persistent state or recovery changes." }
+}

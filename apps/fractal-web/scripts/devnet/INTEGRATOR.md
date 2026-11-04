@@ -82,7 +82,9 @@ for the separate launcher scripts.
 Failure attribution builds each probe in a fresh temporary
 `live-r3-probe-*` namespace under `FRACTAL_BUILD_ROOT`. Probe outputs are removed
 after the helper returns; empty snapshot namespaces are also removed, without
-deleting leftover snapshots that might still hold leases. Existing outputs are
+deleting leftover snapshots that might still hold leases. Relative build and
+snapshot roots are resolved against the helper's working directory (`SCRIPT_DIR`),
+not the integrator process's starting directory. Existing outputs are
 never reused: ignored private/vendor overlays can change without changing the
 commit, and a raw build receipt can exist before host validation finishes.
 A probe passes only when the full build-and-validation helper exits successfully.
@@ -362,9 +364,21 @@ Every tick reads `servedSha` from `/build-identity.json` (`rev`) at the publishe
 `current` requires no `error`, a non-null `sha`, and equality with `servedSha`, not a disk build.
 A failed lookup/fetch/identity decode sets `servedSha=null`, `current=false`, and a short `servedError`; lock-held ticks are false.
 The `--local` probe records `localServedSha`/`localServedError` for diagnostics only; it never determines `current`.
-`build` is `built`, `skipped`, `failed`, or `dry-run`; it is not a freshness signal.
-Skipped `reason` is `unchanged`, `lock-held`, or `known-built-tree`/`known-failed-tree`.
-Dry-run `reason` is `merged-and-regenerated-no-build-no-swap`; errors retain `build=failed`.
+`build` is `built`, `skipped`, `failed`, `error`, or `dry-run`; it is not a freshness signal.
+Skipped `reason` is `unchanged`, `lock-held`, `selection-deadline`, or `known-built-tree`/`known-failed-tree`.
+Dry-run `reason` is `merged-and-regenerated-no-build-no-swap`; ordinary errors retain `build=failed`.
+Agent-nix capacity refusal (exit 75, `EX_TEMPFAIL`) records `build: "error"`,
+`reason: "capacity-refused"`, `retryable: true` and an `error` explaining that the
+previous build is retained. This is host pressure, not a candidate build failure.
+The sandbox CLI preserves 75 through the build helper; integrator-side nix
+exceptions and refused attribution probes take the same retryable error path.
+A refused candidate never enters the failed-tree cache or starts attribution;
+a refused probe aborts attribution without caching the tree or ejecting a PR.
+Failure-cache writes and tentative PR ejections are also withheld if the reduced
+candidate rebuild is refused after attribution.
+The next tick retries the same tree after capacity becomes available. No build
+pointer or served process is changed by these refusals. Observers must distinguish
+this retryable tick error from a reproducible candidate build failure.
 Observability alerts when the last `current=true` timestamp is over 24 hours old, or no tick arrives for 30 minutes.
 
 ## Follower inputs

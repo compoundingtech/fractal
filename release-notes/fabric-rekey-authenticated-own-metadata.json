@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve Fabric re-key metadata only from the authenticated current local fleet incarnation",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No database or claim schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Endpoint refreshes and re-key operations read local metadata through the existing membership writer, signature and incarnation-window checks; another member cannot supply local rotation metadata by copying the public member key."},
+  "downtime": {"status": "none", "detail": "No additional downtime."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Authenticated local transitions and receipts retain their existing refresh and recovery behavior."}
+}

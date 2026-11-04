@@ -112,7 +112,7 @@ const markers = (world: World, kind: SliceKind, atMs: number, window?: ScenarioM
     case 'conversation': values = foldSlice(world.slices.conversation, atMs).state.threads.flatMap(({ items }) => mountedEntries(items, window).flatMap((entry) => entry.type === 'content' ? texts(entry.body) : [])); break
     case 'terminal': values = foldSlice(world.slices.terminal, atMs).state.terminals.flatMap(({ screens }) => screens.at(-1)?.screen.lines.map(({ text }) => text) ?? []); break
     case 'sync': values = []; break
-    case 'objectives': values = world.slices.objectives.state.list.rows.map(({ id }) => id); break
+    case 'objectives': values = world.slices.objectives.state.list.rows.map(({ about }) => about); break
   }
   return values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
 }
