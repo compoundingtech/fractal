@@ -6,6 +6,7 @@ import { SystemNotice } from '../composition/SystemState'
 import { spaceVars as s, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 
 export interface PinsSectionProps {
+  readonly title?: string
   /** Rendered in the given order. */
   readonly items: readonly { readonly id: string; readonly label: string }[]
   /** False keeps Open available and disables Unpin. */
@@ -18,11 +19,11 @@ export interface PinsSectionProps {
 }
 
 /** Nothing renders without Pins. */
-export function PinsSection({ items, editable, onOpen, onUnpin, detail, onRetry }: PinsSectionProps) {
+export function PinsSection({ items, editable, onOpen, onUnpin, detail, onRetry, title = 'Pinned' }: PinsSectionProps) {
   const headingId = React.useId()
   if (items.length === 0) return null
   return <section aria-labelledby={headingId} data-pins-section="" {...stylex.props(styles.section)}>
-    <h2 id={headingId} {...stylex.props(styles.heading)}>Pinned</h2>
+    <h2 id={headingId} {...stylex.props(styles.heading)}>{title}</h2>
     <ul {...stylex.props(styles.list)}>{items.map(item => <li key={item.id} data-pin={item.id} {...stylex.props(styles.item)}>
       <Button onPress={() => onOpen(item.id)}><span {...stylex.props(styles.label)}>{item.label}</span></Button>
       <IconButton icon="x" label={`Unpin ${item.label}`} isDisabled={!editable} onPress={() => onUnpin(item.id)} />

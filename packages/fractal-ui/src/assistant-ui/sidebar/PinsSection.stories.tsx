@@ -14,8 +14,8 @@ function AllStatesHarness() {
   const [retries, setRetries] = React.useState(0)
   return <main {...stylex.props(styles.canvas)}>
     <div data-state="editable"><PinsSection items={items} editable onOpen={setOpened} onUnpin={id => setItems(current => current.filter(item => item.id !== id))} /></div>
-    <div data-state="readonly"><PinsSection items={ordered} editable={false} onOpen={setOpened} onUnpin={() => undefined} /></div>
-    <div data-state="failed"><PinsSection items={ordered.slice(0, 1)} editable={false} onOpen={setOpened} onUnpin={() => undefined} detail="Pins could not be saved" onRetry={() => setRetries(count => count + 1)} /></div>
+    <div data-state="readonly"><PinsSection title="Pinned · read-only" items={ordered} editable={false} onOpen={setOpened} onUnpin={() => undefined} /></div>
+    <div data-state="failed"><PinsSection title="Pinned · unavailable" items={ordered.slice(0, 1)} editable={false} onOpen={setOpened} onUnpin={() => undefined} detail="Pins could not be saved" onRetry={() => setRetries(count => count + 1)} /></div>
     <div data-state="empty"><PinsSection items={[]} editable onOpen={setOpened} onUnpin={() => undefined} /></div>
     <output data-testid="pins-log">{`${opened} retries:${retries}`}</output>
   </main>
@@ -35,6 +35,8 @@ export const scenarioExemptions: readonly string[] = ['AllStates:contract-fixtur
 export const AllStates: StoryObj<typeof meta> = { tags: ['critical', 'both-widths'], name: 'All states · ordered, read-only, failed, empty', play: async ({ canvasElement }) => {
   const editable = state(canvasElement, 'editable')
   await expect(editable.getByRole('region', { name: 'Pinned' })).toBeInTheDocument()
+  await expect(state(canvasElement, 'readonly').getByRole('region', { name: 'Pinned · read-only' })).toBeInTheDocument()
+  await expect(state(canvasElement, 'failed').getByRole('region', { name: 'Pinned · unavailable' })).toBeInTheDocument()
   await expect(editable.getAllByRole('listitem').map(item => item.dataset.pin)).toEqual(ordered.map(item => item.id))
   await userEvent.click(editable.getByRole('button', { name: 'Reviewer' }))
   await expect(within(canvasElement).getByTestId('pins-log')).toHaveTextContent('agent/reviewer')
