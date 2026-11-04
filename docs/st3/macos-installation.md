@@ -84,6 +84,23 @@ configured keychain identity. The helper restores installation files, not
 application databases; schema compatibility must be checked by the deployment caller.
 
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
+Follow the [default-host cutover procedure](../site/guides/upgrading.md#default-host-st3--fractal-cutover)
+for staging, migration evidence, seat-continuity checks and readiness-based recovery.
+The mover recognizes either `com.compoundingtech.st3` or
+`org.nix-community.home.smalltalk` as the legacy daemon, and either
+`com.compoundingtech.st3.replication` or
+`org.nix-community.home.smalltalk-replication` as the legacy replication worker.
+Targets use `com.compoundingtech.fractal` and
+`com.compoundingtech.fractal.replication`. Duplicate installed legacy aliases
+refuse; a recognized Home Manager worker does not require a separate manual
+bootout before migration.
+
+The current mover inspects and operates only in the `gui/UID` launchd domain.
+It has no domain-selection option and does not migrate jobs owned by the
+session-independent `user/UID` domain. Establish the actual service domain before
+staging; a user-domain installation requires supported domain handling before
+this procedure can be used. Do not infer support from an installed plist alone.
+
 For the default-host Fractal cutover, `st service install --stage-fractal` installs
 `com.compoundingtech.fractal` and `com.compoundingtech.fractal.replication` definitions
 disabled without loading or starting them. On Linux the same command stages
