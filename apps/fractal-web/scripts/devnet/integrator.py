@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integrate open Fractal PRs and publish an immutable production build.
 
-Version 12: attribute failures using fresh, validated probe builds.
+Version 13: resolve attribution probe roots against the build helper's cwd.
 """
 import contextlib, datetime, fcntl, hashlib, json, math, os, pathlib, re, shutil, subprocess, tempfile, time
 import sys
@@ -50,7 +50,7 @@ try:
 except (ValueError, TypeError) as error:
     raise SystemExit(f'invalid integrator trust configuration: {error}')
 PR_METADATA_FIELDS = 'number,headRefName,headRefOid,baseRefName,baseRefOid,changedFiles,isDraft,author,isCrossRepository,headRepositoryOwner'
-INTEGRATOR_VERSION = 12
+INTEGRATOR_VERSION = 13
 DEPENDENCY_SANDBOX_VERSION = candidate_sandbox.DEPENDENCY_POLICY
 try:
     SELECTION_BUDGET_SECONDS = float(os.environ.get('FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS', '60'))
@@ -410,8 +410,11 @@ def probe_revision(revision):
     # A raw receipt does not prove host validation completed, and a prior output
     # for this commit may have used different ignored private/vendor overlays.
     # Keep publication's immutable-output guard and build every probe afresh.
+    # The build helper runs with cwd=SCRIPT_DIR, including for relative roots.
+    build_root=SCRIPT_DIR/required_input('FRACTAL_BUILD_ROOT')
+    snapshot_root=SCRIPT_DIR/required_input('FRACTAL_BUILD_SNAPSHOT_ROOT')
     with tempfile.TemporaryDirectory(prefix='live-r3-probe-',
-            dir=required_input('FRACTAL_BUILD_ROOT')) as output:
+            dir=build_root) as output:
         name=pathlib.Path(output).name
         try:
             return build(name).returncode == 0
@@ -419,7 +422,7 @@ def probe_revision(revision):
             # The helper removes its snapshots. Remove only an empty namespace;
             # never delete a leftover snapshot that might still hold a lease.
             with contextlib.suppress(OSError):
-                (pathlib.Path(required_input('FRACTAL_BUILD_SNAPSHOT_ROOT'))/name).rmdir()
+                (snapshot_root/name).rmdir()
 
 def build_candidate(row, private_hash, checkpoints):
     cache=L/'live-r3-tree-cache.json'

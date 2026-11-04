@@ -153,6 +153,38 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(all(not (build_root / name).exists() for name in names))
         self.assertTrue(receipt.exists())
 
+    def test_probe_relative_roots_use_build_helper_cwd(self):
+        script_dir = self.root / 'helper'
+        process_cwd = self.root / 'caller'
+        for directory in (script_dir, process_cwd):
+            (directory / 'build-root').mkdir(parents=True)
+            (directory / 'snapshots').mkdir()
+        names = []
+
+        def build(name):
+            names.append(name)
+            self.assertTrue(name.startswith('live-r3-probe-'))
+            self.assertTrue((script_dir / 'build-root' / name).is_dir())
+            self.assertFalse((process_cwd / 'build-root' / name).exists())
+            (script_dir / 'snapshots' / name).mkdir()
+            (process_cwd / 'snapshots' / name).mkdir()
+            return subprocess.CompletedProcess([], 0)
+
+        with contextlib.chdir(process_cwd), \
+                patch.object(self.module, 'SCRIPT_DIR', script_dir), \
+                patch.dict(os.environ, FRACTAL_BUILD_ROOT='build-root',
+                           FRACTAL_BUILD_SNAPSHOT_ROOT='snapshots'), \
+                patch.object(self.module, 'git') as git, \
+                patch.object(self.module, 'prepare_dependencies') as prepare, \
+                patch.object(self.module, 'build', side_effect=build) as build_probe:
+            self.assertTrue(self.module.probe_revision('a' * 40))
+        git.assert_called_once_with('checkout', '--detach', 'a' * 40)
+        prepare.assert_called_once_with()
+        build_probe.assert_called_once_with(names[0])
+        self.assertFalse((script_dir / 'build-root' / names[0]).exists())
+        self.assertFalse((script_dir / 'snapshots' / names[0]).exists())
+        self.assertTrue((process_cwd / 'snapshots' / names[0]).is_dir())
+
     def test_tree_cache_identity_changes_with_integrator_version(self):
         with patch.object(self.module, 'text', return_value='tree'):
             old = self.module.candidate_key('overlay')
