@@ -206,8 +206,10 @@ own literal identity immediately after `add`, `remove`, or `prefer`; borrowing a
 different actor or omitting the actor fails closed before local settings change.
 Attributed commands authorize through the public transport endpoint before local
 effects and publish before saving settings, so a refusal leaves `fleet.toml`
-unchanged. Each change carries one mutation ID; replaying its publication does
-not append a second event. Automatic worker announcements use the internal route.
+unchanged. A private pending intent next to `fleet.toml` retains the mutation ID
+and target settings until the save succeeds, so a retry after a lost publication
+response reuses that ID. Distinct changes use new IDs, not content-derived IDs.
+Automatic worker announcements use the internal route.
 
 Adding Fabric requires a listening member with a configured replication port and a working
 local `fabric` command. Use `st fleet mode listening` first for a dial-out member. Add exposes

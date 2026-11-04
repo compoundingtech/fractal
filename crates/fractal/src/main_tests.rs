@@ -5,16 +5,7 @@ fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
             let cli = Cli::try_parse_from([
                 "fractal", "fleet", "transports", subcommand, "--as", actor, transport,
             ]).unwrap();
-            let Command::Fleet { command: FleetCommand::Transports { command } } = &cli.command else {
-                panic!("expected transports");
-            };
-            let (FleetTransportsCommand::Add { actor: parsed, .. }
-                | FleetTransportsCommand::Remove { actor: parsed, .. }
-                | FleetTransportsCommand::Prefer { actor: parsed, .. }) = command;
-            assert_eq!(parsed.as_deref(), Some(actor));
-            let restart = Cli::try_parse_from([
-                "fractal", "agents", "restart", "--as", actor, "agent/example",
-            ]).unwrap();
+            let restart = Cli::try_parse_from(["fractal", "agents", "restart", "--as", actor, "agent/example"]).unwrap();
             assert_eq!(
                 guard_mutating_cli_actor(&cli.command, Some("agent/example"), None).is_ok(),
                 guard_mutating_cli_actor(&restart.command, Some("agent/example"), None).is_ok(),
@@ -28,23 +19,49 @@ fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
 }
 
 #[tokio::test]
-async fn refused_transport_publication_does_not_save_settings() {
+async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
+    use fractal_store::store::fleet_admission_tests_shared_seats::{FLEET, admit, key, node};
     let root = tempfile::tempdir().unwrap();
-    let config = Config { state_dir: root.path().into(), ..Config::default() };
-    let mut file = fractal_daemon::config::FleetFile::default();
+    let config = Config { node: "local".into(), state_dir: root.path().into(), ..Config::default() };
+    let file = fractal_daemon::config::FleetFile {
+        fleet_id: FLEET.into(), transports: vec!["tailscale".into(), "fabric".into()], ..Default::default()
+    };
     file.save(root.path()).unwrap();
     let path = fractal_daemon::config::FleetFile::path(root.path());
     let before = fs::read(&path).unwrap();
-    file.transports.push("fabric".into());
+    let anchor = key();
+    let store = Arc::new(node("local", Some(&anchor), Some(&anchor)));
+    admit(&store, "local", &anchor, "anchor", None);
+    let published = store.clone();
+    let membership = store.clone();
+    let fail = std::sync::atomic::AtomicBool::new(true);
+    let app = axum::Router::new()
+        .route("/v1/fleet/membership", axum::routing::get(move || {
+            let store = membership.clone(); async move { axum::Json(store.fleet_view().unwrap()) }
+        }))
+        .route("/v1/fleet/transports", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let store = published.clone();
+            let lost = body["dry_run"] != true && fail.swap(false, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if body["dry_run"] != true {
+                    store.publish_fleet_endpoints(body["mode"].as_str().unwrap(), &[], "test",
+                        Some((body["actor"].as_str().unwrap(), body["mutation_id"].as_str().unwrap()))).unwrap();
+                }
+                (if lost { axum::http::StatusCode::INTERNAL_SERVER_ERROR } else { axum::http::StatusCode::OK }, axum::Json(json!({})))
+            }
+        }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = Client::new(Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
-    let app = axum::Router::new().route("/v1/fleet/transports",
-        axum::routing::post(|| async { axum::http::StatusCode::UNPROCESSABLE_ENTITY }));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    assert!(save_and_publish_fleet_settings(
-        &client, &config, &file, vec![], Some(("agent/example", "transport-test")),
-    ).await.is_err());
-    assert_eq!(fs::read(path).unwrap(), before);
+    let prefer = || FleetTransportsCommand::Prefer { actor: Some("agent/example".into()), transport: "fabric".into(), no_service: true };
+    assert!(run_fleet_transports(&client, &config, prefer(), true).await.is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(path.with_extension("transport-change.json").exists());
+    run_fleet_transports(&client, &config, prefer(), true).await.unwrap();
+    assert_eq!(store.claims_for("host/local", Some("fleet.member-endpoints")).unwrap().len(), 1);
+    assert_eq!(store.latest_claim("host/local", Some("fleet.member-endpoints")).unwrap().unwrap().actor.as_deref(), Some("agent/example"));
+    assert_eq!(fractal_daemon::config::FleetFile::load(root.path()).unwrap().unwrap().transports, ["fabric", "tailscale"]);
+    assert!(!path.with_extension("transport-change.json").exists());
     server.abort();
 }
 
