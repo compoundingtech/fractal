@@ -34,7 +34,7 @@ async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
     admit(&store, "local", &anchor, "anchor", None);
     let published = store.clone();
     let membership = store.clone();
-    let fail = std::sync::atomic::AtomicBool::new(true);
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let app = axum::Router::new()
         .route("/v1/fleet/membership", axum::routing::get(move || {
             let store = membership.clone(); async move { axum::Json(store.fleet_view().unwrap()) }
