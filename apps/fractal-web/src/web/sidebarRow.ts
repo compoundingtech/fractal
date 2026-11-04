@@ -104,17 +104,18 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
   /** Only fences out future-dated occupancy; rows stay off the ticking clock, which reaches time leaves. */
   readonly now?: number
 }): SidebarAgentRowData => {
-  const status: SidebarAgentStatus = agent.state === 'retired' ? 'retired'
+  const status: SidebarAgentStatus = agent.activity === 'errored' || agent.state === 'failed' ? 'failed'
+    : agent.state === 'retired' ? 'retired'
     : agent.state === 'suspended' ? 'suspended'
     : agent.state === 'stopped' || agent.state === 'ended' ? 'ended'
     : agent.state === 'desired' || agent.state === 'starting' ? 'pending'
-    : !agent.connected ? 'offline' : agent.activity === 'errored' ? 'stale' : agent.activity
+    : agent.activity
   const validTimestamp = (value: number | undefined) => value !== undefined && Number.isFinite(value) &&
     value >= 0 && value <= 8640000000000000 ? value : undefined
   const lastActivityAt = validTimestamp(agent.lastActivityAt._tag === 'Known' ? agent.lastActivityAt.value : undefined)
   const statusSince = validTimestamp(agent.statusSince)
-  // The canonical state drives both the G3 glyph and its sentence-case word.
-  // Lifecycle takes precedence over harness activity: a stopped idle harness is Ended, not Idle.
+  const lastObserved = stale || !agent.connected
+  // Lifecycle takes precedence over harness activity unless Fractal reports a fault.
   const statusLabel = statuses[status].label
   // Preserve the real projection's driver capability; visual harness metadata can omit non-observing/unknown drivers.
   const observesSubagents = agent.driver?._tag === 'Observing'
@@ -123,14 +124,15 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
   const subagentsKnown = agent.subagents !== undefined
   return {
     ref: agent.ref, id: agent.ref, title: agent.name, host: agent.host, status,
-    statusLabel: stale ? 'Last verified · ' + statusLabel : statusLabel,
-    freshness: stale ? 'stale' : 'live', description: agent.description, harness: agent.harness,
+    statusLabel: lastObserved ? 'Last verified · ' + statusLabel : statusLabel,
+    freshness: lastObserved ? 'stale' : 'live', description: agent.description, harness: agent.harness,
     terminal: agent.terminal || undefined, mission: agent.mission, lastActivityAt, statusSince,
     context: contextOccupancy({ usage: agent.usage, now, observedAfter: agent.contextObservedAfter }),
     missionContext: missionUnavailable && (agent.currentWork?.[0]?.missionId ?? agent.mission) !== undefined
       ? { _tag: 'Unavailable' } : sidebarMissionContext({ agent, missions, attention }),
     missionInfo,
     needsMe,
+    asking: agent.ask._tag === 'Known' ? agent.ask.value === 'question' : undefined,
     subagentCount: subagentsKnown ? agent.subagents!.length : undefined,
     subagentObservation: subagentsKnown ? { _tag: 'Reported' } : awaitingFirstReport ? { _tag: 'Unavailable' } :
       { _tag: 'NotReported', reason: { _tag: observesSubagents ? 'DaemonVersion' : 'Harness' } },
