@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Document the default-host st3 to Fractal cutover, service and seat boundaries, readiness-based recovery, and macOS launchd limitations.",
+  "summary": "Document the default-host st3 to Fractal cutover, prebuilt completed activation, rooted generation archives, memory and dependency gates, evidence, seat continuity, readiness-based recovery, and macOS launchd limitations.",
   "commits": [],
   "replay": {"status": "none", "detail": "Documentation only; no replay changes."},
   "schema": {"status": "none", "detail": "No schema changes."},

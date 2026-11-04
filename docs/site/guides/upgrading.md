@@ -89,16 +89,39 @@ For Home Manager, stage through the configuration that owns the services:
 services.smalltalk.fractalMigration.phase = "stage";
 ```
 
-Stage installs disabled target definitions without moving state. The product module
-forces its legacy config entry's `force` setting off in the staged generation,
-overriding a consumer's `force = true`; that newest generation is safe. Assertions
-still reject other forced ownership of protected legacy config/state paths.
-Older retained generations are a separate concern: the mover scans every
-`home-manager-N-link` in all inspected profile directories, without a generation
-depth limit, and refuses forced collision prefixes that could overwrite the fence.
-Dry-run lists the unsafe generation numbers. Preserve their records and recovery
-material, then remove those specific retained generations through the owner before
-cutover. Do not bypass the guard or indiscriminately garbage-collect generations.
+Stage installs disabled target definitions without moving state. Build the
+`"completed"` generation **before running migration**, without activating it, so
+it is ready for immediate activation after a successful migration in the same
+maintenance window. Freeze all other Home Manager rolls on this host from stage
+activation until completed activation.
+
+The product module forces its legacy config entry's `force` setting off in the
+staged generation, overriding a consumer's `force = true`; that newest generation
+is safe. Assertions still reject other forced ownership of protected legacy
+config/state paths. Older retained generations are a separate concern: the mover
+scans every `home-manager-N-link`, without a generation depth limit, in:
+
+- `${XDG_STATE_HOME:-$HOME/.local/state}/nix/profiles`;
+- `${NIX_STATE_DIR:-/nix/var/nix}/profiles/per-user/$USER`;
+- `~/.local/state/nix/profiles`, when distinct from the first directory.
+
+Dry-run lists unsafe generation numbers. Before deleting any unsafe profile links,
+record each generation number, profile and store path, and preserve its closure
+with an explicit GC root in an archive directory outside **all** scanned profile
+directories, for example:
+
+```sh
+nix-store --add-root "$HOME/fractal-cutover-archive/hm-gen-N" --realise <generation-store-path>
+nix-env --profile <home-manager-profile> --delete-generations N ...
+```
+
+Create that archive directory first and use a unique root name for each preserved
+generation (including the profile identity if numbers overlap). Recording paths
+alone does not protect closures from GC. Remove **only** the unsafe retained links
+reported by dry-run, through their owning profiles; record what was removed and
+keep the active staged generation. Do not use broad expiration or garbage
+collection. Preserved pre-cutover generations are recovery material, not
+post-cutover activation targets.
 
 For native service ownership instead, use:
 
@@ -117,6 +140,17 @@ Before proceeding:
 - Require exactly one installed legacy daemon definition. Corresponding target
   definitions must already be installed, disabled and stopped. Resolve duplicate
   legacy worker aliases and any unrelated service ownership separately.
+- Prepare phase-aware wiring in the owning configuration for dependent Linux
+  units: legacy/stage `smalltalk.service`, `smalltalk-replication.service` and
+  `smalltalk-apply.service` become completed `fractal.service`,
+  `fractal-replication.service` and `fractal-apply.service`, respectively, where
+  those workers are configured. The mover does not rewrite other units'
+  `PartOf`, `After` or `WantedBy` relationships.
+- On Linux, configure matching target `memory.low` and `memory.swap.max` values
+  before cutover. After starting the target daemon, the mover requires its running
+  cgroup values to equal the legacy snapshot **exactly**; a mismatch triggers
+  automatic legacy restoration. Dry-run reads the legacy values, not the running
+  target, and cannot prove this comparison will pass.
 - Require real legacy directories and absent or empty ordinary destinations on
   the same filesystem. A destination receipt does not authorize merging contents.
 - Resolve mounts at or below either source or destination product root before
@@ -130,17 +164,32 @@ Before proceeding:
 
 ### 2. Check, then migrate
 
+Use one fixed evidence directory outside both product roots, such as
+`$HOME/fractal-cutover-evidence` (choose another external location if your roots
+are customized). Keep dry-run stdout/errors and real-run JSON/errors there with
+timestamped names:
+
 ```sh
-fractal migrate host --dry-run
-fractal migrate host --json
+mkdir -p "$HOME/fractal-cutover-evidence"
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+fractal migrate host --dry-run >"$HOME/fractal-cutover-evidence/$stamp-dry-run.out" 2>"$HOME/fractal-cutover-evidence/$stamp-dry-run.err" &&
+  fractal migrate host --json >"$HOME/fractal-cutover-evidence/$stamp-migrate.json" 2>"$HOME/fractal-cutover-evidence/$stamp-migrate.err"
 ```
 
-Save stdout and errors in operator-chosen evidence files. The command does not
-choose a receipt filename. A dry-run checks staging, paths, store access, checkpoint
-and replication quiescence, and effective memory protection without stopping
-services or writing a migration journal. A pending checkpoint, pending replication
-records, an unverified first sync, or a peer worker not observed idle/backoff
-refuses cutover. Resolve the cause and retry; do not suppress the check.
+The command does not choose a receipt filename. Re-run dry-run immediately before
+the real run, even if an earlier preparation dry-run passed. Dry-run checks staging,
+paths, store access, checkpoint and replication quiescence, and legacy effective
+memory protection without stopping services or writing a migration journal. A
+pending checkpoint, pending replication records, an unverified first sync, or a
+peer worker not observed idle/backoff refuses cutover. Resolve the cause and retry;
+do not suppress the check. The real run independently re-checks quiescence.
+
+The staged Home Manager generation is a rollback target **only until migration
+starts**. Once root markers exist, legacy/stage activation is refused by the
+current module's activation guard; older unsafe generations are fenced separately.
+Deploy tooling must not select retained pre-cutover generations as recovery
+targets, even when their closures have been archived. Use readiness-based recovery
+below, not generation rollback.
 
 Actual migration checks quiescence again, disables legacy units, stops recognized
 workers before the daemon, fences state/store ownership, exchanges roots and
@@ -149,6 +198,10 @@ the target daemon, compares effective Linux memory protection and probes the loc
 API for the same node before committing readiness. It then retires legacy
 service-definition links, enables target units and starts recognized auxiliaries.
 Other adapters or carriers remain their owner's responsibility.
+
+After a successful migration, immediately activate the prebuilt `"completed"`
+Home Manager generation in this same window, before any other roll; see step 5
+for its ownership checks. Do not defer building it until after the move.
 
 **Service restart is not seat restart.** The mover deliberately restarts daemon
 and recognized worker units, not agent PTYs or harness sessions. Healthy isolated
@@ -175,9 +228,18 @@ Keep these three objects distinct:
   records the service/path plan and undo progress, protection and commit state.
   Preserve it; deleting or editing it is not a recovery procedure.
 
-Run the version, doctor, service, agent and replication diagnostics above after
-preservation and migration. Compare effective memory protection and daemon build
-with the recorded baseline. For every previously live seat, verify the same
+Run these diagnostics after preservation, migration and completed activation:
+
+```sh
+fractal --version --json
+fractal doctor --json
+fractal service status
+fractal agents ls
+fractal replication status
+```
+
+Compare effective memory protection and daemon build with the recorded baseline.
+For every previously live seat, verify the same
 incarnation and provider/PTY processes, agent readiness, reconnect through the
 retained socket paths and resumed message delivery. A healthy daemon or a surviving
 harness alone is insufficient. Record any continuity failure separately from the
@@ -201,13 +263,16 @@ restore claims or delivery state subsequently written.
 
 ### 5. Complete declarative ownership
 
-After successful migration, set Home Manager's phase to `"completed"` **before
-the next activation**. Completed activation requires exact migration markers,
+Activate the `"completed"` Home Manager generation built in step 1 immediately
+after successful migration, before ending the maintenance window or allowing any
+other Home Manager roll. Completed activation requires exact migration markers,
 migrated roots, the persistent config fence and an inactive legacy daemon.
-Legacy/stage activation after marker publication refuses. Ensure the owning
-configuration also adopts the target worker names and all dependent services;
-the mover cannot prevent a later configuration from regenerating legacy units.
-Verify service ownership, replication and per-seat health again after activation.
+Legacy/stage activation after marker publication refuses in the current module;
+retained pre-cutover generations must not be deployment recovery targets.
+The owning configuration must adopt the target daemon/worker names and the
+phase-aware dependent-unit relationships prepared in step 1. Verify service
+ownership, replication and per-seat health again after activation, then release
+the Home Manager roll freeze.
 
 Preserve legacy payload, history and recovery material; the mover retires legacy
 service-definition links. Only after completed ownership and health acceptance

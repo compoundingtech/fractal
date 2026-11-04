@@ -100,6 +100,9 @@ It has no domain-selection option and does not migrate jobs owned by the
 session-independent `user/UID` domain. Establish the actual service domain before
 staging; a user-domain installation requires supported domain handling before
 this procedure can be used. Do not infer support from an installed plist alone.
+Domain handling for host cutover and staging is being revised; until supported
+handling is available, the limitation above applies. Fresh installs and the app
+installer remain GUI-domain-only and are outside that cutover/staging work.
 
 For the default-host Fractal cutover, `st service install --stage-fractal` installs
 `com.compoundingtech.fractal` and `com.compoundingtech.fractal.replication` definitions
