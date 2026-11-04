@@ -250,11 +250,13 @@ limit shrinks what `nproc` reports. From that room, admission takes:
 - what the seats outside lanes hold that the kernel cannot take back, the anonymous and kernel memory
   of each seat scope in the user manager's `app.slice`. Nothing caps such a seat, so a reservation
   could not bound it; page cache is left out, since pressure reclaims it;
-- the room kept for one burst (below, "Bursts"): what a burst raises the host's smallest laned seat
-  by, the seat starting among them. A burst raises a seat to the burst lane (24G, `build` in
+- the room kept for one burst (below, "Bursts"): what a burst raises the host's smallest live laned
+  seat by (one that runs or was admitted to start, since only such a seat's run asks for a burst),
+  the seat starting among them. A burst raises a seat to the burst lane (8 cores/24G, `build` in
   `.st/lane-bursts.json`, which `scripts/fractal-test` asks for; a test holds the two together), so
   on a host of 8G seats it keeps 16G. While a burst is held its raise already counts in its seat's
-  lane, so the reserve keeps only what is left of it. Starts may not use it; bursts may. Without it,
+  lane, so the reserve keeps only what is left of it. A host whose room for lanes could never hold
+  the burst lane keeps none, since every burst there is refused. Starts may not use it; bursts may. Without it,
   seats that start while no run builds would take the room every later burst needs, and each run
   would wait out its `--queue-limit`.
 

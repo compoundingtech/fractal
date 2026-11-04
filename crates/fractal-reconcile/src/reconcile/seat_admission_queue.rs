@@ -90,8 +90,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             if status.lane_wait(&subject.subject, reason, false, now) {
                 self.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
             }
-            // The reserve follows the host's smallest lane: try again soon.
-            smallclaims::touched::note_due(now_ms() + LANE_RETRY_MS);
+            if lane.cores <= room.cores && lane.memory <= room.memory {
+                // The reserve follows the host's smallest live lane: try again soon.
+                smallclaims::touched::note_due(now_ms() + LANE_RETRY_MS);
+            }
             return Ok(LaneFit::Waits);
         }
         let held = self.held_lanes(&subject.subject, now)?;
@@ -119,14 +121,18 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// The room admission keeps from seat starts so one lane burst fits (docs/st3/seat-lanes.md,
-    /// "Bursts"): what a burst to the host's burst lane raises its smallest laned seat by,
-    /// `candidate` (at `lane`) among them. A granted burst already holds its raise, so while one is
-    /// held the reserve keeps only what is left of it. Bursts may use the reserve; starts may not.
+    /// "Bursts"): what a burst to the host's burst lane raises its smallest live laned seat by,
+    /// `candidate` (at `lane`) among them. A seat runs, or was admitted to start, to ask for a
+    /// burst, so stopped seats do not count. A granted burst already holds its raise, so while one
+    /// is held the reserve keeps only what is left of it. A host that could never grant the burst
+    /// lane keeps none. Bursts may use the reserve; starts may not.
     pub(super) fn burst_reserve(&self, candidate: &str, lane: fractal_runtime::Capacity) -> Result<BurstReserve> {
-        let burst_lane = self.seat_admission.lanes.map_or(0, |host| host.burst_lane);
-        if burst_lane == 0 {
+        let Some(host) = self.seat_admission.lanes else { return Ok(BurstReserve { full: 0, kept: 0 }) };
+        let Some(burst_lane) = host.burst_lane
+            .filter(|burst| burst.cores <= host.room.cores && burst.memory <= host.room.memory)
+        else {
             return Ok(BurstReserve { full: 0, kept: 0 });
-        }
+        };
         let granted = self.seat_admission.status.state().lane_bursts.iter().filter(|burst| burst.granted)
             .map(|burst| (burst.subject.clone(), burst.capacity.memory)).collect::<BTreeMap<_, _>>();
         let (mut smallest, mut burst_raise) = (lane.memory, 0);
@@ -136,12 +142,18 @@ impl<R: RuntimeControl> Reconciler<R> {
             if desired.kind != "agent" || desired.subject == candidate {
                 continue;
             }
+            let live = self.store.latest_observation(&desired.subject, "runtime.observed")?
+                .is_some_and(|claim| claim.body["fields"]["status"] == "running")
+                || self.seat_admission.status.state().lane_starts.contains_key(&desired.subject);
+            if !live {
+                continue;
+            }
             smallest = smallest.min(base.memory);
             if let Some(asked) = granted.get(&desired.subject) {
                 burst_raise = burst_raise.max(asked.saturating_sub(base.memory));
             }
         }
-        let full = burst_lane.saturating_sub(smallest);
+        let full = burst_lane.memory.saturating_sub(smallest);
         let reserve = BurstReserve { full, kept: full.saturating_sub(burst_raise) };
         self.seat_admission.status.state().burst_reserve = Some((reserve.full, reserve.kept));
         Ok(reserve)

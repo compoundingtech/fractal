@@ -21,7 +21,7 @@ fn observe(store: &Store, subject: &str, status: &str) {
 fn a_laned_seat_starts_only_when_its_lane_fits_and_seats_wait_for_room_in_order() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: 0 }));
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }));
     let seat = |name: &str, lane: &str| format!("agent {name:?} {{ workspace \"/tmp\"; command \"true\"; {lane} }}\n");
     apply_source(&store, &format!("version 2\n{}{}{}{}{}",
         seat("held", r#"capacity cores=8 memory="24G""#),
@@ -83,7 +83,7 @@ agent "huge" { workspace "/tmp"; command "true"; capacity cores=64 memory="1T" }
 fn a_seat_first_in_line_that_is_suspended_gives_up_its_place() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: 0 }));
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }));
     apply_source(&store, r#"version 2
 agent "held" { workspace "/tmp"; command "true"; capacity cores=8 memory="24G" }
 agent "big" { workspace "/tmp"; command "true"; capacity cores=8 memory="30G" }
@@ -113,7 +113,7 @@ agent "small" { workspace "/tmp"; command "true"; capacity cores=1 memory="4G" }
 fn a_restart_that_ignores_the_fit_starts_a_waiting_seat_and_holds_its_room() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: 0 }));
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }));
     apply_source(&store, r#"version 2
 agent "held" { workspace "/tmp"; command "true"; capacity cores=8 memory="24G" }
 agent "operations" { workspace "/tmp"; command "true"; capacity cores=2 memory="40G" }"#, "seats");
@@ -167,7 +167,7 @@ mission "orchid" state="ready" {
 
 fn reserving(store: &Arc<Store>) -> Reconciler<FakeRuntime> {
     Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: 24 * G }))
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: Some(super::seat_admission::BURST_LANE) }))
 }
 
 #[test]
@@ -211,12 +211,37 @@ fn a_lane_that_fits_only_in_the_room_kept_for_a_burst_waits_out_of_line() {
     apply_source(&store, r#"version 2
 agent "small" { workspace "/tmp"; command "true"; capacity cores=1 memory="4G" }
 agent "big" { workspace "/tmp"; command "true"; capacity cores=8 memory="40G" }"#, "seats");
+    observe(&store, "agent/node.small", "running");
     let big = store.desired_subjects().unwrap().into_iter().find(|desired| desired.subject == "agent/node.big").unwrap();
-    // A burst to 24G on the 4G seat needs 20G of the 54G: 34G is left for starts.
+    // A burst to 24G on the running 4G seat needs 20G of the 54G: 34G is left for starts.
     assert!(!reconciler.admit_seat_start(&big, big.member.as_ref().unwrap(), None).unwrap());
     let wait = reconciler.seat_admission.status.subject("agent/node.big", u64::MAX).unwrap();
     assert_eq!(wait["reason"], "lane 8 cores/40.0G does not fit beside the 20.0G this host keeps from starts for a burst, of the 54.0G it gives lanes");
     assert!(wait["queuePosition"].is_null(), "it holds no one back");
+}
+
+#[test]
+fn a_host_that_could_never_grant_a_burst_keeps_no_room_for_one_and_stopped_seats_do_not_size_it() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let small_host = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 6, memory: 20 * G }, outside: two_gib_outside,
+            burst_lane: Some(super::seat_admission::BURST_LANE) }));
+    apply_source(&store, r#"version 2
+agent "idle" { workspace "/tmp"; command "true"; capacity cores=1 memory="2G" }
+agent "seat" { workspace "/tmp"; command "true"; capacity cores=4 memory="8G" }"#, "seats");
+    let seat = store.desired_subjects().unwrap().into_iter().find(|desired| desired.subject == "agent/node.seat").unwrap();
+    // 20G for lanes can never hold a 24G burst: nothing is kept, and the 8G seat starts.
+    assert!(small_host.admit_seat_start(&seat, seat.member.as_ref().unwrap(), None).unwrap());
+    // On a host that can, the stopped 2G seat asks no burst: the reserve is sized from the seat
+    // starting, 24G - 8G.
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let reconciler = reserving(&store);
+    apply_source(&store, r#"version 2
+agent "idle" { workspace "/tmp"; command "true"; capacity cores=1 memory="2G" }
+agent "seat" { workspace "/tmp"; command "true"; capacity cores=4 memory="8G" }"#, "seats");
+    let seat = store.desired_subjects().unwrap().into_iter().find(|desired| desired.subject == "agent/node.seat").unwrap();
+    assert!(reconciler.admit_seat_start(&seat, seat.member.as_ref().unwrap(), None).unwrap());
+    assert_eq!(reconciler.seat_admission.status.snapshot(0)["laneBurstReserve"], json!({"full": 16 * G, "kept": 16 * G}));
 }
 
 #[test]
@@ -225,6 +250,7 @@ fn the_burst_lane_admission_keeps_room_for_is_what_fractal_test_asks_for() {
     let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let memory = config["build"]["memory"].as_str().unwrap();
     let gib = memory.strip_suffix('G').and_then(|gib| gib.parse::<u64>().ok()).unwrap();
-    assert_eq!(gib << 30, super::seat_admission::BURST_LANE_MEMORY,
-        ".st/lane-bursts.json's build memory ({memory}) and BURST_LANE_MEMORY must agree");
+    let lane = super::seat_admission::BURST_LANE;
+    assert_eq!((config["build"]["cores"].as_u64(), gib << 30), (Some(u64::from(lane.cores)), lane.memory),
+        ".st/lane-bursts.json's build ({memory}) and BURST_LANE must agree");
 }
