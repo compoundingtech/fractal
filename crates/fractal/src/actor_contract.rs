@@ -38,8 +38,8 @@ fn accepts_person(argument: &clap::Arg) -> bool {
 //   queueing a request in that person's terminal UI request directory.
 // - st note and its subcommands: main's Command::Note passes config.person to
 //   directive_note::run, which resolves it with configured_actor before dispatch.
-// - st changes except list/show: main's Command::Changes resolves config.person
-//   with parse_person_subject before constructing Client::unix_as.
+// - st changes sync: main's Command::Changes resolves config.person with
+//   configured_actor before constructing the named execution client.
 // A parser-only test cannot prove these runtime fallbacks; keep their source
 // anchors explicit rather than asserting source text or requiring live setup/UI.
 fn implicit_person(path: &str) -> bool {
