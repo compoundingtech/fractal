@@ -221,6 +221,7 @@ fn unix_socket_answers(socket: &Path) -> bool {
     if result == 0 {
         return true;
     }
+    // macOS also refuses full backlogs: both aliases serve one daemon, so refused aliases keep the primary.
     let error = std::io::Error::last_os_error().raw_os_error();
     error == Some(libc::EAGAIN)
         || error == Some(libc::EWOULDBLOCK)
@@ -5853,6 +5854,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("fractal.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let legacy = root.path().join("st3.sock");
+        drop(std::os::unix::net::UnixListener::bind(&legacy).unwrap());
         // SAFETY: listener owns a valid listening socket; reduce its queue to the minimum.
         assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
         // SAFETY: zero initialization is valid before populating the Unix address.
@@ -5869,8 +5872,8 @@ mod tests {
             address.sun_len = length as u8;
         }
         let mut clients = Vec::new();
-        let mut full = false;
-        for _ in 0..16 {
+        let mut backlog_error = None;
+        for _ in 0..1024 {
             // SAFETY: socket creates a descriptor that is immediately given a unique owner.
             let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
             assert!(fd >= 0);
@@ -5895,16 +5898,23 @@ mod tests {
                 assert!(
                     error == Some(libc::EAGAIN)
                         || error == Some(libc::EWOULDBLOCK)
-                        || error == Some(libc::EINPROGRESS),
+                        || error == Some(libc::EINPROGRESS)
+                        || (cfg!(target_os = "macos") && error == Some(libc::ECONNREFUSED)),
                     "{error:?}"
                 );
-                full = true;
+                backlog_error = error;
                 break;
             }
         }
-        assert!(full, "the listener backlog must be full before probing");
+        assert!(
+            backlog_error.is_some(),
+            "listener backlog did not fill after 1024 nonblocking connects"
+        );
         let start = Instant::now();
-        assert!(unix_socket_answers(&socket));
+        assert_eq!(
+            unix_socket_answers(&socket),
+            backlog_error != Some(libc::ECONNREFUSED)
+        );
         assert_eq!(
             default_unix_socket(&socket, &socket),
             socket.canonicalize().unwrap()
@@ -5914,6 +5924,7 @@ mod tests {
         drop(listener);
         assert!(socket.exists());
         assert!(!unix_socket_answers(&socket));
+        assert!(!unix_socket_answers(&legacy));
     }
 
     #[test]
