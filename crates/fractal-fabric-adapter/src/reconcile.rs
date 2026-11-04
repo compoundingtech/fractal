@@ -190,6 +190,24 @@ async fn send(socket: &Path, request: &Value) -> Result<Reply> {
     })
 }
 
+async fn supports_expiry(socket: &Path) -> Result<bool> {
+    let reply: Value = tokio::time::timeout(CONTROL_TIMEOUT, async {
+        let mut stream = tokio::net::UnixStream::connect(socket).await?;
+        stream.write_all(b"{\"type\":\"reachability_status\"}\n").await?;
+        let mut bytes = Vec::new();
+        BufReader::new(stream).take(RESPONSE_LIMIT + 1).read_until(b'\n', &mut bytes).await?;
+        ensure!(bytes.len() as u64 <= RESPONSE_LIMIT && bytes.last() == Some(&b'\n'),
+            "Fabric version probe returned an incomplete or oversized response");
+        serde_json::from_slice::<Value>(&bytes).context("invalid Fabric version probe response")
+    }).await??;
+    let mut version = reply["version"].as_str().unwrap_or_default().split(['.', '+', '-']);
+    let parsed = (version.next().and_then(|v| v.parse::<u64>().ok()),
+        version.next().and_then(|v| v.parse::<u64>().ok()),
+        version.next().and_then(|v| v.parse::<u64>().ok()));
+    Ok(reply["type"] == "reachability_status"
+        && matches!(parsed, (Some(major), Some(minor), Some(patch)) if (major, minor, patch) >= (0, 9, 4)))
+}
+
 async fn snapshot(socket: &Path) -> Result<Snapshot> {
     let mut first: Option<Snapshot> = None;
     let mut cursor = None;
@@ -788,7 +806,14 @@ pub async fn reconcile(
             (node, services)
         })
         .collect();
-    let (expiries, _) = rotations(view, own_key, &mut desired, (now_ms() / 1000) as u64)?;
+    let (mut expiries, rotations) = rotations(view, own_key, &mut desired, (now_ms() / 1000) as u64)?;
+    let rekey_blocked = !expiries.is_empty() && !supports_expiry(socket).await?;
+    if rekey_blocked {
+        // Never turn expiring overlap into permanent authorization on an older daemon.
+        // Keep the old route; ordinary peer additions and revocations still reconcile.
+        for (_, rotation) in rotations { desired.remove(&rotation.next_node); }
+        expiries.clear();
+    }
     let ended = view
         .members
         .iter()
@@ -798,6 +823,10 @@ pub async fn reconcile(
         .filter_map(|endpoint| endpoint["node"].as_str().map(str::to_owned))
         .collect();
     let mut status = apply(state_dir, socket, fleet_id, desired, expiries, ended, false).await?;
+    if rekey_blocked && status.state == "applied" {
+        status.state = "rekey_blocked".into();
+        status.message = Some("fabric_without_expiry: upgrade every participating Fabric daemon to v0.9.4 before rekey".into());
+    }
     if status.state == "applied"
         && view.members.iter().any(|member| {
             member.state == "ended"
