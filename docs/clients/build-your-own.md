@@ -20,10 +20,14 @@ cargo run --locked -p fractal-client-tui -- person/avery
 cargo run --locked -p fractal-client-tui -- person/avery /tmp/example-st3.sock
 ```
 
-Without an explicit socket, the example passes `ST3_ENDPOINT` to `discover_unix_endpoint`, then
-uses the normal Fractal config and XDG runtime/state discovery. `Client::unix_as` is for the trusted
-local socket, where Fractal allows the local user to select the person. It does not authenticate a
-remote device. For remote access, pair a device and use its credential as described below.
+Without an explicit socket, the example passes `ST3_ENDPOINT` to `discover_unix_identity`, then
+uses the normal Fractal config and XDG runtime/state discovery. `Client::discovered_unix_as`
+retains that identity and resolves default socket candidates on each connection, including
+outage retries; explicit and configured socket paths stay exact. It is for the trusted local
+control socket, where Fractal allows the local user to select the person, not a paired gateway.
+It does not authenticate a remote device. For remote access, pair a device and use its credential
+as described below. `discover_unix_endpoint` remains available for callers needing a one-time
+path snapshot, and `Client::unix_as` connects only to the exact path supplied.
 
 Up/Down selects an agent. Type a single-line message and press Enter to send it to the displayed
 agent. Esc clears the draft or discards an uncertain-send retry; Ctrl-C quits. Discarding a retry
