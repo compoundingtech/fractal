@@ -1477,6 +1477,85 @@ class StTest(unittest.TestCase):
         self.assertIn('materializing the megarepo members waited 60s for build admission (--queue-limit)', out)
         self.assertEqual(len(self.statements()), 1, 'only the first run signed')
 
+    def test_the_gate_s_admission_notice_ends_the_wait_and_sets_how_long_it_was(self):
+        now = [0.0]
+        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
+        limit.observe(False)  # admitted between two samples: none saw the gate
+        now[0] = 81
+        limit.admitted(80.0)
+        self.assertAlmostEqual(limit.waiting(), 80)
+        limit.observe(True)  # the samples change nothing once the gate has said so
+        now[0] = 100
+        self.assertAlmostEqual(limit.waiting(), 80)
+        self.assertAlmostEqual(limit.remaining(), 30)
+        # A sampled wait ends at the notice, and the gate's figure is never more than the step has taken.
+        now[0] = 0.0
+        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
+        limit.observe(True)
+        now[0] = 40
+        limit.admitted(None)
+        now[0] = 45
+        self.assertAlmostEqual(limit.waiting(), 40)
+        now[0] = 0.0
+        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
+        now[0] = 10
+        limit.admitted(500.0)
+        self.assertAlmostEqual(limit.waiting(), 10)
+        self.assertEqual([st_test.admitted_waited(line) for line in (b'admitted 1793800000.125 80.0\n', b'admitted 1 x\n', b'admitted\n', b'other 1 2\n')],
+                         [80.0, None, None, None])
+
+    @contextlib.contextmanager
+    def admission_before_notice(self, seconds):
+        """The member step's clock moves `seconds` just before the gate's notice is read: a wait in a gate the samples never saw. The notice
+        is read a second late, so a quick command has already exited by then."""
+        init, admitted = st_test.MembersLimit.__init__, st_test.MembersLimit.admitted
+        offset = [0.0]
+
+        def begin(limit, *args, **kwargs):
+            init(limit, *args, **kwargs)
+            limit.clock = lambda: time.monotonic() + offset[0]
+
+        def said(limit, waited=None):
+            time.sleep(1)
+            offset[0] += seconds
+            admitted(limit, waited)
+
+        with mock.patch.object(st_test.MembersLimit, '__init__', begin), mock.patch.object(st_test.MembersLimit, 'admitted', said):
+            yield
+
+    def test_a_member_step_reads_the_gate_s_admission_notice_from_the_fd_it_names(self):
+        self.commit('.gitignore', '/repos/\n')
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        bin_dir = Path(self.tmp.name) / 'notify-bin'
+        bin_dir.mkdir()
+        gate = bin_dir / 'notify-gate'  # not named build-admission, so no sample sees it wait: only its notice says so
+        gate.write_text(f'#!{sys.executable}\nimport os, sys\nfd = int(os.environ["BUILD_ADMISSION_NOTIFY_FD"])\n'
+                        'os.write(fd, ("admitted 1793800000.0 %s\\n" % os.environ["GATE_SAYS"]).encode())\nos.close(fd)\n'
+                        'os.execvp(sys.argv[5], sys.argv[5:])\n')
+        gate.chmod(0o755)
+        through_gate = lambda directory: [str(gate), 'start', 'heavy', 'nix:run', '--', 'sh', '-c', 'mkdir -p repos/x']
+        # 80 s in the gate by its own notice: within a 50 s limit, and said.
+        with self.admission_before_notice(80), mock.patch.object(st_test, 'members_command', through_gate):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_SAYS': '80.0'},
+                                              command=['test', '-d', 'repos/x'])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('megarepo members materialized; waited 80s for build admission (not counted against ST_TEST_MEMBERS_LIMIT)', err)
+        # The same 80 s that the gate says were not its wait are the step's own running, over the limit, even from a command that has
+        # already exited successfully: the limits are read as the notice leaves them before an exit is accepted.
+        quick = lambda directory: [str(gate), 'start', 'heavy', 'nix:run', '--', 'sh', '-c', 'mkdir -p repos/x']
+        self.commit('b.txt', 'two')
+        with self.admission_before_notice(80), mock.patch.object(st_test, 'members_command', quick):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_SAYS': '0.0'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('materializing the megarepo members timed out after 50s (ST_TEST_MEMBERS_LIMIT)', out)
+        # And 80 s of waiting by the notice is past a 60 s --queue-limit, likewise.
+        self.commit('c.txt', 'three')
+        with self.admission_before_notice(80), mock.patch.object(st_test, 'members_command', quick):
+            code, out, err = self.run_st_test('--check', 'demo', '--queue-limit', '60', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_SAYS': '80.0'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('materializing the megarepo members waited 60s for build admission (--queue-limit)', out)
+        self.assertEqual(len(self.statements()), 1, 'only the first run signed')
+
     def test_the_members_limit_comes_from_the_environment_and_a_bad_value_is_the_default(self):
         for value, expected in (('30', 30), ('0', 1), ('x', st_test.MEMBERS_LIMIT), ('', st_test.MEMBERS_LIMIT)):
             with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_MEMBERS_LIMIT': value}):
