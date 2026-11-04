@@ -12,7 +12,7 @@ import { isExportStory } from 'storybook/internal/csf'
 import meta, { AllStates } from './Markdown.scenario.stories.tsx'
 import * as systemModule from './SystemState.stories.tsx'
 import * as nodePath from 'node:path'
-import { globSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { globSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import ts from 'typescript'
 import { checkFixtureGraph, createTypeScriptGraph, requiresDomainMarker, type ExemptStoryMode } from './scenario-fixture-graph.ts'
@@ -196,6 +196,52 @@ test('the scenario inventory covers exactly the CSFs loaded by kit Storybook', (
   expect(storybookConfig.stories).toEqual(storyGlobs)
   expect(Object.keys(storyModules).map(file => nodePath.resolve(uiSource, file)).sort()).toEqual(configuredFiles.sort())
   expect(configuredFiles.length).toBeGreaterThan(0)
+})
+
+test('story-local play tags preserve the main play sets, including unlisted spread aliases', () => {
+  const baseline: { MERGE_ONLY: string[], BOTH_WIDTHS: string[], exports: Record<string, string[]> } = JSON.parse(readFileSync(nodePath.resolve(uiSource, '../scripts/kit-play-main-baseline.json'), 'utf8'))
+  // Freeze main's original exports, not the evolving inventory. New stories
+  // never require editing this historical regression fixture or a lane file.
+  const entries = Object.fromEntries(Object.entries(baseline.exports).flatMap(([file, names]) => {
+    const module = storyModules[`./${nodePath.relative(uiSource, nodePath.resolve(uiSource, '../../..', file))}`]
+    expect(module, file).toBeDefined()
+    const { default: storyMeta } = module!
+    return names.flatMap(name => {
+      const story = module![name]
+      if (!isExportStory(name, storyMeta) || !isStory(story)) return []
+      const composed = composeStory(story, storyMeta, {}, name)
+      return [[composed.id, composed.tags]]
+    })
+  }))
+  for (const id of [...baseline.MERGE_ONLY, ...baseline.BOTH_WIDTHS]) expect(entries[id], id).toBeDefined()
+  expect(Object.keys(entries).filter(id => entries[id].includes('merge-only')).sort()).toEqual([...baseline.MERGE_ONLY].sort())
+  expect(Object.keys(entries).filter(id => entries[id].includes('both-widths')).sort()).toEqual([...baseline.BOTH_WIDTHS].sort())
+})
+
+test('sidebar tab contracts retain both widths through story-local policy tags', () => {
+  const module = storyModules['./assistant-ui/sidebar/SidebarTabs.stories.tsx']
+  expect(module).toBeDefined()
+  for (const name of ['AllStates', 'Keyboard']) {
+    const story = module![name]
+    expect(isStory(story)).toBe(true)
+    if (!isStory(story)) throw new Error(`Missing sidebar tab story ${name}`)
+    expect(composeStory(story, module!.default, {}, name).tags).toEqual(expect.arrayContaining(['critical', 'both-widths']))
+  }
+})
+
+test('configured inventory discovers app stories in a new nested source folder', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-'))
+  try {
+    const configDirectory = nodePath.join(directory, 'packages/fractal-ui/.storybook')
+    mkdirSync(configDirectory, { recursive: true })
+    const story = nodePath.join(directory, 'apps/fractal-web/src/new-feature/nested/Example.stories.tsx')
+    mkdirSync(nodePath.dirname(story), { recursive: true })
+    writeFileSync(story, '')
+    writeFileSync(nodePath.join(nodePath.dirname(story), 'Example.tsx'), '')
+    expect(configuredStoryFiles(storyGlobs.filter(glob => glob.includes('apps/fractal-web/')), configDirectory)).toEqual([story])
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('configured inventory rejects directory and file symlinks without following them', () => {

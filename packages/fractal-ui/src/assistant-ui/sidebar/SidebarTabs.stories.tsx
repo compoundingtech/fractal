@@ -293,11 +293,11 @@ const meta = {
 export default meta
 
 type Story = StoryObj<Args>
-export const Keyboard: Story = { tags: ['critical'], name: 'Keyboard · markers, selection and panel', play: keyboardPlay }
+export const Keyboard: Story = { tags: ['critical', 'both-widths'], name: 'Keyboard · markers, selection and panel', play: keyboardPlay }
 export const CountFit: Story = { tags: ['critical'], name: 'Count fit · counts drop before labels', play: countFitPlay }
 
 /** Both themes with an unreachable machine holding work: ◆3, ?, a single ◆ and Fleet's !. */
-export const AllStates: Story = { tags: ['critical'], name: 'All states · ◆3, ?, ◆ and ! in both themes', args: { both: true, roster: 'sidebar-tabs' }, play: async ({ canvasElement }) => {
+export const AllStates: Story = { tags: ['critical', 'both-widths'], name: 'All states · ◆3, ?, ◆ and ! in both themes', args: { both: true, roster: 'sidebar-tabs' }, play: async ({ canvasElement }) => {
   const sections = await within(canvasElement).findAllByRole('region', { name: /^Sidebar tabs / })
   await expect(sections.map(section => section.dataset.scheme)).toEqual(['dark', 'light'])
   const faulted = { names: [...names.slice(0, 3), 'Fleet, 1 unreachable with work'], withCounts: [...withCounts.slice(0, 3), '! Fleet'], withoutCounts: [...withoutCounts.slice(0, 3), '! Fleet'], leading: [...leading.slice(0, 3), 'status'] }

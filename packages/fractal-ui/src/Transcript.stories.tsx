@@ -1083,7 +1083,8 @@ function greenFindings(root: Element): string[] {
 function NoGreenStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   return <main data-scheme={scheme} {...stylex.props(styles.all, ...baselineTheme, scheme === 'light' && lightTheme)}>{noGreenData.map(([name, data]) => <section key={name} data-no-green-state={name}><h2>{name}</h2><div {...stylex.props(styles.cell)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} onRetrySend={() => {}} /></div></section>)}</main>
 }
-export const NoGreenAllStates: Story = { tags: ['critical'], render: args => <NoGreenStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+// Exhaustive no-green coverage takes about 15 s of case time; retain it at the merge gate.
+export const NoGreenAllStates: Story = { tags: ['critical', 'merge-only'], render: args => <NoGreenStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   await within(canvasElement).findAllByTestId('transcript-turn')
   for (let pass = 0; pass < 4; pass++) {
     const closed = [...canvasElement.querySelectorAll<HTMLElement>('[aria-expanded="false"]:not([disabled]):not([aria-disabled="true"])')]
@@ -1096,7 +1097,7 @@ export const NoGreenAllStates: Story = { tags: ['critical'], render: args => <No
   await expect(canvasElement.querySelectorAll('[data-testid="thinking-entry"]').length).toBeGreaterThan(0)
   await expect(greenFindings(canvasElement)).toEqual([])
 } }
-export const NoGreenAllStatesLight: Story = { ...NoGreenAllStates, args: { scheme: 'light' } }
+export const NoGreenAllStatesLight: Story = { ...NoGreenAllStates, tags: ['critical', '!merge-only'], args: { scheme: 'light' } }
 const styles = stylex.create({
   root: { height: '100vh', width: '100%', minWidth: 0, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
   frame: { flex: '1 1 0', minHeight: 0 }, cell: { height: '720px', display: 'flex', flexDirection: 'column' }, detail: { padding: s.lg, maxHeight: g.previewMax, overflow: 'auto', fontSize: t.metaSize },

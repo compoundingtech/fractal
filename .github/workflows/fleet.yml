@@ -4103,7 +4103,7 @@ jobs:
           import sys
           import tempfile
 
-          # Directory patterns end in `/**`; `*` stays within one path component.
+          # `**/` includes zero or more directories; `*` stays within one path component.
           PATTERNS = (
               "apps/fractal-web/**",
               "packages/fractal-ui/**",
@@ -4164,17 +4164,12 @@ jobs:
           # scripts/ci-fractal-web-kit-graph fails the kit lane when the built Storybook bundles a file outside these.
           KIT_PATTERNS = (
               "packages/fractal-ui/**",
+              # Every app story belongs to kit, including stories added in new source folders.
+              "apps/fractal-web/src/**/*.stories.tsx",
               # Changelog stories render the app's changelog view and seen state.
               "apps/fractal-web/src/changelog/**",
               "apps/fractal-web/src/embed/**",
-              "apps/fractal-web/src/web/ColdOpen.stories.tsx",
               "apps/fractal-web/src/web/coldOpen.fixtures.ts",
-              # The image composer integration story exercises the app's live imageUploadAdapter in kit Storybook.
-              "apps/fractal-web/src/web/ComposerImages.stories.tsx",
-              # NativeTranscript exercises the real ConversationPane over synthetic native wire records.
-              "apps/fractal-web/src/web/NativeTranscript.stories.tsx",
-              # The transcript image integration story exercises the app's production transcript image cache in kit Storybook.
-              "apps/fractal-web/src/web/TranscriptImages.stories.tsx",
               "apps/fractal-web/src/web/transcriptImages.ts",
               # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
               "apps/fractal-web/.changelog/**",
@@ -4311,19 +4306,15 @@ jobs:
               "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
               "apps/fractal-web/src/web/useTabMetadata.ts",
               "apps/fractal-web/src/web/liveSidebarTree.ts",
-              "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
               "apps/fractal-web/src/web/NativeTurnFooter.tsx",
               "apps/fractal-web/src/web/perfMarks.ts",
-              "apps/fractal-web/src/web/ResponsiveAgentSidebar.stories.tsx",
               "apps/fractal-web/src/web/ResponsiveAgentSidebar.tsx",
               "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
               "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
               "apps/fractal-web/src/web/semanticTool.tsx",
               "apps/fractal-web/src/web/sidebarAttention.ts",
-              "apps/fractal-web/src/web/SidebarChrome.stories.tsx",
               "apps/fractal-web/src/web/SidebarChromeFooter.tsx",
               "apps/fractal-web/src/web/SidebarEmptyState.tsx",
-              "apps/fractal-web/src/web/SidebarTreeBinding.stories.tsx",
               "apps/fractal-web/src/web/sidebarRow.ts",
               "apps/fractal-web/src/web/subagentThreadFocus.ts",
               "apps/fractal-web/src/web/TypedToolPreview.tsx",
@@ -4358,11 +4349,8 @@ jobs:
               "apps/fractal-web/src/data/attention.ts",
               "apps/fractal-web/src/data/projections.ts",
               "apps/fractal-web/src/data/source.ts",
-              "apps/fractal-web/src/web/LiveRoster.stories.tsx",
               "apps/fractal-web/src/web/LiveRoster.tsx",
               # The production module suites mount the real LiveAgentWorkspace and ConversationPane over app story states.
-              "apps/fractal-web/src/web/LiveAgentWorkspace.stories.tsx",
-              "apps/fractal-web/src/web/ConversationPane.stories.tsx",
               "apps/fractal-web/src/fixtures/AppStoryHarness.tsx",
               "apps/fractal-web/src/fixtures/appStoryAssertions.ts",
               "apps/fractal-web/src/fixtures/appStoryStates.ts",
@@ -4373,8 +4361,8 @@ jobs:
 
 
           def pattern_regex(pattern):
-              parts = re.split(r"(\*\*|\*)", pattern)
-              body = "".join(".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part) for part in parts)
+              parts = re.split(r"(\*\*/|\*\*|\*)", pattern)
+              body = "".join("(?:.*/)?" if part == "**/" else ".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part) for part in parts)
               # DOTALL: Git paths may legally contain newlines, and `**` must still cover them.
               return re.compile(body + r"\Z", re.DOTALL)
 
