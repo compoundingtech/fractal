@@ -3,6 +3,7 @@
 index, absolute grace and the cap, fail-closed on an unresolved head, a remote, and idempotence. An open pull request head is never deleted.
 gc_plan itself is checked as a pure function: random worlds, any input order, whole trees only, and no verdict of a kept tree changes."""
 import collections
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
@@ -759,8 +760,8 @@ sys.exit({exit_code})
         done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
         before = json.loads(seen.read_text())
-        self.assertEqual(before['argv'][:3], ['gc', '--publish', '--plan'])
-        self.assertTrue(before['argv'][3].endswith('.plan.json'))
+        self.assertEqual(before['argv'][:4], ['gc', '--publish', '--no-wait', '--plan'])
+        self.assertTrue(before['argv'][4].endswith('.plan.json'))
         self.assertTrue(set(doomed) <= {ref.rsplit('/', 1)[1] for ref in before['tags']}, 'the log heard first')
         self.assertTrue(set(doomed).isdisjoint(ref.rsplit('/', 1)[1] for ref in self.remote_refs(bare, 'refs/tags/evidence')))
 
@@ -776,6 +777,221 @@ sys.exit({exit_code})
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertIn('the log signer failed', done.stderr)
         self.assertTrue(set(doomed) <= {ref.rsplit('/', 1)[1] for ref in self.remote_refs(bare, 'refs/tags/evidence')})
+
+    def test_resume_after_local_commit_before_ack_keeps_migration_and_finishes_without_planning(self):
+        pr, head, doomed, bystander = self.lock_world()
+        legacy = self.record(pr[0], pr[1], 27, layout='legacy')
+        bare, _ = self.protected_remote('update')
+        self.push_all()
+        state, plan = self.f.root / 'resume.json', self.f.root / 'plan.json'
+        driver = self.f.root / 'local-commit.py'
+        driver.write_text(f'''import importlib.machinery, importlib.util, os, signal, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader('gc', {str(GC)!r})
+gc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(gc)
+if not Path({str(state)!r}).exists():
+    original = gc.apply_local
+    def commit_then_stop(*args, **kwargs):
+        original(*args, **kwargs)
+        os.kill(os.getpid(), signal.SIGKILL)
+    gc.apply_local = commit_then_stop
+else:
+    def no_planning(*args, **kwargs):
+        raise AssertionError('completed local transaction must not restart planning')
+    gc.read_refs = gc.protected_keys = gc.crate_keys = no_planning
+sys.exit(gc.main(sys.argv[1:]))
+''')
+        argv = [sys.executable, str(driver), '--repo', str(self.f.repo), '--main', 'main', '--head', pr[0],
+                '--retention', self.retention(), '--as-of', str(NOW), '--remote', 'origin', '--apply',
+                '--resume-state', str(state), '--plan-out', str(plan)]
+        stopped = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        self.assertEqual(stopped.returncode, -signal.SIGKILL, stopped.stderr)
+        self.assertTrue(state.exists())
+        self.assertIn(f'refs/notes/evidence/{pr[1]}/{legacy}', self.evidence_refs())
+        self.assertNotIn(f'refs/notes/evidence/{legacy}', self.evidence_refs())
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(json.loads(done.stdout)['resumed'])
+        self.assertFalse(state.exists())
+        self.assertEqual(self.evidence_refs(), self.evidence_refs(bare))
+        self.assertEqual({r.rsplit('/', 1)[1] for r in self.evidence_refs()}, {head, bystander, legacy})
+
+    def test_resume_rechecks_live_replacements_before_deleting_old_names(self):
+        pr, _, _, _ = self.lock_world()
+        migrating = self.record(pr[0], pr[1], 27, layout='legacy')
+        duplicate = self.record(pr[0], pr[1], 26, layout='legacy')
+        old_m = f'refs/notes/evidence/{migrating}'
+        new_m = f'refs/notes/evidence/{pr[1]}/{migrating}'
+        old_d = f'refs/notes/evidence/{duplicate}'
+        new_d = f'refs/notes/evidence/{pr[1]}/{duplicate}'
+        self.f.git('update-ref', new_d, duplicate)
+        bare, _ = self.protected_remote('update')
+        self.push_all()
+        state = self.f.root / 'resume.json'
+        # Lose both live replacements after the migration push, before old-name deletion.
+        hook = bare / 'hooks/post-receive'
+        hook.write_text(f'#!/bin/sh\ngit update-ref -d {new_m}\ngit update-ref -d {new_d}\n')
+        hook.chmod(0o755)
+        argv = ['--repo', str(self.f.repo), '--main', 'main', '--head', pr[0], '--retention', self.retention(),
+                '--as-of', str(NOW), '--remote', 'origin', '--apply', '--resume-state', str(state)]
+        done = subprocess.run([sys.executable, str(GC), *argv], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn('replacement', done.stderr)
+        self.assertTrue(state.exists())
+        self.assertTrue({old_m, old_d} <= self.evidence_refs(bare))
+        hook.unlink()
+        # Resume may recreate the migration target, but cannot invent the missing duplicate's proof.
+        done = subprocess.run([sys.executable, str(GC), *argv], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertTrue({old_m, old_d} <= self.evidence_refs(bare))
+        self.assertTrue(state.exists())
+        subprocess.run(['git', '-C', str(bare), 'update-ref', new_d, duplicate], check=True)
+        done = subprocess.run([sys.executable, str(GC), *argv], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(state.exists())
+        self.assertTrue({new_m, new_d} <= self.evidence_refs(bare))
+        self.assertFalse({old_m, old_d} & self.evidence_refs(bare))
+
+    def test_a_resumed_plan_refuses_a_changed_ref_and_leases_the_atomic_push(self):
+        pr, head, doomed, bystander = self.lock_world()
+        bare, _ = self.protected_remote('update')
+        self.push_all()
+        state = self.f.root / 'resume.json'
+        changed = f'refs/tags/evidence/{"1" * 40}/{doomed[0]}'
+        driver = self.f.root / 'race.py'
+        driver.write_text(f'''import importlib.machinery, importlib.util, subprocess, sys
+loader = importlib.machinery.SourceFileLoader('gc', {str(GC)!r})
+gc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(gc)
+original = gc.git
+def git(repo, *args, **kwargs):
+    if args[0] == 'push' and '--atomic' in args:
+        subprocess.run(['git', '-C', {str(bare)!r}, 'update-ref', {changed!r}, {bystander!r}], check=True)
+    return original(repo, *args, **kwargs)
+gc.git = git
+sys.exit(gc.main(sys.argv[1:]))
+''')
+        argv = ['--repo', str(self.f.repo), '--main', 'main', '--head', pr[0], '--retention', self.retention(),
+                '--as-of', str(NOW), '--remote', 'origin', '--apply', '--resume-state', str(state)]
+        done = subprocess.run([sys.executable, str(driver), *argv], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertTrue(json.loads(done.stdout)['failed'])
+        self.assertTrue(state.exists())
+        self.assertIn(changed, self.evidence_refs(bare), 'a race must not delete the replacement')
+        self.assertTrue(all(f'refs/tags/evidence/{str(n) * 40}/{r}' in self.evidence_refs(bare) for n, r in zip((1, 2, 3), doomed)),
+                        'the other groups in the refused atomic batch stay whole')
+        before = self.evidence_refs(bare)
+        done = subprocess.run([sys.executable, str(GC), *argv], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('changed', done.stderr)
+        self.assertEqual(self.evidence_refs(bare), before)
+        subprocess.run(['git', '-C', str(bare), 'update-ref', changed, doomed[0]], check=True)
+        done = subprocess.run([sys.executable, str(GC), *argv], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(state.exists())
+
+    def test_an_unfinished_plan_lock_and_missing_resume_only_state_fail_closed(self):
+        self.world()
+        state = self.f.root / 'resume.json'
+        with open(str(state) + '.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            code, _, error = self.run_gc('--remote', 'origin', '--apply', '--resume-state', str(state))
+            self.assertEqual(code, 1)
+            self.assertIn('lock', error)
+        code, _, error = self.run_gc('--remote', 'origin', '--apply', '--resume-state', str(state), '--resume-only')
+        self.assertEqual(code, 1)
+        self.assertIn('new run must read', error)
+        self.assertFalse(state.exists())
+
+    def test_a_frozen_plan_must_be_durable_before_its_hook_runs(self):
+        pr, _, _, _ = self.lock_world()
+        bare, _ = self.protected_remote('update')
+        self.push_all()
+        state, plan = self.f.root / 'resume.json', self.f.root / 'plan.json'
+        before, seen = self.recorder(bare)
+        driver = self.f.root / 'sync-failure.py'
+        driver.write_text(f'''import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader('gc', {str(GC)!r})
+gc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(gc)
+def cannot_persist(path):
+    raise OSError('simulated directory fsync failure')
+gc.sync_directory = cannot_persist
+sys.exit(gc.main(sys.argv[1:]))
+''')
+        remote_before = self.evidence_refs(bare)
+        done = subprocess.run([sys.executable, str(driver), '--repo', str(self.f.repo), '--main', 'main', '--head', pr[0],
+                               '--retention', self.retention(), '--as-of', str(NOW), '--remote', 'origin', '--apply',
+                               '--resume-state', str(state), '--plan-out', str(plan), '--before-delete', json.dumps(before)],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('fsync', done.stderr)
+        self.assertFalse(seen.exists())
+        self.assertEqual(self.evidence_refs(bare), remote_before)
+
+    def test_a_bad_journal_or_changed_remote_or_hook_never_authorizes_deletion(self):
+        pr, _, _, _ = self.lock_world()
+        bare, _ = self.protected_remote('update')
+        self.push_all()
+        state, plan = self.f.root / 'resume.json', self.f.root / 'plan.json'
+        before, _ = self.recorder(bare, exit_code=3)
+        base = ['--head', pr[0], '--apply', '--resume-state', str(state), '--plan-out', str(plan)]
+        code, _, error = self.run_gc(*base, '--remote', 'origin', '--before-delete', json.dumps(before))
+        self.assertEqual(code, 1, error)
+        saved = state.read_text()
+        original = self.evidence_refs(bare)
+        for contents in ('{', saved.replace('"version": 1', '"version": 2')):
+            with self.subTest(contents=contents[:20]):
+                state.write_text(contents)
+                code, _, error = self.run_gc(*base, '--remote', 'origin')
+                self.assertEqual(code, 1)
+                self.assertIn('cannot resume', error)
+                self.assertEqual(self.evidence_refs(bare), original)
+        state.write_text(saved)
+        for extra in (['--remote', 'elsewhere'], ['--remote', 'origin', '--before-delete', '["true"]']):
+            code, _, error = self.run_gc(*base, *extra)
+            self.assertEqual(code, 1)
+            self.assertIn('differs', error)
+            self.assertEqual(self.evidence_refs(bare), original)
+
+    def test_a_protection_only_outcome_finishes_the_journal_so_the_timer_plans_again(self):
+        env, bare, flag, head, doomed, stored, state = self.timer_world()
+        env['EVIDENCE_GC_LOG_TIMER'] = str(self.f.root / 'no-log-here')
+        flag.write_text('update deletion')
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse((state / 'pending-plan.json').exists(), 'protection is a completed outcome, not an unfinished operation')
+        self.assertTrue(set(doomed) <= {r.rsplit('/', 1)[1] for r in self.evidence_refs(bare)})
+        # A newly dead tagless group must still be collected on the next daily plan.
+        later = self.record(self.f.git('rev-parse', 'main'), 'd' * 40, 10)
+        ref = f'refs/notes/evidence/{"d" * 40}/{later}'
+        self.f.git('push', '-q', 'origin', f'{ref}:{ref}')
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse((state / 'pending-plan.json').exists())
+        self.assertEqual(len((self.f.root / 'curl.urls').read_text().splitlines()), 2)
+        self.assertNotIn(ref, self.evidence_refs(bare))
+        self.assertTrue(set(doomed) <= {r.rsplit('/', 1)[1] for r in self.evidence_refs(bare)})
+
+    def test_the_timer_resumes_before_reading_new_open_heads(self):
+        env, bare, flag, head, doomed, stored, state = self.timer_world()
+        env['EVIDENCE_GC_LOG_TIMER'] = str(self.f.root / 'no-log-here')
+        hook = bare / 'hooks/pre-receive'
+        original = hook.read_text()
+        hook.write_text(original.replace('while read old new ref; do',
+                        'case "$rules" in *busy*) echo "remote temporarily unavailable" >&2; exit 1;; esac\nwhile read old new ref; do'))
+        flag.write_text('busy')
+        first = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(first.returncode, 1, first.stderr)
+        self.assertTrue((state / 'pending-plan.json').exists())
+        flag.write_text('update')
+        (self.f.root / 'bin/curl').write_text('#!/bin/sh\necho "must not read a new live set during resume" >&2\nexit 22\n')
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse((state / 'pending-plan.json').exists())
+        self.assertTrue(set(doomed).isdisjoint(r.rsplit('/', 1)[1] for r in self.remote_refs(bare, 'refs/tags/evidence')))
+        self.assertEqual(len((self.f.root / 'curl.urls').read_text().splitlines()), 1)
 
     def test_bad_retention_and_bad_arguments_are_refused(self):
         self.world()

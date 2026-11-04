@@ -1,4 +1,4 @@
-import type { Attention, AttentionPrompt, TimelineEntry } from '@fractal/client';
+import type { Attention, AttentionPrompt, AttentionPromptCall } from '@fractal/client';
 import { ago } from './time.ts';
 
 // Home, drawn the way the Fractal terminal UI draws it (crates/fractal-tui/src/ui/screens.rs home_list, adapt.rs
@@ -280,7 +280,8 @@ function parsedInput(args: unknown): unknown {
  * call it asks about; or why st serves none (it cannot read the conversation, or it is older).
  */
 export type ServedPrompt = { calls: PendingCall[]; allow: boolean } | { calls: null; allow: false; why: string };
-export function servedPrompt(item: { readonly presentation?: { readonly prompt?: AttentionPrompt } | null }): ServedPrompt {
+export type ServedPromptInput = Pick<AttentionPrompt, 'allow' | 'unknown_reason'> & { readonly calls: readonly AttentionPromptCall[] | null };
+export function servedPrompt(item: { readonly presentation?: { readonly prompt?: ServedPromptInput } | null }): ServedPrompt {
   const prompt = item.presentation?.prompt;
   if (!prompt) return { calls: null, allow: false, why: "This host's st is older and does not say which call the prompt asks about." };
   if (!prompt.calls) return { calls: null, allow: false, why: prompt.unknown_reason ?? "st cannot read the agent's conversation." };
@@ -307,26 +308,6 @@ export function servedAnswers(prompt: PromptAnswers, served: ServedPrompt): stri
     if (answer === 'answer') return certain && pendingQuestions(shown) !== null;
     return true;
   });
-}
-
-/**
- * Every tool call with no result yet, oldest first: Fractal's own alerts still read a prompt's
- * calls this way. A client that reads `presentation.prompt` uses `servedPrompt` instead.
- */
-export function pendingCalls(entries: ReadonlyArray<Pick<TimelineEntry, 'type' | 'body' | 'id'>>): PendingCall[] {
-  const answered = new Set<string>();
-  for (const entry of entries) {
-    if (entry.type === 'tool_result') { const call = (entry.body as { call_id?: unknown }).call_id; if (typeof call === 'string') answered.add(call); }
-  }
-  const open: PendingCall[] = [];
-  for (const entry of entries) {
-    if (entry.type !== 'tool_call') continue;
-    const body = entry.body as { call_id?: unknown; name?: unknown; arguments?: unknown };
-    const call = typeof body.call_id === 'string' ? body.call_id : entry.id;
-    if (answered.has(call) || open.some(other => other.id === call)) continue;
-    open.push({ id: call, tool: typeof body.name === 'string' && body.name ? body.name : 'tool', lines: inputLines(body.arguments), input: parsedInput(body.arguments) });
-  }
-  return open;
 }
 
 /** One question of a harness's pending `AskUserQuestion` call. */
@@ -388,23 +369,6 @@ export function answerLabel(answer: string): string {
     case 'dismiss': return 'Dismiss';
     default: return answer;
   }
-}
-
-/**
- * The answers a client may offer from calls it read itself, as Fractal's own alerts still do
- * (`servedAnswers` reads st's). `allow` and `approve` only beside the exact call the prompt asks
- * about, shown in full; `answer` only when that
- * call's questions can be shown and chosen from; every other answer (deny, and a screen prompt's
- * or denial's own answers) always.
- */
-export function offeredAnswers(prompt: PromptAnswers, calls: readonly PendingCall[]): string[] {
-  const shown = promptCalls(prompt, calls);
-  const certain = shown.length === 1 && (shown[0]?.lines.length ?? 0) > 0;
-  return prompt.answers.filter(answer => {
-    if (answer === 'allow' || answer === 'approve') return certain;
-    if (answer === 'answer') return pendingQuestions(shown) !== null;
-    return true;
-  });
 }
 
 /**
