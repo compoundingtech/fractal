@@ -26,6 +26,10 @@ async fn caller_bound_grant(source: &AppState) -> Value {
 }
 
 async fn summary_status(receiver: &AppState, credential: &str) -> StatusCode {
+    receiver.store.start_agent_roster_refresher().unwrap();
+    crate::api::refresh_agent_roster(&receiver.store, false).unwrap();
+    receiver.store.start_attention_list_refresher().unwrap();
+    crate::api::published_attention::refresh_attention_list(&receiver.store).unwrap();
     super::super::super::super::fabric_router(receiver.clone())
         .oneshot(Request::builder().uri("/v1/client/assistant/summary")
             .header(AUTHORIZATION, format!("Bearer {credential}"))
