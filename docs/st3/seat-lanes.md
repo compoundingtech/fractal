@@ -320,9 +320,16 @@ A burst is tied to the command, not to a step, so a seat in `work wait` holds on
 its steps. A seat without a lane, or a host with lanes off, holds no burst: the holder answers
 `none`.
 
-`scripts/fractal-test` asks for one before it takes a pool tree (a tree held while its run waits
-for room is a tree nobody can use), sized by `.st/lane-bursts.json` for a run that builds (any
-check in `BUILDS`); a run that builds nothing asks for none. It waits up to `--queue-limit`, prints
+`scripts/fractal-test` asks for one at the pool tree, sized by `.st/lane-bursts.json` for a run
+that builds (any check in `BUILDS`); a run that builds nothing asks for none. A run asks only once
+it could take a free tree (first in the tree order, or past the fallback for a tree the run ahead
+left), and takes the tree only once the burst is granted. It holds no tree while the burst waits,
+so the run behind may take that tree after the fallback, and a burst granted while no tree is free
+is given back and asked again when one is: no run holds a burst without a tree or a tree without
+its burst. A run that hands over to main's newer copy while it waits keeps its ask: the holder is
+the run's child, and the exec keeps it and its pipes, so the newer copy reads its answer and keeps
+its place in the host's order. A run with no pool tree asks before its checks. It waits up to
+`--queue-limit` in all, prints
 each reason, and records `burst` (the size held, or none and why) and `burst_wait_s` in the run's
 `runs.jsonl` line, which `scripts/fractal-test-report` shows as its own line beside the tree and
 slot waits. A fractal or daemon without bursts holds none, says so, and the checks run in the lane

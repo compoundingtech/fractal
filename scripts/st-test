@@ -203,8 +203,8 @@ POOL_WAIT_SECONDS = 1  # how often a waiter looks at the tree queue again
 # rule merged waited 13.2 h, deferring to the new waiters' rank-3 tickets while they deferred to its overdue one).
 QUEUE_RULES = 2
 QUEUE_FOLLOW_SECONDS = 600  # while a run waits for a tree, how often it fetches the base to see whether main's st-test changed (then it continues in that copy)
-HANDOVER_TICKET, HANDOVER_STARTED = 'ST_TEST_HANDOVER_TICKET', 'ST_TEST_HANDOVER_STARTED'
-HANDOVER = {}  # what a waiting run handed to main's newer copy when it executed it: its ticket and start time (read before the seat scrub drops every ST_* name)
+HANDOVER_TICKET, HANDOVER_STARTED, HANDOVER_BURST = 'ST_TEST_HANDOVER_TICKET', 'ST_TEST_HANDOVER_STARTED', 'ST_TEST_HANDOVER_BURST'
+HANDOVER = {}  # what a waiting run handed to main's newer copy when it executed it: its ticket, start time and lane-burst ask (read before the seat scrub drops every ST_* name)
 RUN_STARTED = []  # the wall-clock start of this run, as the summary and runs.jsonl count it, for a handover
 TREE_FREE_FALLBACK_SECONDS = 60  # a tree this waiter has seen free this long, untaken by the ticket ahead of it, may be tried by it: the flock decides (liveness: waiters run different copies of this order, so the best ticket of one may defer to another that defers back)
 # Ignored inputs a pool tree keeps between runs (git clean -e): the megarepo members, the installed dependencies and the downloaded
@@ -661,6 +661,8 @@ def hand_over(handover, argv):
         environment[HANDOVER_STARTED] = repr(RUN_STARTED[0])
     if handover.keeps_ticket:
         environment[HANDOVER_TICKET] = str(handover.ticket)
+    if handover.burst:
+        environment[HANDOVER_BURST] = handover.burst
     place = 'with its place in the tree queue' if handover.keeps_ticket else 'with a new ticket, as that copy cannot take one over'
     print(f"fractal-test: the base's st-test changed while this run waited for a pool tree; continuing in {handover.commit[:12]}'s copy, {place}",
           file=sys.stderr, flush=True)
@@ -953,10 +955,14 @@ def burst_size(checks, base='HEAD'):
 class Burst:
     """A seat's lane raised for one run (docs/st3/seat-lanes.md, Bursts), held by `fractal agents burst` while its stdin is open.
     The holder renews the daemon's lease and gives the burst back when its stdin closes: when this run ends, whatever ends it.
-    `granted` is the size held, or None with `why` when the run holds none (no lane, lanes off, a daemon without bursts)."""
+    `granted` is the size held, or None with `why` when the run holds none (no lane, lanes off, a daemon without bursts).
+    It is asked in steps (poll), so a run waiting for a pool tree asks only once a tree is free and takes the tree only once it is granted
+    (acquire_tree): `size` is what it asks for (burst_size; None asks nothing), and `limit_s` the seconds its asks may wait in all (--queue-limit)."""
 
-    def __init__(self):
+    def __init__(self, size=None, limit_s=0.0, output=None):
+        self.size, self.limit_s, self.output = size, limit_s, output
         self.holder, self.granted, self.why, self.waited, self.errors = None, None, None, 0.0, None
+        self.told, self.pending, self.counted = None, '', None  # the last reason shown, unread answer text, and when waited was last counted
 
     def record(self):
         return {'burst': None if self.granted is None else {'cores': self.granted[0], 'memory': self.granted[1]},
@@ -975,72 +981,172 @@ class Burst:
             holder.wait()
         holder.stdout.close()
         self.errors.close()
+        self.errors = None
+
+    def give_back(self):
+        """Give a granted burst back and forget it, so that the next poll(start=True) asks again: a burst granted while no tree is free (acquire_tree)."""
+        self.release()
+        self.granted, self.told, self.pending = None, None, ''
+
+    def abandon(self):
+        """End an ask that will never be answered here: its holder is killed, as it holds nothing yet."""
+        holder, self.holder = self.holder, None
+        if holder is None:
+            return
+        with contextlib.suppress(OSError):
+            holder.stdin.close()
+        holder.kill()
+        holder.wait()
+        holder.stdout.close()
+        self.errors.close()
+        self.errors = None
+
+    def poll(self, start=False, timeout=0.0):
+        """Whether the run may go on: True once the burst is granted or the run holds none (and says why), False while the ask waits in the host's
+        order. With `start`, an ask not made yet is made; without it, none is. Reads the holder's answers for up to `timeout` seconds."""
+        output = self.output or sys.stderr
+        if self.granted is not None or self.why is not None or self.size is None:
+            return True
+        if self.holder is None:
+            if not start:
+                return False
+            agent = os.environ.get('ST_AGENT')
+            st = os.environ.get('ST3_BIN') or shutil.which('fractal') or shutil.which('st')
+            if not agent or not st:
+                self.why = 'no seat to raise the lane of' if not agent else 'no fractal on PATH'
+                return True
+            cores, memory = self.size
+            self.errors = tempfile.TemporaryFile()  # a file, not a pipe: a holder's warnings over hours must never fill a pipe nobody reads
+            self.holder = subprocess.Popen([st, 'agents', 'burst', agent, '--cores', str(cores), '--memory', memory, '--reason', 'st-test',
+                                            '--as', agent], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errors)
+            self.counted = time.monotonic()
+        cores, memory = self.size
+        deadline, looked = time.monotonic() + timeout, False
+        try:
+            while True:
+                now = time.monotonic()
+                self.waited += now - self.counted
+                self.counted = now
+                if '\n' not in self.pending:
+                    if self.waited >= self.limit_s:
+                        raise Failure(f'waited {self.limit_s:g}s (--queue-limit) for a lane burst of {cores} cores/{memory}: {self.told or "no answer"}')
+                    if looked and now >= deadline:
+                        return False
+                    looked = True  # at least one look, however short the timeout
+                    ready, _, _ = select.select([self.holder.stdout], [], [], max(0.0, min(deadline - now, self.limit_s - self.waited)))
+                    if not ready:
+                        continue
+                    chunk = os.read(self.holder.stdout.fileno(), 4096).decode(errors='replace')
+                    if chunk:
+                        self.pending, looked = self.pending + chunk, False
+                        continue
+                    # It ended without an answer: an older fractal without the command, or an error.
+                    self.holder.wait()
+                    self.errors.seek(0)
+                    why = self.errors.read().decode(errors='replace').strip().splitlines()
+                    if any('unrecognized subcommand' in text for text in why):
+                        self.why = "this host's fractal has no lane bursts"
+                        print(f'fractal-test: no lane burst: {self.why}; the checks run in the lane as it is', file=output, flush=True)
+                        self.abandon()
+                        return True
+                    raise Failure(f'fractal agents burst ended without an answer: {(why or [f"exit {self.holder.returncode}"])[-1]}')
+                line, self.pending = self.pending.split('\n', 1)
+                kind, _, detail = line.partition(' ')
+                if kind == 'waiting':
+                    if detail != self.told:
+                        print(f'fractal-test: waiting for a lane burst: {detail}', file=output, flush=True)
+                        self.told = detail
+                elif kind == 'granted':
+                    self.granted = (cores, memory)
+                    print(f'fractal-test: lane burst {cores} cores/{memory} granted after {round(self.waited)}s', file=output, flush=True)
+                    return True
+                elif kind == 'none':
+                    self.why = detail
+                    print(f'fractal-test: no lane burst: {detail}; the checks run in the lane as it is', file=output, flush=True)
+                    self.abandon()
+                    return True
+                elif kind == 'refused':
+                    raise Failure(f'lane burst {cores} cores/{memory} refused: {detail}')
+        except BaseException:
+            self.abandon()
+            raise
+
+    def wait(self):
+        """Ask, and wait in the host's order until the answer (poll), or fail past `limit_s`."""
+        while not self.poll(start=True, timeout=max(1.0, self.limit_s)):
+            pass
+
+    def hand_off(self):
+        """An ask still waiting, as HANDOVER_BURST carries it to main's newer copy (hand_over), else None. The holder is this process's child and an
+        exec keeps it and its pipes, so the newer copy reads its answer and keeps its place in the host's order. This run then holds nothing."""
+        if self.holder is None or self.granted is not None:
+            return None
+        self.waited += time.monotonic() - self.counted
+        fds = [self.holder.stdin.fileno(), self.holder.stdout.fileno(), self.errors.fileno()]
+        for fd in fds:
+            os.set_inheritable(fd, True)
+        HANDED_HOLDERS.append((self.holder, self.errors))  # referenced until the exec: a collected file object closes its pipe, which gives the burst back
+        state = {'pid': self.holder.pid, 'fds': fds, 'size': list(self.size), 'waited': self.waited, 'told': self.told, 'pending': self.pending}
+        self.holder, self.errors = None, None
+        return json.dumps(state)
+
+    @classmethod
+    def handed(cls, raw, size, limit_s, output=None):
+        """The ask the copy before this one handed over (HANDOVER_BURST), when it asks for `size` and its holder is still this process's child,
+        else None. A handed ask this run cannot carry on has its pipes closed, so its holder gives back whatever it got."""
+        if not raw:
+            return None
+        try:
+            state = json.loads(raw)
+            pid, fds = int(state['pid']), [int(fd) for fd in state['fds']]
+        except (ValueError, KeyError, TypeError):
+            return None
+        try:
+            ours = os.waitpid(pid, os.WNOHANG) == (0, 0) and all(os.fstat(fd) for fd in fds)
+        except OSError:
+            ours = False
+        if not ours or size is None or tuple(state.get('size') or ()) != tuple(size):
+            for fd in fds:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            return None
+        for fd in fds:
+            os.set_inheritable(fd, False)  # no check this run starts may keep the holder's stdin open past the run
+        burst = cls(size, limit_s, output)
+        burst.holder, burst.errors = HandedHolder(pid, fds[0], fds[1]), os.fdopen(fds[2], 'w+b')
+        burst.waited, burst.told, burst.pending, burst.counted = float(state.get('waited') or 0), state.get('told'), state.get('pending') or '', time.monotonic()
+        return burst
 
 
-def lane_burst(size, limit_s, output=None):
-    """Raise this seat's lane to `size` for the run, waiting in the host's order up to `limit_s` seconds (--queue-limit): a Burst.
-    Asked before the run takes a pool tree, as a slot was: a tree held while its run waits for room is a tree nobody can use.
-    A run that names no seat (ST_AGENT), or whose fractal or daemon has no lane bursts, holds none and says why."""
-    output = output or sys.stderr
-    burst = Burst()
-    agent = os.environ.get('ST_AGENT')
-    st = os.environ.get('ST3_BIN') or shutil.which('fractal') or shutil.which('st')
-    if size is None:
-        return burst
-    if not agent or not st:
-        burst.why = 'no seat to raise the lane of' if not agent else 'no fractal on PATH'
-        return burst
-    cores, memory = size
-    began = time.monotonic()
-    errors = tempfile.TemporaryFile()  # a file, not a pipe: a holder's warnings over hours must never fill a pipe nobody reads
-    holder = subprocess.Popen([st, 'agents', 'burst', agent, '--cores', str(cores), '--memory', memory, '--reason', 'st-test',
-                               '--as', agent], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
-    told, pending = None, ''
-    try:
-        while True:
-            if '\n' not in pending:
-                left = limit_s - (time.monotonic() - began)
-                ready, _, _ = select.select([holder.stdout], [], [], max(0.0, left))
-                if not ready:
-                    raise Failure(f'waited {limit_s:g}s (--queue-limit) for a lane burst of {cores} cores/{memory}: {told or "no answer"}')
-                chunk = os.read(holder.stdout.fileno(), 4096).decode(errors='replace')
-                if chunk:
-                    pending += chunk
-                    continue
-                # It ended without an answer: an older fractal without the command, or an error.
-                holder.wait()
-                errors.seek(0)
-                why = errors.read().decode(errors='replace').strip().splitlines()
-                if any('unrecognized subcommand' in text for text in why):
-                    burst.why = "this host's fractal has no lane bursts"
-                    print(f'fractal-test: no lane burst: {burst.why}; the checks run in the lane as it is', file=output, flush=True)
-                    return burst
-                raise Failure(f'fractal agents burst ended without an answer: {(why or [f"exit {holder.returncode}"])[-1]}')
-            line, pending = pending.split('\n', 1)
-            kind, _, detail = line.partition(' ')
-            if kind == 'waiting':
-                if detail != told:
-                    print(f'fractal-test: waiting for a lane burst: {detail}', file=output, flush=True)
-                    told = detail
-            elif kind == 'granted':
-                burst.holder, burst.granted, burst.waited, burst.errors = holder, (cores, memory), time.monotonic() - began, errors
-                holder = None
-                print(f'fractal-test: lane burst {cores} cores/{memory} granted after {round(burst.waited)}s', file=output, flush=True)
-                return burst
-            elif kind == 'none':
-                burst.why, burst.waited = detail, time.monotonic() - began
-                print(f'fractal-test: no lane burst: {detail}; the checks run in the lane as it is', file=output, flush=True)
-                return burst
-            elif kind == 'refused':
-                raise Failure(f'lane burst {cores} cores/{memory} refused: {detail}')
-    finally:
-        if holder is not None:
-            with contextlib.suppress(OSError):
-                holder.stdin.close()
-            holder.kill()
-            holder.wait()
-            holder.stdout.close()
-            errors.close()
+HANDED_HOLDERS = []  # the holder (and its error file) of an ask handed to main's newer copy, kept until the exec (Burst.hand_off)
+
+
+class HandedHolder:
+    """A `fractal agents burst` holder the copy before this one started, with the part of Popen's interface Burst uses: it is this process's child."""
+
+    def __init__(self, pid, stdin, stdout):
+        self.pid, self.returncode = pid, None
+        self.stdin, self.stdout = os.fdopen(stdin, 'wb'), os.fdopen(stdout, 'rb')
+
+    def poll(self):
+        if self.returncode is None:
+            done, status = os.waitpid(self.pid, os.WNOHANG)
+            if done:
+                self.returncode = os.waitstatus_to_exitcode(status)
+        return self.returncode
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self.poll() is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(f'pid {self.pid}', timeout)
+            time.sleep(0.05)
+        return self.returncode
+
+    def kill(self):
+        if self.poll() is None:  # never a pid already reaped, which another process may hold by now
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(self.pid, signal.SIGKILL)
 
 
 def web_slot(argv):
@@ -1567,9 +1673,9 @@ class Handover(BaseException):
     ticket, and the entry point executes the new copy in the same process (hand_over), which takes the ticket over, since its name holds the pid,
     and with it the run's place. A BaseException, so that no handler for errors takes it for one."""
 
-    def __init__(self, source, commit, ticket, keeps_ticket):
+    def __init__(self, source, commit, ticket, keeps_ticket, burst=None):
         super().__init__(f"the base's st-test changed at {commit[:12]}")
-        self.source, self.commit, self.ticket, self.keeps_ticket = source, commit, ticket, keeps_ticket
+        self.source, self.commit, self.ticket, self.keeps_ticket, self.burst = source, commit, ticket, keeps_ticket, burst
 
 
 def base_copy_follower(base, own=None):
@@ -1607,7 +1713,7 @@ def handed_ticket(queue):
     return ticket if ours else None
 
 
-def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None):
+def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None, burst=None):
     """(n, lock): the lowest free tree of the pool, held by an flock until the lock is closed; waits while every tree is in use.
     Waiters queue in the build host's order, not by a race to the next free tree (2026-10-26: the CPU P0 builder, rank 3, waited two hours while
     rank-50 runs took each tree as it came free): each takes a ticket in queue/ and only the best live ticket tries the trees. `size` is the
@@ -1618,7 +1724,11 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
     still tries a tree it has seen free for TREE_FREE_FALLBACK_SECONDS (liveness against waiters running different copies of the order). `waits`, a
     dict, is given the seconds spent: 'tree_wait_s' in all, and 'slot_wait_s' of them while a free tree waited for a build slot.
     A waiter defers only to tickets of its own QUEUE_RULES or newer. With `follow` (base_copy_follower), called on every pass while no tree is held,
-    a run whose base's st-test changed raises Handover to continue in that copy with the same ticket: every waiter follows main's current rules."""
+    a run whose base's st-test changed raises Handover to continue in that copy with the same ticket: every waiter follows main's current rules.
+    With `burst` (a Burst), a tree this waiter could take asks for the run's lane burst first, and is taken only once the burst is granted: no tree
+    is held while the burst waits, so after TREE_FREE_FALLBACK_SECONDS the run behind may take it, and a burst granted while no tree is free is
+    given back and asked again when one is. No run holds a burst without a tree or a tree without its burst. A handover carries a waiting ask
+    to the newer copy (Burst.hand_off) when that copy takes one over (HANDOVER_BURST), and ends it otherwise."""
     root.mkdir(parents=True, exist_ok=True)
     queue = root / 'queue'
     queue.mkdir(exist_ok=True)
@@ -1629,8 +1739,19 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
     last = int(ticket.name.split('.')[0]) >= POOL_LAST_RANK  # never takes a tree while another ticket waits (POOL_LAST_RANK)
     waited, handing = False, False
     began = time.monotonic() - (time.time_ns() - int(ticket.name.split('.')[1])) / 1e9  # since the ticket was taken, by this copy or the one before
-    slot_waited, slot_seen, slot_told, spare_told = 0.0, None, False, False
+    slot_waited, slot_seen, slot_told, spare_told, burst_told = 0.0, None, False, False, False
     free_since = {}  # tree number -> when this waiter first saw it free (not the head's, so only watched)
+
+    def burst_lets(n):
+        """Whether tree `n`, free and flocked, may be taken as far as the run's lane burst goes: asked now if it was not, taken once granted."""
+        nonlocal burst_told
+        if burst is None or burst.poll(start=True):
+            return True
+        if not burst_told:
+            burst_told = True
+            print(f'fractal-test: tree-{n} is free; asking for the lane burst before taking it, and holding no tree while the burst waits',
+                  file=sys.stderr, flush=True)
+        return False
 
     def taken(n, lock):
         if waits is not None:
@@ -1643,12 +1764,19 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
             if newer:
                 source, commit = newer
                 handing = HANDOVER_TICKET.encode() in source  # a copy that cannot take the ticket over gets none: no ticket outlives its waiter's place
-                raise Handover(source, commit, ticket, handing)
+                handed = None
+                if burst is not None:
+                    handed = burst.hand_off() if HANDOVER_BURST.encode() in source else None
+                    burst.abandon()  # what was not handed: a copy that cannot take an ask over gets none and asks again
+                raise Handover(source, commit, ticket, handing, burst=handed)
             order = tree_queue(queue, time.time_ns(), rules=QUEUE_RULES, own=ticket.name)
             ahead = next((i for i, (_, _, name) in enumerate(order) if name == ticket.name), 0)
             trees = size() if callable(size) else size
             free_tree = False
-            if ahead == 0:
+            # An ask that waits tries no tree, not even to look: a flock taken on every pass would keep a free tree from the run behind,
+            # whose TREE_FREE_FALLBACK_SECONDS count only while it finds the tree free each time.
+            asking = burst is not None and burst.holder is not None and burst.granted is None and not burst.poll()
+            if ahead == 0 and not asking:
                 for n in range(trees):
                     lock = open(root / f'tree-{n}.lock', 'w')
                     try:
@@ -1668,8 +1796,12 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                     except BaseException:
                         lock.close()
                         raise
-                    if slot_ready is None:
-                        return taken(n, lock)
+                    if slot_ready is None or (burst is not None and burst.holder is not None):  # a granted burst was asked with a build slot free
+                        if burst_lets(n):
+                            return taken(n, lock)
+                        lock.close()
+                        free_tree = True
+                        break
                     ready, why = slot_ready()
                     now = time.monotonic()
                     if slot_seen is not None:
@@ -1680,7 +1812,11 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                                   f'TREE_SLOT_WAIT_LIMIT): its build waits for one in the tree', file=sys.stderr, flush=True)
                         elif slot_told:
                             print(f'fractal-test: a build slot is free ({why}): taking tree-{n} after {round(slot_waited)}s', file=sys.stderr, flush=True)
-                        return taken(n, lock)
+                        if burst_lets(n):
+                            return taken(n, lock)
+                        lock.close()
+                        free_tree = True
+                        break
                     lock.close()
                     slot_seen, free_tree = now, True
                     if not slot_told:
@@ -1688,7 +1824,7 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                         print(f'fractal-test: tree-{n} is free, but a build started now would wait for a slot ({why}); waiting for one '
                               f'without holding a tree (at most {TREE_SLOT_WAIT_LIMIT}s)', file=sys.stderr, flush=True)
                     break  # every free tree would wait for the same slot
-            elif trees and not last:
+            elif trees and not last and not asking:
                 # Not the head of this waiter's order. Normally it leaves free trees to the head. But another waiter may run an older or newer copy of this
                 # order and defer to this one while this one defers to it (an old copy's overdue rank-50 ticket and a new copy's rank-3 one), so nobody
                 # would try a free tree. Liveness: a tree seen free for TREE_FREE_FALLBACK_SECONDS that the head has not taken may be tried here; the flock
@@ -1711,10 +1847,17 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                     if now - seen >= TREE_FREE_FALLBACK_SECONDS and (slot_ready is None or slot_ready()[0]):
                         print(f'fractal-test: tree-{n} has been free for {round(now - seen)}s and the {ahead} ticket(s) ahead did not take it '
                               f'(TREE_FREE_FALLBACK_SECONDS): trying it', file=sys.stderr, flush=True)
-                        return taken(n, lock)
+                        if burst_lets(n):
+                            return taken(n, lock)
+                        free_tree = True
                     lock.close()
-            if not free_tree:
+            if not free_tree and not asking:
                 slot_seen = None  # only the time a free tree waited for a slot counts toward TREE_SLOT_WAIT_LIMIT
+                if burst is not None and burst.holder is not None and burst.granted is not None:
+                    burst.give_back()
+                    burst_told = False
+                    print('fractal-test: the lane burst was granted while no pool tree was free; given back, and asked again when one is',
+                          file=sys.stderr, flush=True)
                 if not waited:
                     print(f'fractal-test: all {trees} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
                     waited = True
@@ -3149,7 +3292,8 @@ def run_main(argv, cleanup):
     POOL_SETTINGS.clear()
     POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
     HANDOVER.clear()
-    HANDOVER.update({key: os.environ.pop(name) for key, name in (('ticket', HANDOVER_TICKET), ('started', HANDOVER_STARTED)) if name in os.environ})
+    HANDOVER.update({key: os.environ.pop(name) for key, name in (('ticket', HANDOVER_TICKET), ('started', HANDOVER_STARTED), ('burst', HANDOVER_BURST))
+                     if name in os.environ})
     if 'started' in HANDOVER:
         main_started = time.monotonic() - max(0.0, time.time() - float(HANDOVER['started']))
     scrub_git_environment()
@@ -3259,8 +3403,10 @@ def run_main(argv, cleanup):
         tree_waits, tree_taken, blocked = {}, None, {}  # the tree's waits, when it was taken, and what the build lane waited holding it
         if not needs_tree(checks):
             pool_trees = None  # a throwaway worktree, as with ST_TEST_TREES=off, and no wait for a tree
-        # The seat's lane raised for the run (Bursts, docs/st3/seat-lanes.md), before any tree: given back when the run ends.
-        burst = lane_burst(burst_size(checks), args.queue_limit)
+        # The seat's lane raised for the run (Bursts, docs/st3/seat-lanes.md): asked at the tree, which is taken only once the burst is granted
+        # (acquire_tree), or before the checks of a run with no tree, and given back when the run ends. A handed-over run carries on its ask.
+        size = burst_size(checks)
+        burst = Burst.handed(HANDOVER.pop('burst', ''), size, args.queue_limit) or Burst(size, args.queue_limit)
         cleanup.callback(burst.release)
         try:
             if pool_trees:
@@ -3268,7 +3414,7 @@ def run_main(argv, cleanup):
                 target_commit(args.base)  # a branch that does not merge with the base fails now, not after the wait for a tree
                 # The slots can change while the run waits; a free tree is taken only when the run's build could start (slot first).
                 n, tree_lock = acquire_tree(root, lambda: pool_size() or pool_trees, slot_ready=build_slot_ready, waits=tree_waits,
-                                            follow=base_copy_follower(args.base))
+                                            follow=base_copy_follower(args.base), burst=burst)
                 tree_taken = time.monotonic()
                 # The wait for a tree can take hours, and main moves meanwhile: the base is fetched again and the commit to sign chosen at
                 # its tip now, so what is signed is only as old as the run itself (2026-10-26: a run that waited 1h50m signed a merge with a
@@ -3282,6 +3428,7 @@ def run_main(argv, cleanup):
                     evict_to_cap(pool_base(), pool_max_gb(), keep=(root, n))
                 directory, tree_target = prepare_tree(root, n, commit), root / f'target-{n}'
             else:
+                burst.wait()
                 merged = merge_base_in(args.base)
                 directory, commit = target_worktree(args.base, scratch)
             whole = set(default_checks) <= set(checks)  # the whole suite: a green run's branch is pushed (top_up)

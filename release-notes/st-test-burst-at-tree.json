@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test asks for its lane burst at the pool tree and takes the tree only once the burst is granted, and a handover keeps a waiting ask",
+  "replay": {"status": "none", "detail": "No graph replay: the change is in scripts/st-test."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "changed", "detail": "A run that builds asks for its burst only once it could take a free pool tree, holds no tree while the burst waits (the run behind may take it after the fallback), gives back a burst granted while no tree is free and asks again when one is, and keeps a waiting ask across a handover to main's newer copy."},
+  "compatibility": {"status": "none", "detail": "No route, CLI or wire change: the same `fractal agents burst` holder."},
+  "downtime": {"status": "none", "detail": "No startup work."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert: runs again ask for the burst before the tree, and a handover gives it back."}
+}

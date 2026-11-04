@@ -675,7 +675,9 @@ class LaneBurstTest(unittest.TestCase):
     def burst(self, body, size=(8, '24G'), limit=10, env=None):
         said = io.StringIO()
         with mock.patch.dict(os.environ, env if env is not None else self.fractal(body)):
-            return st_test.lane_burst(size, limit, output=said), said.getvalue()
+            burst = st_test.Burst(size, limit, output=said)
+            burst.wait()
+            return burst, said.getvalue()
 
     def test_the_size_follows_what_the_run_builds(self):
         blob = json.dumps({'version': 1, 'build': {'cores': 8, 'memory': '24G'}}).encode()
@@ -739,7 +741,7 @@ class LaneBurstTest(unittest.TestCase):
         script = (f'import importlib.machinery, importlib.util, os\n'
                   f'loader = importlib.machinery.SourceFileLoader("st_test_kill", {str(ROOT / "scripts/st-test")!r})\n'
                   f'st = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader)); loader.exec_module(st)\n'
-                  f'burst = st.lane_burst((8, "24G"), 10)\nprint(burst.granted, flush=True)\nos.kill(os.getpid(), 9)\n')
+                  f'burst = st.Burst((8, "24G"), 10)\nburst.wait()\nprint(burst.granted, flush=True)\nos.kill(os.getpid(), 9)\n')
         done = subprocess.run([sys.executable, '-c', script], env=dict(os.environ, **env), capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, -9, done.stderr)
         self.assertIn("(8, '24G')", done.stdout)
@@ -3738,26 +3740,26 @@ finally:
         self.assertEqual(st_test.ci_local_stages(log), [{'name': 'setup', 'start': '2026-11-02T03:57:46Z', 'end': '2026-11-02T04:02:20Z',
                                                          'seconds': 274, 'exit': None, 'queue_waits': 2, 'queue_s': 232}])
 
-    def test_a_run_that_builds_takes_its_lane_burst_before_its_tree_records_it_and_gives_it_back(self):
+    def test_a_run_that_builds_asks_for_its_lane_burst_at_its_tree_records_it_and_gives_it_back(self):
         self.commit('b.txt', 'two')
         order, real_tree = [], st_test.acquire_tree
 
-        def burst(size, limit):
-            order.append(('burst', size, limit))
-            held = st_test.Burst()
-            held.granted, held.waited = size, 42.4
-            held.release = lambda: order.append(('released',))
-            return held
+        def poll(burst, start=False, timeout=0.0):
+            if start and burst.granted is None:
+                order.append(('burst', burst.size, burst.limit_s))
+                burst.granted, burst.waited = burst.size, 42.4
+            return burst.granted is not None
 
         def tree(*args, **kwargs):
-            order.append(('tree',))
+            order.append(('tree', kwargs['burst'].granted))  # the wait for a tree begins with no burst held
             return real_tree(*args, **kwargs)
 
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'lane_burst', side_effect=burst), \
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test.Burst, 'poll', poll), \
+                mock.patch.object(st_test.Burst, 'release', lambda burst: order.append(('released',))), \
                 mock.patch.object(st_test, 'burst_size', return_value=(8, '24G')), mock.patch.object(st_test, 'acquire_tree', side_effect=tree):
             code, out, err = self.run_st_test('--queue-limit', '600', command=['sh', '-c', 'echo ran'], extra_env={'ST_EVIDENCE_GOVERN': 'off'})
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(order, [('burst', (8, '24G'), 600.0), ('tree',), ('released',)])
+        self.assertEqual(order, [('tree', None), ('burst', (8, '24G'), 600.0), ('released',)])
         record, = self.runs()
         self.assertEqual((record['burst'], record['burst_wait_s']), ({'cores': 8, 'memory': '24G'}, 42))
 
@@ -4369,6 +4371,152 @@ class PoolQueue(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 st_test.acquire_tree(self.root, 1, rank=50)
         self.assertEqual(os.listdir(self.root / 'queue'), [])
+
+
+class BurstAtTheTree(unittest.TestCase):
+    """A run asks for its lane burst once it could take a pool tree, and takes the tree only once the burst is granted (acquire_tree): no run holds
+    a burst without a tree or a tree without its burst, and a handover keeps a waiting ask."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp = Path(self.tmp.name)
+        self.root, self.calls, self.released, self.go = tmp / 'pool', tmp / 'calls', tmp / 'released', tmp / 'go'
+        speed = mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.05)
+        speed.start()
+        self.addCleanup(speed.stop)
+
+    def fractal(self, body):
+        """A fake fractal: records each call, runs BODY (which prints the holder's answers), then holds until stdin closes."""
+        path = Path(self.tmp.name) / 'fractal'
+        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\necho released >> {self.released}\n')
+        path.chmod(0o755)
+        return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
+
+    def lines(self, path):
+        return path.read_text().splitlines() if path.exists() else []
+
+    def until(self, condition, seconds=10):
+        deadline = time.monotonic() + seconds
+        while not condition():
+            self.assertLess(time.monotonic(), deadline, 'timed out')
+            time.sleep(0.05)
+
+    def test_a_run_waiting_for_a_tree_holds_no_burst_and_asks_once_one_is_free(self):
+        self.root.mkdir(parents=True)
+        holder = open(self.root / 'tree-0.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        got = []
+        with mock.patch.dict(os.environ, self.fractal('echo granted')), contextlib.redirect_stderr(io.StringIO()):
+            burst = st_test.Burst((8, '24G'), 30)
+            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, burst=burst)), daemon=True)
+            waiter.start()
+            time.sleep(1)
+            self.assertEqual(got, [])
+            self.assertEqual(self.lines(self.calls), [])                    # every tree in use: nothing asked, nothing held
+            holder.close()
+            waiter.join(10)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(burst.granted, (8, '24G'))
+        self.assertEqual(len(self.lines(self.calls)), 1)
+        self.assertEqual(self.lines(self.released), [])                     # held with the tree, for the run
+        burst.release()
+        got[0][1].close()
+        self.assertEqual(self.lines(self.released), ['released'])
+
+    def test_a_run_whose_burst_waits_leaves_the_free_tree_to_the_run_behind_and_gives_back_a_burst_granted_with_no_tree_free(self):
+        # The first ask waits until `go`, the next is granted at once.
+        body = (f'if [ "$(wc -l < {self.calls})" -eq 1 ]; then echo "waiting burst lane 8 cores/24.0G does not fit"; '
+                f'while [ ! -e {self.go} ]; do sleep 0.05; done; fi; echo granted')
+        head, behind = [], []
+        said = io.StringIO()
+        with mock.patch.dict(os.environ, self.fractal(body)), mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), \
+                contextlib.redirect_stderr(said):
+            burst = st_test.Burst((8, '24G'), 60)
+            first = threading.Thread(target=lambda: head.append(st_test.acquire_tree(self.root, 1, rank=3, burst=burst)), daemon=True)
+            first.start()
+            self.until(lambda: self.lines(self.calls))                      # first in the order with tree-0 free: it asks, and holds no tree
+            second = threading.Thread(target=lambda: behind.append(st_test.acquire_tree(self.root, 1, rank=50)), daemon=True)
+            second.start()
+            second.join(10)
+            self.assertEqual([n for n, _ in behind], [0])                   # the run behind, which needs no burst, has it after the fallback
+            self.assertEqual(head, [])
+            self.go.touch()
+            self.until(lambda: self.lines(self.released))                   # granted while no tree is free: given back
+            self.assertEqual(head, [])
+            behind[0][1].close()
+            first.join(10)
+        self.assertEqual([n for n, _ in head], [0])
+        self.assertEqual(burst.granted, (8, '24G'))
+        self.assertEqual(len(self.lines(self.calls)), 2)                    # asked again once a tree was free
+        self.assertIn('granted while no pool tree was free; given back', said.getvalue())
+        self.assertEqual(self.lines(self.released), ['released'])
+        burst.release()
+        head[0][1].close()
+        self.assertEqual(self.lines(self.released), ['released', 'released'])
+
+    def test_a_handover_keeps_a_waiting_ask_and_its_place(self):
+        """The holder is this process's child and keeps running through the exec: the newer copy reads its answer, and nothing asks again."""
+        env = self.fractal(f'echo "waiting burst lane 8 cores/24.0G does not fit"; while [ ! -e {self.go} ]; do sleep 0.05; done; echo granted')
+        report = Path(self.tmp.name) / 'report.json'
+        newer = textwrap.dedent(f"""
+            import importlib.machinery, importlib.util, json, os, sys
+            loader = importlib.machinery.SourceFileLoader('st_test_newer', {str(ROOT / 'scripts/st-test')!r})
+            st = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader)); loader.exec_module(st)
+            burst = st.Burst.handed(os.environ[{st_test.HANDOVER_BURST!r}], (8, '24G'), 60)
+            alive = not os.path.exists({str(self.released)!r})
+            open({str(self.go)!r}, 'w').close()
+            granted = burst.poll(timeout=10)
+            json.dump({{'pid': os.getpid(), 'alive': alive, 'granted': granted, 'size': burst.granted, 'waited': burst.waited}}, open({str(report)!r}, 'w'))
+            burst.release()
+        """)
+        driver = textwrap.dedent(f"""
+            import gc, importlib.machinery, importlib.util, os, sys, time
+            from pathlib import Path
+            loader = importlib.machinery.SourceFileLoader('st_test', {str(ROOT / 'scripts/st-test')!r})
+            st = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader)); loader.exec_module(st)
+            burst = st.Burst((8, '24G'), 60)
+            assert not burst.poll(start=True, timeout=1)
+            handed = burst.hand_off()
+            burst.release()  # what the run's unwind does: nothing is held here any more
+            gc.collect()
+            print(os.getpid(), flush=True)
+            st.hand_over(st.Handover({newer.encode()!r}, 'c' * 40, Path('/q/050.1.' + str(os.getpid())), True, burst=handed), [])
+        """)
+        done = subprocess.run([sys.executable, '-c', driver], capture_output=True, text=True, env=dict(os.environ, TMPDIR=self.tmp.name, **env),
+                              timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        seen = json.loads(report.read_text())
+        self.assertEqual(seen['pid'], int(done.stdout.split()[0]))
+        self.assertTrue(seen['alive'], 'the holder kept its stdin open through the exec')
+        self.assertEqual((seen['granted'], seen['size']), (True, [8, '24G']))
+        self.assertGreaterEqual(seen['waited'], 1)                          # the wait counts from the first copy's ask
+        self.assertEqual(len(self.lines(self.calls)), 1)                    # one ask, so one place in the host's order
+        self.until(lambda: self.lines(self.released))
+
+    def test_a_newer_copy_that_cannot_take_an_ask_over_is_handed_none_and_the_ask_ends(self):
+        self.root.mkdir(parents=True)
+        with mock.patch.dict(os.environ, self.fractal('echo "waiting burst lane 8 cores/24.0G does not fit"; sleep 30')), \
+                contextlib.redirect_stderr(io.StringIO()):
+            for source, handed in ((b'# takes over ST_TEST_HANDOVER_TICKET only\n', False), (b'# ST_TEST_HANDOVER_TICKET ST_TEST_HANDOVER_BURST\n', True)):
+                burst = st_test.Burst((8, '24G'), 60)
+                self.assertFalse(burst.poll(start=True, timeout=0.5))      # an ask that waits
+                pid = burst.holder.pid
+                with self.assertRaises(st_test.Handover) as caught:
+                    st_test.acquire_tree(self.root, 1, rank=50, burst=burst, follow=lambda: (source, 'c' * 40))
+                self.assertIsNone(burst.holder)                             # nothing left for this run's unwind to give back
+                if handed:
+                    self.assertEqual(json.loads(caught.exception.burst)['pid'], pid)
+                    holder, errors = st_test.HANDED_HOLDERS.pop()
+                    holder.kill()
+                    holder.wait()
+                    holder.stdin.close()
+                    holder.stdout.close()
+                    errors.close()
+                else:
+                    self.assertIsNone(caught.exception.burst)
+                    with self.assertRaises(ProcessLookupError):           # the ask ended with the copy that made it
+                        os.kill(pid, 0)
 
 
 class PerCrate(StTest):
