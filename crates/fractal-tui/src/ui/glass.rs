@@ -2721,7 +2721,7 @@ impl Ui {
         let strip_room = available;
         let counts = tabs.iter().map(|(title, badge)| badge.width(title, true))
             .sum::<usize>() <= usize::from(available);
-        let compact_fits = tabs.iter().map(|(title, badge)| badge.width(title, false) + 1)
+        let compact_fits = tabs.iter().map(|(title, badge)| badge.width(title, false))
             .sum::<usize>() <= usize::from(available);
         // Reserve both overflow markers and a tab gap before shortening any label. A selected
         // tab must never consume the space needed to reach its hidden neighbors.
