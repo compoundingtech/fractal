@@ -79,6 +79,20 @@ when adopting the script to reuse the existing member key. The production build
 helper and generated launchers remain deployment-owned inputs, not replacements
 for the separate launcher scripts.
 
+Failure attribution builds each probe in a fresh temporary
+`live-r3-probe-*` namespace under `FRACTAL_BUILD_ROOT`. Probe outputs are removed
+after the helper returns; empty snapshot namespaces are also removed, without
+deleting leftover snapshots that might still hold leases. Relative build and
+snapshot roots are resolved against the helper's working directory (`SCRIPT_DIR`),
+not the integrator process's starting directory. Existing outputs are
+never reused: ignored private/vendor overlays can change without changing the
+commit, and a raw build receipt can exist before host validation finishes.
+A probe passes only when the full build-and-validation helper exits successfully.
+Once a failing prefix is found, the integrator ejects that PR and reintegrates
+later accepted heads before rebuilding.
+Tree-cache identities include the integrator version, so upgrading the attribution
+logic does not replay an older unattributed failure.
+
 Deployment overlays can import `edgeOrTailnetAdmission` from `server/host.mts` and
 pass their existing edge admission as `edge`. With `origin: undefined`, it returns
 that exact policy. With a published HTTPS origin and a nonempty login allowlist,
@@ -163,14 +177,20 @@ until its replacement is Ready and the edge cuts over. A previous registration
 is stopped first only when Devnet status positively reports it is not running
 or its lifecycle is starting/terminal. Missing or failed observations never
 authorize stopping a server; Devnet decides whether replacement can proceed.
-If replacement fails, Devnet owns server recovery. The integrator restores the
-previous build pointer only if the edge confirms that previous revision serves;
-if the candidate serves or the observation is inconclusive, the pointer stays
-unchanged. Neither generation is stopped or relaunched, and the original error
-is propagated. In particular, `ReplacementRecoveryRequired` needs operator
-recovery: the integrator never runs `--abandon-replace`. If replacement succeeds
-but subsequent publication verification fails, the integrator stops the new
-server and relaunches the previous build as before.
+After a nonzero replacement exit, the integrator verifies the published candidate
+build identity; neither the exit code nor stderr text establishes whether the
+switch committed. If the candidate serves, activation succeeds and the tick
+records the last 4000 stderr characters in `replaceWarning` (or the command error
+if stderr is empty). The current pointer is preserved and normal retention runs.
+Otherwise Devnet owns server recovery. The integrator restores the previous build
+pointer only if the edge confirms that previous revision serves; an inconclusive
+observation leaves the pointer unchanged. Neither generation is stopped or
+relaunched, and the original error is propagated with the last 4000 diagnostic
+characters in the tick's `detail`. `ReplacementRecoveryRequired` remains a Devnet
+recovery diagnostic, not a success/failure discriminator; the integrator never runs
+`--abandon-replace`. If replacement exits successfully but subsequent publication
+verification fails, the integrator stops the new server and relaunches the previous
+build as before.
 
 After confirmed activation, the integrator keeps the current build and one previous
 rollback build and deletes older build directories. `integrator-activation.json`
@@ -344,9 +364,21 @@ Every tick reads `servedSha` from `/build-identity.json` (`rev`) at the publishe
 `current` requires no `error`, a non-null `sha`, and equality with `servedSha`, not a disk build.
 A failed lookup/fetch/identity decode sets `servedSha=null`, `current=false`, and a short `servedError`; lock-held ticks are false.
 The `--local` probe records `localServedSha`/`localServedError` for diagnostics only; it never determines `current`.
-`build` is `built`, `skipped`, `failed`, or `dry-run`; it is not a freshness signal.
-Skipped `reason` is `unchanged`, `lock-held`, or `known-built-tree`/`known-failed-tree`.
-Dry-run `reason` is `merged-and-regenerated-no-build-no-swap`; errors retain `build=failed`.
+`build` is `built`, `skipped`, `failed`, `error`, or `dry-run`; it is not a freshness signal.
+Skipped `reason` is `unchanged`, `lock-held`, `selection-deadline`, or `known-built-tree`/`known-failed-tree`.
+Dry-run `reason` is `merged-and-regenerated-no-build-no-swap`; ordinary errors retain `build=failed`.
+Agent-nix capacity refusal (exit 75, `EX_TEMPFAIL`) records `build: "error"`,
+`reason: "capacity-refused"`, `retryable: true` and an `error` explaining that the
+previous build is retained. This is host pressure, not a candidate build failure.
+The sandbox CLI preserves 75 through the build helper; integrator-side nix
+exceptions and refused attribution probes take the same retryable error path.
+A refused candidate never enters the failed-tree cache or starts attribution;
+a refused probe aborts attribution without caching the tree or ejecting a PR.
+Failure-cache writes and tentative PR ejections are also withheld if the reduced
+candidate rebuild is refused after attribution.
+The next tick retries the same tree after capacity becomes available. No build
+pointer or served process is changed by these refusals. Observers must distinguish
+this retryable tick error from a reproducible candidate build failure.
 Observability alerts when the last `current=true` timestamp is over 24 hours old, or no tick arrives for 30 minutes.
 
 ## Follower inputs

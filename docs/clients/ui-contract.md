@@ -588,6 +588,14 @@ read or computed.
 **Inputs:** the agent row's runtime, harness observation, delivery, fault and queue, which the
 roster refresher already folds.
 
+An agent root without a primary member reduces only its currently declared, owned exec/PTY
+children. Unsuccessful exits are failures; failed or unknown children cannot be hidden by a
+running sibling. It is stopped only when all children have ended successfully or stopped.
+Its `runtime_ids` contains observed runtime resources, never unobserved declarations, ordered
+with terminal-capable runtimes first and then by runtime ID within each class. Clients may use
+the first resource to discover an available terminal. Root host/workspace come from root
+placement, not an arbitrary child's override; unresolved host placement remains unknown.
+
 | | Derivation | Differs from this contract |
 |---|---|---|
 | Terminal UI | Reads `presentation.state` and `because` (`crates/fractal-tui/src/ui/adapt.rs`); its derivation moved to `fractal-ui-model::agents` | Its labels still use mission titles from the missions window. |
@@ -634,7 +642,7 @@ agents.
 |---|---|---|
 | Terminal UI | Reads `tier`, `kind`, `agent`, `raised_by` and `waiting` (`crates/fractal-tui/src/ui/adapt.rs` `attention()`); a row without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows Fractal's text as an unplaced card where its `alert` flag puts it, with no answer of its own; a message or a fault stays off Now. A launch card shows `launch` (`launch_preview()`), and a prompt's band shows `prompt`'s calls and offers allow only where `allow` says so (`prompt_calls()`, `alerts.rs`); an older Fractal that serves neither gets a card that says so, answered in the terminal. | Also withholds allow when the band cannot show the whole call in its four lines, as a client that cannot show the whole input offers deny only. |
 | Phone | Reads `tier`, `kind` and `waiting` (`clients/typescript/fractal-views/homeView.ts` `homeKind`, `homeRows`; a feedback gate shows as a review); an item without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows as unplaced where its `alert` flag puts it, never dropped; a message or a fault stays off Now. A prompt's calls and answers are `prompt`'s (`servedPrompt`, `servedAnswers`, `apps/ios/screens/Alerts.tsx`), and an older Fractal that serves none gets a card answered in the terminal | Shows launch variants and diagnostics, with no step preview. |
-| Fractal | `projections.ts` `attentionRefs`; its alerts read a prompt's calls from the conversation (`src/conversation/alerts/AgentAlerts.tsx`, with `homeView.ts` `pendingCalls`, `offeredAnswers`) | Moves to `prompt` with `servedPrompt` and `servedAnswers`; then `pendingCalls` and `offeredAnswers` are deleted. |
+| Fractal | `projections.ts` `attentionRefs`; prompt cards read `presentation.prompt` through `homeView.ts` `servedPrompt` and `servedAnswers` (`src/conversation/alerts/AgentAlerts.tsx`), never infer pending calls from the conversation. Missing, incomplete or unsupported prompt details keep an explicit terminal fallback. | — |
 
 Settled: `custom.*` kinds are Today requests, as in the terminal UI. Allow depends on
 `input_complete`; a client that cannot show the whole input offers deny only.
@@ -662,6 +670,11 @@ the published revision rendered as KDL by Fractal's one renderer. Clients show i
 needs the same `read.declarations` grant as `publication.definition`. A refusal reads "Fractal does not
 show this declaration to this device". A published revision never changes, so this read reads
 it directly. It is a `person-read` path.
+
+The mission renderer emits deterministic KDL from `MissionSpec`, not original authored bytes.
+It redacts environment values and embedded declaration KDL. URI edges use stored subjects because
+published revisions do not retain URI locators. Legacy collection loops use their last accepted
+syntax with a `legacy loop shape` comment; the current parser still rejects those shapes.
 
 Today no client reads a declaration: the terminal UI shows one only in the demo, and
 `subject.definition` refuses missions.
@@ -704,6 +717,31 @@ editing it loses nothing. When two clients create the reserved subject at once, 
 `arrangement-exists` and adopts the first, and replicas converge under last-writer-wins. The
 terminal UI (`crates/fractal-tui/src/ui/resource_sidebar.rs`), the phone (`apps/ios/sidebarEdits.ts`)
 and Fractal (`apps/fractal-web/src/data/arrangements.ts`) follow this rule.
+
+### Pins identity
+
+Each person has one Pins arrangement at
+`arrangement/person/NAME/00000000-0000-7000-8000-000000000002`.
+The generated clients expose `PINS_ARRANGEMENT_UUID` (Swift:
+`st3PinsArrangementUuid`) from `constants` in `operations.json`.
+Clients select only this identity, regardless of its display name; there is no
+name-based fallback and no copy from Sidebar folders or placements.
+
+The first pin creates this arrangement named "Pins" with `version: 2`.
+Pins use the existing ordered memberships contract: `arrangement.membership.edit`
+places a stable member subject at `{bucket: null, key}` or removes that member.
+Clients read and follow `ordered-memberships`, including pagination and whole-container
+invalidation. They never write v1 placements or mutate Sidebar folders to pin a subject.
+Membership admission, permitted subject families, lifecycle visibility, ordering,
+limits and canonical conflict resolution are the existing version-2 rules.
+
+Before creating Pins, coordinate the version-2-aware reader rollout described in
+the [client contract](../st3/client-v0/README.md#ordered-memberships-and-new-version-2-layouts).
+A create refused with `arrangement-exists` adopts the reserved live v2 arrangement.
+A v1 body at that identity is incompatible, not silently migrated. Retirement is
+permanent: `arrangement-retired` reports restoration unavailable and never selects
+another identity. Hidden or retired members retain the server's membership winner;
+clients do not unpin them as a side effect of a read.
 
 ### Conversation stream
 
