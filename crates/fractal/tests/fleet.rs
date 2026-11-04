@@ -7368,6 +7368,56 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     // The seat's own host reads its own marks, with no host to name.
     let own: Value = b.client().get(&format!("/v1/messages/read/{read}")).await.unwrap();
     assert_eq!((own["status"].clone(), own.get("status_from").cloned()), (json!("read"), None), "{own}");
+
+    // A reminder group to the seat, whose winner b closes as a mark. Once a read on `a` hears the
+    // close from b, a's client list makes the older reminder current and the closed winner
+    // history, and still no close replicates (#4866).
+    let mut reminders = Vec::new();
+    for version in [1, 2] {
+        let receipt: Value = b
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("b-seat-reminder-{version}"), "from": PERSON, "to": seat,
+                "content": "stand-up", "tags": ["reminder:standup", format!("version:{version}")],
+            }))
+            .await
+            .unwrap();
+        reminders.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (older, winner) = (reminders[0].clone(), reminders[1].clone());
+    for lifecycle in ["delivered", "read", "closed"] {
+        let receipt: Value = b
+            .client()
+            .post(
+                &format!("/v1/messages/{}/claims", winner.trim_start_matches("message/")),
+                &json!({"lifecycle": lifecycle, "actor": seat, "idempotency_key": format!("{winner}-{lifecycle}")}),
+            )
+            .await
+            .unwrap();
+        assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{lifecycle}: {receipt}");
+    }
+    let layer = |page: &Value, subject: &str| {
+        page["items"].as_array().unwrap().iter().find(|item| item["id"] == subject).map(|item| item["operational"].clone())
+    };
+    wait_until("a's client list makes the older reminder current once it hears b's close", 90, || {
+        let client = a.client();
+        let (older, winner) = (older.clone(), winner.clone());
+        async move {
+            let Ok(page) = client.get::<Value>("/v1/client/messages?limit=200").await else { return false };
+            layer(&page, &older).is_some_and(|layer| layer["layer"] == "current") && layer(&page, &winner).is_none()
+        }
+    })
+    .await;
+    let history: Value = a.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
+    assert_eq!(
+        layer(&history, &winner),
+        Some(json!({"layer": "history", "actionable": false, "reasons": ["closed"]})),
+        "{history}"
+    );
+    assert!(
+        !a.claims().await.iter().any(|claim| claim["subject"] == winner.as_str() && claim["kind"] == "message.closed"),
+        "b's close replicated as a claim"
+    );
 }
 
 /// A fleet of the previous release upgraded to this build, then one member rolled back. Before
@@ -7461,10 +7511,45 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     .await;
     assert_eq!(view(&o, &before).await.unwrap()["status"], "delivered", "the release's claim still counts");
 
+    // The host closes a reminder's winner as a mark; once `o` hears it, its client list makes the
+    // older reminder current (#4866), and `o` keeps the close in its member-local table.
+    let mut reminders = Vec::new();
+    for version in [1, 2] {
+        let receipt: Value = h
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("h-seat-reminder-{version}"), "from": PERSON, "to": seat,
+                "content": "stand-up", "tags": ["reminder:standup", format!("version:{version}")],
+            }))
+            .await
+            .unwrap();
+        reminders.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (older, winner) = (reminders[0].clone(), reminders[1].clone());
+    for kind in ["delivered", "read", "closed"] {
+        assert!(lifecycle(&h, &winner, kind).await.starts_with("offset-receipt/"), "{kind}");
+    }
+    let layer = |page: &Value, subject: &str| {
+        page["items"].as_array().unwrap().iter().find(|item| item["id"] == subject).map(|item| item["operational"]["layer"].clone())
+    };
+    wait_until("o's client list makes the older reminder current once it hears the host's close", 90, || {
+        let client = o.client();
+        let (older, winner) = (older.clone(), winner.clone());
+        async move {
+            let Ok(page) = client.get::<Value>("/v1/client/messages?limit=200").await else { return false };
+            layer(&page, &older) == Some(json!("current")) && layer(&page, &winner).is_none()
+        }
+    })
+    .await;
+
     // `o` rolls back: the host stops recording marks, and its next lifecycle write is a claim.
     o.stop();
     o.binary = old.clone();
     o.start().await;
+    // The release never reads the kept close: its table and trigger are inert, and it lists the
+    // reminders from its own records.
+    let listed: Value = o.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
+    assert!(layer(&listed, &older).is_some() && layer(&listed, &winner).is_some(), "{listed}");
     wait_until("the host turns marks off beside a member that does not read them", 150, || {
         let off = doctor_check(&h, "message-marks")["message"].as_str().unwrap().starts_with("off:");
         async move { off }
@@ -7491,6 +7576,20 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     // The host's own records are whole: its marks and the claim after them.
     assert_eq!(view(&h, &marked).await.unwrap()["status"], "closed");
     assert_eq!(view(&h, &before).await.unwrap()["status"], "delivered");
+
+    // Rolled forward again, `o` counts the close it kept before the rollback at its next fold.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("o counts the kept close again after rolling forward", 90, || {
+        let client = o.client();
+        let (older, winner) = (older.clone(), winner.clone());
+        async move {
+            let Ok(page) = client.get::<Value>("/v1/client/messages?limit=200").await else { return false };
+            layer(&page, &older) == Some(json!("current")) && layer(&page, &winner).is_none()
+        }
+    })
+    .await;
 }
 
 /// A seat's conversation and `conversations wait` across the previous release and this build, on
@@ -8009,6 +8108,63 @@ async fn item_claim_with_head(node: &Node, kind: &str, head: &str) -> bool {
             && (claim.pointer("/body/fields/facts/head_sha") == Some(&json!(head))
                 || claim.pointer("/body/fields/head_sha") == Some(&json!(head)))
     })
+}
+
+/// The standing observer's declarations on `node`, oldest first, as (origin, stopped).
+async fn observer_declarations(node: &Node) -> Vec<(String, bool)> {
+    node.claims().await.iter()
+        .filter(|claim| claim["subject"] == "observer/github/fixture/app" && claim["kind"] == "intent.desired")
+        .map(|claim| (
+            claim["origin"].as_str().unwrap_or_default().to_owned(),
+            claim.pointer("/body/desired/children/0/name") == Some(&json!("stop")),
+        ))
+        .collect()
+}
+
+/// A member of the previous release watches a pull request beside a poller of this build that
+/// already observes the repository (#4831). The poller declares its observer once, in the write
+/// that declares the watch using it, so no pass stops it as unused and declares it again; the
+/// elder's watch, the released command, plans beside that one declaration and becomes a
+/// subscription on the poller's observer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_member_watches_beside_this_builds_poller() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let mut elder = Node::new(root.path(), "fixture-elder");
+    elder.binary = old;
+    elder.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api.clone())]);
+    let code = poller.invite("fixture-elder", &[]);
+    let output = elder.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    elder.start().await;
+    watch_fixture_app(&poller);
+    wait_until("the poller fills its mirror", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" }
+    }).await;
+    wait_until("the elder holds the poller's observer declaration", 90, || async {
+        observer_declarations(&elder).await.iter().any(|(origin, _)| origin == "fixture-poller")
+    }).await;
+    watch_fixture_app(&elder);
+    wait_until("the poller holds the elder's watch", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"].as_str().is_some_and(|subject| subject.starts_with("subscription/watch/fixture/app/12/"))
+                && claim["origin"] == "fixture-elder"
+        })
+    }).await;
+    let declarations = observer_declarations(&poller).await;
+    assert_eq!(
+        declarations.iter().filter(|(origin, _)| origin == "fixture-poller").collect::<Vec<_>>(),
+        [&("fixture-poller".to_owned(), false)],
+        "the poller declared its observer once and never stopped it: {declarations:?}",
+    );
 }
 
 /// A previous release without the GitHub plugin keeps the poller writing item snapshots.

@@ -2329,6 +2329,7 @@ export type MissionRunSummary = {
   blocker?: {
 
 } | null;
+  completed_at?: number | null;
   current_steps: Array<{
   assignee?: (ActorRef | null);
   claimant?: (ActorRef | null);
@@ -2350,6 +2351,7 @@ export type MissionRunSummary = {
   total: number;
 };
   requester: ActorRef;
+  started_at?: number | null;
   state_since: Timestamp;
   status: string;
   steps?: (Array<MissionStep> | null);
@@ -2374,6 +2376,7 @@ export type MissionStep = {
   blockers?: Array<Id>;
   claim_expires_at?: (Timestamp | null);
   claimant?: (ActorRef | null);
+  completed_at?: number | null;
   constraints?: Array<string>;
   goals?: Array<string>;
   id: Id;
@@ -2387,6 +2390,7 @@ export type MissionStep = {
   path: string;
   progress_at?: (Timestamp | null);
   since: Timestamp;
+  started_at?: number | null;
   state: WorkState;
   title?: string | null;
   wake?: (MissionWake | null);
