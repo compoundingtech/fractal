@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add @fractal/declarations for typed agent, mission and schedule authoring with canonical KDL v2 encoding",
+  "replay": {
+    "status": "none",
+    "detail": "The authoring SDK emits declaration source only; event replay and runtime projections are unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No persisted schema, index or trigger changes. The generated TypeScript API represents the supported KDL declaration vocabulary."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Declaration admission, authority, revision validation and publication rules remain daemon-owned and unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Adds an independent workspace package without changing the existing HTTP client API or KDL v2 grammar. Existing declaration files remain valid."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No deployment, runtime restart or migration is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Adoption is optional. Authors can import @fractal/declarations and validate its emitted KDL through the existing Fractal workflow."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No new persistent state or recovery procedure; authors can continue using existing KDL declarations."
+  }
+}

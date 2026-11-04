@@ -135,6 +135,7 @@ const freezeId = 'fractal-narrow-layout--sidebar-drag-unmount-cleanup'
 const densityIds = ['fractal-narrow-layout--breakpoint-density', 'fractal-narrow-layout--breakpoint-density-coarse']
 const focusReturnId = 'fractal-narrow-layout--drawer-focus-return'
 const nativeOverlayId = 'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed'
+const usageIds = ['fractal-app-usagepane--all-states', 'fractal-app-usagepane--populated']
 const aliasIds = [
   'fractal-ui-transcript--no-green-all-states-light',
   'fractal-ui-composer--footer-width-budget-narrow-light',
@@ -159,6 +160,7 @@ test('the strict case set measures the filter once, keeps functional corners, an
     ...densityIds.map(id => [id, [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]]),
     [focusReturnId, [['dark', 899], ['light', 440]]],
     ...APP_MODULE_SUITE_IDS.map(id => [id, [['dark', 1440]]]),
+    ...usageIds.map(id => [id, [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]]),
   ])
   const omittedBenchmarkCases = [
     { id: 'fractal-ui-sidebar-tree--filter-keystroke-to-paint', scheme: 'dark', width: 440 },
@@ -218,15 +220,22 @@ test('production module suites run each state once, dark at desktop width, and a
   assert.equal(fullCases(APP_MODULE_SUITE_IDS).length, 14)
   for (const id of APP_MODULE_SUITE_IDS) assert.ok(!MERGE_ONLY.includes(id) && !BOTH_WIDTHS.includes(id), `${id} is not named by the per-commit set`)
 })
+test('Usage pane stories retain both themes and widths in full and per-commit gates', () => {
+  for (const id of usageIds) {
+    const expected = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]].map(([scheme, width]) => ({ id, scheme, width }))
+    assert.deepEqual(fullCases([id]), expected)
+    assert.deepEqual(commitSetCases([id], { mergeOnlyIds: [], bothWidthsIds: [id] }).cases, expected)
+  }
+})
 test('kit-only fixtures scope their policy explicitly without making app cases optional in production', () => {
   const ids = [benchmarkId, nativeOverlayId, ...aliasIds, ...baseIds]
   const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
-  assert.deepEqual([...APP_CASE_OVERRIDES.keys()], [freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS])
+  assert.deepEqual([...APP_CASE_OVERRIDES.keys()], [freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...usageIds])
   assert.doesNotThrow(() => validateCaseOverrides(entries, KIT_CASE_OVERRIDES))
   assert.throws(() => validateCaseOverrides(entries), /names fractal-narrow-layout--sidebar-drag-unmount-cleanup, which is not a known story/)
 })
 test('strict case policy rejects unknown stories and aliases without a kept same-source base', () => {
-  const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...aliasIds, ...baseIds]
+  const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...usageIds, ...aliasIds, ...baseIds]
   const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
   assert.doesNotThrow(() => validateCaseOverrides(entries))
   assert.throws(() => validateCaseOverrides(entries, new Map([['kit--unknown', []]])), /not a known story/)
@@ -300,7 +309,7 @@ test('the gate receipt declares the intended benchmark corner and alias omission
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
     await mkdir(build)
-    const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...aliasIds, ...baseIds]
+    const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...usageIds, ...aliasIds, ...baseIds]
     await writeFile(join(build, 'index.json'), JSON.stringify({ entries: Object.fromEntries(ids.map(id => [id, { ...story, id }])) }))
     const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
       env: { ...process.env, KIT_PLAY_SET: 'all', PLAYWRIGHT_MODULE: 'must-not-import-browser-for-case-contract' },
@@ -312,7 +321,7 @@ test('the gate receipt declares the intended benchmark corner and alias omission
     })
     assert.equal(code, 1)
     const receipt = JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8'))
-    assert.equal(receipt.expectedCases, 51)
+    assert.equal(receipt.expectedCases, 59)
     assert.equal(receipt.omitted.cases, 65)
     assert.deepEqual(receipt.omitted.stories, aliasIds.toSorted())
     assert.deepEqual(receipt.caseOverrides[benchmarkId], [['dark', 1440]])
