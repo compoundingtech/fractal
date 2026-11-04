@@ -19,7 +19,7 @@ mod native;
 mod home_manager;
 mod mounts;
 #[cfg(any(target_os = "macos", test))]
-mod launchd;
+use fractal_daemon::service::launchd_domain as launchd;
 #[cfg(test)]
 mod tests;
 
@@ -285,6 +285,30 @@ trait Manager {
     async fn idle(&mut self) -> Result<()>;
     async fn probe(&mut self) -> Result<()>;
 }
+pub(super) fn print_launchd_domain() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        ensure!(fractal_daemon::instance::current().is_none(), "launchd migration domain is for the default host only");
+        let layout = Layout::discover()?;
+        let domain = queried_launchd_domain(&layout, unsafe { libc::getuid() },
+            |domain| launchd::probe(domain, std::process::Command::new("/bin/launchctl").args(["print", domain]).output()?))?;
+        fractal_daemon::cli_println!("{domain}");
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    bail!("launchd domain queries require macOS")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn queried_launchd_domain(layout: &Layout, uid: u32, inspect: impl FnMut(&str) -> Result<launchd::Probe>) -> Result<String> {
+    let journal = match fs::read(&layout.journal) {
+        Ok(bytes) => Some(serde_json::from_slice::<Journal>(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    launchd::resolve(uid, journal.as_ref().and_then(|j| j.launchd_domain.as_deref()), journal.is_some(), inspect)
+}
+
 
 pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Result<()> {
     ensure!(fractal_daemon::instance::current().is_none(), "host migration does not move named instances; run it for the default host");
