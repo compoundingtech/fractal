@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A capacity refusal while rebuilding a reduced web candidate no longer persists a tentative PR ejection or failed-tree entry. The integrator retains the served build and retries the complete candidate on the next tick.",
+  "replay": {"status": "none", "detail": "No replay or backfill."},
+  "schema": {"status": "none", "detail": "No storage schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or admission-rule changes."},
+  "compatibility": {"status": "none", "detail": "Uses the existing capacity-refused retryable tick outcome; no wire or configuration changes."},
+  "downtime": {"status": "none", "detail": "The previously served build remains active."},
+  "manual": {"status": "none", "detail": "No new manual steps or configuration."},
+  "recovery": {"status": "changed", "detail": "Let host capacity recover and allow the next tick to retry. Rolling back this change can persist tentative failure/ejection state if a reduced-candidate rebuild is refused; no storage migration is required."}
+}
