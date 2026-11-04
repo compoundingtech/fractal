@@ -1024,3 +1024,18 @@ async fn launchd_cutover_saves_selected_domain() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn launchd_ownership_refusals_do_not_mutate_host() -> Result<()> {
+    for other in [None, Some("com.compoundingtech.st3"), Some("com.compoundingtech.fractal")] {
+        let mut fixture = Fixture::new()?;
+        let gui = other.map_or_else(Vec::new, |_| vec!["com.compoundingtech.st3".into()]);
+        fixture.manager.registrations = Some([gui, other.into_iter().map(str::to_owned).collect()]);
+        let before = fixture.snapshot()?;
+        assert!(fixture.run(false, false).await.unwrap_err().is::<launchd::DomainError>());
+        assert_eq!(fixture.snapshot()?, before);
+        assert!(!fixture.layout.journal.exists());
+        assert!(!fixture.manager.changed_services());
+    }
+    Ok(())
+}
