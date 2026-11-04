@@ -31,12 +31,26 @@ started_at: Timestamp | null
 completed_at: Timestamp | null
 ```
 
-Run start is run creation, and run end is the terminal state claim
-(`outcome.at`). Step start is the `work.claimed` claim, and step end is the
-terminal `work.*` claim. The existing `STEP_TIMING_KINDS` fold and
-`step_timing_events` in `crates/fractal-store/src/store.rs` read the step timing
-claims. The daemon serves the new timing fields with the same bound as today's
-run enrichment: open runs plus the latest finished run.
+Run start is run creation. Run end is `accepted_at_unix_ms` on the
+`mission-run.state` claim that transitions the run into `phase: "terminal"`,
+as projected by `project_mission_run_update` in
+`crates/fractal-store/src/store.rs`. It is not `outcome.at`:
+`run_outcome_from_claim` only exposes terminal-to-terminal overrides.
+
+For worker-backed steps, step start is the `work.claimed` claim. Agentless
+steps have no `work.claimed`; their opening edge is the reconciler-owned
+`step-run.state` transition to `working`. Step end comes from the terminal
+`work.submitted` or `work.failed` claim for worker-backed steps, or the terminal
+`step-run.state` transition for agentless steps. Use the claims'
+`accepted_at_unix_ms` timestamps. The existing `STEP_TIMING_KINDS`,
+`step_timing_events`, and `fold_step_clock_open` in
+`crates/fractal-store/src/store.rs` cover both sources: the clock opens on
+`work.claimed` or `step-run.state` with status `claimed`/`working`, and closes on
+`work.submitted`, `work.failed`, `work.released`, or a `step-run.state` leaving
+`claimed`/`working`. A release or other nonterminal closing edge stops an
+execution interval; it is not step completion. The daemon serves the new
+timing fields with the same bound as today's run enrichment: open runs plus
+the latest finished run.
 
 ### Run ETA
 
@@ -70,9 +84,11 @@ them as real delay.
 
 For each remaining step, the daemon takes p25 and p75 of that duration from
 the completed runs of the same step path under the current definition hash.
-If dependencies are declared (step `blockers`), the daemon sums along the
-critical path, and `method` is `critical-path`. Otherwise the daemon sums over
-the remaining steps, and `method` is `per-step`.
+If dependencies are declared in the mission definition's `step.dependencies`,
+the daemon sums along the critical path, and `method` is `critical-path`.
+These declarations supply the graph's dependency edges; runtime step
+`blockers` are current `work.person-asked` subjects, not dependency edges.
+Otherwise the daemon sums over the remaining steps, and `method` is `per-step`.
 
 `samples` is the smallest sample count among the remaining steps. With 1 or 2
 samples the value is still served, so a client can say "(1 prior run)".
@@ -98,11 +114,16 @@ Each implementation PR is at most 300 lines:
 
 ## Verification required for implementation
 
-- Check timing against run creation, terminal `outcome.at`, and the step
-  timing claims, preserving the open-runs-plus-latest-finished-run bound.
-- Check per-step and critical-path estimates, the current-definition-hash
-  sample set, and exclusion of person-held time without excluding queueing
-  or agent waits. Check the smallest sample count, including 1 or 2 samples,
-  and `null` for a zero-sample remaining step or a finished run.
+- Check timing against run creation and the `accepted_at_unix_ms` of the
+  `mission-run.state` transition into `phase: "terminal"`, not a later
+  terminal-to-terminal outcome override. Check worker-backed `work.claimed`
+  and terminal work claims, plus agentless `step-run.state` working and
+  terminal transitions. Distinguish interval closure from step completion,
+  preserving the open-runs-plus-latest-finished-run bound.
+- Check per-step and critical-path estimates using declared
+  `step.dependencies`, not runtime person-work `blockers`; check the
+  current-definition-hash sample set and exclusion of person-held time without
+  excluding queueing or agent waits. Check the smallest sample count, including
+  1 or 2 samples, and `null` for a zero-sample remaining step or a finished run.
 - Check remaining durations and the publication-cut `as_of`, including the
   display of a paused or overdue run and omission by older daemons.
