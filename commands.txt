@@ -1,0 +1,37 @@
+Host: dev3 only for all install/build/browser activity.
+Exact source SHA: 446df2574bf0b2a7a8d73e91bbe4b46c23ca3bba
+Preflight: ssh -o BatchMode=yes dev3 'uptime; free -h; pty list --summary'
+Observed: 28 CPUs; load 12.74/14.33/16.12; 27 GiB available memory; 18 running PTYs. No existing sessions modified.
+Worktree:
+git -C ~/.megarepo/github.com/compoundingtech/fractal/.bare worktree add ~/.megarepo/github.com/compoundingtech/fractal/worktrees/fw2-evidence-4641 446df2574bf0b2a7a8d73e91bbe4b46c23ca3bba
+pty run -d -a --id fractal.4641.browser -- bash --noprofile --norc
+cd ~/.megarepo/github.com/compoundingtech/fractal/worktrees/fw2-evidence-4641
+python3 scripts/prepare-pnpm-source-inputs.py prepare
+pnpm install --frozen-lockfile
+pnpm --filter fractal-web changelog:registry
+pnpm --filter @fractal/ui build-storybook --output-dir ../../tmp/evidence-4641/storybook
+python3 -m http.server 54641 --bind 127.0.0.1 --directory tmp/evidence-4641/storybook
+pty run -d -a --id fractal.4641.playwright -- bash --noprofile --norc
+cd ~/.megarepo/github.com/compoundingtech/fractal/worktrees/fw2-evidence-4641
+playwright-cli -s=fractal-4641 open http://127.0.0.1:54641
+playwright-cli -s=fractal-4641 run-code --filename tmp/evidence-4641/scenarios.js | tee tmp/evidence-4641/results.log
+
+Harness: production kit Storybook, existing Fractal UI/Markdown StreamingCodeBlock story. Uses actual Markdown and CodeBlock, production StyleX/Tailwind preview and Pierre dynamic import. Chosen to isolate transcript code rendering without daemon/auth dependencies; existing Languages story mutates widths during play, so StreamingCodeBlock is a cleaner layout measurement target. No runtime source changes.
+Prerequisite deviations: initial frozen install before source publication failed (missing local source inputs); materialized exact locked effect-utils sources then frozen install passed with fleet pnpm 12.15.0. Initial build needed generated changelog registry; generated it using repository command and rebuilt successfully. Initial refs/heads worktree placement rejected; correct managed worktrees path succeeded.
+Nix-managed playwright-cli used directly from PATH; no npx, installs, browser path overrides, or dev5 browser execution.
+Observer: see scenarios.js (addInitScript runs before navigation; buffered layout-shift observer retains source nodes and geometry, filters hadRecentInput for CLS, includes ancestor/descendant code block attribution).
+
+FINAL MEASUREMENTS
+Lazy chunk: assets/default-BlkKtuOY.js; importer: assets/Markdown-BXhaDlfy.js.
+Scenario A at 390x900: chunk held 2000 ms; code CLS 0.00; whole-page CLS 0.00; no layout-shift entries.
+Scenario A at 1280x900: chunk held 2000 ms; code CLS 0.00; whole-page CLS 0.00; no layout-shift entries.
+Observation window: before navigation through 500 ms after highlighted tokens appear (includes the 2-second route hold).
+Scenario B: exactly one aborted chunk request; plain code retains Wrap code / Copy code buttons.
+IMPORTANT ACCEPTANCE FAILURE: unblock + Storybook forceRemount does not recover highlighting. Same document identity is retained, original block DOM is disconnected, and token wait times out. No network request goes out.
+Direct import of identical chunk URL rejects TypeError: Failed to fetch dynamically imported module, with zero new requests.
+Direct import with ?retry=1 succeeds and issues one new request. This is diagnostic only, not a runtime fix.
+Reloading the page issues a new original-URL request and recovers highlighting.
+Screenshots: a-390-before.png, a-390-after.png, a-1280-before.png, a-1280-after.png, b-390-aborted.png, b-390-remount.png, b-390-reload-recovered.png.
+No screenshot is claimed as successful same-document retry. b-390-reload-recovered.png is explicitly reload-only recovery.
+Artifacts copied using scp from dev3 to dev5:/tmp/fw2/evidence-4641/; no browser/build ran on dev5.
+Cleanup: playwright-cli -s=fractal-4641 close; pty kill fractal.4641.playwright; pty kill fractal.4641.browser.

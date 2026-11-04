@@ -1,0 +1,85 @@
+async (page) => {
+  const base = 'http://127.0.0.1:54641';
+  const out = 'tmp/evidence-4641';
+  const chunk = /\/assets\/default-[^/]+\.js(?:\?.*)?$/;
+  const observe = () => {
+    window.__shifts = [];
+    window.__observer = new PerformanceObserver(list => {
+      for (const e of list.getEntries()) {
+        const sources = (e.sources || []).map(s => {
+          const n = s.node;
+          return { code: !!(n && (n.closest?.('[data-testid="markdown-code-block"]') || n.querySelector?.('[data-testid="markdown-code-block"]'))), node: n?.outerHTML?.slice(0, 300), previousRect: s.previousRect, currentRect: s.currentRect };
+        });
+        window.__shifts.push({ value: e.value, hadRecentInput: e.hadRecentInput, startTime: e.startTime, sources });
+      }
+    });
+    window.__observer.observe({ type: 'layout-shift', buffered: true });
+  };
+  const summarize = async () => page.evaluate(() => {
+    const eligible = window.__shifts.filter(e => !e.hadRecentInput);
+    return { codeCLS: eligible.filter(e => e.sources.some(s => s.code)).reduce((s, e) => s + e.value, 0), pageCLS: eligible.reduce((s, e) => s + e.value, 0), shifts: window.__shifts };
+  });
+  await page.addInitScript(observe);
+  const result = { harness: 'production kit Storybook Markdown story', scenarios: [], lazyChunks: [] };
+  for (const width of [390, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    let release, heldAt;
+    const held = new Promise(resolve => { release = resolve; });
+    await page.route(chunk, async route => {
+      result.lazyChunks.push(route.request().url());
+      heldAt = Date.now();
+      await held;
+      await route.continue();
+    });
+    await page.goto(`${base}/iframe.html?id=fractal-ui-markdown--streaming-code-block&viewMode=story`, { waitUntil: 'domcontentloaded' });
+    const block = page.getByTestId('markdown-code-block').first();
+    await block.waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    await page.waitForTimeout(250);
+    if (!heldAt) throw new Error('Pierre request was not intercepted');
+    if (await block.locator('[data-syntax-token]').count()) throw new Error('Already highlighted during hold');
+    await page.screenshot({ path: `${out}/a-${width}-before.png` });
+    await page.waitForTimeout(Math.max(0, 2000 - (Date.now() - heldAt)));
+    const holdMilliseconds = Date.now() - heldAt;
+    release();
+    await block.locator('[data-syntax-token]').first().waitFor();
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${out}/a-${width}-after.png` });
+    result.scenarios.push({ scenario: 'A', width, holdMilliseconds, ...(await summarize()) });
+    await page.unroute(chunk);
+    await page.goto('about:blank');
+  }
+  await page.setViewportSize({ width: 390, height: 900 });
+  let aborted = 0;
+  await page.route(chunk, async route => { aborted++; await route.abort('failed'); });
+  await page.goto(`${base}/iframe.html?id=fractal-ui-markdown--streaming-code-block&viewMode=story`, { waitUntil: 'domcontentloaded' });
+  const block = page.getByTestId('markdown-code-block').first();
+  await block.waitFor();
+  await page.waitForTimeout(750);
+  if (!aborted || await block.locator('[data-syntax-token]').count()) throw new Error('Abort fallback not demonstrated');
+  const controls = await block.locator('button').evaluateAll(nodes => nodes.map(n => ({label:n.getAttribute('aria-label'), text:n.textContent})));
+  await page.screenshot({ path: `${out}/b-390-aborted.png` });
+  await page.unroute(chunk);
+  // Storybook's forceRemount event resubscribes the production Markdown component.
+  const documentIdentity = await page.evaluate(() => { window.__evidenceIdentity = Math.random(); return window.__evidenceIdentity; });
+  await block.evaluate(node => window.__originalBlock = node);
+  let retried = 0;
+  await page.route(chunk, async route => { retried++; await route.continue(); });
+  await page.evaluate(() => window.__STORYBOOK_ADDONS_CHANNEL__.emit('forceRemount', { storyId: 'fractal-ui-markdown--streaming-code-block' }));
+  let remountError;
+  try { await page.getByTestId('markdown-code-block').first().locator('[data-syntax-token]').first().waitFor({ timeout: 3000 }); }
+  catch (error) { remountError = error.message; }
+  await page.screenshot({ path: `${out}/b-390-remount.png` });
+  const sameDocument = await page.evaluate(id => window.__evidenceIdentity === id, documentIdentity);
+  const oldBlockConnected = await page.evaluate(() => window.__originalBlock?.isConnected);
+  const requestsAfterRemount = retried;
+  const specifier = result.lazyChunks[0];
+  const sameSpecifier = await page.evaluate(async url => { try { await import(url); return { ok: true }; } catch (e) { return { ok: false, error: String(e) }; } }, specifier);
+  const requestsAfterSameSpecifier = retried;
+  const cacheBustedSpecifier = await page.evaluate(async url => { try { await import(url + '?retry=1'); return { ok: true }; } catch (e) { return { ok: false, error: String(e) }; } }, specifier);
+  const requestsAfterCacheBust = retried;
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.getByTestId('markdown-code-block').first().locator('[data-syntax-token]').first().waitFor();
+  await page.screenshot({ path: `${out}/b-390-reload-recovered.png` });
+  return { ...result, abort: { aborted, controls, sameDocument, oldBlockConnected, remountError, requestsAfterRemount, sameSpecifier, requestsAfterSameSpecifier, cacheBustedSpecifier, requestsAfterCacheBust, requestsAfterReload: retried }, retryPending: false };
+}
