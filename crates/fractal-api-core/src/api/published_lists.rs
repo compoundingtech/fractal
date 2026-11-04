@@ -393,9 +393,12 @@ enum Advance<R, P> {
 }
 
 #[cfg(test)]
+type CatchUpHook = Box<dyn FnMut(&Store)>;
+
+#[cfg(test)]
 thread_local! {
     /// Called before each catch-up round, so a test can change a list while its fold catches up.
-    static BEFORE_CATCH_UP: std::cell::RefCell<Option<Box<dyn FnMut(&Store)>>> =
+    static BEFORE_CATCH_UP: std::cell::RefCell<Option<CatchUpHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
