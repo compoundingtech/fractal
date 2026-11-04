@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "summary": "Align the MCP server source and Nix installation instructions with the st-chatgpt executable used by the launch examples and client configuration.",
+  "commits": [],
+  "replay": {"status": "none", "detail": "Documentation only; no replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "No runtime or client contract changes; both existing Cargo binary targets and the Nix package remain unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No upgrade steps; installation examples now select the executable available from both documented methods."},
+  "recovery": {"status": "none", "detail": "No persistent state changes."}
+}
