@@ -32,7 +32,7 @@ export default meta
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = ['AllStates:contract-fixture']
 
-export const AllStates: StoryObj<typeof meta> = { tags: ['critical'], name: 'All states · ordered, read-only, failed, empty', play: async ({ canvasElement }) => {
+export const AllStates: StoryObj<typeof meta> = { tags: ['critical', 'both-widths'], name: 'All states · ordered, read-only, failed, empty', play: async ({ canvasElement }) => {
   const editable = state(canvasElement, 'editable')
   await expect(editable.getByRole('region', { name: 'Pinned' })).toBeInTheDocument()
   await expect(editable.getAllByRole('listitem').map(item => item.dataset.pin)).toEqual(ordered.map(item => item.id))
