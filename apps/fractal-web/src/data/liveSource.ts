@@ -15,8 +15,7 @@ import {
   type SyncStatus,
   syncStatusFromFailure,
 } from '@fractal/sdk/read'
-import { openPtySession } from '@fractal/sdk/pty'
-import { makeMutations } from '@fractal/sdk/mutations'
+import { loadMutations, loadPty } from './lazySdk.ts'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -753,6 +752,12 @@ export const liveSource = ({
   const messageSnapshot = (): Promise<ConversationPortResult<string>> =>
     runtime.runPromise(
       Effect.gen(function* () {
+        const loaded = yield* loadMutations.pipe(Effect.result)
+        if (loaded._tag === 'Failure') return {
+          _tag: 'Refused' as const, reason: 'snapshot-unavailable' as const,
+          detail: loaded.failure.message,
+        }
+        const { makeMutations } = loaded.success
         const fractal = yield* Fractal
         const statuses = yield* SubscriptionRef.get(fractal.syncStatuses)
         let freshest: typeof Snapshot.Type | undefined
@@ -1178,7 +1183,9 @@ export const liveSource = ({
       // Same origin and transport as `client`; the gateway injects the credential and keeps the
       // capability subprotocol on the WebSocket upgrade.
       terminalRaw: {
-        open: (options) => openPtySession({ ...options, baseUrl, fetch }),
+        open: (options) => loadPty.pipe(
+          Effect.flatMap(({ openPtySession }) => openPtySession({ ...options, baseUrl, fetch })),
+        ),
       },
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({

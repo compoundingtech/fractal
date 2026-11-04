@@ -12,6 +12,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { fixtureSource } from '../data/fixtureSource.ts'
+import { SdkChunkFailure } from '../data/lazySdk.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { observed, unavailable, waiting, type Feed, type Grants } from '../data/source.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
@@ -299,6 +300,24 @@ describe('terminal detail', () => {
 })
 
 describe('raw terminal', () => {
+  it('keeps the projected screen usable after a chunk failure and retries the raw service', async () => {
+    const { opened, port } = rawSessions()
+    let failed = true
+    const lazyPort: RawTerminalPort = {
+      open: (options) => Effect.suspend(() => failed
+        ? Effect.fail(new SdkChunkFailure({ message: 'Could not load terminal services. Try again.' }))
+        : port.open(options)),
+    }
+    await mount({ terminal: observed({ value: screen }), terminalRaw: lazyPort })
+    await vi.waitFor(() => expect([...host.querySelectorAll('button')].some(button => button.textContent === 'Retry')).toBe(true))
+    expect(host.querySelector('[aria-roledescription="terminal"]')).not.toBeNull()
+    failed = false
+    await act(async () => [...host.querySelectorAll('button')].find(button => button.textContent === 'Retry')!.click())
+    await vi.waitFor(() => expect(opened.length).toBeGreaterThan(0))
+    await live(opened.at(-1)!, 'recovered prompt$ ')
+    expect(host.textContent).toContain('recovered prompt$')
+  })
+
   it('attaches to the shown incarnation, paints the replay through libghostty, and types on the same socket', async () => {
     const { opened, port } = rawSessions()
     await mount({ terminal: observed({ value: screen }), terminalRaw: port })

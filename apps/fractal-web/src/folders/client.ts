@@ -1,6 +1,6 @@
 import { FractalClient } from '@fractal/client'
 import type { ActionOf, ActionResult, Arrangement, ArrangementOperation, ArrangementPage, Capabilities, EnvelopeOf } from '@fractal/client'
-import { Schema } from 'effect'
+import { Effect, Schema } from 'effect'
 import { Arrangement as ArrangementSchema, ArrangementPage as ArrangementPageSchema, ArrangementEditParameters as ArrangementEditSchema, Capabilities as CapabilitiesSchema } from '@fractal/client/schema'
 import { formatDuration } from '@fractal/ui/human-time/format'
 const isArrangement = Schema.is(Schema.toEncoded(ArrangementSchema))
@@ -67,7 +67,8 @@ export const createFoldersClient = (gateway: ArrangementsGateway, selection: Sel
 // Generated arrangements are authoritative. FolderDoc is only the Tree's presentation shape.
 import * as Atom from 'effect/reactivity/Atom'
 import type { CollectionSocketFactory } from '@fractal/client'
-import { arrangementActions, type ArrangementActionPort } from '@fractal/sdk/mutations'
+import { loadMutations } from '../data/lazySdk.ts'
+import type { ArrangementActionPort } from './edit.ts'
 import { followArrangementInventory, readArrangementInventory, reservedSidebarSubject, sidebarCandidates, sidebarWinner, fractalInventoryGateway, type ArrangementInventoryGateway, type InventoryFollow } from '../data/arrangements.ts'
 import { emptyDoc, type FolderDoc, type Stamp } from './core.mts'
 import { createArrangementEditor, refusalText, type ArrangementEditor, type ArrangementRefusal, type EditOutcome, type SidebarOperation, type StructuralIntent } from './edit.ts'
@@ -209,7 +210,15 @@ const pageHotData = import.meta.hot?.data
 export let folders: Atom.Atom<FolderState> = pageHotData?.pageFolders ?? sidebarFolders({
   gateway: () => {
     const options = { baseUrl: globalThis.location.origin, fetchImpl: globalThis.fetch.bind(globalThis) }
-    return { ...fractalInventoryGateway(options), actions: arrangementActions(new FractalClient(options)) }
+    const client = new FractalClient(options)
+    const actions = loadMutations.pipe(Effect.map(({ arrangementActions }) => arrangementActions(client)))
+    return {
+      ...fractalInventoryGateway(options),
+      actions: {
+        snapshot: actions.pipe(Effect.flatMap((port) => port.snapshot)),
+        submitAction: (request) => actions.pipe(Effect.flatMap((port) => port.submitAction(request))),
+      },
+    }
   },
 })
 

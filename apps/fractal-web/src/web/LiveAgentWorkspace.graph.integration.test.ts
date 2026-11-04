@@ -9,6 +9,8 @@ import { storyGlobs } from '../../../../packages/fractal-ui/.storybook/stories.t
 const web = dirname(fileURLToPath(import.meta.url))
 const kit = resolve(web, '../../../../packages/fractal-ui')
 const kitPackage: { readonly exports: Readonly<Record<string, string>> } = JSON.parse(readFileSync(resolve(kit, 'package.json'), 'utf8'))
+const sdk = resolve(web, '../../../../packages/fractal-sdk')
+const sdkPackage: { readonly exports: Readonly<Record<string, string>> } = JSON.parse(readFileSync(resolve(sdk, 'package.json'), 'utf8'))
 
 /** Eager mode preserves the startup proof. Coverage mode additionally traverses
  * literal import() edges without evaluating modules or starting liveRuntime. */
@@ -55,6 +57,11 @@ const eagerGraph = (entry: string, includeLazy = false) => {
         const target = kitPackage.exports[key]
         if (target === undefined) throw new Error(`Missing kit export ${specifier}`)
         local = resolve(kit, target)
+      } else if (specifier === '@fractal/sdk' || specifier.startsWith('@fractal/sdk/')) {
+        const key = specifier === '@fractal/sdk' ? '.' : `.${specifier.slice('@fractal/sdk'.length)}`
+        const target = sdkPackage.exports[key]
+        if (target === undefined) throw new Error(`Missing SDK export ${specifier}`)
+        local = resolve(sdk, target)
       }
       if (local === undefined || ['.css', '.svg'].includes(extname(local))) continue
       const target = [local, `${local}.ts`, `${local}.tsx`, resolve(local, 'index.ts'), resolve(local, 'index.tsx')]
@@ -83,6 +90,22 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(web, 'ChangesInspector.tsx'))
     expect(graph.files).not.toContain(resolve(web, 'capturedChanges.ts'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
+  })
+
+  it('keeps SDK pty and mutations outside the eager shell while retaining their on-demand coverage', () => {
+    const entry = resolve(web, 'main.tsx')
+    const eager = eagerGraph(entry)
+    const coverage = eagerGraph(entry, true)
+    // The read surface witnesses SDK export traversal in both graph modes.
+    expect(eager.dependencies).toContain('@fractal/sdk/read')
+    expect(eager.files).toContain(resolve(sdk, 'src/effect/mod.ts'))
+    expect(coverage.files).toContain(resolve(sdk, 'src/effect/mod.ts'))
+    for (const surface of ['pty', 'mutations']) {
+      expect(eager.dependencies).not.toContain(`@fractal/sdk/${surface}`)
+      expect(eager.files).not.toContain(resolve(sdk, `src/effect/${surface}.ts`))
+      expect(coverage.dependencies).toContain(`@fractal/sdk/${surface}`)
+      expect(coverage.files).toContain(resolve(sdk, `src/effect/${surface}.ts`))
+    }
   })
 
   it('still reaches the real heavy composition through the on-demand pane', () => {

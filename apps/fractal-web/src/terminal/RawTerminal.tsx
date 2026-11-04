@@ -172,6 +172,7 @@ export interface RawTerminal {
   readonly typing: TerminalTyping | undefined
   /** A page hide stopped this ATTACH's typing; keys wait for the next focus or click. */
   readonly disarmed: boolean
+  readonly retry: () => void
 }
 
 /**
@@ -205,6 +206,7 @@ export const useRawTerminal = ({
   const binding = terminalId === undefined || incarnation === undefined ? undefined : `${terminalId}\u0000${incarnation}`
   // Each hide and return is a new epoch, so a hide and return React renders as one still reopens.
   const [page, setPage] = React.useState(() => ({ epoch: 0, hidden: document.visibilityState === 'hidden' }))
+  const [retryEpoch, retry] = React.useReducer((epoch: number) => epoch + 1, 0)
   // The binding a page hide stopped. The ref answers keys synchronously; the state re-renders the chip.
   const hiddenStop = React.useRef<string | undefined>(undefined)
   const [stoppedFor, setStoppedFor] = React.useState<string | undefined>(undefined)
@@ -273,7 +275,7 @@ export const useRawTerminal = ({
           onOutput: view.output,
           signal,
           isForegroundSelected: () => document.visibilityState === 'visible',
-        })
+        }).pipe(Effect.mapError((failure) => new RawTerminalUnprepared({ message: failure.message })))
         yield* SubscriptionRef.changes(session.state).pipe(
           Stream.runForEach((state) => Effect.sync(() => view.state(state))),
           Effect.forkScoped,
@@ -281,7 +283,7 @@ export const useRawTerminal = ({
         return { session, encoder, terminal, view } satisfies RawTerminalHandle
       }),
     ).pipe(Atom.setIdleTTL(0))
-  }, [port, terminalId, incarnation, mode, open, epoch])
+  }, [port, terminalId, incarnation, mode, open, epoch, retryEpoch])
   const result = useAtomValue(resource)
   const handle = AsyncResult.isSuccess(result) ? result.value : undefined
   const subscribe = React.useMemo(() => handle?.view.subscribe ?? unsubscribed, [handle])
@@ -315,7 +317,7 @@ export const useRawTerminal = ({
           },
           notice: stoppedFor !== undefined && stoppedFor === binding ? pageHidden : undefined,
         }
-  return { preparation, handle, snapshot, typing, disarmed: stoppedFor !== undefined && stoppedFor === binding }
+  return { preparation, handle, snapshot, typing, retry, disarmed: stoppedFor !== undefined && stoppedFor === binding }
 }
 
 const selectionInside = (element: HTMLElement | null) => {

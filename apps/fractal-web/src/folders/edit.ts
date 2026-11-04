@@ -1,8 +1,16 @@
-import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
+import type { ActionOf, ActionResult, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
 import { ArrangementEditParameters, ErrorCode, decodeUnknownSync } from '@fractal/client/schema'
-import type { ActionFailure, ArrangementActionPort } from '@fractal/sdk/mutations'
+import type { ActionFailure } from '@fractal/sdk/mutations'
+import type { SdkChunkFailure } from '../data/lazySdk.ts'
 import { Effect, Schema } from 'effect'
 import { reservedSidebarSubject, sidebarCandidates, sidebarWinner, type ArrangementInventory } from '../data/arrangements.ts'
+
+/** Loading errors are refused before submission, and the existing edit retry reacquires the chunk. */
+export interface ArrangementActionPort {
+  readonly snapshot: Effect.Effect<string, ActionFailure | SdkChunkFailure>
+  readonly submitAction: (request: ActionOf<'arrangement.edit'>) =>
+    Effect.Effect<ActionResult, ActionFailure | SdkChunkFailure>
+}
 
 /** Only folder/placement operations are user-editable: Sidebar name and retirement are not. */
 export type SidebarOperation = Extract<ArrangementOperation, { op: 'folder.create' | 'folder.rename' | 'folder.move' | 'folder.delete' | 'subject.place' }>
@@ -32,6 +40,7 @@ export interface ArrangementAttempt {
   readonly kind: 'folder' | 'agent'
 }
 export type ArrangementRefusal = {
+  readonly retryableLoad?: boolean
   readonly reason: { readonly _tag: 'Known'; readonly code: Extract<typeof ErrorCode.Type, string> } | { readonly _tag: 'Unknown'; readonly code?: string }
   readonly detail: string
   readonly targets: readonly string[]
@@ -43,7 +52,11 @@ export type ArrangementRefusal = {
   /** Fixed client copy: restaging this intent against fresh state is invalid, so retrying cannot help. */
   readonly restageRefusal?: string
 }
-export const arrangementRefusal = (failure: ActionFailure, targets: readonly string[]): ArrangementRefusal => {
+export const arrangementRefusal = (failure: ActionFailure | SdkChunkFailure, targets: readonly string[]): ArrangementRefusal => {
+  if (failure._tag === 'SdkChunkFailure') return {
+    reason: { _tag: 'Unknown' }, retryableLoad: true, detail: failure.message,
+    restageRefusal: failure.message, targets,
+  }
   if (failure._tag !== 'ActionRefused') return { reason: { _tag: 'Unknown' }, detail: failure.message, targets }
   const code = decodeUnknownSync(ErrorCode)(failure.response.code)
   return {

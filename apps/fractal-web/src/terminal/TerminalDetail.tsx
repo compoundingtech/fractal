@@ -141,6 +141,12 @@ export const TerminalDetail = React.memo(
         <Badge variant={chipVariant[chip.tone]} size="sm" role="status" data-terminal-mode={presentation._tag} data-terminal-input-path={input._tag}>
           {chip.label}
         </Badge>
+        {raw.preparation._tag === 'Unprepared' && (
+          <button type="button" onClick={() => {
+            if (current !== undefined) setPinned({ ...current, attachLost: false })
+            raw.retry()
+          }}>Retry</button>
+        )}
         {input._tag !== 'Attach' && terminal._tag === 'Observed' && (
           <TerminalResize
             key={terminal.value.runtime_incarnation}
