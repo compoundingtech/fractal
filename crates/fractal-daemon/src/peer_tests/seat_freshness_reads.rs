@@ -14,6 +14,7 @@ use tokio::sync::watch;
 
 use crate::api::message_reads::{self, Relayed};
 use crate::config::{Config, PeerConfig};
+use crate::AdhocWorkStore as _;
 use crate::model::ClaimInput;
 use crate::store::Store;
 use crate::store::message_marks;
@@ -770,9 +771,12 @@ async fn views_and_lists_read_a_relay_hosts_seat_from_it() {
     assert_eq!(read["status_from"], json!({"host": OWNER, "state": "answered"}));
     assert_eq!(read["delivery"]["phase"], "read", "{read}");
     assert_eq!(read["operational"]["layer"], "current");
-    assert!(
-        read["revision"].as_str().unwrap().starts_with("offset-receipt/"),
-        "the host's newest mark is the resource's revision, so a client sees it move: {read}"
+    let local = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
+    let local = local.iter().find(|resource| resource["id"] == "message/00000000000000c1").unwrap();
+    assert_eq!(
+        (&read["revision"], &read["updated_at"]),
+        (&local["revision"], &local["updated_at"]),
+        "a host's answer never feeds the revision, which a client takes as monotonic: {read}"
     );
     let closed = resource("message/00000000000000c2");
     assert_eq!(closed["state"], "closed");
@@ -846,5 +850,73 @@ async fn a_view_waits_a_second_for_a_silent_host_and_then_does_not_ask_it() {
         statuses(&open).into_iter().map(|(subject, _, from)| (subject, from)).collect::<Vec<_>>(),
         ["c1", "c2", "c3"].map(|name| (format!("message/00000000000000{name}"), Some("unknown".to_owned()))),
         "an unknown message stays open"
+    );
+}
+
+/// A fault's target states and a work wake read another host's seat from it, at serve time: a
+/// fault about mail the host's seat read shows it read since the host's mark, and a wake whose
+/// message the seat read there is consumed, or delivered while the seat works in the wake's
+/// incarnation. A claim still wins, and mail whose host keeps no receipts (`birch`) stays as this
+/// member's records say.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_faults_targets_and_a_wake_read_a_relay_hosts_seat_from_it() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, birch) = owner(root.path()).await;
+    send(&owner, "message/00000000000000b1", &birch);
+    send(&owner, "message/00000000000000d1", &cedar);
+    message_marks::record(&owner, "message/00000000000000d1", "message.delivered", &cedar).unwrap();
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer
+        .import_replication(OWNER, &owner.export_replication(0).unwrap())
+        .unwrap();
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+
+    let mut items = vec![json!({"id": "attention/fault", "target_states": [
+        {"id": "message/00000000000000c1", "state": "sent", "since": "2026-01-01T00:00:00Z"},
+        {"id": "message/00000000000000b1", "state": "sent"},
+        {"id": "mission-run/example", "state": "running"},
+    ]})];
+    crate::api::relay_attention_target_states(&state, &mut items).await.unwrap();
+    let states = &items[0]["target_states"];
+    assert_eq!(states[0]["state"], "read", "{states}");
+    assert_ne!(states[0]["since"], "2026-01-01T00:00:00Z", "the host's mark is its since: {states}");
+    assert_eq!(states[1], json!({"id": "message/00000000000000b1", "state": "sent"}));
+    assert_eq!(states[2], json!({"id": "mission-run/example", "state": "running"}));
+
+    let worker = declare(&viewer, "viewer-seat", VIEWER);
+    let step = viewer
+        .start_work(&crate::model::WorkStartRequest {
+            actor: worker,
+            title: "Inspect a fixture".into(),
+            idempotency_key: "wake-step".into(),
+        })
+        .unwrap();
+    let wake = |message: &str, acknowledged_by: Option<&str>, delivery_acknowledges: bool| {
+        let mut step = step.clone();
+        step.wake = Some(crate::model::WorkWakeView {
+            assignee: cedar.clone(),
+            assignee_state: "working".into(),
+            incarnation_id: "incarnation".into(),
+            attempts: 1,
+            last_attempt_at_unix_ms: None,
+            acknowledged_by: acknowledged_by.map(str::to_owned),
+            failure: None,
+            asks: crate::model::WakeAsks { messages: vec![message.into()], delivery_acknowledges },
+        });
+        step
+    };
+    let mut steps = [
+        wake("message/00000000000000c1", None, false),
+        wake("message/00000000000000c1", Some("turn"), true),
+        wake("message/00000000000000c1", Some("claim"), true),
+        wake("message/00000000000000d1", None, true),
+        wake("message/00000000000000d1", None, false),
+        wake("message/00000000000000b1", Some("turn"), true),
+    ];
+    steps[5].wake.as_mut().unwrap().assignee = birch.clone();
+    crate::api::message_reads::read_work_wakes(&state, steps.iter_mut()).await.unwrap();
+    assert_eq!(
+        steps.iter().map(|step| step.wake.as_ref().unwrap().acknowledged_by.as_deref()).collect::<Vec<_>>(),
+        [Some("consumed"), Some("consumed"), Some("claim"), Some("delivery"), None, Some("turn")]
     );
 }
