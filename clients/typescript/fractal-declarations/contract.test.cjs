@@ -40,6 +40,12 @@ test('the st validate daily review uses object references and matches the canoni
     assert.equal(encodeKdl({ agents: [editor, writer], missions: [mission], schedules: [schedule] }), expected);
 });
 
+test('the runnable TypeScript example matches the Rust-validated golden fixture', () => {
+    const { execFileSync } = require('node:child_process');
+    const rendered = execFileSync(process.execPath, [path.join(__dirname, 'examples/render.cjs')], { encoding: 'utf8' });
+    assert.equal(rendered, fs.readFileSync(path.join(__dirname, 'fixtures/daily-review.kdl'), 'utf8'));
+});
+
 test('dotted and slash-qualified agent identities match the canonical golden without a host guess', () => {
     const dotted = { ...editor, id: 'remote.editor' };
     const expected = fs.readFileSync(path.join(__dirname, 'fixtures/daily-review.kdl'), 'utf8')
