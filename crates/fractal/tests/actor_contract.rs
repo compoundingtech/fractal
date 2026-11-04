@@ -5,6 +5,7 @@ fn command(home: &std::path::Path) -> Command {
     command
         .env_remove("ST_INSTANCE")
         .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_STATE_HOME", home.join("state"));
@@ -29,7 +30,7 @@ fn actor_contract_prints_without_daemon_or_config() {
     assert_eq!(value["contract"]["kind"], "st3.actor-contract.v1");
     assert_eq!(
         value["contract"]["commands"]["st actor-contract"]["actor"],
-        "none"
+        "optional"
     );
     assert!(value.get("effective").is_none());
     assert!(!home.path().join("config").exists());
@@ -51,12 +52,13 @@ fn actor_contract_prints_without_daemon_or_config() {
         serde_json::from_slice::<serde_json::Value>(&static_with_invalid_config.stdout).unwrap(),
         value
     );
-    let refused = command(home.path())
-        .args(["actor-contract", "--as", "person/operator"])
+    let attributed = command(home.path())
+        .args(["actor-contract", "--as", "person/operator", "--json"])
         .output()
         .unwrap();
-    assert_eq!(refused.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("--as"));
+    assert!(attributed.status.success());
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&attributed.stdout).unwrap(), value);
+    assert!(String::from_utf8_lossy(&attributed.stderr).contains("read attribution: actor=person/operator"));
 }
 
 #[test]
