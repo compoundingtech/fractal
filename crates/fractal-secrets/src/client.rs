@@ -26,11 +26,21 @@ use crate::model::{
 #[derive(Clone, Debug)]
 pub enum Endpoint {
     Unix(PathBuf),
+    DiscoveredUnix(fractal_client::UnixSocketDiscovery),
     Http(String),
     Fabric(FabricEndpoint),
 }
 
 impl Endpoint {
+    /// Resolve discovery at use time; explicit Unix endpoints remain exact.
+    pub fn unix_socket(&self) -> Option<std::borrow::Cow<'_, Path>> {
+        match self {
+            Self::Unix(path) | Self::DiscoveredUnix(fractal_client::UnixSocketDiscovery::Explicit(path)) =>
+                Some(std::borrow::Cow::Borrowed(path)),
+            Self::DiscoveredUnix(discovery) => Some(std::borrow::Cow::Owned(discovery.resolve())),
+            Self::Http(_) | Self::Fabric(_) => None,
+        }
+    }
     pub fn parse(value: impl AsRef<str>) -> Result<Self> {
         let value = value.as_ref();
         if value.starts_with("fabric:") {
@@ -454,6 +464,12 @@ impl Client {
         }
     }
 
+    /// Preserve an endpoint's discovery identity when adding local authority.
+    pub fn with_endpoint(mut self, endpoint: Endpoint) -> Self {
+        self.endpoint = endpoint;
+        self
+    }
+
     /// Keep retrying for up to `wait` while the daemon is unreachable. Only requests that are
     /// safe to repeat are retried: any request that never reached the daemon, and reads.
     /// With `announce`, one line on stderr says what is happening while it waits.
@@ -511,12 +527,9 @@ impl Client {
         Self::new(Endpoint::Unix(path.into()))
     }
 
-    /// The daemon's Unix socket, when this client talks to one.
-    pub fn socket_path(&self) -> Option<&std::path::Path> {
-        match &self.endpoint {
-            Endpoint::Unix(path) => Some(path),
-            Endpoint::Http(_) | Endpoint::Fabric(_) => None,
-        }
+    /// A current Unix socket snapshot. Request clients retain the endpoint's discovery identity.
+    pub fn socket_path(&self) -> Option<std::borrow::Cow<'_, Path>> {
+        self.endpoint.unix_socket()
     }
 
     /// Name the concrete human authority carried over the trusted Unix boundary.
@@ -578,7 +591,7 @@ impl Client {
         &self,
         request: &fractal_schema::deploy::VerifyGoRequest,
     ) -> Result<fractal_schema::deploy::VerifyGoReceipt> {
-        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+        if !matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
             return Err(crate::model::St3Error::new(
                 "deploy-local-only",
                 "deploy verification requires the local Unix endpoint",
@@ -741,9 +754,10 @@ impl Client {
         }
         let deadline = request_deadline(path, self.deadlines);
         let response = match &self.endpoint {
-            Endpoint::Unix(socket) => {
+            Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => {
+                let socket = self.endpoint.unix_socket().expect("Unix endpoint");
                 unix_request(
-                    socket,
+                    &socket,
                     method,
                     path,
                     bytes,
@@ -814,7 +828,7 @@ impl Client {
     /// read without any graph write. `None` leaves the attach to the WebSocket: an HTTP endpoint
     /// can be another host, and a daemon from before direct attachment has no such route.
     pub async fn local_terminal(&self, subject: &str) -> Result<Option<LocalTerminal>> {
-        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+        if !matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
             return Ok(None);
         }
         match self
@@ -898,10 +912,9 @@ impl Client {
         &self,
         fence: &Fence,
     ) -> Result<tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>> {
-        let Endpoint::Unix(path) = &self.endpoint else {
-            anyhow::bail!("native mailbox subscriptions require a local Unix socket");
-        };
-        let stream = tokio::net::UnixStream::connect(path).await?;
+        let path = self.endpoint.unix_socket()
+            .context("native mailbox subscriptions require a local Unix socket")?;
+        let stream = tokio::net::UnixStream::connect(path.as_ref()).await?;
         let url = format!(
             "ws://localhost/v1/mailbox?subject={}&incarnation={}&component={}&epoch={}&token={}",
             urlencoding::encode(&fence.subject),
@@ -930,11 +943,12 @@ impl Client {
             Endpoint::Fabric(_) => {
                 anyhow::bail!("native Fabric endpoints do not support WebSocket requests");
             }
-            Endpoint::Unix(socket) => {
+            Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => {
+                let socket = self.endpoint.unix_socket().expect("Unix endpoint");
                 let endpoint = socket.display().to_string();
                 let stream = tokio::time::timeout(
                     self.deadlines.connect,
-                    tokio::net::UnixStream::connect(socket),
+                    tokio::net::UnixStream::connect(socket.as_ref()),
                 )
                 .await
                 .map_err(|_| connect_deadline_error(&endpoint, self.deadlines.connect))?
@@ -2559,6 +2573,44 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("was not reachable for 0s"), "{message}");
         assert!(message.contains("Nothing was sent"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn default_discovery_retries_a_legacy_daemon_restored_during_the_wait() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let directory = tempfile::tempdir().unwrap();
+        let primary = directory.path().join("fractal.sock");
+        let legacy = directory.path().join("st3.sock");
+        let discovery = fractal_client::UnixSocketDiscovery::Defaults {
+            runtime: primary.clone(),
+            published: primary.clone(),
+        };
+        assert_eq!(discovery.resolve(), primary);
+        let client = Client::new(Endpoint::DiscoveredUnix(discovery))
+            .with_outage_wait(Duration::from_secs(2), false);
+        let request = tokio::spawn(async move { client.get::<usize>("/v1/test").await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let listener = UnixListener::bind(&legacy).unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                if stream.read(&mut bytes).await.unwrap() == 0 {
+                    continue; // Discovery probes do not issue an HTTP request.
+                }
+                let body = r#"{"api_version":"st3.v1","value":42}"#;
+                stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                ).as_bytes()).await.unwrap();
+                break;
+            }
+        });
+        assert_eq!(request.await.unwrap().unwrap(), 42);
+        server.await.unwrap();
+        assert!(!primary.exists());
+        assert!(Client::unix(primary).with_outage_wait(Duration::from_millis(50), false)
+            .get::<usize>("/v1/test").await.is_err());
     }
 
     #[tokio::test]
