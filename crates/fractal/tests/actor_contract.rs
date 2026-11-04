@@ -143,3 +143,28 @@ fn actor_contract_effective_uses_selected_instance() {
             .unwrap()
     );
 }
+
+#[test]
+fn offline_proof_verify_attributes_before_reading_and_rejects_foreign_actor() {
+    let home = tempfile::tempdir().unwrap();
+    for family in ["agents", "missions"] {
+        for actor in ["agent/reader", "agent/other", "person/operator"] {
+            let output = command(home.path())
+                .env("ST_AGENT", "agent/reader")
+                .args([family, "rename-id", "proof", "verify", "--as", actor,
+                    "missing.json", "--fleet-anchor", "anchor"])
+                .output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if actor == "agent/reader" {
+                assert_eq!(output.status.code(), Some(6));
+                assert!(stderr.contains("read attribution: actor=agent/reader"));
+                assert!(!output.stdout.is_empty());
+            } else {
+                assert_eq!(output.status.code(), Some(1));
+                assert!(stderr.contains("actor flag must equal ST_AGENT literally"));
+                assert!(output.stdout.is_empty());
+            }
+        }
+    }
+    assert!(!home.path().join("config").exists());
+}
