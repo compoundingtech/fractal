@@ -67,9 +67,9 @@ const Usage = ({ source, label }: { readonly source: ObjectivesSource; readonly 
                   const expanded = open === row.id
                   return (
                     <li key={row.id} data-slo={row.id} data-tone={tone}>
-                      <Aria.Button aria-expanded={expanded} onPress={() => setOpen(expanded ? undefined : row.id)} {...stylex.props(styles.row)}>
+                      <Aria.Button aria-label={row.about ?? row.id} aria-expanded={expanded} onPress={() => setOpen(expanded ? undefined : row.id)} {...stylex.props(styles.row)}>
                         <span aria-hidden="true" {...stylex.props(styles.dot, tones[tone])}>●</span>
-                        <span {...stylex.props(styles.name)}>{row.account === undefined ? row.id : `${row.id} · ${row.account}`}</span>
+                        <span {...stylex.props(styles.name)}>{row.about ?? row.id}</span>
                         <span {...stylex.props(styles.left, tones[tone])}>{leftText(row)}</span>
                         <span {...stylex.props(styles.second)}>{line.text}{line.forecast ? <span {...stylex.props(line.forecast.runsOut && tones.yellow)}>{line.forecast.short}</span> : null}</span>
                       </Aria.Button>
@@ -109,7 +109,7 @@ const Detail = ({ row, source, now }: { readonly row: Native.SloRow; readonly so
   const forecast = forecastOf(row, now)
   const resets = Option.getOrUndefined(row.resets_at_unix_ms)
   const fields: ReadonlyArray<readonly [string, string | undefined]> = [
-    ['status', row.status], ['about', row.about], ['target', row.target], ['current', row.current], ['window', row.window], ['account', row.account],
+    ['id', row.id], ['status', row.status], ['about', row.about], ['target', row.target], ['current', row.current], ['window', row.window], ['account', row.account],
     ['resets', resets === undefined ? undefined : resets > now ? `in ${spanText(resets - now)}` : 'now'],
     // The phone's basis wording: whole days from a day, else whole hours.
     ['forecast', forecast ? `${forecast.long}${row.forecast_basis_minutes === undefined ? '' : ` (from the last ${row.forecast_basis_minutes >= 1440 ? `${Math.floor(row.forecast_basis_minutes / 1440)}d` : `${Math.floor(row.forecast_basis_minutes / 60)}h`})`}` : undefined],

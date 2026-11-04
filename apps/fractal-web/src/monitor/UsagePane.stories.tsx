@@ -75,7 +75,8 @@ export const Populated: Story = {
     expect(link.getAttribute('href')).toBe('https://otel.example.com/explore?service=fractal')
     expect(link.getAttribute('target')).toBe('_blank')
     expect(link.getAttribute('rel')).toBe('noopener noreferrer')
-    const row = usage.getByRole('button', { name: /^ada-claude\/5-hour/ })
+    const row = usage.getByRole('button', { name: 'ada/claude-max 5-hour limit', exact: true })
+    await expect(within(row).getByText('ada/claude-max 5-hour limit')).toBeVisible()
     await userEvent.click(row)
     expect(row.getAttribute('aria-expanded')).toBe('true')
     await expect(usage.getByText('runs out in 41m, before it resets (from the last 1h)')).toBeVisible()
@@ -85,7 +86,7 @@ export const Populated: Story = {
     expect(chart.slice(20, 24)).toBe('····')
     await expect(usage.getByText(/low 38% · latest 38% · 1320 readings · a column is its lowest reading · a dot had no reading/)).toBeVisible()
     // One row open at a time; a row with no readings says so instead of drawing zero.
-    await userEvent.click(usage.getByRole('button', { name: /^vista-publish/ }))
+    await userEvent.click(usage.getByRole('button', { name: 'Vista publications land', exact: true }))
     expect(row.getAttribute('aria-expanded')).toBe('false')
     await expect(usage.getByText('No readings in this period yet.')).toBeVisible()
     await expect(usage.getByText('error budget left, last 24 hours')).toBeVisible()
