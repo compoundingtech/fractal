@@ -330,8 +330,16 @@ fn operation_processes(owner_uid: u32, operation: &str, id: &str, scopes: &BTree
 
 #[cfg(target_os = "linux")]
 fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str, id: &str, scopes: &BTreeSet<String>) -> Result<Vec<u32>> {
+    operation_processes_with_visibility(proc_root, owner_uid, operation, id, scopes, require_complete_procfs())
+}
+
+#[cfg(target_os = "linux")]
+fn operation_processes_with_visibility(
+    proc_root: &Path, owner_uid: u32, operation: &str, id: &str, scopes: &BTreeSet<String>,
+    visibility: std::result::Result<(), ProcfsHidesProcesses>,
+) -> Result<Vec<u32>> {
     use std::os::unix::fs::MetadataExt as _;
-    require_complete_procfs()?;
+    visibility?;
     let mut matching = BTreeSet::new();
     let safe = crate::isolate::sanitize(id);
     for entry in std::fs::read_dir(proc_root).context("enumerate legacy operation processes")? {
@@ -568,12 +576,12 @@ mod tests {
         let scopes = BTreeSet::from([crate::scope_unit("st3", id)]);
         assert!(!scopes.contains(&unit));
         let mut evidence = closed();
-        evidence.operation_pids = operation_processes_in(root.path(), uid, "op", id, &scopes).unwrap();
+        evidence.operation_pids = operation_processes_with_visibility(root.path(), uid, "op", id, &scopes, Ok(())).unwrap();
         assert_eq!(evidence.operation_pids, vec![123]);
         assert!(!positive(&evidence));
         std::fs::remove_file(process.join("environ")).unwrap();
         std::fs::create_dir(process.join("environ")).unwrap();
-        let error = operation_processes_in(root.path(), uid, "op", id, &scopes).unwrap_err();
+        let error = operation_processes_with_visibility(root.path(), uid, "op", id, &scopes, Ok(())).unwrap_err();
         let refusal = error.downcast_ref::<LegacyStartProofUnavailable>().unwrap();
         assert_eq!((refusal.stage, refusal.pid), ("proc-environ", Some(123)));
     }
@@ -592,17 +600,30 @@ mod tests {
         for unit in ["session-1.scope", "user@1000.service", "sd-pam.service",
             "st3-pty-server-repo.worker-2-42.scope"] {
             std::fs::write(process.join("cgroup"), format!("0::/user.slice/{unit}\n")).unwrap();
-            assert!(operation_processes_in(root.path(), uid, "op", "repo.worker", &BTreeSet::new()).unwrap().is_empty());
+            assert!(operation_processes_with_visibility(root.path(), uid, "op", "repo.worker", &BTreeSet::new(), Ok(())).unwrap().is_empty());
         }
         for unit in [crate::scope_unit("st3", "repo.worker"),
             crate::server_unit("repo.worker", 42), "recorded.scope".into()] {
             std::fs::write(process.join("cgroup"), format!("0::/user.slice/{unit}/nested\n")).unwrap();
             let scopes = BTreeSet::from(["recorded.scope".into()]);
-            let error = operation_processes_in(root.path(), uid, "op", "repo.worker", &scopes).unwrap_err();
+            let error = operation_processes_with_visibility(root.path(), uid, "op", "repo.worker", &scopes, Ok(())).unwrap_err();
             let refusal = error.downcast_ref::<LegacyStartProofUnavailable>().unwrap();
             assert_eq!(refusal.stage, "proc-environ");
             assert_eq!(refusal.pid, Some(123));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hidden_procfs_refuses_before_scanning_candidates() {
+        let visibility = validate_procfs_mount(Ok(
+            "42 1 0:1 / /proc rw - proc proc rw,hidepid=invisible\n".into()), 42);
+        let root = tempfile::tempdir().unwrap();
+        let error = operation_processes_with_visibility(
+            root.path(), 1000, "op", "repo.worker", &BTreeSet::new(), visibility).unwrap_err();
+        let refusal = error.downcast_ref::<ProcfsHidesProcesses>().unwrap();
+        assert_eq!(refusal.detail, "procfs-hides-processes");
+        assert_eq!(refusal.mount_options.as_deref(), Some("rw;rw,hidepid=invisible"));
     }
 
     #[cfg(target_os = "linux")]
