@@ -319,6 +319,12 @@ pub(super) async fn run_work(
                 };
                 let driver_held = claim_has_driver(client, work.claimant.as_deref(), work.claim_incarnation.as_deref()).await;
                 print!("{}", render_client_work_detail(work, driver_held));
+                if work.claim_expires_at_unix_ms.is_some() {
+                    let step: StepRunView = client
+                        .get(&format!("/v1/work-items/{}", urlencoding::encode(&normalized)))
+                        .await?;
+                    print!("{}", render_wait_lease(&step, current_unix_ms()?, driver_held));
+                }
                 Ok(())
             }
         }
@@ -375,6 +381,8 @@ pub(super) async fn run_work(
                 print_value(&response, true)
             } else {
                 println!("{}\t{}", response.status, response.subject);
+                let driver_held = claim_has_driver(client, response.claimant.as_deref(), response.claim_incarnation.as_deref()).await;
+                print!("{}", render_wait_lease(&response, current_unix_ms()?, driver_held));
                 Ok(())
             }
         }
@@ -711,6 +719,50 @@ async fn post_work(
             println!("{}\t{}", response.status, response.subject);
         }
         Ok(())
+    }
+}
+
+fn render_wait_lease(step: &StepRunView, now: u128, driver_held: Option<bool>) -> String {
+    let budget = u128::from(fractal_daemon::store::MAX_STEP_WAIT_MS);
+    let mut output = format!(
+        "Wait budget: {} used of {} · {} left\n",
+        fractal_daemon::store::format_wait_span(step.execution_waited_ms),
+        fractal_daemon::store::format_wait_span(budget),
+        fractal_daemon::store::format_wait_span(budget.saturating_sub(step.execution_waited_ms)),
+    );
+    if let Some(expires) = step.claim_expires_at_unix_ms {
+        let expiry = i64::try_from(expires).ok()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map_or_else(|| format!("{expires}ms since Unix epoch"),
+                |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        output.push_str(&format!("Lease deadline: {expiry} ({} seconds left). {}\n",
+            expires.saturating_sub(now) / 1000,
+            render_claim_lease(&step.subject, step.claimant.as_deref(),
+                step.claim_incarnation.as_deref(), expires, driver_held)));
+    }
+    output
+}
+
+#[cfg(test)]
+mod wait_lease_tests {
+    use super::*;
+
+    #[test]
+    fn wait_and_show_report_separate_wait_budget_and_lease_deadline() {
+        let step: StepRunView = serde_json::from_value(json!({
+            "subject":"step-run/test/work", "run":"mission-run/test",
+            "generation":"run-generation/test", "step":"work", "definition_hash":"test",
+            "status":"working", "attempt":1, "agentless":false, "worker_reported":false,
+            "claimant":"agent/test", "claim_incarnation":"live", "readiness_epoch":1,
+            "claim_expires_at_unix_ms":600000, "execution_waited_ms":120000,
+            "execution_paused_until_unix_ms":1920000,
+            "created_at_unix_ms":0, "updated_at_unix_ms":0
+        })).unwrap();
+        let rendered = render_wait_lease(&step, 120000, Some(true));
+        assert!(rendered.starts_with("Wait budget: "));
+        assert!(rendered.contains("Lease deadline: 1970-01-01T00:10:00Z (480 seconds left). The Fractal driver renews the lease"));
+        assert!(!rendered.contains("fractal work renew"));
+        assert!(render_wait_lease(&step, 700000, None).contains("(0 seconds left)"));
     }
 }
 
