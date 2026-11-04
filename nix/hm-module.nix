@@ -150,7 +150,7 @@ let
       printf '%s\n' "$status" | ${pkgs.gnugrep}/bin/grep -Eq '^ActiveState=(inactive|failed)$' || exit 1
     done
   '' else ''
-    if [ -e ${lib.escapeShellArg "${config.xdg.configHome}/.fractal-host-cutover.json"} ]; then
+    if [ -e ${lib.escapeShellArg "${config.xdg.configHome}/.fractal-host-cutover.json"} ] || [ ${lib.escapeShellArg (if completed then "completed" else "stage")} = stage ]; then
       ${resolveDomain}
     else
       # Fresh completed installs have no migration journal; preserve their existing guard.
