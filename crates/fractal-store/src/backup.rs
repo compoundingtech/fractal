@@ -28,9 +28,9 @@ pub async fn create(endpoint: &Endpoint, destination: &Path) -> Result<()> {
     let temporary = tempfile::NamedTempFile::new_in(directory)?;
     let mut output = tokio::fs::File::from_std(temporary.reopen()?);
     let (client, url) = match endpoint {
-        Endpoint::Unix(socket) => (
+        Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => (
             reqwest::Client::builder()
-                .unix_socket(socket.as_path())
+                .unix_socket(endpoint.unix_socket().expect("Unix endpoint").as_ref())
                 .build()?,
             "http://localhost/v1/backup".to_owned(),
         ),
