@@ -6,6 +6,6 @@
   "rules": { "status": "changed", "detail": "Home Manager staging and --stage-fractal share migration domain discovery. Missing, ambiguous and split ownership fail closed before staging mutations. Home Manager refuses a configured domain change during the rename and retains staged session properties." },
   "compatibility": { "status": "changed", "detail": "Completed migration guards use the recorded domain. Journals without launchd_domain refuse with the existing typed recovery error. Fresh completed installations without a journal retain their existing guard behavior. General lifecycle and app-installer staging remain outside this support." },
   "downtime": { "status": "none", "detail": "Staging never starts, stops or loads jobs; host cutover remains separate." },
-  "manual": { "status": "required", "detail": "Keep Home Manager agent domains aligned with the loaded legacy daemon; inspect with fractal migrate launchd-domain before staging. Do not change domains during the rename." },
+  "manual": { "status": "changed", "detail": "Keep Home Manager agent domains aligned with the loaded legacy daemon; inspect with fractal migrate launchd-domain before staging. Do not change domains during the rename." },
   "recovery": { "status": "none", "detail": "No migration or activation is performed by this update. Existing host migration rollback remains journal-bound." }
 }

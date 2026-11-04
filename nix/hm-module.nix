@@ -124,7 +124,7 @@ let
     done
   '';
   hmDomain = config.launchd.agents.${if completed then "fractal" else "smalltalk"}.domain or "gui";
-  domainQuery = "${if externallyManaged then cfg.binary.path else "${effectivePackage}/bin/fractal"} migrate launchd-domain";
+  domainQuery = lib.escapeShellArgs [ (if externallyManaged then cfg.binary.path else "${effectivePackage}/bin/fractal") "migrate" "launchd-domain" ];
   resolveDomain = ''
     domain=$(${domainQuery}) || exit 1
     [ "$domain" = "${hmDomain}/$(id -u)" ] || {
