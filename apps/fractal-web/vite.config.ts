@@ -7,10 +7,12 @@ import { extensionBuild } from './scripts/extensions-build.mjs'
 import { fractalContentSecurityPolicy } from './scripts/vite-csp.mjs'
 import { fractalCssAssets } from './scripts/vite-css-assets.mjs'
 import { fractalDevReplay } from './scripts/vite-replay.mjs'
+import { pierreLanguagesPlugin } from '../../packages/fractal-ui/scripts/pierre-languages.mjs'
 
 export default defineConfig({
   root: 'src/web',
   plugins: [
+    pierreLanguagesPlugin(),
     fractalContentSecurityPolicy(),
     fractalDevReplay(),
     {

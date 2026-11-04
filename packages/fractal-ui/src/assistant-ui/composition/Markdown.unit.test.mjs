@@ -3,6 +3,9 @@ import { after, test } from 'node:test'
 import { createServer } from 'vite'
 import stylex from '@stylexjs/unplugin'
 
+import { readFile } from 'node:fs/promises'
+import { generatedLanguages, output } from '../../../scripts/pierre-languages.mjs'
+
 // Load the real TSX with the kit's StyleX transform, just as Storybook does.
 const server = await createServer({
   configFile: false,
@@ -13,6 +16,9 @@ const server = await createServer({
 })
 after(() => server.close())
 const { completeStreamingTail } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
+test('generated Pierre IDs and aliases match the installed package', async () => {
+  assert.equal(await readFile(output, 'utf8'), await generatedLanguages())
+})
 
 // This thread's CPU time, not wall time: a niced test on a busy host waits for a core, and that wait is not the
 // function's cost. Linear completion of this input takes a few milliseconds; a scan that restarts at every bracket
