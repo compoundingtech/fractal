@@ -1657,6 +1657,8 @@
         "current_steps": { "type": "array", "items": { "type": "object", "required": ["id", "title", "state", "since"], "properties": { "id": { "$ref": "#/$defs/StepRunId" }, "title": { "type": ["string", "null"] }, "assignee": { "oneOf": [{ "$ref": "#/$defs/ActorRef" }, { "type": "null" }] }, "claimant": { "oneOf": [{ "$ref": "#/$defs/ActorRef" }, { "type": "null" }] }, "state": { "$ref": "#/$defs/WorkState" }, "since": { "$ref": "#/$defs/Timestamp" }, "progress_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." } } } },
         "must_act": {"$ref": "#/$defs/MustAct"},
         "state_since": { "$ref": "#/$defs/Timestamp" },
+        "started_at": { "type": ["integer", "null"], "minimum": 0, "description": "Run creation, in Unix milliseconds." },
+        "completed_at": { "type": ["integer", "null"], "minimum": 0, "description": "First terminal transition, in Unix milliseconds; unaffected by outcome edits." },
         "outcome": { "oneOf": [{ "$ref": "#/$defs/MissionRunOutcome" }, { "type": "null" }], "description": "The outcome a person or an authorized agent set after the run finished." },
         "last_progress": { "type": ["string", "null"] },
         "blocker": { "type": ["object", "null"] },
@@ -1798,6 +1800,8 @@
       "type": "object",
       "required": ["id", "path", "state", "attempt", "since"],
       "properties": {
+        "started_at": { "type": ["integer", "null"], "minimum": 0, "description": "First execution opening of the selected attempt, in Unix milliseconds." },
+        "completed_at": { "type": ["integer", "null"], "minimum": 0, "description": "Authoritative terminal transition of the selected attempt, in Unix milliseconds." },
         "id": { "$ref": "#/$defs/Id" },
         "path": { "type": "string" },
         "title": { "type": ["string", "null"] },

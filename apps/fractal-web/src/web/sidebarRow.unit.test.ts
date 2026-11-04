@@ -248,6 +248,7 @@ describe('retained mission row context', () => {
   const run: MissionRunSummary = {
     id: work.runId, requester: 'agent/example-worker', status: 'running', phase: 'working',
     state_since: mission.updated_at, progress: { done: 2, total: 5 }, current_steps: [],
+    started_at: Option.none(), completed_at: Option.none(),
     after: Option.none(), blocker: Option.none(), deadline: Option.none(),
     last_progress: Option.none(), outcome: Option.none(), steps: Option.none(), must_act: 'agent',
   }
