@@ -65,11 +65,25 @@ it('contains a rejected grammar import to plain code and retries on a later tran
     expect(transcript.textContent).toContain('Readable answer.')
     expect(code.textContent).toBe('const answer = 42\n')
     expect(code.querySelector('[data-syntax-token]')).toBeNull()
-    vi.doMock('../../../../packages/fractal-ui/src/assistant-ui/composition/syntaxGrammar', async importOriginal => importOriginal())
+    const retryReady = Promise.withResolvers<void>()
+    const retryImported = Promise.withResolvers<void>()
+    vi.doMock('../../../../packages/fractal-ui/src/assistant-ui/composition/syntaxGrammar', async importOriginal => {
+      await retryReady.promise
+      const grammar = await importOriginal()
+      retryImported.resolve()
+      return grammar
+    })
     await show('const answer = 43')
     expect(container.querySelector('[data-testid="transcript-scroll"]')).toBe(transcript)
     expect(container.querySelector('textarea')).toBe(composer)
     await act(async () => { await vi.dynamicImportSettled() })
+    // Import settlement does not await an async mock factory. Keep it pending to
+    // prove the transcript remains readable, then await the actual grammar load.
+    expect(code.querySelector('[data-syntax-token]')).toBeNull()
+    await act(async () => {
+      retryReady.resolve()
+      await retryImported.promise
+    })
     expect(document.activeElement).toBe(composer)
     expect(code.textContent).toBe('const answer = 43\n')
     expect(code.querySelector('[data-syntax-token="keyword"]')?.textContent).toBe('const')

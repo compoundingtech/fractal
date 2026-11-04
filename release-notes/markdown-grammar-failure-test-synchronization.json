@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make the Markdown grammar failure integration test await its async mock factory before asserting highlighted tokens",
+  "replay": {"status": "none", "detail": "Test-only synchronization change."},
+  "schema": {"status": "none", "detail": "No wire or storage schema changes."},
+  "rules": {"status": "none", "detail": "No production rules change."},
+  "compatibility": {"status": "none", "detail": "No application behavior or compatibility changes."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent data or recovery changes."}
+}
