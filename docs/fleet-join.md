@@ -204,6 +204,10 @@ Pass `--as` to attribute the recorded announcement to a person or agent, includi
 preference changes that leave exposure unchanged. Agent callers must pass their
 own literal identity immediately after `add`, `remove`, or `prefer`; borrowing a
 different actor or omitting the actor fails closed before local settings change.
+Attributed commands authorize through the public transport endpoint before local
+effects and publish before saving settings, so a refusal leaves `fleet.toml`
+unchanged. Each change carries one mutation ID; replaying its publication does
+not append a second event. Automatic worker announcements use the internal route.
 
 Adding Fabric requires a listening member with a configured replication port and a working
 local `fabric` command. Use `st fleet mode listening` first for a dial-out member. Add exposes

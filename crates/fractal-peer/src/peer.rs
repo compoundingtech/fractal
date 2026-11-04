@@ -1977,7 +1977,6 @@ impl Backend for MainBackend {
                 &crate::model::FleetEndpointsRequest {
                     mode: mode.into(),
                     endpoints: endpoints.to_vec(),
-                    actor: None,
                 },
             )
             .await?;

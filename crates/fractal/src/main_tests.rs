@@ -27,6 +27,27 @@ fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
     }
 }
 
+#[tokio::test]
+async fn refused_transport_publication_does_not_save_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let config = Config { state_dir: root.path().into(), ..Config::default() };
+    let mut file = fractal_daemon::config::FleetFile::default();
+    file.save(root.path()).unwrap();
+    let path = fractal_daemon::config::FleetFile::path(root.path());
+    let before = fs::read(&path).unwrap();
+    file.transports.push("fabric".into());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::new(Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+    let app = axum::Router::new().route("/v1/fleet/transports",
+        axum::routing::post(|| async { axum::http::StatusCode::UNPROCESSABLE_ENTITY }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    assert!(save_and_publish_fleet_settings(
+        &client, &config, &file, vec![], Some(("agent/example", "transport-test")),
+    ).await.is_err());
+    assert_eq!(fs::read(path).unwrap(), before);
+    server.abort();
+}
+
 use super::*;
 
 #[test]

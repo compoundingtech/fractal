@@ -1102,7 +1102,7 @@ async fn save_and_publish_fleet_settings(
     config: &Config,
     file: &fractal_daemon::config::FleetFile,
     mut endpoints: Vec<Value>,
-    actor: Option<&str>,
+    attribution: Option<(&str, &str)>,
 ) -> Result<()> {
     if file.mode == fractal_daemon::config::FleetMode::DialOut {
         endpoints.clear();
@@ -1120,18 +1120,17 @@ async fn save_and_publish_fleet_settings(
             _ => false,
         });
     }
+    let announcement = json!({"mode": file.mode.as_str(), "endpoints": endpoints});
+    let published: Result<Value> = if let Some((actor, mutation_id)) = attribution {
+        let mut change = announcement;
+        change["actor"] = json!(actor);
+        change["mutation_id"] = json!(mutation_id);
+        client.post("/v1/fleet/transports", &change).await
+    } else {
+        client.post("/v1/internal/fleet/endpoints", &announcement).await
+    };
+    published.context("endpoint publication did not complete; fleet.toml is unchanged")?;
     file.save(&config.state_dir)?;
-    let _: Value = client
-        .post(
-            "/v1/internal/fleet/endpoints",
-            &fractal_daemon::api::FleetEndpointsRequest {
-                mode: file.mode.as_str().into(),
-                endpoints,
-                actor: actor.map(str::to_owned),
-            },
-        )
-        .await
-        .context("fleet.toml saved; endpoint publication did not complete; restart fractal daemon and fractal replication-worker to apply saved relay settings and announce the saved endpoints")?;
     Ok(())
 }
 
@@ -1156,6 +1155,14 @@ async fn run_fleet_transports(
         | FleetTransportsCommand::Remove { actor, .. }
         | FleetTransportsCommand::Prefer { actor, .. } => actor.take(),
     };
+    let mutation_id = actor.as_ref().map(|_| format!("fleet-transports:{}", uuid::Uuid::now_v7()));
+    let attribution = actor.as_deref().zip(mutation_id.as_deref());
+    if let Some((actor, mutation_id)) = attribution {
+        let _: Value = client.post("/v1/fleet/transports", &json!({
+            "actor": actor, "mutation_id": mutation_id, "dry_run": true,
+            "mode": "dial-out", "endpoints": [],
+        })).await?;
+    }
     let lock = lock_fleet_settings(&config.state_dir).await?;
     let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
         .context("this machine is not a fleet member")?;
@@ -1192,7 +1199,7 @@ async fn run_fleet_transports(
             file.transports.retain(|configured| configured != transport);
             file.transports.insert(0, transport.clone());
             let endpoints = member_endpoints(client, &config.node).await?;
-            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, attribution).await?;
             drop(lock);
             println!("Fabric is now preferred; its existing protocol is unchanged.");
             return refresh_fleet_services(*no_service, json_output);
@@ -1226,7 +1233,7 @@ async fn run_fleet_transports(
                 .position(|configured| configured == &transport)
                 .expect("preferred transport was checked as enabled");
             file.transports[..=index].rotate_right(1);
-            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, attribution).await?;
             println!("{transport} is now preferred; transport exposure is unchanged.");
             no_service
         }
@@ -1274,7 +1281,7 @@ async fn run_fleet_transports(
             endpoints.push(json!({"transport":"fabric", "node":node, "protocol":protocol}));
             // A lost publication response can follow a committed claim. Keep the exposure
             // reachable and report the incomplete operation rather than undoing that route.
-            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref())
+            save_and_publish_fleet_settings(client, config, &file, endpoints, attribution)
                 .await
                 .with_context(|| format!("Fabric remains exposed as {protocol}"))?;
             println!("Fabric enabled with protocol {protocol}.");
@@ -1314,7 +1321,7 @@ async fn run_fleet_transports(
             );
             file.transports.retain(|transport| transport != "fabric");
             // Retain the existing protocol setting so a later add can restore it.
-            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, attribution).await?;
             let result = match resolve_tool(file.fabric.as_deref(), "fabric") {
                 Some(program) => Fabric::new(program).unexpose(&protocol).await,
                 None => Err(anyhow::anyhow!("fabric is not installed")),

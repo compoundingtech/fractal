@@ -1272,13 +1272,22 @@ fn attributed_transport_changes_are_recorded_even_with_unchanged_endpoints() {
     admit(&store, "local", &anchor, "anchor", None);
     let endpoints = [json!({"transport": "loopback", "address": "127.0.0.1:1"})];
     assert!(store.publish_fleet_endpoints("listening", &endpoints, "test", None).unwrap());
-    for _ in 0..2 {
+    for mutation_id in ["transport-change-1", "transport-change-2"] {
+        let before = store.index().unwrap();
         assert!(store.publish_fleet_endpoints(
-            "listening", &endpoints, "test", Some("agent/example"),
+            "listening", &endpoints, "test", Some(("agent/example", mutation_id)),
         ).unwrap());
         let claim = store.latest_claim("host/local", Some("fleet.member-endpoints"))
             .unwrap().unwrap();
         assert_eq!(claim.actor.as_deref(), Some("agent/example"));
+        assert!(store.index().unwrap() > before, "distinct changes record new events");
+        let after = store.index().unwrap();
+        assert!(store.publish_fleet_endpoints(
+            "listening", &endpoints, "test", Some(("agent/example", mutation_id)),
+        ).unwrap());
+        assert_eq!(store.index().unwrap(), after, "replay must not append a claim");
+        assert_eq!(store.latest_claim("host/local", Some("fleet.member-endpoints"))
+            .unwrap().unwrap().id, claim.id);
     }
     assert!(!store.publish_fleet_endpoints("listening", &endpoints, "test", None).unwrap());
 }

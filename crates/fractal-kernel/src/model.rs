@@ -96,8 +96,6 @@ pub const FIRST_READINESS_FAULT_SCOPE: &str = "scheduler/first-readiness";
 pub struct FleetEndpointsRequest {
     pub mode: String,
     pub endpoints: Vec<Value>,
-    #[serde(default)]
-    pub actor: Option<String>,
 }
 
 /// The error code of a send or reply addressed to a person.

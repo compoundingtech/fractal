@@ -2596,7 +2596,7 @@ impl Store {
         mode: &str,
         endpoints: &[Value],
         build: &str,
-        actor: Option<&str>,
+        attribution: Option<(&str, &str)>,
     ) -> Result<bool> {
         let Some(member_key) = self.member_public_key() else {
             return Ok(false);
@@ -2604,7 +2604,7 @@ impl Store {
         let subject = format!("host/{}", self.origin);
         // Automatic announcements are deduplicated; an attributed settings change is an audit event.
         if let Some(latest) = self.latest_claim(&subject, Some("fleet.member-endpoints"))?
-            && actor.is_none()
+            && attribution.is_none()
         {
             let fields = latest.body.get("fields").cloned().unwrap_or_default();
             if fields["member_key"] == member_key
@@ -2617,7 +2617,7 @@ impl Store {
         self.append_claim(&ClaimInput {
             subject,
             kind: "fleet.member-endpoints".into(),
-            actor: actor.map(str::to_owned),
+            actor: attribution.map(|(actor, _)| actor.to_owned()),
             fields: BTreeMap::from([
                 ("member_key".into(), Value::String(member_key)),
                 ("mode".into(), Value::String(mode.into())),
@@ -2626,7 +2626,7 @@ impl Store {
             ]),
             evidence: Vec::new(),
             expected_subject: None,
-            idempotency_key: None,
+            idempotency_key: attribution.map(|(_, mutation_id)| mutation_id.to_owned()),
         })
         .map_err(anyhow::Error::from)?;
         // Seed and sign at once, so the announcement counts in this node's own fold.
