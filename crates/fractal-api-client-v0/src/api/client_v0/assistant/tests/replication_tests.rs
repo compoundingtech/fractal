@@ -60,15 +60,19 @@ async fn unsigned_lifecycle_is_refused(anchored: bool) {
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
     sync(&source, &receiver);
+    receiver.store.admit_restored_backlog().unwrap();
+    receiver.store.project_replication_backlog().unwrap();
     for kind in [BEGUN, GRANTED, POLICY] {
         assert!(latest(&receiver, &grant_subject, kind).unwrap().is_none(), "{kind}");
     }
     assert!(receiver.store.claim_by_id(&compatibility.id).unwrap().is_some());
     assert!(authenticate(&receiver, &credential_digest(credential), "fabric-loopback").unwrap().is_none());
     assert_eq!(summary_status(&receiver, credential).await, StatusCode::FORBIDDEN);
-    revoke(State(source.clone()), Extension(ClientSession::local(Some(ISSUER)).unwrap()),
+    let _ = revoke(State(source.clone()), Extension(ClientSession::local(Some(ISSUER)).unwrap()),
         AxumPath(id.to_owned())).await.unwrap();
     sync(&source, &receiver);
+    receiver.store.admit_restored_backlog().unwrap();
+    receiver.store.project_replication_backlog().unwrap();
     assert!(latest(&receiver, &grant_subject, REVOKED).unwrap().is_none());
 }
 
