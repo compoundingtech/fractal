@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -453,6 +454,239 @@ sys.exit(log.main(sys.argv[1:]))
         code, _, error = self.pull('--plan', str(plan), mode='gc')
         self.assertEqual(code, 2, error)
         self.assertIn('delete', error)
+
+    def test_a_remote_gc_killed_twice_finishes_its_published_plan_without_replanning(self):
+        records, trees = [], []
+        for n in (1, 2, 3):
+            commit, tree = self.f.commit(f'obsolete {n}\n')
+            records.append(self.record(tree=tree, commit=commit, seconds=n))
+            trees.append(tree)
+        self.commit, self.tree = self.f.commit('current main\n')
+        self.f.git('push', '-q', 'origin', 'main:main')
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['added']), (0, 3), error)
+        state, plan = self.f.root / 'pending-plan.json', self.f.root / 'plan.json'
+        retention = self.f.root / 'retention.json'
+        retention.write_text(json.dumps({'version': 1, 'main_days': 3, 'branch_days': 60, 'grace_hours': 0,
+                                         'soft_records': 3000, 'cap_records': 5000}))
+        pid_file, count = self.f.root / 'gc.pid', self.f.root / 'deletions'
+        count.write_text('0')
+        hook = self.remote / 'hooks/post-receive'
+        hook.write_text(f'''#!{sys.executable}
+import os, signal, sys
+from pathlib import Path
+for line in sys.stdin:
+    old, new, ref = line.split()
+    if ref.startswith('refs/tags/evidence/') and new == '0' * 40:
+        count = Path({str(count)!r})
+        n = int(count.read_text()) + 1
+        count.write_text(str(n))
+        if n <= 2:
+            os.kill(int(Path({str(pid_file)!r}).read_text()), signal.SIGKILL)
+''')
+        hook.chmod(0o755)
+        subprocess.run(['git', '-C', str(self.remote), 'config', 'core.hooksPath', str(hook.parent)], check=True)
+        driver = self.f.root / 'gc-driver.py'
+        driver.write_text(f'''import importlib.machinery, importlib.util, os, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader('gc', {str(ROOT / 'scripts/evidence-gc')!r})
+gc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(gc)
+gc.BATCH = 1
+Path({str(pid_file)!r}).write_text(str(os.getpid()))
+if Path({str(state)!r}).exists():
+    def no_new_plan(*args, **kwargs):
+        raise AssertionError('resume restarted planning or record verification')
+    gc.read_refs = gc.protected_keys = gc.crate_keys = no_new_plan
+sys.exit(gc.main(sys.argv[1:]))
+''')
+        before = [sys.executable, str(LOG), 'gc', '--repo', str(self.host), '--signer', json.dumps(self.signer),
+                  '--log-keys', str(self.log_keys), '--publish', '--no-wait', '--plan']
+        argv = [sys.executable, str(driver), '--repo', str(self.f.repo), '--remote', 'origin', '--main', 'main',
+                '--head', self.commit, '--as-of', str(NOW + 2 * 86400), '--retention', str(retention), '--apply',
+                '--resume-state', str(state), '--plan-out', str(plan), '--before-delete', json.dumps(before)]
+        for deleted in (1, 2):
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+            self.assertEqual(done.returncode, -signal.SIGKILL, done.stderr)
+            self.assertTrue(state.exists(), 'the frozen plan survives the deadline')
+            self.assertEqual(len(self.remote_refs('refs/tags/evidence')), 3 - deleted)
+            pending = json.loads((self.host / log.PENDING).read_text())
+            for record, tree in zip(records, trees):
+                ref = f'refs/tags/evidence/{tree}/{record}'
+                self.assertTrue(ref not in self.remote_refs() or ref in pending)
+                lines = self.lines(f'trees/{tree[:2]}/{tree}', at='refs/evidence-log/main')
+                self.assertEqual(sum(entry.startswith('gc ') for entry in lines), 1)
+            # A resumed run must not need a new live set or retention policy.
+            if deleted == 1:
+                retention.unlink()
+                published = self.remote_head()
+                pending_before = (self.host / log.PENDING).read_bytes()
+                remote_before = self.remote_refs()
+                fork = log.commit(str(self.host), self.host_git('rev-parse', f'{published}^{{tree}}'), None,
+                                  'unpublished branch', self.signer, self.now)
+                self.host_git('update-ref', log.LOG, fork)
+                refused = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                self.assertEqual(refused.returncode, 1, refused.stderr)
+                self.assertIn('before-delete', json.loads(refused.stdout)['refused'])
+                self.assertEqual(self.remote_refs(), remote_before, 'a refused re-publication permits no deletion')
+                self.assertEqual((self.host / log.PENDING).read_bytes(), pending_before)
+                self.host_git('update-ref', log.LOG, published)
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(json.loads(done.stdout)['resumed'])
+        self.assertFalse(state.exists())
+        self.assertFalse(self.remote_refs('refs/tags/evidence'))
+        self.assertEqual(self.pull('--publish', '--restore')[0], 0)
+        self.assertEqual(json.loads((self.host / log.PENDING).read_text()), {})
+
+    def test_a_resumed_gc_keeps_newer_records_and_publishes_without_duplicate_gc_lines(self):
+        old = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([old])
+        self.assertEqual(self.pull('--publish', '--plan', str(plan), mode='gc')[0], 0)
+        newer = self.record(seconds=50)
+        self.assertEqual(self.pull('--publish')[0], 0)
+        path = f'trees/{self.tree[:2]}/{self.tree}'
+        previous = self.lines(path)
+        contents = json.loads(plan.read_text())
+        plan.write_text(json.dumps({**contents, 'resumed': True}))
+        code, result, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.lines(path), previous)
+        self.assertEqual(result['gc_lines_added'], 0)
+        self.assertIn(newer, self.host_git('for-each-ref', '--format=%(objectname)', log.COPY))
+        self.assertEqual(self.remote_head(), result['head'])
+
+    def test_a_new_gc_of_identical_refs_resumes_after_a_kill_before_its_first_hook(self):
+        old_commit, old_tree = self.f.commit('obsolete record\n')
+        record = self.record(tree=old_tree, commit=old_commit)
+        self.commit, self.tree = self.f.commit('current main\n')
+        self.f.git('push', '-q', 'origin', 'main:main')
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['added']), (0, 1), error)
+        state, plan = self.f.root / 'resume.json', self.f.root / 'plan.json'
+        retention = self.f.root / 'retention.json'
+        retention.write_text(json.dumps({'version': 1, 'main_days': 3, 'branch_days': 60, 'grace_hours': 0,
+                                         'soft_records': 3000, 'cap_records': 5000}))
+        before = [sys.executable, str(LOG), 'gc', '--repo', str(self.host), '--signer', json.dumps(self.signer),
+                  '--log-keys', str(self.log_keys), '--publish', '--no-wait', '--plan']
+        args = ['--repo', str(self.f.repo), '--remote', 'origin', '--main', 'main', '--head', self.commit,
+                '--as-of', str(NOW + 2 * 86400), '--retention', str(retention), '--apply', '--resume-state', str(state),
+                '--plan-out', str(plan), '--before-delete', json.dumps(before)]
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/evidence-gc'), *args], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        first_plan = json.loads(plan.read_text())
+        self.assertEqual(self.pull('--publish')[0], 0)  # absence acknowledges the first operation
+        ref = f'refs/tags/evidence/{old_tree}/{record}'
+        self.f.git('update-ref', ref, record)
+        self.f.git('push', '-q', 'origin', f'{ref}:{ref}')  # the same record is later published again
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['added']), (0, 1), error)
+        driver = self.f.root / 'before-hook.py'
+        driver.write_text(f'''import importlib.machinery, importlib.util, os, signal, sys
+loader = importlib.machinery.SourceFileLoader('gc', {str(ROOT / 'scripts/evidence-gc')!r})
+gc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(gc)
+original = gc.write_journal
+def stop_before_hook(*args, **kwargs):
+    original(*args, **kwargs)
+    os.kill(os.getpid(), signal.SIGKILL)
+gc.write_journal = stop_before_hook
+sys.exit(gc.main(sys.argv[1:]))
+''')
+        stopped = subprocess.run([sys.executable, str(driver), *args], capture_output=True, text=True, timeout=30)
+        self.assertEqual(stopped.returncode, -signal.SIGKILL, stopped.stderr)
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/evidence-gc'), *args], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        second_plan = json.loads(plan.read_text())
+        self.assertEqual(first_plan['inputs_sha256'], second_plan['inputs_sha256'])
+        self.assertNotEqual(first_plan['plan_sha256'], second_plan['plan_sha256'])
+        self.assertFalse(state.exists())
+        self.assertFalse(self.remote_refs('refs/tags/evidence'))
+        self.assertEqual(sum(line.startswith('gc ') for line in self.lines(f'trees/{old_tree[:2]}/{old_tree}')), 2)
+
+    def test_a_resumed_gc_refuses_records_logged_again_and_failed_publication_preserves_pending(self):
+        old = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([old])
+        self.assertEqual(self.pull('--publish', '--plan', str(plan), mode='gc')[0], 0)
+        previous = (self.host / log.PENDING).read_bytes()
+        contents = json.loads(plan.read_text())
+        plan.write_text(json.dumps({**contents, 'resumed': True}))
+        # An unrelated published chain refuses the hook. Its original pending set remains byte-for-byte intact.
+        published = self.remote_head()
+        self.host_git('update-ref', log.LOG, self.host_git('rev-parse', f'{published}^'))
+        code, result, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 1, error)
+        self.assertIn('publish_refused', result)
+        self.assertEqual((self.host / log.PENDING).read_bytes(), previous)
+        self.assertEqual(self.remote_head(), published)
+        # Expiration is handled separately: until then a resume refuses a target logged after its GC line.
+        self.host_git('update-ref', log.LOG, published)
+        self.now += 25 * 3600
+        self.assertEqual(self.pull('--publish')[0], 0)
+        previous = (self.host / log.PENDING).read_bytes()
+        published = self.remote_head()
+        code, _, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 1)
+        self.assertIn('logged again', error)
+        self.assertEqual((self.host / log.PENDING).read_bytes(), previous)
+        self.assertEqual(self.remote_head(), published)
+
+    def test_resume_checks_records_after_its_own_gc_even_when_another_gc_followed(self):
+        old = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([old])
+        first = json.loads(plan.read_text())
+        self.assertEqual(self.pull('--publish', '--plan', str(plan), mode='gc')[0], 0)
+        self.now += 25 * 3600
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan.write_text(json.dumps({**first, 'plan_sha256': 'a' * 64}))
+        self.assertEqual(self.pull('--publish', '--plan', str(plan), mode='gc')[0], 0)
+        lines = self.lines(f'trees/{self.tree[:2]}/{self.tree}')
+        self.assertEqual([line.split()[0] for line in lines], ['record', 'gc', 'record', 'gc'])
+        previous = (self.host / log.PENDING).read_bytes()
+        published = self.remote_head()
+        plan.write_text(json.dumps({**first, 'resumed': True}))
+        code, _, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 1, error)
+        self.assertIn('logged again', error)
+        self.assertEqual((self.host / log.PENDING).read_bytes(), previous)
+        self.assertEqual(self.remote_head(), published)
+
+    def test_gc_can_refuse_a_busy_pull_without_waiting_or_changing_pending(self):
+        record = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([record])
+        with log.locked(str(self.host)):
+            done = subprocess.run([sys.executable, str(LOG), 'gc', '--repo', str(self.host), '--signer', json.dumps(self.signer),
+                                   '--log-keys', str(self.log_keys), '--publish', '--no-wait', '--plan', str(plan)],
+                                  capture_output=True, text=True, timeout=5)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('busy', done.stderr)
+        self.assertFalse((self.host / log.PENDING).exists())
+
+    def test_a_failed_gc_publication_keeps_copies_so_an_intervening_pull_does_not_reverify(self):
+        record = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([record])
+        published = self.remote_head()
+        copies = self.host_git('for-each-ref', '--format=%(objectname) %(refname)', log.COPY)
+        previous = log.pending(str(self.host))
+        fork = log.commit(str(self.host), self.host_git('rev-parse', f'{published}^{{tree}}'), None,
+                          'another published branch', self.signer, self.now)
+        self.host_git('push', '--force', 'origin', f'{fork}:{log.LOG}')  # fixture divergence, never an allowed publisher action
+        code, result, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 1, error)
+        self.assertIn('publish_refused', result)
+        self.assertEqual(log.pending(str(self.host)), previous)
+        self.assertEqual(self.host_git('for-each-ref', '--format=%(objectname) %(refname)', log.COPY), copies)
+        self.host_git('push', '--force', 'origin', f'{published}:{log.LOG}')
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['added']), (0, 0), error)
+        plan.write_text(json.dumps({**json.loads(plan.read_text()), 'resumed': True}))
+        code, result, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual((code, result['gc_lines_added'], result['copies_dropped']), (0, 0, 1), error)
 
     def test_an_input_index_ref_is_logged_under_its_key_only_when_the_record_carries_that_key(self):
         key = 'e' * 40

@@ -1,4 +1,4 @@
-import { ShowMenu, type ShowMenuProps } from '@fractal/ui/assistant-ui/shell'
+import { ShowMenu, type ShowMenuProps } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarShowMenu.tsx'
 
 import { askingToken, parseSidebarQuery, printSidebarQuery } from './filter.ts'
 import { machineKey, selectedShowKeys, showCounts, showMachines, withShowKeys, type ShowRow } from './show.ts'
