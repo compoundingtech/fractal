@@ -3,7 +3,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel, Input, Label, SearchField, Tree, TreeItem, TreeItemContent, type Key } from 'react-aria-components'
-import { sidebarRowAccessibleName } from '../../assistant-ui/sidebar/SidebarAgentRow'
+import { sidebarRowAccessibleName } from '../../assistant-ui/sidebar/rowPresentation.tsx'
 import { MilestoneAgentRow } from '../../assistant-ui/sidebar/MilestoneAgentRow'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { Icon } from '../../assistant-ui/composition/Icons'
