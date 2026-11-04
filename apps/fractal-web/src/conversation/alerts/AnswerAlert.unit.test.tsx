@@ -225,7 +225,7 @@ describe('AnswerAlert', () => {
 
   it('opens the first of several alerts and folds the rest under their titles', () => {
     const html = renderToStaticMarkup(
-      <AgentAlerts alerts={[item({ id: 'attention/one', title: 'First?' }), item({ id: 'attention/two', title: 'Second?' })]} calls={[]} onAct={async () => ({ _tag: 'Sent' })} />,
+      <AgentAlerts alerts={[item({ id: 'attention/one', title: 'First?' }), item({ id: 'attention/two', title: 'Second?' })]} onAct={async () => ({ _tag: 'Sent' })} />,
     )
     expect(html).toContain('◆ 2 alerts')
     expect(html.indexOf('First?')).toBeLessThan(html.indexOf('<details'))
