@@ -1761,6 +1761,35 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn person_pins_identity_is_shared_by_generated_clients() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))?;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/person-pins-v2.json"
+        ))?;
+        let constants = contract_constants(&operations)?;
+        let uuid = operations["constants"]["pins_arrangement_uuid"]["value"].as_str().unwrap();
+        assert_eq!(uuid, "00000000-0000-7000-8000-000000000002");
+        assert_eq!(fixture["subject"], format!("arrangement/person/example/{uuid}"));
+        assert_eq!(fixture["create"]["version"], 2);
+        assert!(fixture["pin"]["operations"][0]["bucket"].is_null());
+        assert_eq!(fixture["unpin"]["operations"][0]["op"], "remove");
+        for (text, name) in [
+            (rust_contract(std::iter::empty(), &[], &constants)?, "PINS_ARRANGEMENT_UUID"),
+            (swift_contract(std::iter::empty(), &[], &constants)?, "st3PinsArrangementUuid"),
+            (typescript_models(&schema, &operations, &constants)?, "PINS_ARRANGEMENT_UUID"),
+        ] {
+            assert!(text.contains(name));
+            assert!(text.contains(uuid));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn wire_alias_types_keep_the_deployed_sender_constant() -> Result<()> {
         let schema: Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
