@@ -1,15 +1,15 @@
 {
   "schema": "effect-utils/buck2-pnpm-sha256/v2",
-  "lockfileFingerprint": "sha256:7bfe8c2f4e86a655ec8b49838f57afd15998046460f1a5d3e495f972cd913a9a",
+  "lockfileFingerprint": "sha256:c9c17132b1d6da2f3ebfd56734a56a055f2b9ccec60e4fe9957191fa9622a0fa",
   "packages": {
-    "effect@4.0.3": {
+    "effect@4.1.0": {
       "bins": {},
       "classification": "public",
-      "integrity": "sha512-LoWn/Uwwx0JjHSDmBAAahx8sB+klzM6vsZovnbYowBNw6B4QScJLRLBByO61plvNiycx7HPN8FnsWUCu0eXW5w==",
-      "packageIdentity": "effect@4.0.3",
-      "registryUrl": "https://registry.npmjs.org/effect/-/effect-4.0.3.tgz",
-      "sha256": "7958027e5fee227674e89b48c8667f23994d57a2cb9b50b5f50748fc317a8ac3",
-      "sizeBytes": 9079903
+      "integrity": "sha512-lGx2MJJyrXA8RZb2UpQ/0Nkb5Utaimby7oD92+18noBxLPE85IFOvptdzau8dvcxAOwfwHo9iqapbKeFzqQM/Q==",
+      "packageIdentity": "effect@4.1.0",
+      "registryUrl": "https://registry.npmjs.org/effect/-/effect-4.1.0.tgz",
+      "sha256": "41705a35c964192dfc742863f0e099727ccda7ff2bd67a06d09b093a336f2b0e",
+      "sizeBytes": 10237671
     },
     "typescript@6.0.3": {
       "bins": {
@@ -36,5 +36,5 @@
   "source": "pnpm-lock.yaml",
   "generator": "buck2/dependencies/pnpm-lock.sha256.json.genie.ts",
   "regenerate": "devenv tasks run genie:run",
-  "fingerprint": "sha256:eab8ba596e44b05ef266bf39bf3470a893219a17ea10307e5fa3e870ba673d65"
+  "fingerprint": "sha256:1ff37317eb223ed3792aa64ed0d62adaa4cfedbcfddd6ccab82a09972dc907ac"
 }
