@@ -59,17 +59,23 @@ fn the_fixture_store_takes_a_write_while_a_reader_holds_a_snapshot() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path(), "reader-writer");
     state.store.read_snapshot(|_| {
-        state.store.append_claim(&ClaimInput {
-            subject: "agent/reader-writer".into(),
-            kind: "runtime.observed".into(),
-            actor: Some("agent/reader-writer".into()),
-            fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        })?;
+        assert!(state.store.latest_claim("agent/reader-writer", None)?.is_none());
+        // Join the other thread's commit while this thread still holds its read snapshot.
+        std::thread::scope(|scope| scope.spawn(|| {
+            state.store.append_claim(&ClaimInput {
+                subject: "agent/reader-writer".into(),
+                kind: "runtime.observed".into(),
+                actor: Some("agent/reader-writer".into()),
+                fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+        }).join().unwrap())?;
+        assert!(state.store.latest_claim("agent/reader-writer", None)?.is_none());
         Ok(())
     }).unwrap();
+    assert!(state.store.latest_claim("agent/reader-writer", None).unwrap().is_some());
 }
 
 async fn publish_fixture_lists(state: &AppState) {

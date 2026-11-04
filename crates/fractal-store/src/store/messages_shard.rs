@@ -109,6 +109,35 @@ fn lifecycle_records(shard: &GraphStore, subject: &str) -> anyhow::Result<Vec<(S
     Ok(records)
 }
 
+/// This member's delivery, read and close of the stream item `subject`, as (kind, actor,
+/// recorded at); `None` when the shard does not hold it.
+pub fn lifecycle_marks(
+    graph: &super::Store,
+    subject: &str,
+) -> anyhow::Result<Option<Vec<(String, String, u64)>>> {
+    let Some(shard) = shard(graph) else {
+        return Ok(None);
+    };
+    if stream_item(&shard, subject)?.is_none() {
+        return Ok(None);
+    }
+    let connection = shard.readers.get();
+    let mut statement = connection.prepare_cached(
+        "SELECT kind, actor, recorded_at_unix_ms FROM stream_lifecycle
+         WHERE subject=?1 AND kind IN ('message.delivered','message.read','message.closed')",
+    )?;
+    let marks = statement
+        .query_map([subject], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get::<_, i64>(2)?.max(0) as u64,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(marks))
+}
+
 /// Whether the shard holds the message `subject`.
 pub fn holds(graph: &super::Store, subject: &str) -> anyhow::Result<bool> {
     let Some(shard) = shard(graph) else {

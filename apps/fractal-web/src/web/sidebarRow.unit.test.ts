@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { sidebarRow, sidebarMissionFeeds } from './sidebarRow.ts'
 import { AgentRowDetails, sidebarRowAccessibleName, sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
+import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { Agent } from '../data/source.ts'
@@ -10,6 +11,26 @@ import type { Attention, MissionRunSummary } from '@fractal/client/schema'
 import fc from 'fast-check'
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
+describe('agent status glyph vocabulary', () => {
+  it.each([
+    ['working', '●'], ['idle', '○'], ['waiting', '○'], ['ended', '×'], ['retired', '×'],
+    ['failed', '!'], ['pending', '~'], ['suspended', '○'], ['unobserved', ''], ['stale', ''], ['offline', ''],
+  ] as const)('renders %s as exactly %s', (status, glyph) => {
+    const html = renderToStaticMarkup(createElement(SidebarStatus, { status, variant: 'Agents', freshness: 'live', iconOnly: true }))
+    expect(html.match(/data-agent-glyph="true"[^>]*>([^<]*)<\/span>/)?.[1]).toBe(glyph)
+  })
+  it.each(['live', 'stale', 'unobserved'] as const)('retains the last working glyph for %s observation', freshness => {
+    const html = renderToStaticMarkup(createElement(SidebarStatus, { status: 'working', variant: 'Agents', freshness, iconOnly: true }))
+    expect(html).toContain('>●</span>')
+    expect(html.includes('data-frozen="true"')).toBe(freshness !== 'live')
+    expect(html).not.toContain('<svg')
+  })
+  it.each(['SG-1', 'SG-2', 'SG-3'] as const)('preserves the existing %s SVG presentation', variant => {
+    const html = renderToStaticMarkup(createElement(SidebarStatus, { status: 'working', variant, freshness: 'live', iconOnly: true }))
+    expect(html).toContain('<svg')
+    expect(html).not.toContain('data-agent-glyph')
+  })
+})
 describe('mission feed evidence', () => {
   it('keeps legacy live feeds live and leaves missing observation timestamps absent', () => {
     const live = { _tag: 'Observed', freshness: 'live', value: [] } as const
@@ -72,7 +93,7 @@ describe('controlled native sidebar observations', () => {
       expect(row({ status }).statusLabel).toBe('Idle')
       expect(row({ status }, true).statusLabel).toBe('Last verified · Idle')
       expect(row({ status }).status).toBe('idle')
-      expect(row({ status, connected: false })).toMatchObject({ status: 'offline', statusLabel: 'Offline' })
+      expect(row({ status, connected: false })).toMatchObject({ status: 'idle', statusLabel: 'Last verified · Idle', freshness: 'stale' })
     }
   })
   it('does not invent usage, duration, attention, unread or children', () => {
@@ -101,7 +122,7 @@ describe('controlled native sidebar observations', () => {
   it('retains distinct native lifecycle states and freshness', () => {
     for(const [state,status] of [['retired','retired'],['suspended','suspended'],['stopped','ended'],['starting','pending']] as const)
       expect(row({state}).status).toBe(status)
-    expect(row({connected:false}).status).toBe('offline')
+    expect(row({connected:false})).toMatchObject({ status: 'idle', freshness: 'stale', statusLabel: 'Last verified · Idle' })
     expect(row({activity:'working'},true)).toMatchObject({status:'working',freshness:'stale'})
     expect(row({activity:'waiting'}).status).toBe('waiting')
     expect(row({activity:'waiting'}).needsMe).toBeUndefined()
@@ -114,7 +135,7 @@ describe('controlled native sidebar observations', () => {
     expect(row()).toMatchObject({ status: 'idle', statusLabel: 'Idle' })
     expect(row({ activity: 'waiting', status: 'waiting' })).toMatchObject({ status: 'waiting', statusLabel: 'Needs you' })
     expect(row({ activity: 'waiting', status: 'waiting for you (question)' })).toMatchObject({ status: 'waiting', statusLabel: 'Needs you' })
-    expect(row({ activity: 'errored', status: 'errored' })).toMatchObject({ status: 'stale', statusLabel: 'Stale observation' })
+    expect(row({ activity: 'errored', status: 'errored' })).toMatchObject({ status: 'failed', statusLabel: 'Failed' })
     expect(row({ state: 'stopped' }, true)).toMatchObject({ status: 'ended', statusLabel: 'Last verified · Ended' })
   })
   it('retains canonical identity and reported metadata without a new read', () => {
@@ -126,6 +147,18 @@ describe('controlled native sidebar observations', () => {
     expect(row({ usage: { _tag: 'Known', value: { ...usage, currency: 'USD', cost: 0.25 } } }).usage).toEqual({ _tag: 'Known', scope: 'reported-agent', tokens: 120, usd: 0.25 })
     expect(row({ usage: { _tag: 'Known', value: { ...usage, currency: 'EUR', cost: 0.25 } } }).usage).not.toHaveProperty('usd')
     expect(sidebarRow({ agent, stale: false, needsMe: true }).needsMe).toBe(true)
+  })
+  it('distinguishes a structured harness question from other attention', () => {
+    expect(row({ ask: { _tag: 'Known', value: 'question' } }).asking).toBe(true)
+    for (const value of ['permission', 'review']) expect(row({ ask: { _tag: 'Known', value } }).asking).toBe(false)
+    expect(row({ activity: 'waiting', status: 'waiting for you (question)' }).asking).toBeUndefined()
+    expect(sidebarRow({ agent, stale: false, needsMe: true }).asking).toBeUndefined()
+  })
+  it('keeps faults distinct from observation gaps and pending lifecycle', () => {
+    expect(row({ state: 'failed' })).toMatchObject({ status: 'failed', statusLabel: 'Failed' })
+    expect(row({ activity: 'errored', connected: false })).toMatchObject({ status: 'failed', freshness: 'stale' })
+    expect(row({ state: 'starting', activity: 'working' })).toMatchObject({ status: 'pending' })
+    expect(row({ activity: 'working', connected: false })).toMatchObject({ status: 'working', freshness: 'stale' })
   })
   it('projects native children without borrowing parent activity, time, usage or attention', () => {
     const result = row({ activity: 'working', subagents: [{

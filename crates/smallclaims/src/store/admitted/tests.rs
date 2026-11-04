@@ -51,7 +51,7 @@ fn directory_swap_between_check_and_open_refuses_before_prepare_and_preserves_by
     });
     let prepared = AtomicBool::new(false);
     let result = Store::open_with(admitted.database_path(), "writer".into(), Arc::new(Plain), Some(admitted.clone()), true,
-        |_| { prepared.store(true, Ordering::Relaxed); });
+        |_| { prepared.store(true, Ordering::Relaxed); }, None);
     assert!(result.is_err());
     assert!(!prepared.load(Ordering::Relaxed));
     assert_eq!(fs::read(moved.join("claims.sqlite3")).unwrap(), original_bytes);

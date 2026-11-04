@@ -49,7 +49,7 @@ async function columns(canvasElement: HTMLElement) {
   await document.fonts.ready
   const row = await waitFor(() => { const found = canvasElement.querySelector('[data-testid="transcript-turn"]'); if (found === null) throw new Error('No transcript row'); return found })
   const composer = canvasElement.querySelector('[data-testid="kit-composer"] form')!
-  await expect(composer).toHaveAccessibleName('Message composer')
+  await expect(composer.parentElement).toHaveAccessibleName('Message composer')
   const dock = canvasElement.querySelector('[data-testid="story-composer-dock"]')!
   const lane = parseFloat(getComputedStyle(canvasElement.querySelector('[data-testid="kit-composer"]')!).maxWidth)
   return { row: bounds(row), composer: bounds(composer), dock: bounds(dock), lane }
