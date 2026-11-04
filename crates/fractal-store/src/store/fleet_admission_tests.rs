@@ -1275,8 +1275,7 @@ fn attributed_transport_changes_are_recorded_even_with_unchanged_endpoints() {
     for mutation_id in ["transport-change-1", "transport-change-2"] {
         let before = store.index().unwrap();
         assert!(store.publish_fleet_endpoints("listening", &endpoints, "test", Some(("agent/example", mutation_id))).unwrap());
-        let claim = store.latest_claim("host/local", Some("fleet.member-endpoints"))
-            .unwrap().unwrap();
+        let claim = store.latest_claim("host/local", Some("fleet.member-endpoints")).unwrap().unwrap();
         assert_eq!(claim.actor.as_deref(), Some("agent/example"));
         assert!(store.index().unwrap() > before, "distinct changes record new events");
         let after = store.index().unwrap();

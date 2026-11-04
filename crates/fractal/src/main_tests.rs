@@ -17,7 +17,7 @@ fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
 #[tokio::test]
 async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
     use fractal_store::store::fleet_admission_tests_shared_seats::{FLEET, admit, key, node};
-    for (changed_base, actor, changed_endpoints, count) in [(false, "agent/example", false, 1), (true, "agent/example", false, 2), (false, "agent/other", false, 2), (false, "agent/example", true, 1)] {
+    for (changed_base, actor, changed_endpoints, abandoned, count) in [(false, "agent/example", false, false, 1), (true, "agent/example", false, false, 2), (false, "agent/other", false, false, 2), (false, "agent/example", true, false, 1), (false, "agent/example", false, true, 2)] {
         let root = tempfile::tempdir().unwrap();
         let config = Config { node: "local".into(), state_dir: root.path().into(), ..Config::default() };
         let file = fractal_daemon::config::FleetFile {
@@ -58,8 +58,9 @@ async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
         assert!(run_fleet_transports(&client, &config, prefer("agent/example"), true).await.is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(path.with_extension("transport-change.json").exists());
-        if changed_base { let mut edited = file.clone(); edited.transports.swap(1, 2); edited.save(root.path()).unwrap(); }
+        if changed_base { let mut edited = file.clone(); edited.transports.swap(1, 2); fs::write(&path, toml::to_string(&edited).unwrap()).unwrap(); }
         observations.store(changed_endpoints, std::sync::atomic::Ordering::SeqCst);
+        if abandoned { let mut other = file.clone(); other.transports.swap(0, 2); other.save(root.path()).unwrap(); file.save(root.path()).unwrap(); }
         run_fleet_transports(&client, &config, prefer(actor), true).await.unwrap();
         assert_eq!(store.claims_for("host/local", Some("fleet.member-endpoints")).unwrap().len(), count);
         assert_eq!(store.latest_claim("host/local", Some("fleet.member-endpoints")).unwrap().unwrap().actor.as_deref(), Some(actor));

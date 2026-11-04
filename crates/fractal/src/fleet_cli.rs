@@ -1146,7 +1146,6 @@ async fn save_and_publish_fleet_settings(
     };
     published.context("endpoint publication did not complete; fleet.toml is unchanged")?;
     file.save(&config.state_dir)?;
-    if let Some(path) = pending { fs::remove_file(path)?; }
     Ok(())
 }
 
