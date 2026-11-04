@@ -2604,7 +2604,7 @@ impl Store {
     ) -> Result<bool> {
         let _publication = self.fleet_endpoints_publication.lock().unwrap_or_else(PoisonError::into_inner);
         let endpoints = self.preserve_fabric_rekey(mode, endpoints, mode != "listening")?;
-        self.publish_fleet_endpoints_locked(mode, &endpoints, build)
+        self.publish_fleet_endpoints_locked(mode, &endpoints, build, attribution)
     }
 
     /// Explicitly withdraw rotation metadata when changing transport settings.
@@ -2616,7 +2616,7 @@ impl Store {
     ) -> Result<bool> {
         let _publication = self.fleet_endpoints_publication.lock().unwrap_or_else(PoisonError::into_inner);
         let endpoints = self.preserve_fabric_rekey(mode, endpoints, true)?;
-        self.publish_fleet_endpoints_locked(mode, &endpoints, build)
+        self.publish_fleet_endpoints_locked(mode, &endpoints, build, None)
     }
 
     fn publish_fleet_endpoints_locked(
@@ -2624,6 +2624,7 @@ impl Store {
         mode: &str,
         endpoints: &[Value],
         build: &str,
+        attribution: Option<(&str, &str)>,
     ) -> Result<bool> {
         let Some(member_key) = self.member_public_key() else {
             return Ok(false);
