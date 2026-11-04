@@ -741,6 +741,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mutation_redirects_keep_methods_and_reject_other_origins() {
+        let app = Router::new()
+            .route("/repos/acme/garden", axum::routing::any(|| async {
+                (StatusCode::TEMPORARY_REDIRECT,
+                    [(axum::http::header::LOCATION, "/repositories/7")])
+            }))
+            .route("/repositories/7", axum::routing::any(|method: axum::http::Method, body: axum::body::Bytes| async move {
+                Json(json!({"method":method.as_str(), "body":String::from_utf8(body.to_vec()).unwrap()}))
+            }))
+            .route("/foreign", post(|| async {
+                (StatusCode::TEMPORARY_REDIRECT,
+                    [(axum::http::header::LOCATION, "http://127.0.0.1:1/repositories/7")])
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        for method in [reqwest::Method::POST, reqwest::Method::PUT, reqwest::Method::PATCH, reqwest::Method::DELETE] {
+            let response = crate::github_http::send(
+                crate::resource::github_api_client().request(method.clone(), format!("{base}/repos/acme/garden"))
+                    .body("original body"),
+                &GithubAuth::test("fixture-token"),
+            ).await.unwrap().json::<Value>().await.unwrap();
+            assert_eq!(response["method"], method.as_str());
+            assert_eq!(response["body"], "original body");
+        }
+        let error = crate::github_http::send(
+            crate::resource::github_api_client().post(format!("{base}/foreign")).body("private body"),
+            &GithubAuth::test("fixture-token"),
+        ).await.unwrap_err();
+        assert!(error.to_string().contains("changed API origin"), "{error:#}");
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn repository_redirects_preserve_comment_body_and_existing_watch_delivery() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for redirect in [301, 307, 308] {
+            let writes = Arc::new(AtomicUsize::new(0));
+            let accepted = writes.clone();
+            let server = Router::new()
+                .route("/repos/acme/garden/issues/12/comments", post(move |Json(body): Json<Value>| async move {
+                    assert_eq!(body, json!({"body":"Seed catalog ready."}));
+                    (StatusCode::from_u16(redirect).unwrap(),
+                        [(axum::http::header::LOCATION, "/repositories/7/issues/12/comments")])
+                }))
+                .route("/repositories/7/issues/12/comments", post(move |Json(body): Json<Value>| {
+                    let accepted = accepted.clone();
+                    async move {
+                        assert_eq!(body, json!({"body":"Seed catalog ready."}));
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"id":501, "user":{"login":"fixture"},
+                            "html_url":"https://github.com/acme/greenhouse/issues/12#issuecomment-501"}))
+                    }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, server).await.unwrap(); });
+            let root = tempfile::tempdir().unwrap();
+            let state = super::super::tests::state(root.path());
+            let store = state.store.clone();
+            let thread = ThreadRef::parse("acme/garden#12").unwrap();
+            let agent = "agent/example-watch/worker";
+            let until = smallclaims::store::now_ms() + 86_400_000;
+            let initial = store.declare_watch(&thread, agent, Some(until)).unwrap();
+            let declaration = store.desired_subjects_named(&[thread.watch(agent)]).unwrap()[0].desired.clone();
+            let intent = crate::graph::parse_internal_intent(
+                "version 2\nagent \"example-watch/worker\" { workspace \"/tmp\"; command \"true\" }\n",
+                store.origin(),
+            ).unwrap();
+            store.apply_internal(&intent, "redirect-watch-seat").unwrap();
+            let subscriptions = store.desired_subjects().unwrap().into_iter().filter_map(|item| {
+                crate::graph::subscription_spec(&item.desired).map(|spec| (item.subject, spec))
+            }).collect::<Vec<_>>();
+            let revision = store.selected_desired_revision(&thread.observer()).unwrap().unwrap();
+            let mut facts = json!({"repository_id":7, "pull_requests":[{
+                "number":12, "title":"Seed catalog", "url":"https://github.com/acme/greenhouse/pull/12",
+                "head":"a".repeat(40), "state":"open", "draft":false,
+                "required_checks":{"state":"pending", "source":"rules", "checks":["build"], "failed":[]}
+            }]});
+            store.record_resource_observation(
+                &thread.observer(), &revision, None, &thread.resource(), Some("cursor-before"),
+                &facts, smallclaims::store::now_ms(), &subscriptions, None,
+            ).unwrap();
+            let posted = post_at(&base, &GithubAuth::test("fixture-token"), &thread,
+                "Seed catalog ready.", None).await.unwrap();
+            assert_eq!(posted.id, 501);
+            assert_eq!(writes.load(Ordering::SeqCst), 1);
+            facts["pull_requests"][0]["required_checks"]["state"] = json!("pass");
+            let mut delivered = 0;
+            for _ in 0..2 {
+                delivered += store.record_resource_observation(
+                    &thread.observer(), &revision, None, &thread.resource(), Some("cursor-after"),
+                    &facts, smallclaims::store::now_ms(), &subscriptions, None,
+                ).unwrap().message_subjects.len();
+            }
+            assert_eq!(delivered, 1);
+            let wakes = store.messages(Some(agent), false).unwrap();
+            assert_eq!(wakes.len(), 1);
+            assert_eq!(store.claims_for(&wakes[0].subject, Some("message.sent")).unwrap().len(), 1);
+            assert_eq!(store.desired_subjects_named(&[thread.watch(agent)]).unwrap()[0].desired, declaration);
+            let watches = store.watches(Some(agent)).unwrap();
+            assert_eq!(watches.len(), 1);
+            assert_eq!(watches[0]["subject"], initial["subject"]);
+            assert_eq!(watches[0]["until"], initial["until"]);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test]
     async fn only_an_open_thread_that_github_shows_can_be_watched() {
         let github = fake_github().await;
         let open = ThreadRef::parse("acme/garden#12").unwrap();

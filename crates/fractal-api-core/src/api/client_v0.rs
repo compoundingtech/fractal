@@ -1659,8 +1659,9 @@ pub fn refresh_operation_report(
     startup_audit: Option<tokio::sync::oneshot::Sender<anyhow::Result<Vec<String>>>>,
 ) {
     let report = if let Some(sender) = startup_audit {
+        // The store keeps this audit's result, which the report's operation check reads.
         let drift = state.store.operation_projection_drift();
-        let report = doctor_report_with_operation_drift(state, &drift);
+        let report = doctor_report(state);
         // The repair owns these findings, including any scan error. It re-derives just the
         // drifted rows from current claims, never reuses expected values from this snapshot.
         let _ = sender.send(drift);
@@ -1730,7 +1731,7 @@ pub async fn now(
     if history && actor.is_none() && owner_run.is_none() {
         return super::attention_history::page(state, snapshot, effective_query, "now").await;
     }
-    client_snapshot_page(
+    let (snapshot, Json(mut page)) = client_snapshot_page(
         &state,
         snapshot,
         "now",
@@ -1758,7 +1759,12 @@ pub async fn now(
             Ok(items)
         },
     )
-    .await
+    .await?;
+    // After the page's cache and digest: a seat's host's answer is never part of either.
+    super::relay_attention_target_states(&state, &mut page.items)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok((snapshot, Json(page)))
 }
 
 pub fn device_resources(
@@ -1950,8 +1956,11 @@ fn session_messages(
             .map_err(ApiError::internal)?,
         None => (None, None),
     };
-    let mut messages = state.store.conversation_messages_at(owner, before, 0)
-        .map_err(ApiError::internal)?;
+    // Every stream item the endpoint has, as the graph's newest sends: a delta read takes those
+    // past its cursor's stream position.
+    let mut messages = state.store.conversation_messages_at(
+        owner, before, 0, Some(crate::store::messages_shard::stream_reads::StreamAfter::Position(0)),
+    ).map_err(ApiError::internal)?;
     messages.retain(|claim| session_message_belongs(claim, owner, session_id, started, ended));
     Ok(messages)
 }
@@ -2022,7 +2031,9 @@ pub fn key_grant_label(body: &Value) -> Option<String> {
 
 pub fn session_message_content(session: &ClientSession, session_id: &str, claim: &ClaimRecord) -> Value {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
-    let mut body = json!({"media_type":"text/plain", "text":fields.get("content").and_then(Value::as_str).unwrap_or_default()});
+    // The message it is the content of, so a client pairs it with its header by identity.
+    let mut body = json!({"media_type":"text/plain", "message_id":claim.subject,
+        "text":fields.get("content").and_then(Value::as_str).unwrap_or_default()});
     if session.assistant_content_handles {
         body["blocks"] = json!([{"kind":"raw_text", "source_type":"content", "payload":{"body_ref":true},
             "continuation":{"ref":conversation_blocks::message_reference(session_id, &claim.id)}}]);
@@ -2163,7 +2174,8 @@ pub fn native_session_messages(
             };
             let stamp = client_timestamp(claim.accepted_at_unix_ms);
             let digest = hex::encode(Sha256::digest(claim.id.as_bytes()));
-            let base = claim.store_index.saturating_mul(4);
+            let base = crate::store::messages_shard::stream_reads::timeline_base(&state.store, &claim)
+                .map_err(ApiError::internal)?;
             items.push(json!({"id":format!("timeline-entry/{}/{}-message", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base, "revision":1, "timestamp":stamp, "role":role, "type":"message", "final":true, "body":session_message_body(state, &claim, session.conversation_message_participants)}));
             items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":session_message_content(session, session_id, &claim)}));
         }
@@ -2690,6 +2702,7 @@ pub fn post_snapshot_native_sends(
     let mut future = if items.iter().any(|item| item["_delivery_correlation"]["kind"] == "codex") {
         let delta = state.store.conversation_message_delta_at(
             owner, through.checked_add(1), snapshot.store_index, 256,
+            Some(crate::store::messages_shard::stream_reads::StreamAfter::Arrival(snapshot.store_index)),
         ).map_err(ApiError::internal)?;
         let subjects = incoming.iter().copied()
             .chain(delta.iter().filter_map(|claim| {
@@ -3524,7 +3537,12 @@ pub fn timeline_first_page_with_extent(
                 .map(u128::from)
                 .unwrap_or(claim.accepted_at_unix_ms),
         );
-        let base_sequence = claim.store_index.saturating_mul(4);
+        let base_sequence = if claim.kind == "message.sent" {
+            crate::store::messages_shard::stream_reads::timeline_base(&state.store, &claim)
+                .map_err(ApiError::internal)?
+        } else {
+            claim.store_index.saturating_mul(4)
+        };
         if claim.subject == owner && claim.kind == "harness.timeline" {
             if !incarnation.is_some_and(|expected| {
                 fields.get("incarnation_id").and_then(Value::as_str) == Some(expected)

@@ -227,7 +227,15 @@ class St:
     """Same trusted-local message endpoints used by Fractal conversations; never an HTTP listener."""
     def __init__(self, path, actor=None):
         self.path = path
-        self.actor = actor or os.environ.get('ST_AGENT')
+        self.actor = actor
+        if not actor:
+            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction.
+            preferred = os.environ.get('FRACTAL_AGENT')
+            legacy = os.environ.get('ST_AGENT')
+            if preferred and legacy is not None and preferred != legacy:
+                raise Stop('Conflicting identity environment variables: FRACTAL_AGENT and ST_AGENT')
+            self.actor = preferred if preferred is not None else legacy
+            # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 
     def request(self, method, path, body=None, *, actor=None, media=None, binary=False):
         connection = UnixConnection(self.path)

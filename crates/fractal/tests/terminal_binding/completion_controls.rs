@@ -51,6 +51,11 @@ async fn real_invocation_replacement_remains_fenced() {
 }
 
 #[tokio::test]
+async fn a_fenced_driver_stops_and_its_successor_keeps_the_mailbox() {
+    completion_control(None, 0, Some("successor")).await;
+}
+
+#[tokio::test]
 async fn foreign_runtime_after_terminal_receipt_remains_fenced() {
     completion_control(Some("before"), 0, Some("runtime")).await;
 }
@@ -127,6 +132,7 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     let runtime = runtime();
     let socket = root.path().join("api.sock");
     let state = fractal_daemon::api::AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -221,11 +227,20 @@ sys.exit(int(os.environ.get('FIXTURE_PROVIDER_EXIT', '0')))
         .env("FIXTURE_PYTHON", python)
         .current_dir(root.path())
         .args(["--noprofile", "--norc", "-c", r#"
+# An interactive shell runs each job in its own process group; the driver's stop signals that
+# group, and the shell outlives it.
+job() { "$FIXTURE_PYTHON" -c 'import os, sys; os.setpgrp(); os.execvp(sys.argv[1], sys.argv[1:])' "$@"; }
 read -r _
-ST_AGENT="$FIXTURE_SEAT" "$ST3_BIN" driver claude --subject "$FIXTURE_SEAT" -- "$FIXTURE_PYTHON" "$FIXTURE_PROVIDER"
+ST_AGENT="$FIXTURE_SEAT" job "$ST3_BIN" driver claude --subject "$FIXTURE_SEAT" -- "$FIXTURE_PYTHON" "$FIXTURE_PROVIDER"
 driver_exit=$?
 printf 'driver-exit=%s shell-still-alive\n' "$driver_exit"
-read -r _
+read -r next
+if [ "$next" = successor ]; then
+  # The completion barrier is for the first driver alone.
+  ST_AGENT="$FIXTURE_SEAT" job env -u ST3_FIXTURE_TERMINAL_COMPLETION "$ST3_BIN" driver claude --subject "$FIXTURE_SEAT" -- "$FIXTURE_PYTHON" "$FIXTURE_PROVIDER"
+  printf 'driver-exit=%s shell-still-alive\n' "$?"
+  read -r _
+fi
 "#])
         .kill_on_drop(true)
         .stdin(std::process::Stdio::piped())
@@ -417,8 +432,10 @@ read -r _
         std::fs::write(barrier.join("release-provider"), b"go").unwrap();
     }
     if let Some(owner) = rejection_fence.as_ref().filter(|_| order.is_none()) {
-        // The real rejection is accepted while the provider is still alive. Tokio waits
-        // for a blocking provider worker on shutdown, so release it only after that proof.
+        // The real rejection is accepted while the provider is still alive, and the fenced
+        // driver stops that provider itself: nothing here releases it. A driver that returned
+        // without stopping it would leave it running with no driver, and Tokio's shutdown would
+        // wait for its blocking task without limit (#4743).
         wait_file(&barrier.join("fence-received")).await;
         assert_eq!(
             std::fs::read_to_string(barrier.join("fence-received")).unwrap(),
@@ -431,8 +448,9 @@ read -r _
             fractal_daemon::test_support::check_fixture_mailbox(&store, owner).unwrap();
         }
         }
-        assert!(!barrier.join("provider-return.json").exists());
-        std::fs::write(barrier.join("exit-provider"), b"go").unwrap();
+        wait_file(&barrier.join("provider-return.json")).await;
+        assert!(!barrier.join("exit-provider").exists());
+        std::fs::write(barrier.join("release-provider"), b"go").unwrap();
     }
     let mut stdout = tokio::io::BufReader::new(shell.stdout.take().unwrap());
     let mut line = String::new();
@@ -454,7 +472,7 @@ read -r _
         shell.try_wait().unwrap().is_none(),
         "the harness must return to its shell"
     );
-    let notification: Value = serde_json::from_slice(&std::fs::read(received).unwrap()).unwrap();
+    let notification: Value = serde_json::from_slice(&std::fs::read(&received).unwrap()).unwrap();
     assert!(
         notification["params"]["content"]
             .as_str()
@@ -487,7 +505,10 @@ read -r _
             );
         }
         assert!(runtime.actions.lock().unwrap().is_empty());
-        std::fs::write(barrier.join("exit-provider"), b"go").unwrap();
+        if rejection == Some("successor") {
+            successor_keeps_the_mailbox(&store, &runtime, &client, root.path(), &barrier, &received,
+                &physical, &mut shell, &mut stdout).await;
+        }
         server.abort();
         shell.kill().await.unwrap();
         return;
@@ -512,4 +533,79 @@ read -r _
     shell.kill().await.unwrap();
     shell.wait().await.unwrap();
     let _ = diagnostics.await.unwrap();
+}
+
+/// The seat's next invocation starts its own driver in the same shell once the fenced one has
+/// stopped. It binds the mailbox and receives mail, and the stopped driver's exit, recorded under
+/// its own incarnation, takes nothing back from it.
+#[allow(clippy::too_many_arguments)]
+async fn successor_keeps_the_mailbox(
+    store: &Arc<Store>,
+    runtime: &Arc<Runtime>,
+    client: &fractal_daemon::client::Client,
+    root: &std::path::Path,
+    barrier: &std::path::Path,
+    received: &std::path::Path,
+    physical: &str,
+    shell: &mut tokio::process::Child,
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+) {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    let successor = format!("{physical}:bound:{NEXT}");
+    std::fs::remove_file(received).unwrap();
+    shell.stdin.as_mut().unwrap().write_all(b"successor\n").await.unwrap();
+    let sent: MessageView = client
+        .post(
+            "/v1/messages",
+            &MessageSendRequest {
+                idempotency_key: "successor-mail".into(),
+                from: "person/avery".into(),
+                to: SEAT.into(),
+                content: "hello to the next invocation".into(),
+                title: None,
+                in_reply_to: None,
+                tags: vec![],
+                attachments: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    if tokio::time::timeout(Duration::from_secs(15), async {
+        while !received.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        let owners = rusqlite::Connection::open(root.join("graph.db")).unwrap()
+            .prepare("SELECT incarnation, epoch FROM local_mailbox_owners WHERE subject=?1").unwrap()
+            .query_map([SEAT], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        panic!(
+            "the successor received no mail; owners={owners:?} harness={:?} status={} driver log={:?} hook={:?}",
+            store.current_harness(SEAT).unwrap(),
+            status(store),
+            std::fs::read_to_string(root.join(".local/state/st3/driver-api-warnings.log")),
+            std::fs::read_to_string(root.join("native-idle.hook-result")),
+        );
+    }
+    let notification: Value = serde_json::from_slice(&std::fs::read(received).unwrap()).unwrap();
+    assert_eq!(notification["params"]["meta"]["messageId"], sent.subject);
+    let owner = title_owner(root);
+    assert_eq!(owner.incarnation, successor);
+    // Nothing contends for the mailbox afterwards: the same binding holds across reconcile passes.
+    for _ in 0..10 {
+        reconcile(store, runtime);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let held = title_owner(root);
+    assert_eq!((&held.incarnation, held.epoch, &held.token), (&owner.incarnation, owner.epoch, &owner.token));
+    fractal_daemon::test_support::check_fixture_mailbox(store, &held).unwrap();
+    // The successor ends as any provider does.
+    std::fs::write(barrier.join("exit-provider"), b"go").unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(20), stdout.read_line(&mut line)).await.unwrap().unwrap();
+    assert_eq!(line, "driver-exit=0 shell-still-alive\n", "{:?}",
+        std::fs::read_to_string(root.join(".local/state/st3/driver-api-warnings.log")));
 }

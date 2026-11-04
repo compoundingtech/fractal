@@ -79,6 +79,7 @@ impl Daemon {
     }
     async fn start(&mut self) {
         let state = AppState {
+            seat_admission: Default::default(),
             owning_person: None,
             store: self.store.clone(),
             notify: Arc::new(Notify::new()),

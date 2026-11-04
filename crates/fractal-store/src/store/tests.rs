@@ -1862,11 +1862,12 @@ fn base_replay_body_page_work_does_not_grow_with_selected_order_size() {
     let store = Store::open_memory("node").unwrap();
     let mut connection = store.connection.write();
     let tx = connection.transaction().unwrap();
-    tx.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hdf54adb9112e owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(
-            ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)",
-    )
-    .unwrap();
+    // Normal store initialization creates replay scratch on the writer connection.
+    assert_eq!(
+        tx.query_row("SELECT COUNT(*) FROM temp.heal_replay_base_order", [], |row| row.get::<_, u64>(0)).unwrap(),
+        0,
+        "a fresh store leaves an empty replay order"
+    );
     let mut costs = Vec::new();
     for (start, end) in [(0, 512), (512, 4096)] {
         for number in start..end {
@@ -1915,6 +1916,388 @@ fn base_replay_body_page_work_does_not_grow_with_selected_order_size() {
     // This measures the actual body-page statement, not the once-per-replay canonical
     // sort, the full runtime fold or writer latency.
     tx.rollback().unwrap();
+}
+
+#[test]
+fn planning_replication_rebuilds_only_planning_and_matches_canonical_replay() {
+    let source = Store::open_memory("source").unwrap();
+    let target = Store::open_memory("target").unwrap();
+    let intent = simple("printf unrelated");
+    let preview = target
+        .mission(
+            &intent,
+            IntentInput {
+                kdl: "unrelated".into(),
+                source_name: None,
+            },
+        )
+        .unwrap();
+    target
+        .apply(&intent, &preview.subject_tokens, "unrelated")
+        .unwrap();
+    target.project_replication_backlog().unwrap();
+    let unrelated = target.selected_desired_token("exec/work").unwrap();
+    let events = [
+        (
+            "started",
+            json!({"mission":"mission/example", "request":"doc/request",
+            "workspace":"workspace", "requester":"person/operator", "planner":"agent/planner"}),
+            "planning",
+            0,
+            0,
+        ),
+        (
+            "candidate-submitted",
+            json!({"variant":"default", "candidate_revision":1,
+            "markdown":"doc/candidate", "kdl":"doc/definition", "mission_revision":"revision-one"}),
+            "review",
+            1,
+            0,
+        ),
+        (
+            "previewed",
+            json!({"variant":"default", "candidate_revision":1,
+            "preview_hash":"preview-one", "store_index":1, "graph":"graph", "diff":"diff", "mission":{}}),
+            "review",
+            1,
+            1,
+        ),
+        (
+            "question-requested",
+            json!({"decision_id":"choice", "revision":1,
+            "question":"Proceed?", "decision_type":"boolean", "options":[],
+            "requester":"person/operator", "planner":"agent/planner"}),
+            "review",
+            1,
+            1,
+        ),
+        (
+            "question-answered",
+            json!({"decision_id":"choice", "expected_revision":1,
+            "response":{"value":true}, "requester":"person/operator"}),
+            "review",
+            1,
+            1,
+        ),
+        (
+            "revision-requested",
+            json!({"variant":"default", "candidate_revision":1,
+            "feedback":"doc/feedback", "requester":"person/operator"}),
+            "revision-requested",
+            1,
+            0,
+        ),
+        (
+            "approved",
+            json!({"variant":"default", "candidate_revision":1,
+            "preview_hash":"preview-one", "preview_token":"token-one", "mission_revision":"revision-one",
+            "markdown":"doc/candidate", "kdl":"doc/definition", "requester":"person/operator"}),
+            "approved",
+            1,
+            0,
+        ),
+        (
+            "cancelled",
+            json!({"reason":"finished", "requester":"person/operator"}),
+            "cancelled",
+            1,
+            0,
+        ),
+    ];
+    let mut predecessors = Vec::new();
+    for (event, fields, status, candidates, previews) in events {
+        let mut connection = source.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let claim = append_claim_record_tx(
+            &transaction, "source", "planning-session/example", &format!("planning-session.{event}"),
+            Some("person/operator"),
+            &json!({"fields":fields, "_operation":{"id":format!("op/planning-{event}"), "request_digest":event}}),
+            &predecessors, None,
+        ).unwrap();
+        predecessors = vec![claim.id];
+        transaction.commit().unwrap();
+        drop(connection);
+        FULL_REPLAYS.with(|count| count.set(0));
+        let admission = receive_and_project(
+            &target,
+            "source",
+            &exchange_from(&source, &target.replication_inventory().unwrap()),
+        );
+        assert_eq!(admission.invalid, 0, "{event}");
+        assert_eq!(
+            FULL_REPLAYS.with(std::cell::Cell::get),
+            0,
+            "{event} forced a whole-store replay"
+        );
+        let connection = target.readers.get();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM planning_sessions WHERE id='example'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            status,
+            "{event}"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM planning_candidates WHERE session_id='example'",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            candidates,
+            "{event}"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM planning_previews WHERE session_id='example'",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            previews,
+            "{event}"
+        );
+        drop(connection);
+        assert_eq!(
+            target.selected_desired_token("exec/work").unwrap(),
+            unrelated,
+            "{event}"
+        );
+        let incremental = graph_digest_of(&target);
+        target.replay_replication_graph().unwrap();
+        assert_eq!(
+            graph_digest_of(&target),
+            incremental,
+            "{event} differs from canonical replay"
+        );
+    }
+    let mut complete = exchange_from(&source, &ReplicationInventory::default());
+    complete.envelopes.reverse();
+    let second = complete.envelopes.split_off(complete.envelopes.len() / 2);
+    let reordered = Store::open_memory("reordered").unwrap();
+    reordered.project_replication_backlog().unwrap();
+    FULL_REPLAYS.with(|count| count.set(0));
+    receive_and_project(&reordered, "source", &complete);
+    receive_and_project(
+        &reordered,
+        "source",
+        &ReplicationExchange {
+            envelopes: second,
+            ..complete
+        },
+    );
+    assert_eq!(
+        FULL_REPLAYS.with(std::cell::Cell::get),
+        0,
+        "reordered planning forced whole-store replay"
+    );
+    let incremental = graph_digest_of(&reordered);
+    reordered.replay_replication_graph().unwrap();
+    assert_eq!(graph_digest_of(&reordered), incremental);
+    assert_eq!(
+        reordered
+            .readers
+            .get()
+            .query_row(
+                "SELECT status FROM planning_sessions WHERE id='example'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "cancelled"
+    );
+}
+
+/// Write one planning claim as `writer` would, chained after `predecessors`.
+fn planning_claim(
+    store: &Store,
+    writer: &str,
+    session: &str,
+    event: &str,
+    fields: Value,
+    predecessors: &[String],
+) -> ClaimRecord {
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    let claim = append_claim_record_tx(
+        &transaction, writer, &format!("planning-session/{session}"), &format!("planning-session.{event}"),
+        Some("person/operator"),
+        &json!({"fields":fields, "_operation":{"id":format!("op/{session}-{event}"), "request_digest":event}}),
+        predecessors, None,
+    ).unwrap();
+    transaction.commit().unwrap();
+    claim
+}
+
+fn planning_started(session: &str) -> Value {
+    json!({"mission":format!("mission/{session}"), "request":"doc/request", "workspace":"workspace",
+        "requester":"person/operator", "planner":"agent/planner"})
+}
+
+fn planning_candidate(revision: u64) -> Value {
+    json!({"variant":"default", "candidate_revision":revision, "markdown":"doc/candidate",
+        "kdl":"doc/definition", "mission_revision":format!("revision-{revision}")})
+}
+
+/// The planning claims the last staged projection lend rebuilt, by stage.
+fn planning_rebuilt_in_last_projection() -> Vec<(&'static str, u64)> {
+    smallclaims::windows::holds::recent_staged()
+        .into_iter()
+        .rev()
+        .find(|(stages, _)| stages.iter().any(|(stage, _)| *stage == "incremental"))
+        .expect("a staged projection lend")
+        .1
+        .into_iter()
+        .filter(|(stage, _)| stage.contains("planning"))
+        .map(|(stage, rebuilt)| (stage, rebuilt.claims))
+        .collect()
+}
+
+/// One planning claim costs the writer what its own session's history costs. A replica that holds
+/// many other sessions, each with several claims, rebuilds none of them when a claim about one
+/// more arrives, and the result still matches canonical replay. Before, every planning claim
+/// replayed every planning claim the store held (and, on the deployed revision, the whole graph).
+/// The staged lends are kept process-wide; CI runs each test in its own process (nextest).
+#[test]
+fn a_planning_claim_rebuilds_only_its_own_session() {
+    let source = Store::open_memory("source").unwrap();
+    let target = Store::open_memory("target").unwrap();
+    target.project_replication_backlog().unwrap();
+    let sessions = 40;
+    for index in 0..sessions {
+        let session = format!("earlier-{index}");
+        let started = planning_claim(&source, "source", &session, "started", planning_started(&session), &[]);
+        let candidate = planning_claim(&source, "source", &session, "candidate-submitted", planning_candidate(1), &[started.id]);
+        planning_claim(&source, "source", &session, "cancelled", json!({"reason":"finished"}), &[candidate.id]);
+    }
+    receive_and_project(&target, "source", &exchange_from(&source, &target.replication_inventory().unwrap()));
+    let started = planning_claim(&source, "source", "late", "started", planning_started("late"), &[]);
+    FULL_REPLAYS.with(|count| count.set(0));
+    receive_and_project(&target, "source", &exchange_from(&source, &target.replication_inventory().unwrap()));
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert_eq!(planning_rebuilt_in_last_projection(), [("rebuild-planning-session", 1)]);
+    planning_claim(&source, "source", "late", "candidate-submitted", planning_candidate(1), &[started.id]);
+    receive_and_project(&target, "source", &exchange_from(&source, &target.replication_inventory().unwrap()));
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert_eq!(planning_rebuilt_in_last_projection(), [("rebuild-planning-session", 2)]);
+    let statuses = |store: &Store| {
+        store.readers.get()
+            .prepare("SELECT id, status FROM planning_sessions ORDER BY id").unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap()
+    };
+    let incremental = (graph_digest_of(&target), statuses(&target));
+    assert_eq!(incremental.1.len(), sessions + 1);
+    assert!(incremental.1.contains(&("late".into(), "review".into())));
+    target.replay_replication_graph().unwrap();
+    assert_eq!((graph_digest_of(&target), statuses(&target)), incremental);
+}
+
+/// A session rebuild keeps what it does not own: another session's quarantined claim stays
+/// quarantined until a full rebuild decides it again, its own claims are decided again, and a
+/// duplicate delivery or a local write of the session's next claim gives what canonical replay
+/// gives.
+#[test]
+fn a_planning_session_rebuild_matches_canonical_replay_for_local_duplicate_and_quarantined_claims() {
+    let source = Store::open_memory("source").unwrap();
+    let target = Store::open_memory("target").unwrap();
+    target.project_replication_backlog().unwrap();
+    // A started claim without a planner cannot be projected and is quarantined alone.
+    planning_claim(&source, "source", "broken", "started", json!({"mission":"mission/broken"}), &[]);
+    planning_claim(&source, "source", "example", "started", planning_started("example"), &[]);
+    let exchange = exchange_from(&source, &target.replication_inventory().unwrap());
+    receive_and_project(&target, "source", &exchange);
+    let quarantined = |store: &Store| {
+        store.readers.get()
+            .prepare("SELECT aggregate, updated_at_unix_ms FROM projection_health WHERE aggregate LIKE 'projection:planning:%' ORDER BY aggregate").unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap()
+    };
+    assert_eq!(quarantined(&target).len(), 1);
+    // The row's time shows the session rebuild kept it, rather than clearing and writing it again.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let before = (graph_digest_of(&target), quarantined(&target));
+    FULL_REPLAYS.with(|count| count.set(0));
+    receive_and_project(&target, "source", &exchange);
+    assert_eq!((graph_digest_of(&target), quarantined(&target)), before, "a duplicate delivery changed the graph");
+    // The target writes the session's next claim itself, as the launch API does.
+    target
+        .append_claim(&ClaimInput {
+            subject: "planning-session/example".into(),
+            kind: "planning-session.candidate-submitted".into(),
+            actor: Some("person/operator".into()),
+            fields: serde_json::from_value(planning_candidate(1)).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some("example-candidate".into()),
+        })
+        .unwrap();
+    {
+        let mut connection = target.connection.write();
+        let transaction = connection.transaction().unwrap();
+        rebuild_planning_session_tx(&transaction, "example").unwrap();
+        transaction.commit().unwrap();
+    }
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert_eq!(quarantined(&target), before.1, "the session rebuild forgot another session's quarantine");
+    let status = |store: &Store| {
+        store.readers.get()
+            .query_row("SELECT status FROM planning_sessions WHERE id='example'", [], |row| row.get::<_, String>(0))
+            .unwrap()
+    };
+    assert_eq!(status(&target), "review");
+    let incremental = (graph_digest_of(&target), quarantined(&target).len(), status(&target));
+    target.replay_replication_graph().unwrap();
+    assert_eq!((graph_digest_of(&target), quarantined(&target).len(), status(&target)), incremental);
+}
+
+#[test]
+fn planning_replication_keeps_malformed_operation_and_unknown_kind_guards() {
+    for (kind, operation, expected) in [
+        (
+            "planning-session.cancelled",
+            json!({"id":"op/malformed"}),
+            "malformed-operation",
+        ),
+        (
+            "planning-session.future",
+            json!({"id":"op/unknown", "request_digest":"digest"}),
+            "non-incremental-kind",
+        ),
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        store.project_replication_backlog().unwrap();
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let claim = append_claim_record_tx(
+            &transaction,
+            "source",
+            "planning-session/example",
+            kind,
+            None,
+            &json!({"fields":{"reason":"finished"}, "_operation":operation}),
+            &[],
+            None,
+        )
+        .unwrap();
+        let result =
+            try_project_simple_replication_tx(&transaction, &store.origin, claim.store_index)
+                .unwrap();
+        match result {
+            IncrementalProjection::Replay(reason)
+            | IncrementalProjection::ReplayWithContext { reason, .. } => {
+                assert_eq!(reason, expected)
+            }
+            IncrementalProjection::Projected => panic!("{kind} bypassed {expected}"),
+        }
+        transaction.rollback().unwrap();
+    }
 }
 
 #[test]
@@ -3443,6 +3826,41 @@ fn a_remote_stop_without_process_authority_cannot_poison_the_running_owner() {
         "example-linux",
         &remote_running,
     ));
+}
+
+#[test]
+fn a_nonowner_end_never_stands_for_a_seat_its_desired_host_observes() {
+    // cedar runs the seat now; birch, where it ran before, records its own old runtime ending.
+    let owner_running = json!({"fields": {"status": "running", "host": "cedar", "incarnation_id": "on-cedar"}});
+    let stale_stop = json!({"fields": {"status": "stopped", "host": "birch", "incarnation_id": "on-birch"}});
+    let rows = [
+        ("a", "runtime.observed", "cedar", &owner_running),
+        ("b", "runtime.observed", "birch", &stale_stop),
+    ];
+    let (id, origin, rivals) = select_actual_source(&rows, Some("cedar")).unwrap();
+    assert_eq!((id.as_str(), origin.as_str()), ("a", "cedar"));
+    assert!(rivals.is_empty(), "{rivals:?}");
+    // With no known desired host, the newest record stands, as before.
+    assert_eq!(select_actual_source(&rows, None).unwrap().0, "b");
+    // The desired host's own end stands.
+    let owner_stop = json!({"fields": {"status": "exited", "host": "cedar", "incarnation_id": "on-cedar"}});
+    let rows = [
+        ("a", "runtime.observed", "cedar", &owner_running),
+        ("b", "runtime.observed", "birch", &stale_stop),
+        ("d", "runtime.observed", "cedar", &owner_stop),
+    ];
+    assert_eq!(select_actual_source(&rows, Some("cedar")).unwrap().0, "d");
+    // A non-owner that runs the seat is real state: it is selected and the owner is its rival.
+    let remote_running = json!({"fields": {"status": "running", "host": "birch", "incarnation_id": "again"}});
+    let rows = [
+        ("a", "runtime.observed", "cedar", &owner_running),
+        ("c", "runtime.observed", "birch", &remote_running),
+    ];
+    let (id, _, rivals) = select_actual_source(&rows, Some("cedar")).unwrap();
+    assert_eq!((id.as_str(), rivals), ("c", vec!["a".to_owned()]));
+    // Before the desired host has observed the seat, the non-owner's record is all there is.
+    let rows = [("b", "runtime.observed", "birch", &stale_stop)];
+    assert_eq!(select_actual_source(&rows, Some("cedar")).unwrap().0, "b");
 }
 
 #[test]
@@ -8197,8 +8615,9 @@ fn a_harness_state_replicates_only_when_it_changes() {
 #[test]
 fn a_resting_native_harness_replicates_its_state_once_not_every_re_stamp() {
     let minute = 60_000_u128;
-    let count = |native: bool| {
+    let count = |native: bool, fleet_hears: bool| {
         let store = Store::open_memory("node").unwrap();
+        store.set_fleet_hears_seats(fleet_hears).unwrap();
         let subject = "agent/node.worker";
         store
             .append_claim(&ClaimInput {
@@ -8220,6 +8639,7 @@ fn a_resting_native_harness_replicates_its_state_once_not_every_re_stamp() {
             let begin = store.claims_for(subject, Some("harness.observed")).unwrap().len();
             for stamp in 0..=12 {
                 let at = start + if state == "idle" { 0 } else { 61 * minute } + stamp * 5 * minute;
+                store.set_write_clock_at(at).unwrap();
                 append_latest_observation_publication(
                     &store.graph,
                     &harness_state(subject, state, at as u64),
@@ -8233,8 +8653,12 @@ fn a_resting_native_harness_replicates_its_state_once_not_every_re_stamp() {
         assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 26, "the local log keeps every re-stamp");
         claims
     };
-    assert_eq!(count(true), [1, 13], "a native harness at rest replicates its transition only");
-    assert_eq!(count(false), [13, 13], "a legacy report keeps its heartbeat");
+    // While some member cannot ask the seat's host, re-stamps five minutes apart replicate.
+    assert_eq!(count(true, false), [1, 13], "a native harness at rest replicates its transition only");
+    assert_eq!(count(false, false), [13, 13], "a legacy report keeps its heartbeat");
+    // Once every member can ask, every seat replicates its transitions only.
+    assert_eq!(count(true, true), [1, 1]);
+    assert_eq!(count(false, true), [1, 1], "a legacy report needs no heartbeat either");
 }
 
 /// A resting native harness's re-stamp no longer replicates, but it still carries out the usage
@@ -12291,6 +12715,120 @@ fn a_seats_harness_diagnostics_are_read_again_only_when_they_change() {
     assert_eq!(store.harness_diagnostics(subject).unwrap()[0].id, later.id);
 }
 
+/// The node-local `claims_stored` totals count rows stored into the claims table: an ignored
+/// INSERT OR IGNORE (a duplicate arrival) counts nothing, a delete never lowers them, and a repair
+/// that deletes a claim and inserts it again counts it again.
+#[test]
+fn claims_stored_counts_inserted_rows_not_deletes_or_ignored_duplicates() {
+    let store = Store::open_memory("node").unwrap();
+    let totals = |store: &Store| -> Vec<(String, String, i64)> {
+        store
+            .readers
+            .get()
+            .prepare("SELECT kind, writer, claims FROM claims_stored WHERE kind='harness.observed'")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let claim = store
+        .connection
+        .batched(|transaction| {
+            append_claim_tx(transaction, &store.origin, "agent/node.test", "harness.observed", Some("agent/node.test"),
+                &json!({"fields": {"state": "ready"}}), &[], None)
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(totals(&store), [("harness.observed".to_owned(), "node".to_owned(), 1)]);
+    store
+        .connection
+        .batched(|transaction| -> rusqlite::Result<()> {
+            let ignored = transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hca6115502373 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
+                 SELECT id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE id=?1",
+                [&claim.id],
+            )?;
+            assert_eq!(ignored, 0, "the duplicate is ignored");
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(totals(&store)[0].2, 1, "an ignored insert stores and counts nothing");
+    store
+        .connection
+        .batched(|transaction| -> rusqlite::Result<()> {
+            let row: (String, String, String, String, Option<String>, String, String, String) = transaction.query_row(
+                "SELECT id, batch_id, subject, kind, actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE id=?1",
+                [&claim.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+            )?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hdbe61e572c78 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id])?;
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h0e5ba72f1e3a owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
+                 VALUES(?1, ?2, ?3, ?4, 'node', ?5, ?6, ?7, ?8)",
+                rusqlite::params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(totals(&store)[0].2, 2, "a delete-then-insert repair counts the claim again; the delete lowered nothing");
+}
+
+/// The cost of the `claims_stored_insert` trigger on a bulk admission: 10,000 claims of about
+/// 1.8 KB in one write transaction, with and without the trigger. Run with
+/// `cargo nextest run -p fractal-store --run-ignored only -E 'test(claims_stored_trigger_cost)' --no-capture`.
+#[test]
+#[ignore = "benchmark; prints timings"]
+fn claims_stored_trigger_cost_on_a_bulk_admission() {
+    const CLAIMS: usize = 10_000;
+    let filler = "x".repeat(1_700);
+    let admit = |store: &Store| -> std::time::Duration {
+        let started = std::time::Instant::now();
+        store
+            .connection
+            .batched(|transaction| -> Result<()> {
+                for index in 0..CLAIMS {
+                    append_claim_tx(transaction, &store.origin, &format!("custom/example/seat-{}", index % 50), "custom.example.reading",
+                        None, &json!({"fields": {"reading": index, "note": filler}}), &[], None)?;
+                }
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        started.elapsed()
+    };
+    let mut with = Vec::new();
+    let mut without = Vec::new();
+    for round in 0..5 {
+        for triggered in if round % 2 == 0 { [true, false] } else { [false, true] } {
+            let store = Store::open_memory("node").unwrap();
+            if !triggered {
+                store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hbc4d43337482 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER claims_stored_insert").unwrap();
+            }
+            let held = admit(&store);
+            if triggered {
+                let stored: i64 = store.readers.get()
+                    .query_row("SELECT sum(claims) FROM claims_stored WHERE kind='custom.example.reading'", [], |row| row.get(0)).unwrap();
+                assert_eq!(stored, CLAIMS as i64);
+                with.push(held);
+            } else {
+                without.push(held);
+            }
+        }
+    }
+    with.sort();
+    without.sort();
+    let (with, without) = (with[with.len() / 2], without[without.len() / 2]);
+    println!(
+        "claims_stored trigger, {CLAIMS} claims in one write transaction (median of 5): with {with:?}, without {without:?}, \
+         {:.1}% more, {:.1} us per claim",
+        (with.as_secs_f64() / without.as_secs_f64() - 1.0) * 100.0,
+        (with.as_secs_f64() - without.as_secs_f64()) * 1e6 / CLAIMS as f64
+    );
+}
+
 #[test]
 fn a_parked_seat_lookup_seeks_each_seat_and_never_ranges_over_every_decision() {
     let store = Store::open_memory("node").unwrap();
@@ -12299,6 +12837,78 @@ fn a_parked_seat_lookup_seeks_each_seat_and_never_ranges_over_every_decision() {
     // (subject, kind, store_index) history, not a range over every seat's decisions of one kind.
     assert_eq!(plan.iter().filter(|step| step.contains("claims_subject_kind_index (subject=? AND kind=?")).count(), 2, "{plan:?}");
     assert!(!plan.iter().any(|step| step.contains("claims_kind_index")), "{plan:?}");
+}
+
+/// Step 2b of the claims-store breakup: an unchanged harness report stays in the local log once
+/// every other member can ask the seat's host how recently it heard the seat. Until then one
+/// replicates every five minutes, for members whose freshness and down rule read report ages:
+/// fifteen minutes of a working seat re-stamping every minute replicate 4 claims, not 16.
+#[test]
+fn unchanged_harness_reports_stay_local_once_every_member_can_ask_the_seats_host() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let count = || store.claims_for(subject, Some("harness.observed")).unwrap().len();
+    let report = |state: &str, at: u128| {
+        let mut input = harness_state(subject, state, at as u64);
+        input.idempotency_key = Some(format!("{state}-{at}"));
+        store.set_write_clock_at(at).unwrap();
+        store.append_latest_observation(&input, at).unwrap();
+    };
+    for n in 0..=15 {
+        report("working", start + n * minute);
+    }
+    assert_eq!(count(), 4, "the first report, then one every five minutes: minutes 0, 5, 10 and 15");
+    store.set_fleet_hears_seats(true).unwrap();
+    for n in 16..=45 {
+        report("working", start + n * minute);
+    }
+    assert_eq!(count(), 4, "re-stamps stay local once every member can ask");
+    report("idle", start + 46 * minute);
+    assert_eq!(count(), 5, "a transition replicates");
+    for n in 47..=60 {
+        report("idle", start + n * minute);
+    }
+    assert_eq!(count(), 5);
+    // A member that cannot ask joins: the fallback resumes.
+    store.set_fleet_hears_seats(false).unwrap();
+    for n in 61..=65 {
+        report("idle", start + n * minute);
+    }
+    assert_eq!(count(), 6, "the first re-stamp past five minutes replicates, the rest wait");
+    assert_eq!(
+        store.local_observations_after(0, 200).unwrap().iter().filter(|row| row.kind == "harness.observed").count(),
+        66,
+        "the local log keeps every report"
+    );
+}
+
+/// A roster's freshness read takes every seat's newest local report in one statement: 12 seats
+/// cost what 2 do, and a seat with no local report adds nothing.
+#[test]
+fn the_newest_local_harness_report_of_many_seats_is_one_read() {
+    let measure = |reported: usize, silent: usize| {
+        let store = Store::open_memory("node").unwrap();
+        let subjects = (0..reported + silent).map(|seat| format!("agent/node.worker-{seat}")).collect::<Vec<_>>();
+        let start = now_ms();
+        for subject in subjects.iter().take(reported) {
+            store.append_latest_observation(&harness_state(subject, "idle", start as u64), start).unwrap();
+        }
+        let names = subjects.iter().map(String::as_str).collect::<Vec<_>>();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let newest = store.local_harness_newest_many(&names).unwrap();
+        let work = scope.finish();
+        assert_eq!(newest.len(), reported);
+        for subject in subjects.iter().take(reported) {
+            assert_eq!(newest[subject], ("inc-1".to_owned(), start), "{subject}");
+            assert_eq!(store.local_harness_newest(subject).unwrap(), Some(newest[subject].clone()));
+        }
+        work.statements
+    };
+    let two = measure(2, 0);
+    assert_eq!(measure(12, 0), two, "12 seats cost what 2 do");
+    assert_eq!(measure(2, 10), two, "and 10 seats with no local report add nothing");
 }
 
 /// `daemon.diagnostic` is observability only, so it stays in the node's local observation log,

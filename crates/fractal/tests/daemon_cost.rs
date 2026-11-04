@@ -121,12 +121,11 @@ const ADAPTER_ACTOR: &str = "agent/bench/cost/adapter";
 /// much worse unnoticed. Each breaks the daemon's rule that no query's cost grows with the whole
 /// store and is owed a fix. A fixed one fails the check until it leaves this list.
 const KNOWN_GROWTH: &[(&str, f64)] = &[
-    // Checkpoint status walks the sealed set (9.8x).
-    ("GET /v1/checkpoint/status", 15.0),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
     ("GET /v1/doctor", 17.0),
     // Fleet and replication status count every replica record (9.7x).
     ("GET /v1/internal/fleet/status", 15.0),
+    ("GET /v1/fleet/status", 15.0),
     ("GET /v1/replication/status", 15.0),
     // Outcome history reads every finished step to page them (8.3x).
     ("GET /v1/outcome-history", 12.5),
@@ -139,6 +138,22 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
+    (
+        "POST /v1/fleet/admission-override",
+        "an operator's rare release of a waiting member; it reads this member's peers and its newest daemon.started claim and appends one claim, none of which grows with claim history; placement_handoff::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override covers the real route through the CLI",
+    ),
+    (
+        "GET /v1/fleet/anchor",
+        "one fleet metadata key lookup, independent of claim history; fleet::rename_proofs_export_over_cli_and_verify_without_daemon_or_config covers the real public API read through the CLI",
+    ),
+    (
+        "POST /v1/agents/rename-id/proof/export",
+        "requires genuinely signed member envelopes and an admitted fleet trust root, absent from generated cost stores; store::rename_proof_tests covers real signed agent exports; evidence export intentionally reads the complete proven declaration, rename, actor and membership history, whose growth is not measured here",
+    ),
+    (
+        "POST /v1/missions/rename-id/proof/export",
+        "requires genuinely signed member envelopes and an admitted fleet trust root, absent from generated cost stores; store::rename_proof_tests::real_mission_rename_proves_published_declaration covers signed mission export; complete proof-history growth is not measured here",
+    ),
     (
         "GET /v1/client/private-notes/{*uri}",
         "owner-local catalog/filesystem read with generation and revision fences; private bytes and recovery receipts are outside the replicated graph; path and audit refusal boundaries are covered by private_notes tests",
@@ -157,7 +172,11 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     (
         "GET /v1/internal/fleet/admission-residue",
-        "the scan doctor's fleet-admission check runs inside GET /v1/doctor, which is measured; st fleet wait reads it once as it ends",
+        "the scan the daemon runs at startup and hourly, off the request path, for doctor's fleet-admission check, in pages that each take their own read snapshot; st fleet wait reads it once as it ends",
+    ),
+    (
+        "GET /v1/fleet/admission-residue",
+        "the public route of GET /v1/internal/fleet/admission-residue, the same handler; st fleet wait reads it once as it ends",
     ),
     ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
     ("POST /v1/client/diagnostics", "requires a current paired session with write.client-diagnostics, absent from generated stores; writes node-local observations and retry receipts; paired admission, deduplication, rate-limit and receipt-reopen tests live in api/client_diagnostics.rs; ingestion cost is not measured here"),
@@ -305,6 +324,28 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/internal/replication/worker-status",
         "updates host-local worker memory; no store read or graph write",
     ),
+    // The messages shard: nothing writes to it before the stream writer, so a generated store
+    // holds an empty shard. The writer's change measures export, receive and wake.
+    (
+        "GET /v1/internal/replication/shard/{shard}/peers",
+        "one indexed daemon.started lookup per member or configured peer; grows with the fleet, not the store",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/export",
+        "pages the messages shard like the graph export; the shard stays empty until the stream writer",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/receive",
+        "admits a peer's messages shard exchange; the shard stays empty until the stream writer",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/peer-failure",
+        "records a transport failure; no store read",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/wake",
+        "drains the messages shard backlog; the shard stays empty until the stream writer",
+    ),
     // Checkpoints: the trim is measured directly, per deleted row.
     (
         "POST /v1/checkpoint/plan",
@@ -313,6 +354,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/checkpoint/excuse", "checkpoint agreement"),
     ("POST /v1/checkpoint/resume", "checkpoint agreement"),
     ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
+    ("POST /v1/faults/dismiss", "an operator's rare action on an ended run: one fault snapshot and one claim"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
@@ -328,6 +370,14 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "POST /v1/internal/replication/answers-check",
         "records a daily answers check; writes only when a fault opens or ends",
+    ),
+    (
+        "POST /v1/internal/seat-freshness",
+        "records a peer's seat freshness push in memory: one declarations read, no write",
+    ),
+    (
+        "POST /v1/internal/seat-freshness/reads",
+        "answers a peer's read about this node's seats: one declarations read and at most 512 messages' marks, no write",
     ),
     // Planning sessions and evals start harnesses.
     ("POST /v1/launches", "starts a planning harness"),
@@ -374,6 +424,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "explicit identity repair enumerates the old person's current work and reviews once; requires that person's authority and is not a steady-state daemon request; covered by api::tests::human_review_list_and_decisions_use_exact_current_requests",
     ),
     ("POST /v1/agents/restart", "restarts a live seat"),
+    ("POST /v1/agents/lane/burst", "raises a live seat's lane slice"),
+    ("DELETE /v1/agents/lane/burst", "lowers a live seat's lane slice"),
     (
         "POST /v1/agents/rollout",
         "requires a running source-fenced native seat",
@@ -718,6 +770,36 @@ const PROBES: &[Probe] = &[
             .map(|ended| json!({"ended": ended}))
             .map_err(|error| error.message)
     }),
+    // The GitHub plugin's reads: which member polls the repository, then, answering from this
+    // member's graph, its recorded items or events. The mirror is the poller's own file.
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/pulls", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .repository_items("resource/github/acme/garden", None)
+            .map(|items| json!(items.len()))
+            .map_err(|error| error.to_string())
+    }),
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/pulls/{number}", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .repository_items("resource/github/acme/garden", Some(1))
+            .map(|items| json!(items.len()))
+            .map_err(|error| error.to_string())
+    }),
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .repository_items("resource/github/acme/garden", Some(1))
+            .map(|items| json!(items.len()))
+            .map_err(|error| error.to_string())
+    }),
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/events", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .github_events("resource/github/acme/garden", None, 50)
+            .map(|events| json!(events.len()))
+            .map_err(|error| error.to_string())
+    }),
     get("GET /v1/health", "/v1/health"),
     get("GET /v1/schema", "/v1/schema"),
     get("GET /v1/client/capabilities", "/v1/client/capabilities"),
@@ -813,6 +895,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/agent-workspaces/{*id}",
         "/v1/client/agent-workspaces/{agent}",
     ),
+    get("GET /v1/agents/lane", "/v1/agents/lane?agent={seat}"),
     get(
         "GET /v1/client/status-history/{*id}",
         "/v1/client/status-history/{agent}",
@@ -963,6 +1046,9 @@ const PROBES: &[Probe] = &[
         "/v1/internal/fleet/membership",
     ),
     get("GET /v1/internal/fleet/status", "/v1/internal/fleet/status"),
+    get("GET /v1/fleet/status", "/v1/fleet/status"),
+    get("GET /v1/fleet/membership", "/v1/fleet/membership"),
+    get("GET /v1/fleet/invites", "/v1/fleet/invites"),
     get(
         "GET /v1/internal/fleet/invites",
         "/v1/internal/fleet/invites",
@@ -1618,6 +1704,7 @@ mission "cost/history" state="ready" {
         }).unwrap();
     }
     let app = fractal_daemon::api::router(AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -2262,7 +2349,9 @@ fn routes_in(router: &str) -> BTreeSet<String> {
     }
     // The router's last section nests test-only routes in its own tests module.
     routes.retain(|route| {
-        !route.contains("/v1/client/probes") && !route.contains("/v1/client/earlier")
+        !route.contains("/v1/client/probes")
+            && !route.contains("/v1/client/earlier")
+            && !route.contains("/v1/internal/test/")
     });
     routes
 }
@@ -2635,6 +2724,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     })
     .unwrap();
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),

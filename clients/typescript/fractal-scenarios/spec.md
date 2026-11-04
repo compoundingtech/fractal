@@ -311,9 +311,9 @@ so an override never introduces strangers. Variants per slice:
 
 | Slice | Variants |
 | --- | --- |
-| `roster` | `default`, `empty`, `loading`, `one-agent`, `all-states`, `huge` |
+| `roster` | `default`, `empty`, `loading`, `one-agent`, `sidebar-tabs`, `all-states`, `huge` |
 | `details` | `default`, `empty`, `loading`, `stalled`, `failed` |
-| `attention` | `default`, `none`, `one-of-each-kind`, `many` |
+| `attention` | `default`, `none`, `one-of-each-kind`, `many`, `sidebar-tabs` |
 | `conversation` | `default`, `empty`, `loading`, `streaming`, `long`, `huge`, `tool-heavy`, `failed-tools`, `remote-only-mail` |
 | `terminal` | `default`, `none`, `running`, `unavailable`, `exited`, `restarted` |
 | `sync` | one variant per row of the [sync matrix](#sync-matrix) |
@@ -331,6 +331,10 @@ member; it never invents a foreign identity or dereferences a missing first reco
 `roster.all-states` cycles the supported lifecycle/harness combinations over the declared cast;
 it does not add agents merely to display every state. `conversation.long` contains 80 exchanges
 per cast agent, and `attention.many` contains 50 cards distributed over cast-owned work.
+`attention.sidebar-tabs` holds one open harness question from the first cast agent's session
+(no requesting agent or mission) and one needs-you card per other cast agent, the first of which
+holds the first mission; `roster.sidebar-tabs` keeps the world's roster but makes every
+non-local machine unreachable while it holds the first mission's work.
 `conversation.tool-heavy` keeps its turn `running` while the final shell call has no result;
 `conversation.failed-tools` keeps its turn `waiting`. After the latest terminal (`completed`,
 `failed`, or `cancelled`) status, tool calls without results require a non-terminal status

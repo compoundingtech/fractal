@@ -1,6 +1,56 @@
 use super::*;
 
 #[test]
+fn fleet_admit_without_binds_mutating_actor_to_harness() {
+    for actor in ["agent/own", "agent/peer", "person/operator"] {
+        let cli = Cli::try_parse_from([
+            "fractal", "fleet", "admit-without", "--peer", "peer",
+            "--reason", "peer unavailable", "--as", actor,
+        ]).unwrap();
+        assert_eq!(
+            guard_mutating_cli_actor(&cli.command, Some("agent/own"), None).is_ok(),
+            actor == "agent/own",
+            "{actor}",
+        );
+        assert!(guard_mutating_cli_actor(&cli.command, None, None).is_ok());
+    }
+}
+
+#[test]
+fn alias_deprecation_uses_argv0_basename_and_exact_suppression() {
+    use std::ffi::OsStr;
+    for (path, expected) in [
+        ("st", Some("st")), ("/usr/local/bin/st", Some("st")),
+        ("st3", Some("st3")), ("./bin/st3", Some("st3")),
+        ("fractal", None), ("/bin/fractal", None),
+        ("git", None), ("gh", None), ("st3-helper", None), ("", None),
+    ] {
+        let argv0 = Some(OsStr::new(path));
+        assert_eq!(deprecated_binary_name(argv0, None), expected, "{path}");
+        assert_eq!(deprecated_binary_name(argv0, Some(OsStr::new("1"))), None, "{path}");
+        for value in ["", "0", "true", "01"] {
+            assert_eq!(deprecated_binary_name(argv0, Some(OsStr::new(value))), expected, "{path}: {value}");
+        }
+    }
+    assert_eq!(deprecated_binary_name(None, None), None);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(deprecated_binary_name(Some(OsStr::from_bytes(b"/bin/\xffst")), None), None);
+    }
+}
+
+#[test]
+fn demo_environment_excludes_both_tui_configuration_spellings() {
+    for suffix in ["PERSON", "ENDPOINT", "DOWNLOADS"] {
+        for prefix in ["ST3", "FRACTAL"] {
+            let name = format!("{prefix}_{suffix}");
+            assert!(DEMO_ENVIRONMENT_NAMES.contains(&name.as_str()), "{name} must not leak into the demo");
+        }
+    }
+}
+
+#[test]
 fn github_watch_line_shows_throttling_without_a_new_wire_state() {
     let view = serde_json::json!({
         "thread": "acme/garden#12", "state": "active",
@@ -293,7 +343,7 @@ fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
 
 #[test]
 fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
-    let status = fractal_daemon::store::CheckpointStatusView {
+    let mut status = fractal_daemon::store::CheckpointStatusView {
         node: "alder".into(),
         newest_stable: None,
         trimmed: None,
@@ -308,6 +358,14 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
     assert!(output.contains("last daemon start (advertised build)"));
     assert!(output.contains("machine_version  alder: 0.1.0+abc1234-dirty"));
     assert!(output.contains("machine_version  birch: not advertised"));
+    status.pending = Some(serde_json::from_value(serde_json::json!({
+        "checkpoint": "checkpoint/test", "cut_unix_ms": 0, "due_at_unix_ms": 0,
+        "local_digest_state": "unavailable", "sealed": [], "disagreeing": {},
+        "unsealed": ["alder", "birch"], "verified": [], "verifications_agree": true,
+        "builds": {}
+    })).unwrap());
+    assert!(status.pending.as_ref().unwrap().terms.is_none());
+    assert!(render_checkpoint_status(&status).contains("local digest unavailable"));
 }
 
 #[test]
@@ -471,6 +529,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         }).unwrap();
     };
     let state = fractal_daemon::api::AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
@@ -1437,6 +1496,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
         sender_class: None,
         assistant_grant_id: None,
         created_index: 1,
+        status_from: None,
         attachments: Vec::new(),
     };
     let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", &[]);
@@ -1475,6 +1535,7 @@ fn native_push_preserves_delivery_notices_and_person_signatures() {
         sender_class: None,
         assistant_grant_id: None,
         created_index: 1,
+        status_from: None,
     };
     let queued = native_queued_message(&view, "body".into(), &[]);
     let rendered = fractal_drivers::ding::with_tag_notices("body".into(), &queued.tags);
@@ -1836,6 +1897,7 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         let mut mailbox = NativeMailbox {
@@ -2082,6 +2144,9 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             claude_attachment_reconciled: false,
             claude_attachment_terminal: None,
             claude_readiness_fallback: ClaudeReadinessFallback::default(),
+            claude_channel_launch: None,
+            claude_attach_started_ms: None,
+            claude_session_started_ms: None,
             claude_attachment_admissions: AdmissionBucket {
                 binding: Some(("incarnation".into(), 4, "token".into())),
                 tokens: 0,
@@ -2550,6 +2615,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             .unwrap();
     }
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -2646,6 +2712,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         })
         .collect::<Vec<_>>();
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
@@ -2725,6 +2792,7 @@ async fn trace_wait_starts_after_existing_events() {
             .store_index;
     }
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
@@ -3936,7 +4004,7 @@ fn an_empty_mailbox_prints_a_heading_and_no_current_items() {
 }
 
 #[test]
-fn claimed_work_renews_for_the_exact_live_harness_incarnation_even_while_idle() {
+fn lease_guidance_finds_the_exact_live_harness_incarnation_even_while_idle() {
     let step: StepRunView = serde_json::from_value(json!({
         "subject": "step-run/run/work",
         "run": "mission-run/run",
@@ -3967,51 +4035,22 @@ fn claimed_work_renews_for_the_exact_live_harness_incarnation_even_while_idle() 
         "observed_at_unix_ms": 1
     }))
     .unwrap();
-    assert!(work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        Some(&harness)
-    ));
+    assert!(claim_has_active_harness(step.claim_incarnation.as_deref(), Some(&harness)));
 
     let mut idle = harness.clone();
     idle.state = "idle".into();
-    assert!(work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        Some(&idle)
-    ));
+    assert!(claim_has_active_harness(step.claim_incarnation.as_deref(), Some(&idle)));
     let mut blocked = idle;
     blocked.state = "blocked".into();
-    assert!(work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        Some(&blocked)
-    ));
+    assert!(claim_has_active_harness(step.claim_incarnation.as_deref(), Some(&blocked)));
     let mut replacement = harness;
     replacement.incarnation_id = "worker-two".into();
-    assert!(!work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        Some(&replacement)
-    ));
-    assert!(!work_claim_has_active_harness(
-        &step,
-        "agent/other",
-        Some(&replacement)
-    ));
-    assert!(!work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        None
-    ));
+    assert!(!claim_has_active_harness(step.claim_incarnation.as_deref(), Some(&replacement)));
+    assert!(!claim_has_active_harness(step.claim_incarnation.as_deref(), None));
     let mut ended = replacement.clone();
     ended.incarnation_id = "worker-one".into();
     ended.state = "ended".into();
-    assert!(!work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        Some(&ended)
-    ));
+    assert!(!claim_has_active_harness(step.claim_incarnation.as_deref(), Some(&ended)));
     for state in ["claimed", "working", "verifying", "blocked"] {
         let mut held = step.clone();
         held.status = state.into();
@@ -4070,7 +4109,7 @@ async fn renewal_retry_failed_work_read_preserves_the_known_lease_bound() {
     retry.lease_margin(Duration::from_secs(2));
     // Exercise the real request/selection boundary: an error is not an empty response.
     assert!(
-        renew_claimed_work(&client, "agent/worker", 0, &mut retry)
+        renew_claimed_work(&client, "agent/worker", "worker-one", 0, &mut retry)
             .await
             .is_err()
     );
@@ -4416,6 +4455,23 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let observed = fractal_drivers::driver_diagnostic::read(
             &fractal_drivers::driver_diagnostic::path(directory.path()),
         );
+        // A legacy same-code diagnostic is not evidence of this runtime's failure.
+        assert!(admission_diagnostic("agent/node.fixture", "first", &observed).is_none());
+        let Observed::Failure(mut failure) = observed else {
+            panic!("missing diagnostic")
+        };
+        failure.attempt = Some(Box::new(fractal_drivers::harness_admission::AttemptDiagnostic {
+            incarnation: "first".into(),
+            phase: "version".into(),
+            outcome: "timeout".into(),
+            elapsed_ms: 5008,
+            deadline_ms: Some(5000),
+            exit_code: None,
+            exit_signal: Some(9),
+            stderr_tail: "fixture error".into(),
+            error_chain: "admission process timed out".into(),
+        }));
+        let observed = Observed::Failure(failure);
         let claim = admission_diagnostic("agent/node.fixture", "first", &observed).unwrap();
         assert_eq!(claim.fields["code"], "harness-admission-failed");
         assert_eq!(claim.fields["severity"], severity);
@@ -4424,7 +4480,13 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let reason = claim.fields["reason"].as_str().unwrap();
         assert!(reason.contains("admissionNativeConsumption") && reason.contains("99.42.7"));
         assert!(reason.contains(driver.as_str()));
-        assert!(reason.contains(&format!("st admission override {} --binary", driver.as_str())));
+        assert!(reason.contains("phase=version outcome=timeout elapsed=5008ms deadline=5000ms"));
+        assert!(reason.contains("fixture error"));
+        assert!(admission_diagnostic("agent/node.fixture", "successor", &observed).is_none());
+        assert!(reason.contains(&format!(
+            "st admission override {} --binary",
+            driver.as_str()
+        )));
         assert_eq!(
             claim.idempotency_key,
             admission_diagnostic("agent/node.fixture", "first", &observed)
@@ -4535,7 +4597,8 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
     let client = Client::new(Endpoint::Unix(PathBuf::from("/nonexistent/st3.sock")));
     let args = |to: &str| MessageSendArgs {
         to: to.into(),
-        body: "Done.".into(),
+        body: Some("Done.".into()),
+        body_file: None,
         subject: None,
         in_reply_to: Some("message/0123456789abcdef".into()),
         tags: Vec::new(),
@@ -5548,6 +5611,52 @@ fn message_list_requires_one_exact_mailbox_and_explicit_identity_wins() {
     assert!(explicit.archive);
 }
 
+fn parse_body_send(extra: &[&str]) -> Result<MessageSendArgs, clap::Error> {
+    let mut args = vec!["fractal", "conversations", "send", "agent/example", "--from", "agent/sender"];
+    args.extend_from_slice(extra);
+    match Cli::try_parse_from(args)?.command {
+        Command::Conversations { command: MessageCommand::Send(send) } => Ok(send),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn message_body_sources_require_exactly_one() {
+    assert_eq!(parse_body_send(&[]).err().unwrap().kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert_eq!(parse_body_send(&["--body", "text", "--body-file", "file"]).err().unwrap().kind(), clap::error::ErrorKind::ArgumentConflict);
+    for flag in ["--body", "-m"] {
+        let args = parse_body_send(&[flag, "-"]).unwrap();
+        let text = " \n`command` $VAR é\r\n";
+        assert_eq!(conversations_cli::read_message_body(args.body, args.body_file, text.as_bytes()).unwrap(), text);
+    }
+}
+
+#[test]
+fn message_body_file_preserves_text_and_rejects_invalid_utf8() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let path = file.path().to_str().unwrap();
+    let text = " \n`command` $VAR é\r\n";
+    std::fs::write(&file, text).unwrap();
+    let args = parse_body_send(&["--body-file", path]).unwrap();
+    assert_eq!(conversations_cli::read_message_body(args.body, args.body_file, std::io::empty()).unwrap(), text);
+    std::fs::write(&file, [0xff]).unwrap();
+    assert!(conversations_cli::read_message_body(None, Some(file.path().into()), std::io::empty()).unwrap_err().to_string().contains("UTF-8"));
+    assert!(conversations_cli::read_message_body(Some("-".into()), None, &[0xff][..]).unwrap_err().to_string().contains("UTF-8"));
+}
+
+#[test]
+fn message_body_sources_share_the_byte_limit() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    for length in [fractal_daemon::message_body::MAX_BYTES, fractal_daemon::message_body::MAX_BYTES + 1] {
+        let text = "a".repeat(length);
+        let accepted = length == fractal_daemon::message_body::MAX_BYTES;
+        std::fs::write(&file, &text).unwrap();
+        assert_eq!(conversations_cli::read_message_body(None, Some(file.path().into()), std::io::empty()).is_ok(), accepted);
+        assert_eq!(conversations_cli::read_message_body(Some("-".into()), None, text.as_bytes()).is_ok(), accepted);
+        assert_eq!(conversations_cli::read_message_body(Some(text), None, std::io::empty()).is_ok(), accepted);
+    }
+}
+
 #[test]
 fn fyi_is_the_silent_kind_on_send_and_reply() {
     let parse = |extra: &[&str]| {
@@ -5724,6 +5833,7 @@ fn message_replies_route_to_the_other_participant() {
         sender_class: None,
         assistant_grant_id: None,
         created_index: 1,
+        status_from: None,
         attachments: Vec::new(),
     };
 
@@ -5894,6 +6004,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("message-read-state").unwrap()),
         notify: Arc::new(Notify::new()),
@@ -5991,8 +6102,9 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     }).unwrap();
     let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
-        &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
+        &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
+        seat_admission: Default::default(),
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
         state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
@@ -7371,6 +7483,44 @@ fn a_graph_read_releases_the_native_delivery_fifo() {
     assert_eq!(fractal_drivers::message::list_dir(&archive).unwrap().len(), 1);
 }
 
+#[test]
+fn projected_inbox_tags_accept_both_families_without_merging() {
+    let root = tempfile::tempdir().unwrap();
+    let inbox = root.path().join("inbox");
+    let archive = root.path().join("archive");
+    for tags in [
+        vec!["st3-message:message/old"],
+        vec!["fractal-message:message/new"],
+        vec![
+            "fractal-message:message/ignored",
+            "st3-message:message/legacy",
+            "st3-message:message/second",
+        ],
+        vec!["unknown-message:message/refused"],
+    ] {
+        let tags = tags.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        fractal_drivers::message::send_to_inbox(&inbox, "requester", None, None, &tags, "body")
+            .unwrap();
+    }
+    let subjects = projected_message_subjects(&inbox, &archive).unwrap();
+    assert_eq!(subjects.len(), 4);
+    assert!(subjects.contains("message/second"));
+    assert!(!subjects.contains("message/ignored"));
+    assert!(!subjects.contains("message/refused"));
+    sync_consumed_projected_messages(
+        &inbox,
+        &archive,
+        &BTreeSet::from(["message/new".into(), "message/ignored".into()]),
+    )
+    .unwrap();
+    let archived = fractal_drivers::message::list_dir(&archive).unwrap();
+    assert_eq!(archived.len(), 1);
+    sync_consumed_projected_messages(&inbox, &archive, &BTreeSet::from(["message/second".into()]))
+        .unwrap();
+    let archived = fractal_drivers::message::list_dir(&archive).unwrap();
+    assert_eq!(archived.len(), 2);
+}
+
 #[tokio::test]
 async fn a_closed_message_missing_from_the_active_page_archives_its_projected_file() {
     use axum::{Json, Router, routing::get};
@@ -7930,6 +8080,7 @@ async fn serve_test_store(
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
@@ -8535,7 +8686,7 @@ async fn initial_snapshot_requires_the_providers_runtime_binding() {
 #[tokio::test]
 async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publication() {
     use axum::{Json, Router, routing::post};
-    use fractal_drivers::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage, Support};
+    use fractal_drivers::driver_diagnostic::{Driver, Publisher, Reason, Support};
     use std::sync::{Arc, Mutex};
 
     let root = tempfile::tempdir().unwrap();
@@ -8549,11 +8700,24 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
         Some("99.42.7".into()),
         Support::Unsupported,
     );
-    publisher.publish(
-        Stage::VersionGate,
-        Reason::AdmissionIdleEdge,
-        Source::AdmissionProbe,
-    );
+    fractal_drivers::harness_admission::Admission {
+        version: Some("99.42.7".into()),
+        failed: Some(Reason::AdmissionIdleEdge),
+        cache_path: None,
+        override_reason: None,
+        attempt: Some(fractal_drivers::harness_admission::AttemptDiagnostic {
+            incarnation: "current-runtime".into(),
+            phase: "idleEdge".into(),
+            outcome: "timeout".into(),
+            elapsed_ms: 45000,
+            deadline_ms: Some(45000),
+            exit_code: None,
+            exit_signal: None,
+            stderr_tail: "fake producer diagnostic retained through outage".into(),
+            error_chain: "required idleEdge evidence was not observed".into(),
+        }),
+    }
+    .publish(&mut publisher);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -8615,6 +8779,12 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
             .unwrap()
             .contains("admissionIdleEdge")
     );
+    assert!(
+        captured[0].fields["reason"]
+            .as_str()
+            .unwrap()
+            .contains("fake producer diagnostic retained through outage")
+    );
     assert!(!ready);
     server.abort();
 }
@@ -8657,9 +8827,9 @@ fn native_identity_rename_commands_preserve_full_ids_and_fences() {
             | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
             _ => panic!("expected identity rename"),
         };
-        assert_eq!(args.from, "agent/example-old");
-        assert_eq!(args.to, "agent/example-new");
-        assert_eq!(args.actor, "person/robin");
+        assert_eq!(args.from.as_deref(), Some("agent/example-old"));
+        assert_eq!(args.to.as_deref(), Some("agent/example-new"));
+        assert_eq!(args.actor.as_deref(), Some("person/robin"));
         assert_eq!(args.expected_naming_revision.as_deref(), Some("claim/example"));
         assert_eq!(args.expected_declaration, None);
         assert_eq!(args.idempotency_key.as_deref(), Some("example-rename"));
@@ -8690,6 +8860,80 @@ fn native_identity_rename_allows_generated_idempotency_key() {
         panic!("expected identity rename");
     };
     assert_eq!(args.idempotency_key, None);
+}
+
+#[test]
+fn rename_proof_commands_parse_without_mutation_arguments() {
+    for kind in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "export", "agent/example",
+            "--revision", "claim/exact-revision", "--out", "proof.json",
+            "--include-co-batched-claims",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename proof"),
+        };
+        assert!(args.actor.is_none());
+        let Some(IdentityRenameCommand::Proof {
+            command: RenameProofCommand::Export { name, revision, out, include_co_batched_claims },
+        }) = args.command else { panic!("expected proof export") };
+        assert_eq!(name, "agent/example");
+        assert_eq!(revision.as_deref(), Some("claim/exact-revision"));
+        assert_eq!(out, Some(PathBuf::from("proof.json")));
+        assert!(include_co_batched_claims);
+
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "verify", "proof.json",
+            "--fleet-anchor", "anchor-key", "--after-revision", "claim/prior",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename proof"),
+        };
+        let Some(IdentityRenameCommand::Proof {
+            command: RenameProofCommand::Verify { file, fleet_anchor, after_revision },
+        }) = args.command else { panic!("expected proof verify") };
+        assert_eq!(file, PathBuf::from("proof.json"));
+        assert_eq!(fleet_anchor, "anchor-key");
+        assert_eq!(after_revision.as_deref(), Some("claim/prior"));
+        assert!(Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "verify", "proof.json",
+        ]).is_err(), "caller trust anchor is mandatory");
+    }
+}
+
+#[test]
+fn rename_proof_verification_dispatches_before_instance_or_endpoint_resolution() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("malformed.json");
+    std::fs::write(&file, b"not a proof").unwrap();
+    for kind in ["agents", "missions"] {
+        let arguments: Vec<std::ffi::OsString> = [
+            "st", "--instance", "unconfigured-proof-verifier",
+            "--endpoint", "not-a-valid-endpoint",
+            kind, "rename-id", "proof", "verify",
+            file.to_str().unwrap(), "--fleet-anchor", "caller-anchor",
+        ].into_iter().map(Into::into).collect();
+        assert_eq!(offline_rename_proof_arguments(&arguments), Some(ExitCode::from(6)));
+    }
+    let (verdict, code) = rename_proof_verdict(&file, "caller-anchor", None);
+    assert_eq!(code, 6);
+    assert_eq!(verdict["schema"], "fractal.rename-proof-verdict.v1");
+    assert_eq!(verdict["ok"], false);
+    assert_eq!(verdict["error"]["code"], "malformed-bundle");
+    let missing = root.path().join("missing.json");
+    assert_eq!(rename_proof_verdict(&missing, "caller-anchor", None).1, 6);
+}
+
+#[test]
+fn fleet_anchor_show_parses_as_public_read() {
+    let cli = Cli::try_parse_from(["st", "fleet", "anchor", "show"]).unwrap();
+    assert!(matches!(cli.command, Command::Fleet {
+        command: FleetCommand::Anchor { command: FleetAnchorCommand::Show },
+    }));
 }
 
 #[test]
@@ -9009,11 +9253,163 @@ async fn the_signature_job_drains_the_verdict_backlog_an_ordinary_pass_leaves() 
     store.judge_claims_slice(true).unwrap();
     assert!(store.verdicts_pending().unwrap(), "one ordinary pass takes only a slice");
     let deadline = Instant::now() + Duration::from_secs(60);
-    // An in-memory store shares one cache, so this read can meet the job's writer.
+    // An in-memory store shares one cache, so this read can meet the job's writer, and the job
+    // then retries its loan after a test build's one-second wait. Read seldom, so it rarely does.
     while store.verdicts_pending().unwrap_or(true) {
         assert!(Instant::now() < deadline, "the idle job drains what the pass left");
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
     assert!(!job.is_finished());
     job.abort();
+}
+
+/// A seat that runs on cedar and holds one step there, served by cedar's real daemon API, with
+/// birch as the host it ran on before.
+struct MovedSeat {
+    _root: tempfile::TempDir,
+    cedar: std::sync::Arc<Store>,
+    birch: Store,
+    client: Client,
+    step: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+const MOVED_SEAT: &str = "agent/example/mover";
+const MOVED_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+
+impl MovedSeat {
+    async fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let cedar = std::sync::Arc::new(Store::open_memory("cedar").unwrap());
+        let birch = Store::open_memory("birch").unwrap();
+        cedar.bind_fleet(MOVED_FLEET).unwrap();
+        birch.bind_fleet(MOVED_FLEET).unwrap();
+        {
+            use fractal_daemon::SeatsStoreCore as _;
+            let source = "version 2\nagent \"example/mover\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+            cedar.apply_internal(&fractal_daemon::parse_intent(source, "cedar").unwrap(), "moved-seat").unwrap();
+        }
+        let state = fractal_daemon::api::AppState {
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: cedar.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0).0,
+            node: "cedar".into(), state_dir: root.path().into(),
+            pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+            fleet_id: Some(MOVED_FLEET.into()), configured_peers: vec![], client_relay: None,
+            native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
+        };
+        let path = root.path().join("api.sock");
+        let socket = path.clone();
+        let server = tokio::spawn(async move {
+            fractal_daemon::api::serve_unix(&socket, fractal_daemon::api::router(state)).await.unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !path.exists() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let client = Client::unix(&path);
+        let seat = Self { _root: root, cedar, birch, client, step: String::new(), server };
+        seat.birch_observes("running", Some("on-birch"));
+        seat.cedar_observes("running", Some("on-cedar"));
+        let started: StepRunView = seat.client.post("/v1/work/start", &fractal_daemon::model::WorkStartRequest {
+            actor: MOVED_SEAT.into(), title: "Invented moved work".into(), idempotency_key: "moved-start".into(),
+        }).await.unwrap();
+        let mut seat = seat;
+        seat.step = started.subject;
+        seat.act("claim", MOVED_SEAT, "on-cedar", "moved-claim").await.unwrap();
+        seat
+    }
+
+    fn observe(store: &Store, status: &str, incarnation: Option<&str>) {
+        let mut fields = BTreeMap::from([("status".into(), json!(status)), ("host".into(), json!(store.origin))]);
+        if let Some(incarnation) = incarnation {
+            fields.insert("incarnation_id".into(), json!(incarnation));
+        }
+        store.append_claim(&ClaimInput {
+            subject: MOVED_SEAT.into(), kind: "runtime.observed".into(), actor: None, fields,
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+
+    fn cedar_observes(&self, status: &str, incarnation: Option<&str>) {
+        Self::observe(&self.cedar, status, incarnation);
+    }
+
+    /// birch records it, and the record replicates to cedar.
+    fn birch_observes(&self, status: &str, incarnation: Option<&str>) {
+        Self::observe(&self.birch, status, incarnation);
+        let exchange = self.birch
+            .export_replication_exchange(MOVED_FLEET, &self.cedar.replication_inventory().unwrap())
+            .unwrap();
+        self.cedar.receive_replication_exchange("birch", MOVED_FLEET, &exchange).unwrap();
+        self.cedar.validate_replication_backlog().unwrap();
+        self.cedar.apply_replication_repairs().unwrap();
+        self.cedar.project_replication_backlog().unwrap();
+    }
+
+    async fn act(&self, action: &str, actor: &str, incarnation: &str, key: &str) -> Result<StepRunView> {
+        self.client.post(&format!("/v1/work/{action}/{}", urlencoding::encode(&self.step)), &WorkRequest {
+            wait_ms: None, actor: Some(actor.into()), incarnation: Some(incarnation.into()),
+            summary: (action == "progress").then(|| "still working".into()), reason: None,
+            evidence: vec![], idempotency_key: key.into(),
+        }).await
+    }
+
+    async fn refused(&self, action: &str, actor: &str, incarnation: &str, key: &str) -> String {
+        let error = self.act(action, actor, incarnation, key).await.unwrap_err();
+        fractal_daemon::client::api_error_code(&error).unwrap_or_default().to_owned()
+    }
+}
+
+impl Drop for MovedSeat {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+#[tokio::test]
+async fn another_hosts_end_of_its_old_runtime_leaves_the_live_driver_renewing() {
+    let seat = MovedSeat::new().await;
+    // birch comes back and records its own old runtime ending, after cedar's running record.
+    seat.birch_observes("stopped", Some("on-birch"));
+    seat.birch_observes("exited", None);
+    let mut retry = fractal_daemon::client::DriverRetry::default();
+    // Twelve minutes of the driver's own timer, longer than a lease: every one renews.
+    for minute in 0..12 {
+        let before = seat.cedar.step_run(&seat.step).unwrap().unwrap().updated_at_unix_ms;
+        std::thread::sleep(Duration::from_millis(2));
+        renew_claimed_work(&seat.client, MOVED_SEAT, "on-cedar", minute, &mut retry).await.unwrap();
+        let after = seat.cedar.step_run(&seat.step).unwrap().unwrap();
+        assert!(after.updated_at_unix_ms > before, "minute {minute} renewed nothing");
+        assert_eq!(after.claim_incarnation.as_deref(), Some("on-cedar"));
+    }
+    // The seat's own work goes on too.
+    seat.act("progress", MOVED_SEAT, "on-cedar", "moved-progress").await.unwrap();
+    // The driver renews only what its own incarnation holds.
+    let before = seat.cedar.step_run(&seat.step).unwrap().unwrap().updated_at_unix_ms;
+    renew_claimed_work(&seat.client, MOVED_SEAT, "on-birch", 99, &mut retry).await.unwrap();
+    assert_eq!(seat.cedar.step_run(&seat.step).unwrap().unwrap().updated_at_unix_ms, before);
+}
+
+#[tokio::test]
+async fn the_work_fence_still_refuses_an_incarnation_that_is_not_live() {
+    // (1) A newer running record of another incarnation replaced it.
+    let seat = MovedSeat::new().await;
+    seat.birch_observes("running", Some("again-on-birch"));
+    assert_eq!(seat.refused("renew", MOVED_SEAT, "on-cedar", "replaced").await, "inactive-work-incarnation");
+    // (2) Its own end, from any host.
+    let seat = MovedSeat::new().await;
+    seat.birch_observes("exited", Some("on-cedar"));
+    assert_eq!(seat.refused("renew", MOVED_SEAT, "on-cedar", "own-end").await, "inactive-work-incarnation");
+    // (3) An end that names no incarnation, from the host where it runs.
+    let seat = MovedSeat::new().await;
+    seat.cedar_observes("vanished", None);
+    assert_eq!(seat.refused("progress", MOVED_SEAT, "on-cedar", "unnamed-end").await, "inactive-work-incarnation");
+    // (4) Another actor cannot act on the claim, whatever incarnation it names.
+    let seat = MovedSeat::new().await;
+    assert!(!seat.refused("renew", "agent/example/other", "on-cedar", "wrong-actor").await.is_empty());
+    // (5) A live incarnation other than the one holding the lease cannot renew it.
+    let seat = MovedSeat::new().await;
+    seat.cedar_observes("running", Some("on-cedar-next"));
+    assert!(!seat.refused("renew", MOVED_SEAT, "on-cedar-next", "other-lease").await.is_empty());
 }

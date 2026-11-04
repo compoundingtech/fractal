@@ -45,7 +45,7 @@ VERIFIER_TIMEOUT = int(os.environ.get('GATE_VERIFIER_TIMEOUT', '30'))
 # A change that touches anything that decides a skip is not skipped on a note alone: those files are what a forged skip would
 # have to edit. Compared between the accepted base and this run's tree. One exception (decide): a pull_request run covered by a note
 # of one of OWN_LEVELS, our dev hosts, which ran the PR's own scripts. It is judged by THIS gate and verifier as the base has them
-# (the workflow fetches both from BASE_SHA), never the PR's copies, and the merge queue runs every check in full before it lands.
+# (the workflow fetches both from BASE_SHA), never the PR's copies. Merge groups reuse only exact-tree evidence enabled at BASE.
 PROTECTED = (
     'scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
     '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts', '.github/workflows/workspace-ci.ts',
@@ -158,6 +158,11 @@ def decide(context, outcome, result, tree):
         return 'run', 'event does not allow skipping'
     if context.get('tree_of') == 'head' and context['event'] != 'pull_request':
         return 'run', 'a head-tree note covers pull request runs only'
+    if context['event'] == 'merge_group':
+        if context.get('merge_group_mode') != 'same-tree':
+            return 'run', 'merge-group tree reuse is not enabled at the accepted base'
+        if result.get('match') != 'tree':
+            return 'run', 'merge groups require exact-tree evidence, not input-key reuse'
     protected = context.get('protected_changed')
     if protected != [] and not (own_pull_request(context, result) and isinstance(protected, list)
                                 and all(isinstance(p, str) and p and not p.startswith('<') for p in protected)):
@@ -188,6 +193,20 @@ def decide(context, outcome, result, tree):
 def own_pull_request(context, result):
     """A pull_request run whose note is one of our hosts' (OWN_LEVELS): it covers the run even when the change edits protected files."""
     return context['event'] == 'pull_request' and result.get('trust_level') in OWN_LEVELS
+
+
+def merge_group_mode(context):
+    """Queue reuse is opt-in at BASE; absent, malformed or unknown modes keep hosted CI running."""
+    path = config_path(context['base'], SIGNED_ONLY)
+    if path is None:
+        return None
+    shown = run('git', 'show', f"{context['base']}:{path}")
+    if shown.returncode != 0:
+        return None
+    try:
+        return json.loads(shown.stdout).get('merge_group')
+    except (ValueError, AttributeError):
+        return None
 
 
 def signed_only(context):
@@ -736,6 +755,8 @@ def main():
     except Exception:
         context['protected_changed'] = ['<comparison failed>']
     try:
+        if context['event'] == 'merge_group':
+            context['merge_group_mode'] = merge_group_mode(context)
         decision, why = decide(context, outcome, result, tree)
     except Exception:
         decision, why = 'run', 'decision error'

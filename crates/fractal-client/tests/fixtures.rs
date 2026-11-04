@@ -786,6 +786,26 @@ fn timeline_tool_result_preserves_timing_metadata_and_decodes_legacy_results() {
 }
 
 #[test]
+fn a_mailbox_content_entry_names_its_message_and_older_content_decodes_without() {
+    let mut wire = serde_json::json!({
+        "id": "timeline-entry/mailbox-content", "sequence": 3, "revision": 1,
+        "timestamp": "2026-09-20T12:00:00Z", "role": "user", "type": "content", "final": true,
+        "body": {"media_type": "text/plain", "text": "hello", "message_id": "message/first"}
+    });
+    let entry: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    let TimelineBody::Content(body) = &entry.body else {
+        panic!("content discriminator was not preserved");
+    };
+    assert_eq!(body.message_id.as_deref(), Some("message/first"));
+    assert_eq!(serde_json::to_value(&entry).unwrap(), wire);
+
+    wire["body"].as_object_mut().unwrap().remove("message_id");
+    let older: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(&older.body, TimelineBody::Content(body) if body.message_id.is_none()));
+    assert_eq!(serde_json::to_value(&older).unwrap(), wire);
+}
+
+#[test]
 fn timeline_models_tolerate_future_discriminators() {
     fn entry(entry_type: &str, body: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
@@ -1244,4 +1264,23 @@ fn optional_message_participants_preserve_legacy_scalar_types_and_typed_relay() 
         "items":raw["value"]["items"], "next_cursor":"conversation-cursor/participants/next"});
     let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
     assert_eq!(serde_json::to_value(typed).unwrap(),changes);
+}
+
+#[tokio::test]
+async fn a_relayed_plugin_read_refuses_paths_outside_the_plugin_routes() {
+    let client = Client::unix(Path::new("/nonexistent/fractal-plugin-read.sock"));
+    let refused = |result: &Result<serde_json::Value, ClientError>| {
+        matches!(result, Err(ClientError::Protocol(message)) if message.contains("not a GitHub plugin read"))
+    };
+    for path in [
+        "/v1/plugins/github/repos/acme/../garden/pulls",
+        "/v1/plugins/github/repos/./acme/garden/pulls",
+        "/v1/client/agents",
+        "/v1/plugins/github/repos/acme/garden/pulls#12",
+    ] {
+        assert!(refused(&client.github_plugin_read(path).await), "{path}");
+    }
+    // A dotted value in the query names no segment: the read is sent, and finds no daemon here.
+    let sent = client.github_plugin_read("/v1/plugins/github/repos/acme/garden/events?after=a..b").await;
+    assert!(sent.is_err() && !refused(&sent), "{sent:?}");
 }

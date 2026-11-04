@@ -451,7 +451,7 @@ def push_deletions(repo, remote, refs, header, token, atomic):
     if done.returncode == 0:
         return deleted, None
     text = (done.stdout + done.stderr).decode(errors='replace')
-    return deleted, (text.replace(token, '***') if token else text).strip()[-300:]
+    return deleted, (text.replace(token, '***') if token else text).strip()
 
 
 def apply_remote(repo, remote, migrate, doomed, groups):
@@ -488,7 +488,7 @@ def apply_remote(repo, remote, migrate, doomed, groups):
         gone, error = push_deletions(repo, remote, redundant[start:start + BATCH], header, token, atomic=False)
         deleted |= gone
         if error:
-            failed.append(error)
+            failed.append(error[-300:])
     batches = []
     for tagged in (False, True):  # never in one push: a refused tag would take a tagless group down with it
         batch = []
@@ -507,7 +507,7 @@ def apply_remote(repo, remote, migrate, doomed, groups):
         if error and PROTECTION_REFUSED.search(error) and any(ref.startswith(TAGS) for ref in batch):
             protected |= set(batch) - gone
         elif error:
-            failed.append(error)
+            failed.append(error[-300:])
     return failed, deleted, protected, True
 
 

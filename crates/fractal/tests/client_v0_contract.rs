@@ -1235,7 +1235,7 @@ async fn publish_fixture_lists(state: &AppState) -> u64 {
 }
 
 fn test_state(root: &Path) -> AppState {
-    AppState { owning_person: None,
+    AppState { seat_admission: Default::default(), owning_person: None,
     // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
     store: Arc::new(
         Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),

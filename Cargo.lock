@@ -1492,7 +1492,6 @@ dependencies = [
  "data-encoding",
  "flate2",
  "fractal",
- "fractal-build-stamp",
  "fractal-chatgpt",
  "fractal-client",
  "fractal-conversation-ui",
@@ -1725,6 +1724,18 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fractal-cli"
+version = "0.1.0"
+dependencies = [
+ "fractal",
+ "fractal-build-stamp",
+ "fractal-daemon",
+ "fractal-drivers",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2050,6 +2061,7 @@ dependencies = [
  "chrono",
  "fractal-evidence",
  "fractal-github",
+ "fractal-schema",
  "getrandom 0.3.4",
  "hex",
  "libc",
@@ -2145,30 +2157,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fractal-legacy-runner"
-version = "0.1.0"
-dependencies = [
- "agent-spec",
- "anyhow",
- "clap",
- "clap_complete",
- "fractal-build-stamp",
- "fractal-drivers",
- "fractal-resource-protocol",
- "fractal-resource-providers",
- "fractal-resource-wasip2",
- "fractal-wire",
- "kdl",
- "libc",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tracing",
-]
-
-[[package]]
 name = "fractal-migrate"
 version = "0.1.0"
 dependencies = [
@@ -2226,6 +2214,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fractal-missions-base",
+ "fractal-runtime",
  "fractal-schema",
  "fractal-secrets",
  "hex",
@@ -2383,6 +2372,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "toml 0.9.12+spec-1.1.0",
+ "url",
 ]
 
 [[package]]
@@ -5863,6 +5853,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smallclaims",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",

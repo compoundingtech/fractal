@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A GitHub plugin mirror refilled from GitHub (a new or lost mirror, or polling moving to another member) no longer hands out `github.event` comment events for old comments. A fresh listing does not reach older comments, so a refilled row lacked them, and the item's next look took each comment the graph already knew for new. The refill now lays the comments the graph recorded on each item into its row. Events already written stay; new comments are still one event each. Fixes #4549.",
+  "replay": {"status": "none", "detail": "No claim or projection replay; existing mirror rows keep their facts until their next refill or look."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Only the poller's mirror rows and the events it derives change; no claim kind, field or wire capability changes, and members of older builds read the same claims."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Rolling back restores the old refill; a later refill may then write old comment events again, which nothing delivers from today."}
+}

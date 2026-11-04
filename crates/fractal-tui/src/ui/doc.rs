@@ -75,7 +75,7 @@ pub enum Hit {
     Field(usize),
     /// Revoke a paired device (after a confirmation).
     Revoke(String),
-    /// Attach the focused terminal tab, as Ctrl+].
+    /// Attach the focused terminal tab, as Enter on a detached terminal pane.
     Attach,
     /// Leave the terminal view.
     Detach,

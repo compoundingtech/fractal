@@ -53,18 +53,25 @@ use crate::resource::{
 use crate::store::Store;
 
 pub mod channel_recovery;
+pub mod github_events;
 pub mod github_plugin_store;
+pub mod plugin_store;
 pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
 pub mod start_spacing;
 pub mod start_jobs;
+pub mod seat_admission;
+mod seat_admission_queue;
+mod lane_bursts;
+mod step_lanes;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
 #[cfg(test)]
 mod schedule_admission_tests;
 mod schedule_replication_block;
+pub mod member_admission;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -428,6 +435,58 @@ pub struct RuntimeObservation {
     pub incarnation_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RuntimeStopCaller {
+    Reconcile,
+    RevokedStartCleanup,
+}
+
+/// Reconcile evidence is not a fresh registry read; native retirement owns that guard.
+struct RuntimeStopEvidence<'a> {
+    caller: RuntimeStopCaller,
+    subject: &'a str,
+    runtime_id: &'a str,
+    terminal: bool,
+    operation_id: Option<&'a str>,
+    expected_incarnation: Option<&'a str>,
+    observation: Option<&'a RuntimeObservation>,
+}
+
+impl RuntimeStopEvidence<'_> {
+    fn record(&self, action: &str, guard_decision: &str, destructive: bool) {
+        macro_rules! record {
+            ($level:ident) => {
+                tracing::$level!(
+                    caller = ?self.caller,
+                    subject = self.subject,
+                    runtime_id = self.runtime_id,
+                    terminal = self.terminal,
+                    operation_id = self.operation_id.unwrap_or("unavailable"),
+                    expected_incarnation = self.expected_incarnation.unwrap_or("unavailable"),
+                    observed_incarnation = self.observation.and_then(|o| o.incarnation_id.as_deref()).unwrap_or("unavailable"),
+                    observation_source = "existing_reconcile_observation",
+                    fresh_observed_incarnation = "unavailable_at_reconcile_boundary",
+                    registry_status = self.observation.map_or("unavailable", |o| o.status.as_str()),
+                    registry_exit_code = ?self.observation.and_then(|o| o.exit_code),
+                    registry_pid = "unavailable_at_reconcile_boundary",
+                    registry_created_at = "unavailable_at_reconcile_boundary",
+                    recorded_scope = "unavailable_at_reconcile_boundary",
+                    tagged_scope = "unavailable_at_reconcile_boundary",
+                    spawn_lock = "not_applicable_at_reconcile_boundary",
+                    action,
+                    guard_decision,
+                    "reconcile runtime stop boundary"
+                );
+            };
+        }
+        if destructive {
+            record!(info);
+        } else {
+            record!(debug);
+        }
+    }
+}
+
 /// Read-only pass evidence; provenance is keyed by the exact observed incarnation.
 #[derive(Default)]
 pub struct PtyRegistrySnapshot {
@@ -541,6 +600,19 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane, and a seat
     /// without one has nothing to end.
     fn end_lane(&self, _runtime_id: &str) {}
+    /// Sets a live seat's lane to `capacity`, for the steps it holds (docs/st3/seat-lanes.md).
+    /// False when the seat has no lane here to change.
+    fn resize_lane(&self, _runtime_id: &str, _capacity: fractal_runtime::Capacity) -> Result<bool> {
+        Ok(false)
+    }
+    /// What a seat's lane holds that cannot be reclaimed, or `None` without a lane to read.
+    fn lane_held_memory(&self, _runtime_id: &str) -> Option<u64> {
+        None
+    }
+    /// The lane a seat's slice is set to now, or `None` without a lane to read.
+    fn live_lane(&self, _runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+        None
+    }
 }
 
 pub struct NativeRuntime {
@@ -912,6 +984,18 @@ impl RuntimeControl for NativeRuntime {
     fn end_lane(&self, runtime_id: &str) {
         fractal_runtime::end_lane(runtime_id);
     }
+
+    fn resize_lane(&self, runtime_id: &str, capacity: fractal_runtime::Capacity) -> Result<bool> {
+        fractal_runtime::resize_lane(capacity, runtime_id)
+    }
+
+    fn lane_held_memory(&self, runtime_id: &str) -> Option<u64> {
+        fractal_runtime::lane_held_memory(runtime_id)
+    }
+
+    fn live_lane(&self, runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+        fractal_runtime::live_lane(runtime_id)
+    }
 }
 
 impl NativeRuntime {
@@ -1068,6 +1152,10 @@ pub trait FaultInjection: Send + Sync + 'static {
 }
 
 pub const FIRST_READINESS_FAULT_AFTER_MS: u128 = 120_000;
+
+/// How long one observer look may run, its provider calls and a mirror refill together, before
+/// it ends as a failure and frees its observer for the next look.
+const OBSERVER_LOOK_LIMIT: Duration = Duration::from_secs(15 * 60);
 pub use crate::model::FIRST_READINESS_FAULT_SCOPE;
 
 fn first_readiness_pending(run: &MissionRunView) -> bool {
@@ -1180,6 +1268,7 @@ pub struct Reconciler<R = NativeRuntime> {
     event_notify: watch::Sender<u64>,
     start_spacing: start_spacing::StartSpacing,
     start_jobs: start_jobs::StartJobs,
+    seat_admission: seat_admission::Controller,
     #[cfg(any(test, feature = "test-support"))]
     pub wait_for_test_starts: AtomicBool,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
@@ -1194,6 +1283,9 @@ pub struct Reconciler<R = NativeRuntime> {
     /// A locally selected future standby tick is not a replicated scheduling claim.
     standby_due_ticks: Mutex<HashMap<String, (String, u64, i64)>>,
     schedule_replication_blocks: Mutex<HashMap<String, schedule_replication_block::BlockedTick>>,
+    member_admission: Mutex<member_admission::MemberAdmission>,
+    /// Whether this member waits after a start before acting on its seats' placement.
+    waits_for_peers_after_start: bool,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
     /// never enters the replicated graph; durable diagnostic dedupe survives a restart.
@@ -1220,10 +1312,23 @@ pub struct Reconciler<R = NativeRuntime> {
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     /// Quiet standing-watch cadence by observer/revision; not part of the provider cache.
     observer_intervals: Arc<Mutex<HashMap<String, u64>>>,
+    /// The fields the latest arm of each observer/revision requests, so an arm that requests
+    /// more polls at once rather than keeping a deadline set by a poll that read less.
+    observer_fields: Arc<Mutex<HashMap<String, Vec<String>>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
+    /// By observer: held from a look reading its cursor until the look publishes the cursor it
+    /// kept, so an arm that retired another waits for that look rather than polling from the
+    /// cursor it moved past.
+    observer_looks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// How long one look's GitHub calls, its provider look and a mirror refill together, may run
+    /// while it holds its observer's look lock: past it the look ends as a failure.
+    look_limit: Duration,
     /// Each observer's poll cursor across restarts, in the GitHub plugin's own database rather
     /// than the graph (see [`github_plugin_store`]).
     github_plugin: Arc<github_plugin_store::GithubPluginStore>,
+    /// Whether an unfilled mirror refills from GitHub with a look of its own. The daemon's
+    /// reconciler does; a test's, with no GitHub behind its provider, does when it asks.
+    refill_mirrors: bool,
     /// By observer: the cursor its plugin database did not keep. Every arm of the observer keeps
     /// it before it asks the provider again.
     unkept_cursors: Arc<Mutex<HashMap<String, UnkeptCursor>>>,
@@ -1377,16 +1482,20 @@ impl Reconciler<NativeRuntime> {
         notify: Arc<Notify>,
         event_notify: watch::Sender<u64>,
         recorder: Option<PathBuf>,
+        unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
     ) -> Result<Self> {
         let selected_pty_root = pty_root
             .map(Path::to_path_buf)
             .unwrap_or_else(|| state_dir.join("pty"));
         Ok(Self {
             store,
-            runtime: Arc::new(
-                NativeRuntime::new(state_dir, Some(&selected_pty_root), pty_binary)
-                    .with_recorder(recorder),
-            ),
+            runtime: Arc::new({
+                let mut runtime = NativeRuntime::new(state_dir, Some(&selected_pty_root), pty_binary)
+                    .with_recorder(recorder);
+                runtime.pty = runtime.pty.with_unlaned_seat(unlaned_seat.clone());
+                runtime.exec = runtime.exec.with_unlaned_seat(unlaned_seat);
+                runtime
+            }),
             host,
             endpoint,
             driver_state_dir: state_dir.join("drivers"),
@@ -1411,6 +1520,7 @@ impl Reconciler<NativeRuntime> {
             event_notify,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
@@ -1423,6 +1533,8 @@ impl Reconciler<NativeRuntime> {
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
             schedule_replication_blocks: Mutex::default(),
+            member_admission: Mutex::default(),
+            waits_for_peers_after_start: false,
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1437,9 +1549,13 @@ impl Reconciler<NativeRuntime> {
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_intervals: Arc::new(Mutex::new(HashMap::new())),
+            observer_fields: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
+            observer_looks: Arc::new(Mutex::new(HashMap::new())),
+            look_limit: OBSERVER_LOOK_LIMIT,
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
-            github_plugin: Arc::new(github_plugin_store::GithubPluginStore::open(state_dir)?),
+            github_plugin: github_plugin_store::GithubPluginStore::shared(state_dir)?,
+            refill_mirrors: true,
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
@@ -1564,8 +1680,22 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Whether this host caps a seat that declares `capacity` in its lane (`lanes` in the
     /// install config). Applies to launches after this call.
-    pub fn with_lanes(self, enforced: bool) -> Self {
+    pub fn with_lanes(mut self, enforced: bool) -> Self {
         fractal_runtime::set_lanes_enforced(enforced);
+        self.seat_admission.lanes = enforced
+            .then(fractal_runtime::host::size)
+            .flatten()
+            .map(|size| seat_admission::LaneHost {
+                room: fractal_runtime::host::for_lanes(size),
+                outside: fractal_runtime::host::unlaned_seat_memory,
+            });
+        self
+    }
+
+    /// Admission by fit against a host of the test's choosing, without the process-wide switch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_lane_host(mut self, lanes: Option<seat_admission::LaneHost>) -> Self {
+        self.seat_admission.lanes = lanes;
         self
     }
 
@@ -1589,6 +1719,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             event_notify: watch::channel(0_u64).0,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
@@ -1601,6 +1732,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
             schedule_replication_blocks: Mutex::default(),
+            member_admission: Mutex::default(),
+            waits_for_peers_after_start: false,
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1615,9 +1748,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_intervals: Arc::new(Mutex::new(HashMap::new())),
+            observer_fields: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
+            observer_looks: Arc::new(Mutex::new(HashMap::new())),
+            look_limit: OBSERVER_LOOK_LIMIT,
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
             github_plugin: Arc::new(github_plugin_store::GithubPluginStore::memory()),
+            refill_mirrors: false,
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
@@ -1794,6 +1931,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         self
     }
 
+    /// Refill unfilled GitHub mirrors from the resource provider, as the daemon's reconciler does.
+    pub fn with_mirror_refill(mut self, refill: bool) -> Self {
+        self.refill_mirrors = refill;
+        self
+    }
+
     #[doc(hidden)]
     pub fn with_cleanup_deadline(mut self, deadline: Duration) -> Self {
         self.cleanup_deadline = deadline;
@@ -1803,6 +1946,21 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Legacy configured peers supplement the current claim-derived fleet membership.
     pub fn with_schedule_peers(mut self, peers: Vec<String>) -> Self {
         self.schedule_peers = peers;
+        self
+    }
+
+    /// Wait after a start, before acting on seats' placement, until this member has caught up
+    /// with a peer (`wait_for_peers_after_start`). Off by default.
+    pub fn with_wait_for_peers_after_start(mut self, on: bool) -> Self {
+        self.waits_for_peers_after_start = on;
+        self
+    }
+
+    /// When this reconciler counts as started, so a test orders declarations against it without
+    /// waiting on the clock.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_started_at_for_test(mut self, started_at_unix_ms: u128) -> Self {
+        self.started_at_unix_ms = started_at_unix_ms;
         self
     }
 
@@ -2754,6 +2912,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_pass(&self) -> Result<()> {
+        self.refresh_seat_admission();
+        self.observe_member_admission()?;
         // Start completion can mutate the runtime-observation fence. Capture before
         // it can read the shared snapshot, so pre-completion evidence cannot later
         // be presented to planning as a post-completion observation.
@@ -2832,6 +2992,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject.kind = "stop".into();
             }
         }
+        self.cancel_invalid_admissions(&desired)?;
         // A stopped root ends every task it declared: each runs the exec's own stop below and is
         // not launched or restarted meanwhile. Starting the root again declares them again.
         let stopped_roots = desired
@@ -3625,11 +3786,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 self.record_member(subject, &observation, false)?;
                             }
                             None if member.lifecycle == MemberLifecycle::AdoptOnly => {
-                                self.record_once(
-                                    &subject.subject,
-                                    "runtime.observed",
-                                    member_fields(member, "absent", None, false),
-                                )?;
+                                if self.member_admitted_for(&subject.subject)? {
+                                    self.record_once(
+                                        &subject.subject,
+                                        "runtime.observed",
+                                        member_fields(member, "absent", None, false),
+                                    )?;
+                                }
                             }
                             None => {
                                 let prior = self.store.latest_actual_value(&subject.subject)?;
@@ -3830,6 +3993,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         // wake-message bookkeeping so a large mailbox or work history cannot starve
         // newly-created runs of their first readiness pass.
         let _work_messages_span = crate::reconcile_telemetry::phase("pass/work-messages");
+        // A burst granted, given back or lapsed marks its seat's wake, which sets the live lane.
+        if let Err(error) = self.reconcile_lane_bursts() {
+            eprintln!("st3: WARN judging lane bursts: {error:#}");
+            smallclaims::touched::note_due(now_ms() + 5_000);
+        }
         // Earlier stages of this pass can change what a wake reads, such as a step a mission
         // cancelled, so see their changes first.
         self.incremental.observe(&self.store)?;
@@ -5753,7 +5921,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         // forgetting it would replay attempt 1 and notify this reconciler forever.
         let messages = self.store.work_wake_messages_for_reconcile(agent)?;
         let work = self.store.work_for_reconcile(agent)?;
+        if let Some(member) = member {
+            self.hold_step_lanes(agent, incarnation, member, &work)?;
+        }
         let harness = self.store.current_harness(agent)?;
+        // When this host last heard the seat: an unchanged working re-stamp stays in its local log.
+        let heard_at = match &harness {
+            Some(harness) => self
+                .store
+                .local_harness_observed_at(agent, &harness.incarnation_id)?
+                .map_or(harness.observed_at_unix_ms, |local| local.max(harness.observed_at_unix_ms)),
+            None => 0,
+        };
         let now = now_ms();
         for step in &work {
             if let Some(due) = crate::incremental::step_due(step, now) {
@@ -5783,7 +5962,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             harness.as_ref().is_some_and(|harness| {
                                 step.status == "ready"
                                     && harness.state == "working"
-                                    && harness.observed_at_unix_ms >= requested
+                                    && heard_at >= requested
                             })
                         })
                     });
@@ -5861,10 +6040,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut attempts = messages
                 .iter()
                 .filter(|message| {
-                    !message
-                        .tags
-                        .iter()
-                        .any(|tag| tag == "st3-wake-source:manual")
+                    !crate::silent::message_tag_values(
+                        message.tags.iter().map(String::as_str),
+                        "wake-source:",
+                    )
+                    .any(|value| value == "manual")
                 })
                 .filter(|message| {
                     work_message_target(message).is_some_and(
@@ -6762,11 +6942,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // A run stops its owned agents in its cleanup phase, before it becomes terminal.
         let run_ended = match subject.owner_run.as_deref() {
             None => subject.kind == "stop",
-            Some(run) => self.store.mission_run(run)?.is_some_and(|run| {
-                matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
-                    || run.phase == "terminal"
-                    || run.phase.starts_with("cleanup-")
-            }),
+            Some(run) => self.store.mission_run(run)?.is_some_and(|run| run.ended().is_some()),
         };
         let stopped = self
             .store
@@ -6920,6 +7096,24 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             false
         };
+        RuntimeStopEvidence {
+            caller: RuntimeStopCaller::Reconcile,
+            subject,
+            runtime_id,
+            terminal,
+            operation_id: operation.as_ref().map(|o| o.id.as_str()),
+            expected_incarnation: incarnation,
+            observation,
+        }
+        .record(
+            "select_retirement",
+            if retirement {
+                "retirement_provenance_matched"
+            } else {
+                "retirement_not_authorized_use_normal_stop"
+            },
+            false,
+        );
         self.reconcile_runtime_stop_inner(
             subject,
             runtime_id,
@@ -6931,6 +7125,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .as_ref()
                 .filter(|_| retirement)
                 .map(|o| o.id.as_str()),
+            RuntimeStopCaller::Reconcile,
+            operation.as_ref().map(|o| o.id.as_str()),
         )
     }
 
@@ -6944,16 +7140,29 @@ impl<R: RuntimeControl> Reconciler<R> {
         timeout_ms: u64,
         observation: Option<&RuntimeObservation>,
         retirement_operation: Option<&str>,
+        caller: RuntimeStopCaller,
+        operation_id: Option<&str>,
     ) -> Result<bool> {
+        let evidence = RuntimeStopEvidence {
+            caller,
+            subject,
+            runtime_id,
+            terminal,
+            operation_id,
+            expected_incarnation: incarnation,
+            observation,
+        };
         self.revoke_start(subject)?;
         if observation.is_none() && self.store.runtime_start_for(subject)?.is_some() {
             // Absence during launch is not verified stop. Completion/observation wakes this path.
+            evidence.record("stop", "skip_absent_during_launch", false);
             return Ok(false);
         }
         // A runtime whose state could not be read may still run. Wait for a readable observation.
         if observation.is_some_and(|observation| {
             matches!(observation.status.as_str(), "unknown" | "indeterminate")
         }) {
+            evidence.record("stop", "skip_unreadable_observation", false);
             let now = now_ms();
             let (due, report, episode_started_at) = {
                 let mut retries = self
@@ -7023,10 +7232,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             // A root's primary process has ended, but its tasks are its processes too: it is
             // not stopped while one still runs. Their own stops report the failure.
             if !self.running_root_tasks(subject)?.is_empty() {
+                evidence.record("end_leftovers", "skip_running_root_tasks", false);
                 return Ok(false);
             }
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
+            evidence.record("end_leftovers", "allow_nonrunning_without_retirement", false);
             self.runtime.end_leftovers(runtime_id, terminal);
             let desired = self.store.selected_desired_token(subject)?;
             let stop = match &desired {
@@ -7100,6 +7311,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("stop:{subject}"),
                 deadline.min(now_ms().saturating_add(100)),
             );
+            evidence.record(
+                if retirement_operation.is_some() {
+                    "stop_with_retirement_proof"
+                } else {
+                    "stop"
+                },
+                "allow_terminate_request",
+                true,
+            );
             let stopped = if retirement_operation.is_some() {
                 self.runtime
                     .stop_with_retirement_proof(runtime_id, terminal, incarnation)
@@ -7127,6 +7347,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             };
             if verified {
+                evidence.record("apply_retirement", "allow_native_retirement_verified", true);
                 let operation =
                     retirement_operation.context("retirement proof has no operation")?;
                 anyhow::ensure!(
@@ -7140,6 +7361,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.start_changed(subject);
                 return Ok(true);
             }
+            evidence.record("stop", "await_stop_verification", false);
             return Ok(false);
         };
         let deadline = request
@@ -7153,6 +7375,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .saturating_add(timeout_ms as u128),
             );
         if now_ms() < deadline {
+            evidence.record("kill", "skip_shutdown_deadline_pending", false);
             self.arm_restart(&format!("stop:{subject}"), deadline);
             return Ok(false);
         }
@@ -7181,6 +7404,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     == Some(deadline_key.as_str())
             })
         {
+            evidence.record("kill", "skip_already_recorded_kill", false);
             let report_survivor = {
                 let mut reported = self
                     .reported_kill_survivors
@@ -7228,6 +7452,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(false);
         }
+        evidence.record("kill", "allow_shutdown_deadline_reached", true);
         self.runtime.kill(runtime_id, terminal, Some(incarnation))?;
         self.store.append_claim(&ClaimInput {
             subject: subject.into(),
@@ -7268,6 +7493,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         if subject.kind == "agent" {
             use crate::store::identities::{IdentityKind, IdentityStore as _};
             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+        }
+        // A member that has not caught up since it started may hold a placement that moved.
+        if !self.member_admitted_for(&subject.subject)? {
+            return Ok(false);
         }
         if request.is_none() && self.store.runtime_start_for(&subject.subject)?.is_some() {
             return Ok(false);
@@ -7360,6 +7589,32 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(false);
             }
         }
+        if !self.admit_seat_start(subject, member, request)? {
+            return Ok(false);
+        }
+        if let Some(id) = member.environment.get(crate::rollout::OPERATION_ENV) {
+            let mut operation = self
+                .store
+                .rollout(&subject.subject)?
+                .context("rollout start has no operation")?;
+            anyhow::ensure!(
+                operation.id == *id && operation.phase == "starting",
+                "rollout changed before start admission"
+            );
+            operation.desired_token = self
+                .store
+                .selected_desired_token(&subject.subject)?
+                .context("replacement has no desired token")?;
+            crate::rollout::phase(
+                &self.store,
+                &subject.subject,
+                &operation,
+                "start-attempted",
+                None,
+                &[],
+            )?;
+            self.signal_changed();
+        }
         let workspace = Path::new(&member.workspace);
         if workspace.exists() {
             anyhow::ensure!(
@@ -7376,6 +7631,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 workspace.display()
             );
         }
+        // The runtime starts in `cwd`, which can lie inside the workspace. A launcher handed a
+        // directory that does not exist exits without saying why in its status.
+        let cwd = Path::new(&member.cwd);
+        anyhow::ensure!(
+            !cwd.is_absolute() || cwd.is_dir(),
+            "working directory {} does not exist",
+            member.cwd
+        );
         // Resolve authored Fractal-only selectors before cleanup and native-session selection.
         let normalized_member = member.environment.keys().any(|name| name.starts_with("FRACTAL_"))
             .then(|| {
@@ -8158,7 +8421,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 // Recover the suspended incarnation's durable path, not the current launch's
                 // latest binding. The snapshot's existing native ID remains the resume fence.
-                if let (Some(incarnation), Some(harness)) =
+                // A path recorded on another host names that host's file: a moved seat resumes
+                // from the inventory its snapshot restored here, by native ID.
+                let moved = suspension
+                    .source_host
+                    .as_deref()
+                    .is_some_and(|source| source != self.host);
+                if moved {
+                    crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
+                } else if let (Some(incarnation), Some(harness)) =
                     (suspension.incarnation_id.as_deref(), suspension.harness.as_deref())
                 {
                     match suspended::bound_session_path(
@@ -8382,8 +8653,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             return Ok(false);
         };
+        self.retire_restart_request(&subject.subject, &request, reason)?;
+        Ok(true)
+    }
+
+    /// Retire a restart request without starting anything: its completion says why.
+    fn retire_restart_request(&self, subject: &str, request: &crate::model::ClaimRecord, reason: &str) -> Result<()> {
         self.store.append_claim(&ClaimInput {
-            subject: subject.subject.clone(),
+            subject: subject.to_owned(),
             kind: "runtime.reconcile-decision".into(),
             actor: None,
             fields: BTreeMap::from([
@@ -8396,7 +8673,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             idempotency_key: Some(format!("restart-retired-obsolete-request:{}", request.id)),
         })?;
         self.store.append_claim(&ClaimInput {
-            subject: subject.subject.clone(),
+            subject: subject.to_owned(),
             kind: "runtime.action.succeeded".into(),
             actor: Some(RECONCILER_ACTOR.into()),
             fields: BTreeMap::from([
@@ -8404,12 +8681,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ("operation_status".into(), Value::from("retired")),
                 ("reason".into(), Value::from(reason)),
             ]),
-            evidence: vec![request.id],
+            evidence: vec![request.id.clone()],
             expected_subject: None,
-            idempotency_key: Some(completion),
+            idempotency_key: Some(format!("agent-restart-completed:{}", request.id)),
         })?;
         self.signal_changed();
-        Ok(true)
+        Ok(())
     }
 
     /// Preflight the stale producer and runtime evidence. This never releases admission;
@@ -8469,6 +8746,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         };
         if self.retire_obsolete_failed_restart(subject, now_ms())? {
+            return Ok(true);
+        }
+        // A seat of an ended run is never started again. A request still open when the run ended
+        // is retired without a start; one already completed is neither retried nor raised again.
+        if let Some(run) = subject.owner_run.as_deref()
+            && let Some(view) = self.store.mission_run(run)?
+            && let Some(ended) = view.ended()
+        {
+            if self.store.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_some() {
+                return Ok(false);
+            }
+            self.retire_restart_request(
+                &subject.subject,
+                &request,
+                &format!("the seat's run {run} has ended ({ended})"),
+            )?;
             return Ok(true);
         }
         if self
@@ -8755,16 +9048,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("restart blocked: {error:#}"),
             );
         }
-        if attempted.is_some() {
+        if let Some(attempt) = attempted.as_ref() {
+            let diagnostic = self.restart_admission_error(&subject.subject, attempt, previous)?;
             return self.fail_requested_restart(
                 subject,
                 member,
                 &request,
-                if channel_recovery::automatic_request(&request) {
+                diagnostic.as_deref().unwrap_or_else(|| if channel_recovery::automatic_request(&request) {
                     "the automatic Claude channel recovery launch was interrupted before its result was recorded"
                 } else {
                     "the explicit launch attempt was interrupted before its result was recorded"
-                },
+                }),
             );
         }
         if request.body["fields"]["fresh_session"] == true {
@@ -8811,6 +9105,44 @@ impl<R: RuntimeControl> Reconciler<R> {
         // that exit at startup after the physical launcher accepted the attempt.
         self.signal_changed();
         Ok(true)
+    }
+
+    /// A driver may publish its refusal and exit before the physical observation arrives.
+    /// Read only this attempt's successor report; an old same-code diagnostic is not its cause.
+    fn restart_admission_error(
+        &self,
+        subject: &str,
+        attempt: &crate::model::ClaimRecord,
+        previous: &str,
+    ) -> Result<Option<String>> {
+        let order = crate::store::claim_log_order;
+        let reports = self.store.claims_for(subject, Some("runtime.observed"))?;
+        let report = reports.iter().rev().find(|claim| {
+            claim.actor.as_deref() == Some(subject)
+                && order(claim) > order(attempt)
+                && claim.body["fields"]["incarnation_id"]
+                    .as_str()
+                    .is_some_and(|inc| !inc.is_empty() && inc != previous)
+        });
+        let Some(report) = report.filter(|claim| claim.body["fields"]["status"] == "exited") else {
+            return Ok(None);
+        };
+        let incarnation = &report.body["fields"]["incarnation_id"];
+        Ok(self
+            .store
+            .harness_diagnostics(subject)?
+            .iter()
+            .rev()
+            .find(|claim| {
+                order(claim) > order(attempt)
+                    && order(claim) < order(report)
+                    && claim.actor.as_deref() == Some(subject)
+                    && claim.body["fields"]["incarnation_id"] == *incarnation
+                    && claim.body["fields"]["code"] == "harness-admission-failed"
+                    && claim.body["fields"]["status"] == "failed"
+            })
+            .and_then(|claim| claim.body["fields"]["reason"].as_str())
+            .map(str::to_owned))
     }
 
     fn fail_requested_restart(
@@ -8892,6 +9224,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         observation: &RuntimeObservation,
     ) -> Result<()> {
+        if !self.member_admitted_for(&subject.subject)? { return Ok(()); }
         if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(()); }
         if subject.kind == "agent"
             && member.lifecycle == MemberLifecycle::Service
@@ -9636,6 +9969,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         observation: &RuntimeObservation,
         adopted: bool,
     ) -> Result<()> {
+        // An end is recorded only once the member knows the seat is still placed here; a
+        // runtime that is alive is recorded wherever the seat is placed.
+        if matches!(observation.status.as_str(), "exited" | "vanished" | "stopped" | "absent" | "failed")
+            && !self.member_admitted_for(&subject.subject)?
+        {
+            return Ok(());
+        }
         let mut fields = member_fields(
             member,
             &observation.status,
@@ -10648,6 +10988,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .blocked_reason
                             .as_deref()
                             .is_some_and(|reason| reason.starts_with("step baseline `"));
+                    // Waiting for room for the lane the step raises its seat to: tried again until
+                    // it fits.
+                    let lane_blocked = view.status == "blocked"
+                        && view.blocked_reason.as_deref().is_some_and(|reason| reason.starts_with("step lane "));
                     // A blocked step that names no blocker, holds no claim and waits on no ask
                     // is a lost reason, for example a revision that carried it without one.
                     // Nothing else will move it, so recompute it like a pending step.
@@ -10672,6 +11016,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if view.status == "pending"
                         || assignment_blocked
                         || baseline_blocked
+                        || lane_blocked
                         || ready_missing_agent
                     {
                         if view
@@ -10761,6 +11106,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     "no eligible agent is present in the desired graph: {eligible}"
                                 )),
                             )?;
+                            return Ok(changed);
+                        }
+                        // A step that raises its seat's lane is delivered only once the raised lane
+                        // fits this host (docs/st3/seat-lanes.md).
+                        if let Some(reason) = self.step_lane_wait(step.spec.capacity, view.assigned_to.as_deref())? {
+                            changed |= self.store.set_step_state(&view.subject, "blocked", Some(&reason))?;
                             return Ok(changed);
                         }
                         // Save readiness before diagnostic writes. A diagnostic failure must not
@@ -13697,6 +14048,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let variables = run_variables(run, step, view);
         let source = crate::mission::interpolate_kdl(source, &variables)?;
+        let source = crate::mission::with_mission_capacity(&source, step.mission_capacity)?;
         let mut intent = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
         if assigned_agents_only {
             let selected_agent = |subject: &str, desired: &DesiredSubject| {
@@ -13774,6 +14126,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             let variables = crate::store::mission_run_variables(run, &mission.revision);
             let source = crate::mission::interpolate_kdl(source, &variables)?;
+            let source = crate::mission::with_mission_capacity(&source, mission.capacity)?;
             let declarations = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
             if declarations
                 .subjects
@@ -13967,6 +14320,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let variables = crate::store::mission_run_variables(run, &mission.revision);
         let source = crate::mission::interpolate_kdl(source, &variables)?;
+        let source = crate::mission::with_mission_capacity(&source, mission.capacity)?;
         #[cfg(any(test, feature = "test-support"))]
         self.mission_declaration_parses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -14940,7 +15294,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         // Held mail waits for the seat's next turn, not for this seat.
                         && !crate::silent::waits_for_turn(&message)
                         && !message.tags.iter().any(|tag| {
-                            tag.starts_with("st3-work:") || tag.starts_with("st3-wake-source:")
+                            crate::silent::strip_message_tag_prefix(tag, "work:").is_some()
+                                || crate::silent::strip_message_tag_prefix(tag, "wake-source:").is_some()
                         })
                 });
             Ok(if unread {
@@ -15123,7 +15478,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.clear_schedule_replication_block(schedule)?;
             return Ok(());
         }
-        if self.schedule_has_open_work(&schedule.subject)? {
+        if self.schedule_has_open_work(&schedule.subject, spec.host != self.host)? {
             if self.store.schedule_has_active_started_run(&schedule.subject)? {
                 self.clear_schedule_replication_block(schedule)?;
             }
@@ -15530,11 +15885,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn schedule_has_open_work(&self, schedule: &str) -> Result<bool> {
-        Ok(!self
+    fn schedule_has_open_work(&self, schedule: &str, on_standby: bool) -> Result<bool> {
+        // A standby starts only its own requests. A primary's request it will never start must
+        // not hold it either, or a primary that stops between requesting and starting its work
+        // holds every later occurrence until it returns.
+        Ok(self
             .store
             .pending_schedule_work_requests(schedule)?
-            .is_empty()
+            .iter()
+            .any(|request| !on_standby || request.origin == self.host)
             || self.store.schedule_has_active_started_run(schedule)?)
     }
 
@@ -16566,6 +16925,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         let prefix = format!("{observer}:");
         self.observer_cursors.lock().unwrap_or_else(PoisonError::into_inner)
             .retain(|key, _| !key.starts_with(&prefix));
+        self.observer_fields.lock().unwrap_or_else(PoisonError::into_inner)
+            .retain(|key, _| !key.starts_with(&prefix));
         if let Err(error) = self.github_plugin.forget(observer) {
             tracing::warn!(observer, "the GitHub plugin database kept a cursor it no longer needs: {error:#}");
         }
@@ -16686,6 +17047,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     })
                     .unwrap_or_else(now_ms)
             });
+        // The deadline was set by a poll that read the fields its arm requested. Fields this arm
+        // adds were never read, as when a watch's subscription reaches the standing observer
+        // after its first poll (#4470), so poll now instead of waiting out that cadence.
+        let previous_fields = self.observer_fields.lock().unwrap_or_else(PoisonError::into_inner)
+            .insert(deadline_key.clone(), spec.fields.clone());
+        if previous_fields.is_some_and(|previous| spec.fields.iter().any(|field| !previous.contains(field))) {
+            next_check = next_check.min(now_ms());
+        }
         // A changed cadence retires the old sleeping poll; its result cannot overwrite
         // a newer watcher observation if it was already in flight.
         if watched_ref && refresh_attempt.is_none() && observer_actual.as_ref().is_none_or(|actual|
@@ -16779,7 +17148,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         };
         let unkept_cursors = self.unkept_cursors.clone();
+        let look_lock = self.observer_looks.lock().unwrap_or_else(PoisonError::into_inner)
+            .entry(observer.subject.clone()).or_default().clone();
+        let look_limit = self.look_limit;
         let github_plugin = self.github_plugin.clone();
+        let refill_mirrors = self.refill_mirrors;
+        let poller_host = self.host.clone();
         let agent_workspaces = agent_workspaces.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
@@ -16821,7 +17195,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                     return;
                 }
+                // One look per observer at a time. An arm that retired another waits for that look
+                // to publish the cursor it kept, then reads on from it: a look from the cursor
+                // before would find the mirror ahead of it and record a full snapshot.
+                // Lock order: this is the outermost lock. It is taken holding no store writer
+                // and no other observer's lock, and nothing inside a look takes it again. The
+                // look's GitHub calls, its provider look and a mirror refill, end at `look_limit`,
+                // so a stuck GitHub call cannot hold it; the local store writes after them can.
+                let _look = look_lock.clone().lock_owned().await;
+                let look_deadline = tokio::time::Instant::now() + look_limit;
                 if !armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation) { return; }
+                if let Some(latest) = cursors.lock().unwrap_or_else(PoisonError::into_inner).get(&deadline_key).cloned() {
+                    kept_cursor = Some(latest.clone());
+                    cursor = latest;
+                }
                 // Until the plugin database keeps the cursor the last poll recorded facts for,
                 // the provider is not asked again and the observer stays degraded.
                 let pending = unkept_cursors.lock().unwrap_or_else(PoisonError::into_inner)
@@ -16857,9 +17244,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     every_ms: spec.every_ms,
                     refresh: refresh_attempt.is_some(),
                 };
-                let observed =
-                    crate::resource::spend_as(observer_subject.clone(), provider.observe(request))
-                        .await;
+                let observed = tokio::time::timeout_at(
+                    look_deadline,
+                    crate::resource::spend_as(observer_subject.clone(), provider.observe(request)),
+                )
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!(
+                    "the look ran past its {}s limit", look_limit.as_secs(),
+                )));
                 // This UUID is the arm generation. The writer checks it inside the
                 // transaction; never keep the scheduler lock while waiting for Store I/O.
                 let current = || {
@@ -16920,7 +17312,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .and_then(crate::resource::replicated_cursor),
                             _ => observation.cursor.clone(),
                         };
-                        match store.record_resource_observation_outcome(
+                        let mirrored = (spec.provider == "github.repository")
+                            .then(|| mirrored_prior(&store, &github_plugin, &poller_host, &spec, &observation.facts, cursor.as_deref()))
+                            .flatten();
+                        match store.record_resource_observation_mirrored(
                             &observer_subject,
                             &revision,
                             refresh_attempt.as_deref(),
@@ -16930,6 +17325,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             observation.next_check_unix_ms,
                             &selected,
                             Some(&current),
+                            mirrored.as_ref(),
                         ) {
                             Ok((outcome, wrote)) => {
                                 if standing {
@@ -16947,6 +17343,31 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     }
                                 }
                                 durable_changed = wrote;
+                                if spec.provider == "github.repository" {
+                                    mirror_observation(
+                                        &store, &github_plugin, &observer_subject, &spec,
+                                        cursor.as_deref(), observation.cursor.as_deref(), &outcome.recorded_items,
+                                    );
+                                    // A mirror that is new, moved, restored, set aside or behind
+                                    // the cursor refills from GitHub once the listing has caught up.
+                                    if refill_mirrors
+                                        && !continuing
+                                        && !github_plugin.filled(&spec.resource).unwrap_or(true)
+                                        && github_plugin.refill_due(&spec.resource, now_ms())
+                                    {
+                                        let refill = refill_mirror(
+                                            &store, provider.as_ref(), &github_plugin, &observer_subject, &spec,
+                                            observation.cursor.as_deref(),
+                                        );
+                                        // A refill past the look's limit is a failed refill: it
+                                        // waits its backoff, and the look goes on to keep its cursor.
+                                        if tokio::time::timeout_at(look_deadline, refill).await.is_err() {
+                                            github_plugin.refill_ended(&spec.resource, now_ms(), false);
+                                            tracing::warn!(observer = %observer_subject, resource = %spec.resource,
+                                                "the GitHub plugin mirror refill ran past the look's limit; it retries later");
+                                        }
+                                    }
+                                }
                                 previous_facts = Some(observation.facts);
                                 // The cursor survives a restart only in the plugin database. A poll
                                 // that cannot keep it there is the observer's failure, which its
@@ -16968,6 +17389,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         }
                                         completed_deadline = Some(observation.next_check_unix_ms);
                                         completed_cursor = Some(observation.cursor);
+                                        #[cfg(any(test, feature = "test-support"))]
+                                        if let Some(injection) = &completion_fault {
+                                            injection.fault("observer-cursor-kept", &observer_subject);
+                                        }
                                     }
                                     Some(error) => {
                                         completed_deadline = Some(now_ms().saturating_add(60_000));
@@ -17050,6 +17475,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     Err(error) => {
+                        let error = if let Some(checkpoint) = error.downcast_ref::<crate::resource::BudgetContinuation>() {
+                            match github_plugin.set_cursor(&observer_subject, &spec.resource, checkpoint.0.as_deref()) {
+                                Ok(()) => {
+                                    let next = checkpoint.0.clone();
+                                    kept_cursor = Some(next.clone());
+                                    completed_cursor = Some(next);
+                                    error
+                                }
+                                Err(persistence) => error.context(format!("could not keep GitHub poll continuation: {persistence:#}")),
+                            }
+                        } else {
+                            error
+                        };
                         let refusal_deadline = error.downcast_ref::<ProviderRateLimit>()
                             .map(|limit| limit.retry_at_unix_ms)
                             .or_else(|| error.downcast_ref::<LocalObserverBudget>()
@@ -17128,20 +17566,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let mut active = armed.lock().unwrap_or_else(PoisonError::into_inner);
                     let armed_now = active.contains(&operation);
                     let still_current = armed_now && revision_state == Some(true);
-                    if still_current {
-                        if let Some(next_check) = completed_deadline {
-                            deadlines.lock().unwrap_or_else(PoisonError::into_inner)
-                                .insert(deadline_key.clone(), next_check);
-                            if let Some(interval) = standing_interval {
-                                intervals.lock().unwrap_or_else(PoisonError::into_inner)
-                                    .insert(deadline_key.clone(), interval);
-                            }
+                    if still_current && let Some(next_check) = completed_deadline {
+                        deadlines.lock().unwrap_or_else(PoisonError::into_inner)
+                            .insert(deadline_key.clone(), next_check);
+                        if let Some(interval) = standing_interval {
+                            intervals.lock().unwrap_or_else(PoisonError::into_inner)
+                                .insert(deadline_key.clone(), interval);
                         }
-                        if let Some(next_cursor) = completed_cursor {
-                            cursors.lock().unwrap_or_else(PoisonError::into_inner)
-                                .insert(deadline_key.clone(), next_cursor.clone());
-                            cursor = next_cursor;
-                        }
+                    }
+                    // The plugin database already keeps the cursor this look recorded to, so it is
+                    // the observer's position even when the arm was retired meanwhile.
+                    if let Some(next_cursor) = completed_cursor {
+                        cursors.lock().unwrap_or_else(PoisonError::into_inner)
+                            .insert(deadline_key.clone(), next_cursor.clone());
+                        cursor = next_cursor;
                     }
                     // Retain this generation across idle polls and error backoff: a full pass
                     // sees the same arm, and cancellation/cadence changes can still retire it.
@@ -18331,7 +18769,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .store
                 .claim_by_id(claim_id)?
                 .filter(|claim| claim.subject == name)
-                .map(|claim| claim.body));
+                // A gate on a compact item state reads its compact facts, as on an observation.
+                .map(|claim| fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body)));
         }
         self.store.latest_actual_value(subject)
     }
@@ -18509,6 +18948,208 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 }
 
+/// Lay what one look at a GitHub repository recorded into the poller's plugin mirror, with the
+/// cursor the look started from and ended at, so the mirror knows whether it followed every
+/// look. The mirror is a cache: a failure is logged and the reads it serves fall back to the
+/// graph, never failing the observer.
+fn mirror_observation(
+    store: &Store,
+    plugin: &github_plugin_store::GithubPluginStore,
+    observer: &str,
+    spec: &crate::model::ObserverSpec,
+    polled_from: Option<&str>,
+    cursor: Option<&str>,
+    recorded: &[crate::model::RecordedItem],
+) {
+    let completed = crate::resource::completed_poll_cursor(polled_from);
+    let polled_from = completed.as_deref();
+    let items = recorded
+        .iter()
+        .filter_map(|recorded| {
+            recorded.facts.as_object().map(|facts| github_plugin_store::MirrorItem {
+                subject: recorded.subject.clone(),
+                item_kind: recorded.kind.clone(),
+                facts: facts.clone(),
+                claim: Some(recorded.claim.clone()),
+            })
+        })
+        .collect::<Vec<_>>();
+    let in_graph = |subject: &str| -> Result<bool> { Ok(store.latest_claim_id(subject)?.is_some()) };
+    let events = match plugin.mirror_checked(&spec.resource, observer, &spec.locator, polled_from, cursor, &items, &in_graph) {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
+            return;
+        }
+    };
+    // Each event is one keyed claim, written once, within the plugin's graph allowlist.
+    for event in events {
+        let Some(subject) = event["subject"].as_str() else { continue };
+        let mut fields = BTreeMap::from([
+            ("version".to_owned(), Value::from(fractal_schema::github_plugin::VERSION)),
+            ("item".to_owned(), event["item"].clone()),
+            ("event".to_owned(), event["event"].clone()),
+            ("observer".to_owned(), Value::String(observer.to_owned())),
+            ("at".to_owned(), event["at"].clone()),
+            ("detail".to_owned(), event["detail"].clone()),
+        ]);
+        if let Some(head) = event["head_sha"].as_str() {
+            fields.insert("head_sha".into(), Value::String(head.to_owned()));
+        }
+        let written = github_plugin_store::MANIFEST
+            .admit(subject, fractal_schema::github_plugin::EVENT, &fields)
+            .map_err(anyhow::Error::new)
+            .and_then(|()| {
+                store.append_claim(&ClaimInput {
+                    subject: subject.to_owned(),
+                    kind: fractal_schema::github_plugin::EVENT.into(),
+                    actor: None,
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("github-event:{subject}")),
+                }).map_err(|error| anyhow::anyhow!(error.message))
+            });
+        if let Err(error) = written {
+            tracing::warn!(observer, subject, "a GitHub event was not written to the graph; the mirror keeps it: {error:#}");
+        }
+    }
+}
+
+/// What a repository's poller lays beside a look it records, from a filled mirror: each listed
+/// item's mirrored facts, and whether the repository is in compact mode. Compact mode, where an
+/// item's change is recorded as `vcs.item.state` alone, needs every current member of the fleet
+/// to advertise the GitHub plugin; it is decided again on each look, so a member of an older
+/// build turns snapshots back on. `None` without a filled mirror, or when reading it fails: the
+/// look is then recorded as before.
+fn mirrored_prior(
+    store: &Store,
+    plugin: &github_plugin_store::GithubPluginStore,
+    host: &str,
+    spec: &crate::model::ObserverSpec,
+    facts: &Value,
+    polled_from: Option<&str>,
+) -> Option<crate::model::MirroredPrior> {
+    let completed = crate::resource::completed_poll_cursor(polled_from);
+    let polled_from = completed.as_deref();
+    let read = || -> Result<Option<crate::model::MirroredPrior>> {
+        // Only a mirror that followed every look up to the one this look starts from knows at
+        // least what the graph does.
+        if !plugin.current(&spec.resource, polled_from)? {
+            return Ok(None);
+        }
+        let mut items = HashMap::new();
+        for (segment, field) in [("pull-request", "pull_requests"), ("issue", "issues")] {
+            for number in facts.get(field).and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|item| item.get("number").and_then(Value::as_u64))
+            {
+                if let Some(item) = plugin.item(&spec.resource, number)? {
+                    items.insert(format!("{}/{segment}/{number}", spec.resource), item["facts"].clone());
+                }
+            }
+        }
+        // Compact mode fails closed: every current member of the fleet, whatever it reads,
+        // must advertise the plugin, so a member that is older, or whose dependency on this
+        // repository has not reached this poller yet, keeps reading full snapshots.
+        let membership = store.fleet_membership()?;
+        let mut holding = None;
+        for member in membership.incarnations()
+            .filter(|member| member.end.is_none() && member.name != host)
+            .map(|member| member.name.clone())
+            .collect::<BTreeSet<_>>()
+        {
+            let advertised = store.advertised_feature(&member, "github_plugin")?;
+            if advertised.as_ref().and_then(Value::as_i64).is_none_or(|version| version < 1) {
+                holding = Some(member);
+                break;
+            }
+        }
+        let compact = holding.is_none();
+        if plugin.note_compact(&spec.resource, compact) {
+            match &holding {
+                None => tracing::info!(resource = %spec.resource, "compact mode on: every member advertises the GitHub plugin; item snapshots stop"),
+                Some(member) => tracing::info!(resource = %spec.resource, member, "compact mode off: this member does not advertise the GitHub plugin, so item snapshots continue"),
+            }
+        }
+        Ok(Some(crate::model::MirroredPrior { compact, items }))
+    };
+    read().unwrap_or_else(|error| {
+        tracing::warn!(resource = %spec.resource, "the GitHub plugin mirror could not be read for a look; it is recorded from the graph: {error:#}");
+        None
+    })
+}
+
+/// Fill a repository's mirror from GitHub itself: one fresh look by the repository provider, as a
+/// new poller's first look reads (the open items, with each open pull request's details), within
+/// the same request budget as the observer's own polls. It records nothing in the graph and
+/// moves no cursor: the observer's own looks keep delivering from where they read to. Each item
+/// is laid over the mirror's row as a recording would lay it, with the comments the graph has
+/// recorded on it: a fresh listing does not reach older comments, and a row without them would
+/// take each one for new on the item's next look and hand it out as an event (#4549).
+async fn refill_mirror(
+    store: &Store,
+    provider: &dyn ResourceProvider,
+    plugin: &github_plugin_store::GithubPluginStore,
+    observer: &str,
+    spec: &crate::model::ObserverSpec,
+    cursor: Option<&str>,
+) {
+    let request = ObservationRequest {
+        provider: spec.provider.clone(),
+        locator: spec.locator.clone(),
+        fields: spec.fields.iter().cloned().collect(),
+        cursor: None,
+        previous_facts: None,
+        every_ms: spec.every_ms,
+        refresh: false,
+    };
+    let filled = async {
+        let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;
+        let recorded_comments = store
+            .repository_items(&spec.resource, None)?
+            .into_iter()
+            .filter_map(|item| Some((item.subject, item.facts.get("recent_comments")?.as_array()?.clone())))
+            .collect::<HashMap<_, _>>();
+        let mut known = |subject: &str| {
+            let number = subject.rsplit('/').next()?.parse::<u64>().ok()?;
+            let mirrored = plugin.item(&spec.resource, number).ok()?.map(|item| item["facts"].clone());
+            let Some(recorded) = recorded_comments.get(subject) else {
+                return mirrored;
+            };
+            let mut facts = mirrored.unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+            let comments = crate::resource::merge_recent_comments(
+                facts.get("recent_comments").and_then(Value::as_array).into_iter().flatten(),
+                recorded,
+                Some(crate::resource::RECENT_COMMENTS),
+            );
+            facts["recent_comments"] = Value::Array(comments);
+            Some(facts)
+        };
+        let items = crate::store::repository_item_facts(&spec.resource, &observation.facts, &mut known)
+            .into_iter()
+            .map(|(subject, kind, facts)| github_plugin_store::MirrorItem {
+                subject,
+                item_kind: kind.to_owned(),
+                facts,
+                claim: None,
+            })
+            .collect::<Vec<_>>();
+        let count = items.len();
+        plugin.fill(&spec.resource, observer, &spec.locator, cursor, &items).map(|filled| (filled, count))
+    }
+    .await;
+    // A fill that failed waits before the next, so a lasting failure does not spend the
+    // observer's budget on every look.
+    // A look that moved the mirror on during the fill is no failure: the next look tries again,
+    // and the doubling wait starts over, since GitHub answered.
+    plugin.refill_ended(&spec.resource, now_ms(), filled.is_ok());
+    match filled {
+        Ok((true, items)) => tracing::info!(observer, resource = %spec.resource, items, "the GitHub plugin mirror refilled from GitHub"),
+        Ok((false, _)) => tracing::info!(observer, resource = %spec.resource, "the GitHub plugin mirror moved on during its refill; the next look tries again"),
+        Err(error) => tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror could not refill from GitHub; reads answer from the graph until it does: {error:#}"),
+    }
+}
+
 /// What the graph knows about each pull request a repository observation saw, in the listing
 /// shape `attach_pull_request_openers` compares with: each item resource's facts, or the item in
 /// the repository facts that builds before item resources kept.
@@ -18580,6 +19221,9 @@ struct RuntimeStep<'a> {
     spec: &'a StepSpec,
     dependency_prefix: String,
     parent: Option<String>,
+    /// The capacity of the mission that declares this step, nested or not: the lane of the agents
+    /// the step declares without one.
+    mission_capacity: Option<fractal_runtime::Capacity>,
 }
 
 /// Each failed finally step of a run with the reason it failed.
@@ -18614,6 +19258,7 @@ fn flatten_mission_steps(mission: &MissionSpec) -> Vec<RuntimeStep<'_>> {
                 spec: step,
                 dependency_prefix: dependency_prefix.clone(),
                 parent: parent.clone(),
+                mission_capacity: mission.capacity,
             });
             if let Some(nested) = &step.nested_mission {
                 append(
@@ -19120,6 +19765,7 @@ pub fn append_work_wake_message(
             .map(|claim| claim.store_index)
             .unwrap_or_default(),
             attachments: Vec::new(),
+        status_from: None,
     })
 }
 
@@ -19333,14 +19979,44 @@ fn nested_under_work(step: &StepRunView, work: &[StepRunView]) -> bool {
 }
 
 fn work_message_target(message: &crate::model::MessageView) -> Option<(&str, u32, u32, &str)> {
-    message.tags.iter().find_map(|tag| {
-        let mut parts = tag.strip_prefix("st3-work:")?.rsplitn(4, '@');
-        let incarnation = parts.next()?;
-        let readiness_epoch = parts.next()?.parse::<u32>().ok()?;
-        let attempt = parts.next()?.parse::<u32>().ok()?;
-        let step_subject = parts.next()?;
-        Some((step_subject, attempt, readiness_epoch, incarnation))
-    })
+    crate::silent::message_tag_values(message.tags.iter().map(String::as_str), "work:").find_map(
+        |value| {
+            let mut parts = value.rsplitn(4, '@');
+            let incarnation = parts.next()?;
+            let readiness_epoch = parts.next()?.parse::<u32>().ok()?;
+            let attempt = parts.next()?.parse::<u32>().ok()?;
+            Some((parts.next()?, attempt, readiness_epoch, incarnation))
+        },
+    )
+}
+
+#[test]
+fn work_message_target_accepts_fractal_and_prefers_old() {
+    let mut message: crate::model::MessageView = serde_json::from_value(serde_json::json!({
+        "subject": "message/test", "from": "daemon/runtime", "to": "agent/worker",
+        "content": "", "status": "sent", "tags": [], "in_reply_to": null, "created_index": 0
+    }))
+    .unwrap();
+    for prefix in ["st3-", "fractal-"] {
+        message.tags = vec![format!("{prefix}work:step-run/r/s@2@3@inc")];
+        assert_eq!(
+            work_message_target(&message),
+            Some(("step-run/r/s", 2, 3, "inc"))
+        );
+    }
+    message.tags = vec![
+        "fractal-work:other@9@8@new".into(),
+        "st3-work:old@1@2@old".into(),
+    ];
+    assert_eq!(work_message_target(&message), Some(("old", 1, 2, "old")));
+    for prefix in ["st3-", "fractal-"] {
+        message.tags = vec![
+            "st3-work:malformed".into(),
+            format!("{prefix}work:step@2@3@inc"),
+        ];
+        let expected = (prefix == "st3-").then_some(("step", 2, 3, "inc"));
+        assert_eq!(work_message_target(&message), expected);
+    }
 }
 
 fn work_message_should_close(
@@ -19645,12 +20321,17 @@ fn observed_field_value(actual: &Value, subject: &str, path: &str) -> Option<Val
             .and_then(|content| serde_json::from_str::<Value>(content).ok())
             .and_then(|content| owned_field(content, path))
     } else {
-        let actual = if subject.starts_with("resource/") {
-            actual.get("facts").unwrap_or(actual)
-        } else {
-            actual
-        };
-        actual_field(actual, path).cloned()
+        // A pinned resource's value is its claim body, an unpinned one's its folded actual.
+        // Either reads a path in its facts first, then in the whole observation, so `state` and
+        // `facts.state` read the same on both (#4557).
+        let facts = subject
+            .starts_with("resource/")
+            .then(|| actual.get("fields").unwrap_or(actual).get("facts"))
+            .flatten();
+        facts
+            .and_then(|facts| actual_field(facts, path))
+            .or_else(|| actual_field(actual, path))
+            .cloned()
     }
 }
 
@@ -20025,8 +20706,10 @@ pub mod tests {
         }
     }
 
+    mod admission_attempt_tests;
     mod channel_recovery;
     mod differential;
+    mod fault_dismiss_tests;
     mod first_readiness_tests;
     pub(crate) mod slo_breach_tests;
     mod slo_breach_flow_tests;
@@ -20039,6 +20722,10 @@ pub mod tests {
     #[cfg(test)]
     mod schedule_standby_parent;
     pub mod mission_eval_reuse;
+    mod mission_capacity_tests;
+    mod lane_admission_tests;
+    mod step_lane_tests;
+    mod lane_burst_tests;
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;
@@ -20048,6 +20735,7 @@ pub mod tests {
     mod run_report_tests;
     mod start_spacing_loop;
     mod start_preemption;
+    mod seat_admission_queue;
     mod terminal_step_guard;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
@@ -20474,6 +21162,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         keys_before_error: Mutex<Option<usize>>,
         leftovers: Mutex<Vec<(String, bool)>>,
         lanes_ended: Mutex<Vec<String>>,
+        pub lanes_resized: Mutex<Vec<(String, fractal_runtime::Capacity)>>,
+        pub lane_held: Mutex<Option<u64>>,
+        pub lane_live: Mutex<Option<fractal_runtime::Capacity>>,
     }
 
     #[test]
@@ -20796,6 +21487,16 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
         fn end_lane(&self, runtime_id: &str) {
             self.lanes_ended.lock().unwrap().push(runtime_id.into());
+        }
+        fn resize_lane(&self, runtime_id: &str, capacity: fractal_runtime::Capacity) -> Result<bool> {
+            self.lanes_resized.lock().unwrap().push((runtime_id.into(), capacity));
+            Ok(true)
+        }
+        fn lane_held_memory(&self, _runtime_id: &str) -> Option<u64> {
+            *self.lane_held.lock().unwrap()
+        }
+        fn live_lane(&self, _runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+            *self.lane_live.lock().unwrap()
         }
     }
 
@@ -21159,6 +21860,65 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         tokio::time::timeout(Duration::from_secs(10), notify.notified())
             .await
             .expect("a long gate still gets a pass every minute");
+    }
+
+    /// A field gate on a GitHub item reads `state` and `facts.state` alike, whether its subject
+    /// is pinned to a full observation, pinned to a compact item state, or not pinned (#4557).
+    #[test]
+    fn a_field_gate_on_an_item_reads_one_path_pinned_or_not() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        let item = "resource/github/acme/garden/pull-request/12";
+        let facts = serde_json::json!({"number": 12, "state": "closed", "merged": true, "title": "Moss"});
+        let append = |kind: &str, fields: Value| store.append_claim(&ClaimInput {
+            subject: item.into(),
+            kind: kind.into(),
+            actor: None,
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap().id;
+        let observed = append("resource.observed", serde_json::json!({
+            "kind": "vcs.pull-request", "facts": facts, "observer": "observer/repo",
+            "baseline": false, "changed_fields": ["state"],
+        }));
+        let state = append(
+            fractal_schema::github_plugin::ITEM_STATE,
+            Value::Object(fractal_schema::github_plugin::compact_item_state(
+                "vcs.pull-request", "observer/repo", facts.as_object().unwrap(),
+            ).unwrap()),
+        );
+        let stage = GateContext {
+            subject: "step-run/garden/wait".into(),
+            name: "wait".into(),
+            started_at_unix_ms: 0,
+            attempt: 1,
+            run: "mission-run/garden".into(),
+            generation: "run-generation/garden".into(),
+            eval: false,
+        };
+        let outcome = |subject: &str, path: &str| {
+            let gate = GateSpec::Field {
+                name: "closed".into(),
+                path: path.into(),
+                subject: subject.into(),
+                operator: "is".into(),
+                value: serde_json::json!("closed"),
+            };
+            match reconciler.evaluate_gate(&stage, &gate).unwrap() {
+                GateOutcome::Pass => "pass",
+                GateOutcome::Pending => "pending",
+                _ => "other",
+            }
+        };
+        for subject in [item.to_owned(), format!("{item}@{observed}"), format!("{item}@{state}")] {
+            assert_eq!(outcome(&subject, "state"), "pass", "{subject}");
+            assert_eq!(outcome(&subject, "facts.state"), "pass", "{subject}");
+            assert_eq!(outcome(&subject, "status"), "pending", "{subject}");
+        }
     }
 
     #[test]
@@ -26060,6 +26820,122 @@ agent "import/omp/fixture" {{
     }
 
     #[test]
+    fn a_stop_ends_an_earlier_member_fault_on_every_host_but_not_a_later_one() {
+        // `node` recorded a fault for a seat placed on `peer`; the seat is then stopped, and the
+        // stop is `peer`'s to carry out. No host answers the fault, as on a member whose
+        // recording host never reconciles the stop, and it still ends.
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, "version 2\nagent \"seat\" { host \"peer\"; command \"sleep 100\" }", "seat");
+        let subject = "agent/peer.seat";
+        let node = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let launcher = "start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)";
+        node.record_member_reconcile_result(subject, Err(anyhow::anyhow!(launcher))).unwrap();
+        assert_eq!(store.member_reconcile_fault(subject, None).unwrap().as_deref(), Some(launcher));
+        apply_source(&store, "version 2\nstop \"agent/peer.seat\"\n", "stop-seat");
+        assert_eq!(store.member_reconcile_fault(subject, None).unwrap(), None);
+        assert_eq!(store.member_reconcile_fault_origin(subject).unwrap(), None);
+        let at = store.index().unwrap();
+        assert!(store.member_reconcile_faults_for(&[subject.to_owned()], at).unwrap().is_empty());
+        // A fault that `peer` records after the stop is `peer`'s word, and it stands.
+        let peer_store = Arc::new(Store::open_memory("peer").unwrap());
+        peer_store.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        let peer = Reconciler::new(
+            peer_store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "peer".into(),
+            Arc::new(Notify::new()),
+        );
+        peer.record_member_reconcile_result(subject, Err(anyhow::anyhow!("stop member runtime: synthetic failure")))
+            .unwrap();
+        store.import_replication("peer", &peer_store.export_replication(0).unwrap()).unwrap();
+        assert_eq!(
+            store.member_reconcile_fault(subject, None).unwrap().as_deref(),
+            Some("stop member runtime: synthetic failure")
+        );
+        assert_eq!(store.member_reconcile_fault_origin(subject).unwrap().as_deref(), Some("peer"));
+    }
+
+    #[test]
+    fn a_task_whose_working_directory_is_missing_says_so_and_is_not_launched() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let missing = workspace.path().join("gone");
+        apply_source(
+            &store,
+            &format!("version 2\nexec \"job\" {{ workspace {:?}; cwd {:?}; command \"sleep 100\" }}", workspace.path(), missing),
+            "job",
+        );
+        let subject = store.desired_subjects().unwrap().into_iter().map(|desired| desired.subject).next().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.reconcile_once().unwrap();
+        let fault = store.member_reconcile_fault(&subject, None).unwrap().unwrap_or_default();
+        assert!(fault.contains(&format!("working directory {} does not exist", missing.display())), "{fault}");
+        assert!(runtime.starts.lock().unwrap().is_empty(), "{:?}", runtime.starts.lock().unwrap());
+    }
+
+    #[test]
+    fn a_restart_still_open_when_the_seats_run_ends_is_retired_once_without_a_start() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nmission \"ending\" state=\"ready\" {\n  goal \"End.\"\n  step \"one\" { assigned-to \"person/robin\" }\n}\nagent \"seat\" { workspace \"/tmp\"; command \"sleep 100\" }\n",
+            "ending",
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "ending".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "ending-run".into(),
+            })
+            .unwrap();
+        // The seat belongs to the run, and a restart was asked for while the run still ran.
+        let mut desired = store.desired_subjects().unwrap().into_iter()
+            .find(|desired| desired.kind == "agent" && desired.subject.ends_with("seat"))
+            .unwrap_or_else(|| panic!("{:?}", store.desired_subjects().unwrap().iter().map(|d| &d.subject).collect::<Vec<_>>()));
+        let seat = desired.subject.clone();
+        desired.owner_run = Some(run.subject.clone());
+        let member = desired.member.clone().unwrap();
+        let token = store.selected_desired_token(&seat).unwrap().unwrap();
+        let request = store.append_claim(&ClaimInput {
+            subject: seat.clone(), kind: "runtime.action.requested".into(),
+            actor: Some("person/robin".into()),
+            fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+            evidence: vec![token], expected_subject: None,
+            idempotency_key: Some("ending-restart".into()),
+        }).unwrap();
+        // The run then moves into cleanup, where it stops its seats.
+        store.connection.write()
+            .execute(/* sqlite-large-value: allow-for-now lv-h8010ab43152a owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='cleanup-seats' WHERE id=?1", [&run.id])
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        assert!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        // A later pass finds the request completed: nothing to retire, retry or raise again, and
+        // the member pass goes on as usual.
+        assert!(!reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        let retirements = store.claims_for(&seat, Some("runtime.reconcile-decision")).unwrap().into_iter()
+            .filter(|claim| claim.body["fields"]["decision"] == "restart-retired-obsolete-request")
+            .count();
+        assert_eq!(retirements, 1);
+        let completion = store.operation_claim(&format!("agent-restart-completed:{}", request.id)).unwrap().unwrap();
+        assert_eq!(completion.kind, "runtime.action.succeeded");
+        assert_eq!(completion.body["fields"]["operation_status"], "retired");
+        let reason = completion.body["fields"]["reason"].as_str().unwrap();
+        assert!(reason.contains(&run.subject) && reason.contains("(cleanup-seats)"), "{reason}");
+        assert!(runtime.starts.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_peer_that_does_not_run_the_seat_leaves_its_member_fault_alone() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, "version 2\nagent \"seat\" { command \"sleep 100\" }", "seat");
@@ -30567,17 +31443,37 @@ schedule "first" {{
             ),
             "first-unpinned",
         );
+        let wake = Arc::new(Notify::new());
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
             "node".into(),
-            Arc::new(Notify::new()),
+            wake.clone(),
         );
+        // The schedule's timer task writes the work request, then wakes the reconciler. Its wake
+        // keeps a permit, so one that comes before the wait still ends it; the bound only catches none.
+        // A loaded host can stall this one runtime thread past the timer's deadline and a fixed sleep
+        // alike, and then block_on polls the test before the timer task. Each wait first stalls the
+        // thread that way, so a wait that only sleeps fails here every time.
+        let requested = |subject: &'static str| {
+            let (store, wake) = (store.clone(), wake.clone());
+            tokio::spawn(async { std::thread::sleep(Duration::from_millis(120)) });
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let request = store.claims_for(subject, Some("schedule.work-requested")).unwrap();
+                        if !request.is_empty() {
+                            return request;
+                        }
+                        wake.notified().await;
+                    }
+                })
+                .await
+                .expect("the schedule's timer requested its work")
+            }
+        };
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        let first_request = store
-            .claims_for("schedule/first", Some("schedule.work-requested"))
-            .unwrap();
+        let first_request = requested("schedule/first").await;
         assert_eq!(first_request.len(), 1);
         assert_eq!(first_request[0].body["fields"]["mission_revision"], first);
 
@@ -30621,7 +31517,7 @@ schedule "second" {{
             "second-unpinned",
         );
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        requested("schedule/second").await;
         reconciler.reconcile_once().unwrap();
         let request = store
             .claims_for("schedule/second", Some("schedule.work-requested"))
@@ -40469,6 +41365,66 @@ agent "example.reviewer" { workspace "/tmp"; command "true" }"#,
         assert!(fixture.running(&fixture.observer) && fixture.running(&planner_watch));
     }
 
+    /// `st gh watch` declares the standing observer, which reads issues, before the watch that
+    /// adds pull requests and comments. A poll between the two reads issues alone, so the arm the
+    /// watch brings polls at once instead of waiting out the cadence that poll set (#4470).
+    #[tokio::test]
+    async fn an_observer_whose_fields_widen_after_a_poll_polls_again_at_once() {
+        struct FieldsProvider {
+            requests: Arc<Mutex<Vec<BTreeSet<String>>>>,
+        }
+        impl ResourceProvider for FieldsProvider {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                self.requests.lock().unwrap().push(request.fields);
+                Box::pin(async {
+                    Ok(crate::resource::ProviderObservation {
+                        facts: serde_json::json!({"repository_id": 7, "issues": []}),
+                        cursor: Some("read".into()),
+                        next_check_unix_ms: now_ms() + 300_000,
+                    })
+                })
+            }
+        }
+        let fixture = WatchFixture::new();
+        let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let reconciler = Reconciler::new(
+            fixture.store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).with_resource_provider(Arc::new(FieldsProvider { requests: requests.clone() }));
+        let poll = |count: usize| {
+            reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+            let requests = requests.clone();
+            let deadlines = reconciler.observer_deadlines.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while requests.lock().unwrap().len() < count || deadlines.lock().unwrap().is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                }).await.unwrap_or_else(|_| panic!("poll {count} did not run at once: {:?}", requests.lock().unwrap()));
+            }
+        };
+
+        // The observer alone polls, reads issues, and sets its standing cadence.
+        fixture.store.ensure_watch_observer(&thread).unwrap();
+        poll(1).await;
+        assert_eq!(requests.lock().unwrap()[0], BTreeSet::from(["issues".to_owned()]));
+        let deadline = *reconciler.observer_deadlines.lock().unwrap().values().next().unwrap();
+        assert!(deadline >= now_ms() + 170_000, "the standing cadence is three minutes");
+
+        // The watch widens what it reads: the next poll comes now, not at that deadline.
+        fixture.watch("acme/garden#12", "agent/example.planner");
+        poll(2).await;
+        assert!(requests.lock().unwrap()[1].contains("pull_requests"), "{:?}", requests.lock().unwrap());
+
+        // The same fields again keep the cadence.
+        fixture.store.declare_watch(&thread, "agent/example.reviewer", None).unwrap();
+        reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(requests.lock().unwrap().len(), 2, "{:?}", requests.lock().unwrap());
+    }
+
     /// A watch on a repository that an intake already observes uses the intake's resource, so
     /// the repository's item facts live in one place and either observer's poll serves both.
     #[test]
@@ -40591,6 +41547,7 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
                 store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
             )
             .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
             .with_resource_provider(Arc::new(OnePoll { asked: asked.clone(), facts, cursor: cursor.clone() }));
             // Due now, rather than at the deadline the last poll recorded.
             reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
@@ -40617,6 +41574,14 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         // A restart reopens the plugin database: the older build's claim is not adopted again.
         poll(disk(), listing(&[1, 3]), cursor(12)).await;
         assert_eq!(delivered(), 1, "issue 3 opened after the last poll");
+        // The poller's new mirror refilled from a look at GitHub of its own, then took each item
+        // the poll recorded; a first sighting is a baseline and holds no event.
+        let mirror = disk();
+        assert!(mirror.filled("resource/repo").unwrap());
+        assert_eq!(mirror.item("resource/repo", 1).unwrap().expect("filled from GitHub")["facts"]["title"], "issue 1");
+        assert_eq!(mirror.item("resource/repo", 3).unwrap().expect("mirrored from the poll")["kind"], "vcs.issue");
+        assert_eq!(mirror.repositories("acme/garden").unwrap()[0]["observer"], "observer/repo");
+        assert!(mirror.events("resource/repo", None, 10).unwrap().is_empty());
         let observed = newest_observed();
         assert_eq!(observed["changed"], true);
         // The claim carries how far the poll read, not the version maps.
@@ -40633,11 +41598,535 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         // from the claim's position: only issue 4, opened meanwhile, delivers.
         poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing(&[1, 3, 4]), cursor(13)).await;
         assert_eq!(delivered(), 2, "a lost database delivers only what is new");
+        // Each poller whose mirror was not filled also looked once from no cursor, recording
+        // nothing: the first poll of this build, and the member without the database.
         assert_eq!(*asked.lock().unwrap(), [
-            Some("old-build".into()), Some(cursor(11)), Some(position(12).to_string()),
+            Some("old-build".into()), None, Some(cursor(11)), Some(position(12).to_string()), None,
         ]);
         assert_eq!(claimed(&newest_observed()), position(13));
 
+        // Back on the member with the plugin database, a change the poll records is one keyed
+        // event in its mirror.
+        let mut closed = issue(3);
+        closed["state"] = Value::String("closed".into());
+        poll(disk(), serde_json::json!({"repository_id": 7, "issues": [issue(1), closed, issue(4)]}), cursor(14)).await;
+        let events = disk().events("resource/repo", Some(3), 10).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["event"], "closed");
+        assert_eq!(events[0]["subject"], "github-event/repo/issue/3/closed");
+    }
+
+    /// In compact mode a poller records a change confined to compact facts as `vcs.item.state`
+    /// alone, and each derived event as one `github.event` claim. A change to a fact a wake or
+    /// a delivery reads, such as a new comment, still writes a full snapshot, so when polling
+    /// moves to a member without the mirror, nothing is delivered twice: the facts that drifted
+    /// in the graph are a baseline for its first look.
+    #[tokio::test]
+    async fn compact_mode_records_compact_changes_alone_and_a_move_delivers_nothing_twice() {
+        struct OnePoll {
+            facts: Value,
+            cursor: String,
+        }
+        impl ResourceProvider for OnePoll {
+            fn observe(&self, _: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts: self.facts.clone(),
+                    cursor: Some(self.cursor.clone()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "comments"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example.reader"; delivery "message" }
+subscription "comments" { observer "observer/repo"; on "comments"; to "agent/example.reader"; delivery "message" }"#,
+            "compact-mode",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let issue = |state: &str, title: &str, comments: &[u64]| serde_json::json!({
+            "node_id": "I_orchid", "number": 1, "state": state, "title": title,
+            "url": "https://github.com/acme/garden/issues/1",
+            "comments": comments.len(),
+            "recent_comments": comments.iter().map(|id| serde_json::json!({
+                "kind": "comment", "id": id, "author": "fern", "at": format!("2026-10-30T10:0{id}:00Z"),
+            })).collect::<Vec<_>>(),
+        });
+        let listing = |state: &str, title: &str, comments: &[u64]| serde_json::json!({"repository_id": 7, "issues": [issue(state, title, comments)]});
+        let poll = |plugin: Arc<github_plugin_store::GithubPluginStore>, facts: Value, cursor: &str| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
+            .with_resource_provider(Arc::new(OnePoll { facts, cursor: cursor.to_owned() }));
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            let cursor = cursor.to_owned();
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while plugin.cursor("observer/repo").unwrap() != Some(Some(cursor.clone())) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll keeps its cursor");
+            }
+        };
+        let item = "resource/repo/issue/1";
+        let count = |kind: &str| store.claims_for(item, None).unwrap().into_iter()
+            .filter(|claim| claim.kind == kind).count();
+        let delivered = || store.messages(Some("agent/example.reader"), true).unwrap().len();
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+
+        // The first look is a baseline, and the mirror fills from it.
+        poll(plugin.clone(), listing("open", "Orchid", &[]), "c1").await;
+        assert!(plugin.filled("resource/repo").unwrap());
+        assert_eq!(delivered(), 0);
+
+        // A comment is a delivery fact: it is delivered once and keeps a full snapshot.
+        let snapshots = count("resource.observed");
+        poll(plugin.clone(), listing("open", "Orchid", &[1]), "c2").await;
+        assert_eq!(delivered(), 1);
+        assert_eq!(count("resource.observed"), snapshots + 1, "a comment writes a snapshot");
+        poll(plugin.clone(), listing("open", "Orchid", &[1]), "c3").await;
+        assert_eq!(delivered(), 1, "a known comment is not delivered again");
+
+        // A close and a new title are not delivery facts: the close is compact state and one
+        // keyed event, and neither writes a snapshot.
+        let snapshots = count("resource.observed");
+        let states = count("vcs.item.state");
+        // A suspended poll keeps the completed mirror position inside its private cursor.
+        let checkpoint = serde_json::json!({"poll_started_ms": 1, "cursor": "c3"}).to_string();
+        plugin.set_cursor("observer/repo", "resource/repo", Some(&checkpoint)).unwrap();
+        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4").await;
+        assert!(plugin.filled("resource/repo").unwrap(), "a resumed poll keeps mirror continuity");
+        assert_eq!(count("resource.observed"), snapshots, "a compact-only change writes no snapshot");
+        assert_eq!(count("vcs.item.state"), states + 1);
+        assert_eq!(store.latest_actual_value(item).unwrap().unwrap()["facts"]["state"], "closed");
+        assert_eq!(store.claims_for("github-event/repo/issue/1/closed", None).unwrap().len(), 1);
+        let after_close = delivered();
+        // The same facts again: an unchanged look writes no snapshot and no state.
+        let (snapshots, states) = (count("resource.observed"), count("vcs.item.state"));
+        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4b").await;
+        assert_eq!((count("resource.observed"), count("vcs.item.state")), (snapshots, states), "an unchanged look records nothing");
+
+        // A new title alone leaves the compact state as it was, but the issues subscription
+        // delivers it: the message gets a state of its own rather than sharing the close's, and
+        // the observer stays healthy (#4553).
+        poll(plugin.clone(), listing("closed", "Orchid, renamed again", &[1]), "c4c").await;
+        assert_eq!(delivered(), after_close + 1, "a new title is delivered");
+        assert_eq!((count("resource.observed"), count("vcs.item.state")), (snapshots, states + 1));
+        assert_eq!(store.latest_actual_value("observer/repo").unwrap().unwrap()["state"], "healthy");
+        let after_close = delivered();
+
+        // Polling moves to a member with no mirror. Its first look finds the title the graph
+        // never recorded: that is a baseline, and nothing is delivered twice.
+        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed again", &[1]), "c5").await;
+        assert_eq!(delivered(), after_close, "a move after compact-only changes delivers nothing twice");
+
+        // A filled mirror that missed a look, as when its write failed after the graph write, is
+        // not a look's prior: the look is compared with the graph.
+        let spec = crate::graph::observer_spec(
+            &store.desired_subjects_named(&["observer/repo".into()]).unwrap()[0].desired,
+        ).unwrap();
+        let facts = listing("closed", "Orchid, renamed again", &[1]);
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c4c")).is_some());
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c9")).is_none(), "behind the cursor");
+
+        // The graph moves on while this mirror and its cursor stay at the earlier look, as when
+        // the daemon stops between the graph write and the mirror write. The look from that
+        // cursor sees a comment the graph already delivered: it is not delivered again.
+        let comments = delivered();
+        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed again", &[1, 2]), "c6").await;
+        assert_eq!(delivered(), comments + 1, "the second comment is delivered");
+        poll(plugin.clone(), listing("closed", "Orchid, renamed again", &[1, 2]), "c7").await;
+        assert_eq!(delivered(), comments + 1, "a mirror behind the graph delivers it nothing twice");
+    }
+
+    /// In compact mode a look that changes only facts outside the compact state, such as an
+    /// issue's title or a pull request's per-check list, records nothing for an item no
+    /// subscription delivers: its stored state compares equal to the new one (#4553).
+    #[tokio::test]
+    async fn compact_mode_records_no_state_for_an_undelivered_change_outside_it() {
+        struct OnePoll {
+            facts: Value,
+            cursor: String,
+        }
+        impl ResourceProvider for OnePoll {
+            fn observe(&self, _: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts: self.facts.clone(),
+                    cursor: Some(self.cursor.clone()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "pull_requests"; field "comments"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "comments" { observer "observer/repo"; on "comments"; to "agent/example.reader"; delivery "message" }"#,
+            "compact-undelivered",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let listing = |title: &str, checks: &[&str]| serde_json::json!({
+            "repository_id": 7,
+            "issues": [{
+                "node_id": "I_fern", "number": 1, "state": "open", "title": title,
+                "url": "https://github.com/acme/garden/issues/1",
+            }],
+            "pull_requests": [{
+                "node_id": "PR_moss", "number": 2, "state": "open", "title": "Moss", "draft": false,
+                "head": "a1b2c3", "url": "https://github.com/acme/garden/pull/2",
+                "required_checks": {
+                    "state": "pass", "source": "rollup",
+                    "checks": checks.iter().map(|name| serde_json::json!({"name": name, "state": "pass"})).collect::<Vec<_>>(),
+                },
+            }],
+        });
+        let poll = |plugin: Arc<github_plugin_store::GithubPluginStore>, facts: Value, cursor: &str| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
+            .with_resource_provider(Arc::new(OnePoll { facts, cursor: cursor.to_owned() }));
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            let cursor = cursor.to_owned();
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                // A bound for a loaded machine, not an expected duration.
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while plugin.cursor("observer/repo").unwrap() != Some(Some(cursor.clone())) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll keeps its cursor");
+            }
+        };
+        let recorded = || ["resource/repo/issue/1", "resource/repo/pull-request/2"].map(|item| {
+            store.claims_for(item, None).unwrap().into_iter()
+                .filter(|claim| matches!(claim.kind.as_str(), "resource.observed" | "vcs.item.state"))
+                .count()
+        });
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+
+        poll(plugin.clone(), listing("Fern", &["lint"]), "c1").await;
+        let baseline = recorded();
+        assert!(baseline.iter().all(|claims| *claims > 0), "{baseline:?}");
+
+        // A new title and a new passing check: neither item's compact state moved.
+        poll(plugin.clone(), listing("Fern, renamed", &["lint", "fmt"]), "c2").await;
+        assert_eq!(recorded(), baseline, "a change outside the compact state records nothing");
+        assert!(store.messages(Some("agent/example.reader"), true).unwrap().is_empty());
+        assert_eq!(plugin.item("resource/repo", 1).unwrap().unwrap()["facts"]["title"], "Fern, renamed");
+    }
+
+    /// The observer `repo` on acme/garden, a subscription so it polls, and its revision.
+    /// The store for this file's multi-threaded look tests. A look task writes while the test
+    /// reads, and a shared-cache memory store fails one of them at once with SQLITE_LOCKED, which
+    /// no busy timeout waits out (#4720), so it is file-backed. The tempdir comes first so a caller's
+    /// binding drops it after the store.
+    fn one_look_fixture(source: &str) -> (tempfile::TempDir, Arc<Store>, String) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example.reader"; delivery "message" }"#,
+            source,
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        (root, store, revision)
+    }
+
+    #[test]
+    fn the_look_fixture_store_takes_a_write_while_a_reader_holds_a_snapshot() {
+        let (_root, store, _) = one_look_fixture("reader-writer");
+        store.read_snapshot(|_| {
+            assert!(store.latest_claim("agent/reader-writer", None)?.is_none());
+            // Join the other thread's commit while this thread still holds its read snapshot.
+            std::thread::scope(|scope| scope.spawn(|| {
+                store.append_claim(&ClaimInput {
+                    subject: "agent/reader-writer".into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some("agent/reader-writer".into()),
+                    fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+            }).join().unwrap())?;
+            assert!(store.latest_claim("agent/reader-writer", None)?.is_none());
+            Ok(())
+        }).unwrap();
+        assert!(store.latest_claim("agent/reader-writer", None).unwrap().is_some());
+    }
+
+    /// One look's listing: issue 1 titled `title`, and the cursor `cursor`.
+    fn one_look(title: &str, cursor: &str) -> crate::resource::ProviderObservation {
+        crate::resource::ProviderObservation {
+            facts: serde_json::json!({"repository_id": 7, "issues": [{
+                "node_id": "I_fern", "number": 1, "state": "open", "title": title,
+                "url": "https://github.com/acme/garden/issues/1",
+            }]}),
+            cursor: Some(cursor.to_owned()),
+            next_check_unix_ms: now_ms() + 300_000,
+        }
+    }
+
+    /// Retire every arm of `observer/repo` and arm a new one, due now, as a refresh or a changed
+    /// declaration does.
+    fn rearm_repo(reconciler: &Reconciler<FakeRuntime>, revision: &str) {
+        reconciler.armed_observers.lock().unwrap().retain(|operation| !operation.starts_with("observer/repo:"));
+        reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+        reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+    }
+
+    async fn until(what: &str, mut done: impl FnMut() -> bool) {
+        // A bound for a loaded machine, not an expected duration.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while !done() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap_or_else(|_| panic!("timed out waiting until {what}"));
+    }
+
+    /// A look that recorded and kept its cursor, and was retired before it published it, as a
+    /// refresh or a scheduled arm retires the arm before it, is the observer's position: the
+    /// arm armed meanwhile waits for that look, then reads on from its cursor. Reading from the
+    /// cursor before, it found the poller's mirror ahead of it and recorded a full snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_arm_armed_during_a_look_reads_on_from_the_cursor_that_look_kept() {
+        struct Counter { asked: Arc<Mutex<Vec<Option<String>>>> }
+        impl ResourceProvider for Counter {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                let mut asked = self.asked.lock().unwrap();
+                asked.push(request.cursor);
+                let n = asked.len();
+                Box::pin(async move { Ok(one_look(&format!("title {n}"), &format!("c{n}"))) })
+            }
+        }
+        /// Holds the second look that keeps a cursor until the test lets it go.
+        struct HoldSecondKept {
+            kept: AtomicUsize,
+            reached: Mutex<std::sync::mpsc::Sender<()>>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl FaultInjection for HoldSecondKept {
+            fn fault(&self, scope: &str, _subject: &str) -> Option<String> {
+                if scope == "observer-cursor-kept" && self.kept.fetch_add(1, Ordering::SeqCst) == 1 {
+                    self.reached.lock().unwrap().send(()).unwrap();
+                    self.release.lock().unwrap().recv().unwrap();
+                }
+                None
+            }
+        }
+        let (_root, store, revision) = one_look_fixture("one-look");
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (reached_tx, reached) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        )
+        .with_resource_provider(Arc::new(Counter { asked: asked.clone() }))
+        .with_fault_injection(Arc::new(HoldSecondKept {
+            kept: AtomicUsize::new(0),
+            reached: Mutex::new(reached_tx),
+            release: Mutex::new(release_rx),
+        }));
+        let key = format!("observer/repo:{revision}");
+        let published = || reconciler.observer_cursors.lock().unwrap().get(&key).cloned().flatten();
+
+        // The first look keeps c1.
+        rearm_repo(&reconciler, &revision);
+        until("the first look publishes c1", || published().as_deref() == Some("c1")).await;
+
+        // The second look records and keeps c2, and is held there.
+        rearm_repo(&reconciler, &revision);
+        tokio::task::spawn_blocking(move || reached.recv().unwrap()).await.unwrap();
+        // An arm armed now retires it, and is due at once.
+        rearm_repo(&reconciler, &revision);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(asked.lock().unwrap().len(), 2, "the new arm waits for the look in flight");
+        release.send(()).unwrap();
+
+        until("the third look", || asked.lock().unwrap().len() == 3).await;
+        assert_eq!(*asked.lock().unwrap(), [None, Some("c1".into()), Some("c2".into())]);
+        until("the third look publishes c3", || published().as_deref() == Some("c3")).await;
+    }
+
+    /// A look holds its observer at most `look_limit`: a mirror refill that never answers, and
+    /// then a look that never answers, each end at the limit, and the next look still runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_look_that_never_answers_frees_its_observer_at_the_limit() {
+        struct Stalls { asked: Arc<Mutex<Vec<Option<String>>>> }
+        impl ResourceProvider for Stalls {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                let mut asked = self.asked.lock().unwrap();
+                asked.push(request.cursor);
+                // The first look answers; the refill after it and the next look never do.
+                match asked.len() {
+                    1 => Box::pin(async { Ok(one_look("first", "c1")) }),
+                    2 | 3 => Box::pin(std::future::pending()),
+                    _ => Box::pin(async { Ok(one_look("last", "c2")) }),
+                }
+            }
+        }
+        let (_root, store, revision) = one_look_fixture("one-look-limit");
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        )
+        .with_mirror_refill(true)
+        .with_resource_provider(Arc::new(Stalls { asked: asked.clone() }));
+        reconciler.look_limit = Duration::from_millis(300);
+        let key = format!("observer/repo:{revision}");
+        let published = || reconciler.observer_cursors.lock().unwrap().get(&key).cloned().flatten();
+
+        // The first look records; its refill stalls and ends at the limit, and the look still
+        // keeps c1.
+        rearm_repo(&reconciler, &revision);
+        until("the first look publishes c1 past its stalled refill", || published().as_deref() == Some("c1")).await;
+        assert_eq!(asked.lock().unwrap().len(), 2, "the refill asked once");
+
+        // The next look stalls and ends at the limit as a failure.
+        rearm_repo(&reconciler, &revision);
+        until("the stalled look ends as a failure", || {
+            reconciler.store.latest_actual_value("observer/repo").unwrap().is_some_and(|actual| {
+                actual["reason"].as_str().is_some_and(|reason| reason.contains("ran past its"))
+            })
+        }).await;
+
+        // The observer is free: an arm armed now looks again.
+        rearm_repo(&reconciler, &revision);
+        until("the look after the stalled one", || published().as_deref() == Some("c2")).await;
+        assert_eq!(*asked.lock().unwrap(), [None, None, Some("c1".into()), Some("c1".into())]);
+    }
+
+    /// A mirror refilled from GitHub keeps the comments the graph recorded on each item, which
+    /// a fresh listing does not reach: the next look at an item it filled hands out no event
+    /// for an old comment, and a new comment is still one event (#4549).
+    #[tokio::test]
+    async fn a_refilled_mirror_hands_out_no_event_for_an_old_comment() {
+        /// Answers a look from a cursor with `look`, and the refill's look from none with
+        /// `refill`, a listing that names no comment.
+        struct Answers {
+            look: Value,
+            refill: Value,
+            cursor: String,
+        }
+        impl ResourceProvider for Answers {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                let facts = if request.cursor.is_some() { self.look.clone() } else { self.refill.clone() };
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts,
+                    cursor: Some(self.cursor.clone()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "comments"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "comments" { observer "observer/repo"; on "comments"; to "agent/example.reader"; delivery "message" }"#,
+            "refill-comments",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let issue = |number: u64, title: &str, comments: &[u64]| {
+            let mut issue = serde_json::json!({
+                "node_id": format!("I_moss{number}"), "number": number, "state": "open", "title": title,
+                "url": format!("https://github.com/acme/garden/issues/{number}"),
+            });
+            if !comments.is_empty() {
+                issue["comments"] = Value::from(comments.len());
+                issue["recent_comments"] = comments.iter().map(|id| serde_json::json!({
+                    "kind": "comment", "id": id, "author": "fern", "at": format!("2026-10-2{id}T10:00:00Z"),
+                })).collect();
+            }
+            issue
+        };
+        let listing = |issues: Vec<Value>| serde_json::json!({"repository_id": 7, "issues": issues});
+        let poll = |plugin: Arc<github_plugin_store::GithubPluginStore>, look: Value, refill: Value, cursor: &str| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
+            .with_resource_provider(Arc::new(Answers { look, refill, cursor: cursor.to_owned() }));
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            let cursor = cursor.to_owned();
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                // A bound for a loaded machine, not an expected duration.
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while plugin.cursor("observer/repo").unwrap() != Some(Some(cursor.clone())) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll keeps its cursor");
+            }
+        };
+        let comment_event = |id: u64| store.claims_for(&format!("github-event/repo/issue/2/comment/{id}"), None).unwrap().len();
+
+        // Issue 2's comment 3 is recorded in the graph, by a poller whose mirror is then lost.
+        let first = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        let both = listing(vec![issue(1, "Fern", &[]), issue(2, "Moss", &[3])]);
+        poll(first.clone(), both.clone(), both, "c1").await;
+        let commented = listing(vec![issue(2, "Moss", &[3, 4])]);
+        poll(first, commented.clone(), commented, "c2").await;
+        assert_eq!(comment_event(4), 1, "a new comment is one event");
+
+        // A poller with no mirror looks at issue 1 alone, then refills from a listing that names
+        // neither issue's comments.
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        let bare = listing(vec![issue(1, "Fern", &[]), issue(2, "Moss", &[])]);
+        poll(plugin.clone(), listing(vec![issue(1, "Fern, renamed", &[])]), bare.clone(), "c3").await;
+        assert!(plugin.filled("resource/repo").unwrap());
+
+        // Its next look sees issue 2 with the comments it already had: none is an event.
+        poll(plugin.clone(), listing(vec![issue(2, "Moss, renamed", &[3, 4])]), bare.clone(), "c4").await;
+        let events = plugin.events("resource/repo", Some(2), 10).unwrap();
+        assert!(events.is_empty(), "an old comment is no event: {events:?}");
+        assert_eq!((comment_event(3), comment_event(4)), (0, 1));
+
+        // A comment written after the refill is one event.
+        poll(plugin.clone(), listing(vec![issue(2, "Moss, renamed", &[3, 4, 5])]), bare, "c5").await;
+        let events = plugin.events("resource/repo", Some(2), 10).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["subject"], "github-event/repo/issue/2/comment/5");
+        assert_eq!(comment_event(5), 1);
     }
 
     /// Polling moves to a member without the plugin database, between two polls by the real
@@ -46610,6 +48099,7 @@ mission "ios-proof-blocked" state="ready" {
             last_attempt_at_unix_ms: None,
             acknowledged_by: None,
             failure: None,
+            asks: Default::default(),
         });
         assert_eq!(
             work_wake_deadline(
@@ -46682,6 +48172,7 @@ mission "ios-proof-blocked" state="ready" {
                 last_attempt_at_unix_ms: Some(1_000),
                 acknowledged_by: None,
                 failure: None,
+                asks: Default::default(),
             }),
             progress_summary: None,
             progress_at_unix_ms: None,
@@ -46813,6 +48304,7 @@ mission "ios-proof-blocked" state="ready" {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         assert!(!work_wake_acknowledged(&[(1_000, &wake)], None));
@@ -46841,6 +48333,7 @@ mission "ios-proof-blocked" state="ready" {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         let mut harness: CurrentHarnessView = serde_json::from_value(serde_json::json!({
@@ -46878,6 +48371,7 @@ mission "ios-proof-blocked" state="ready" {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         let harness: CurrentHarnessView = serde_json::from_value(serde_json::json!({
@@ -47178,6 +48672,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
                 last_attempt_at_unix_ms: Some(1_000),
                 acknowledged_by: None,
                 failure: None,
+                asks: Default::default(),
             }),
             progress_summary: None,
             progress_at_unix_ms: None,
@@ -47705,6 +49200,59 @@ mission "gated" state="ready" {
                 )
                 .map(|_| ())
         }
+    }
+
+    /// Step 2b: once every member can ask the seat's host, an unchanged working re-stamp stays in
+    /// the host's local log. A wake into a turn that was already working is still taken up by the
+    /// next working report after it was sent, which the host hears locally.
+    #[test]
+    fn a_working_re_stamp_that_stays_local_still_takes_up_a_wake() {
+        let seat = SeatQueueFixture::new();
+        seat.store.set_fleet_hears_seats(true).unwrap();
+        let working = |key: &str| {
+            seat.store
+                .append_claim(&ClaimInput {
+                    subject: SEAT.into(),
+                    kind: "harness.observed".into(),
+                    actor: Some(SEAT.into()),
+                    fields: BTreeMap::from([
+                        ("state".into(), Value::String("working".into())),
+                        ("driver".into(), Value::String("codex".into())),
+                        ("incarnation_id".into(), Value::String("seat-one".into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(key.into()),
+                })
+                .unwrap();
+        };
+        working("seat-one-working");
+        seat.start("queued", "local-re-stamp-wake-run");
+        let wake = seat.store.messages(Some(SEAT), false).unwrap().remove(0);
+        seat.store
+            .append_claim(&ClaimInput {
+                subject: wake.subject.clone(),
+                kind: "message.delivered".into(),
+                actor: Some(SEAT.into()),
+                fields: BTreeMap::from([("status".into(), Value::String("delivered".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("local-re-stamp-wake-delivered".into()),
+            })
+            .unwrap();
+        let index = seat.store.index().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        working("seat-one-working-again");
+        assert_eq!(seat.store.index().unwrap(), index, "the unchanged working re-stamp stayed local");
+        seat.reconciler.reconcile_once().unwrap();
+        let after = seat
+            .store
+            .messages(Some(SEAT), true)
+            .unwrap()
+            .into_iter()
+            .find(|message| message.subject == wake.subject)
+            .unwrap();
+        assert_eq!(after.status, "closed", "the local working report took up the wake");
     }
 
     #[test]

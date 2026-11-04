@@ -27,7 +27,7 @@ pub const STAGING_PAGE: i64 = 64;
 /// SQLite's page cache for the staging file, in KiB. Its sorter spills past it to disk.
 const STAGING_CACHE_KIB: i64 = 2_048;
 
-pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha255beb4781e owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-variable-columns */ "
+pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h8db35ff8f8df owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS meta(
     id INTEGER PRIMARY KEY CHECK(id=1),
     identity TEXT NOT NULL,
@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS meta(
     bound INTEGER,
     plan TEXT
 );
+-- A row here lets the planner drop claims of an envelope it keeps: a local cut only.
+CREATE TABLE IF NOT EXISTS split_envelopes(id INTEGER PRIMARY KEY CHECK(id=1));
 -- A scoped capture's envelopes, numbered for its records phase to page through.
 CREATE TABLE IF NOT EXISTS scoped_envelopes(
     n INTEGER PRIMARY KEY, writer TEXT NOT NULL, sequence INTEGER NOT NULL, envelope_hash TEXT NOT NULL,
@@ -250,6 +252,20 @@ impl Store {
         self.checkpoint_staged_set_scoped(cut_unix_ms, through_rowid, dir, None)
     }
 
+    /// How many of the store's claims are of `kinds`, and how many it holds: a scoped capture's
+    /// share, which sizes its staging allowance. Both counts read only an index.
+    fn claim_share(&self, kinds: &[String]) -> Result<(u128, u128)> {
+        let connection = self.readers.get();
+        let mut scoped = 0_i64;
+        for kind in kinds {
+            scoped += connection
+                .prepare_cached("SELECT COUNT(*) FROM claims WHERE kind=?1")?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h7c73f57c6335 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ [kind], |row| row.get::<_, i64>(0))?;
+        }
+        let total: i64 = connection.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0))?;
+        Ok((u128::try_from(scoped)?, u128::try_from(total)?))
+    }
+
     /// `checkpoint_staged_set`, staging with `scope` only the envelopes that hold a claim of
     /// those kinds and what the planner's guards read to judge them (`checkpoint_staging/scoped`).
     pub fn checkpoint_staged_set_scoped(
@@ -264,7 +280,10 @@ impl Store {
         let _span = crate::profile::span_with_io("checkpoint.capture");
         // Admit before lock_staging creates the scratch directory or lock file.
         let space = if self.shared_memory { None } else {
-            Some(super::checkpoint_space::SpaceGuard::admit(&self.path, dir, true)?)
+            Some(match scope.as_deref() {
+                Some(kinds) => super::checkpoint_space::SpaceGuard::admit_scoped_capture(&self.path, dir, self.claim_share(kinds)?)?,
+                None => super::checkpoint_space::SpaceGuard::admit(&self.path, dir, true)?,
+            })
         };
         // The startup checkpoint pass sweeps only proof scratch that has lost its owner lock.
         // A dry-run captures in `scratch/plan`, while the proof files live in `scratch`.
@@ -1178,6 +1197,17 @@ impl StagedSet {
             rusqlite::params_from_iter(kinds),
         )?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-he7052689cff7 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Let the plan drop a claim whose envelope it keeps, and forget any plan made without that.
+    /// Only a member that trims locally does: the envelope stays whole and servable, and only
+    /// this member's own copies of the claim go. A shared checkpoint's envelopes stay atomic.
+    pub fn split_envelopes(&self) -> Result<()> {
+        let transaction = self.staging.unchecked_transaction()?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h38a606664b66 owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO split_envelopes(id) VALUES (1)", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0c9cd59bf805 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
         transaction.commit()?;
         Ok(())
     }
