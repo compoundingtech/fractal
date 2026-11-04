@@ -4,6 +4,35 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('JSON Schema string bounds count Unicode code points, not UTF-16 units', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const name = Rich.decodeUnknownSync(Rich.ArrangementName, 'strict');
+    assert.equal(name('😀'.repeat(256)), '😀'.repeat(256));
+    assert.throws(() => name('😀'.repeat(257)));
+    const cursor = Rich.decodeUnknownSync(Rich.Cursor, 'strict');
+    assert.equal(cursor('😀'.repeat(8)), '😀'.repeat(8));
+    assert.throws(() => cursor('😀'.repeat(7)));
+    assert.equal(Schema.encodeSync(Rich.ArrangementName)('😀'.repeat(256)), '😀'.repeat(256));
+    assert.throws(() => Schema.encodeSync(Rich.ArrangementName)('😀'.repeat(257)));
+});
+
+test('URI-reference formats validate RFC3986 without URL normalization', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const capabilities = require('../../../docs/st3/client-v0/fixtures/capabilities.json').value;
+    const decode = Rich.decodeUnknownSync(Rich.Capabilities, 'strict');
+    for (const uri of ['', '../schema.json', '?q=a/b?c', '#fragment', 'urn:example:test',
+        'https://example.com/a%20b', '//user:pass@example.com:8080/path',
+        'https://[2001:db8::1]/', 'https://[::ffff:192.0.2.1]/', 'scheme://[v1.example]/']) {
+        const wire = { ...capabilities, schemas: [uri] };
+        assert.deepEqual(Schema.encodeSync(Rich.Capabilities)(decode(wire)), wire, uri);
+    }
+    for (const uri of ['https://example.com/a b', 'https://example.com/%xy', '/trailing\n',
+        'https://[::::]/', 'https://[1:2:3:4:5:6:7:8:9]/', 'https://example.com:port/',
+        'https://example.com/\\path', 'https://example.com/😀', ':not-a-relative-path']) {
+        assert.throws(() => decode({ ...capabilities, schemas: [uri] }), uri);
+    }
+});
+
 test('harness questions retain canonical private metadata and open response enums', async () => {
     const [{ DateTime, Option, Schema }, Rich] = await modules;
     const wire = {

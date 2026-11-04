@@ -63,12 +63,15 @@ pub mod start_spacing;
 pub mod start_jobs;
 pub mod seat_admission;
 mod seat_admission_queue;
+mod lane_bursts;
+mod step_lanes;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
 #[cfg(test)]
 mod schedule_admission_tests;
 mod schedule_replication_block;
+pub mod member_admission;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -597,6 +600,19 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane, and a seat
     /// without one has nothing to end.
     fn end_lane(&self, _runtime_id: &str) {}
+    /// Sets a live seat's lane to `capacity`, for the steps it holds (docs/st3/seat-lanes.md).
+    /// False when the seat has no lane here to change.
+    fn resize_lane(&self, _runtime_id: &str, _capacity: fractal_runtime::Capacity) -> Result<bool> {
+        Ok(false)
+    }
+    /// What a seat's lane holds that cannot be reclaimed, or `None` without a lane to read.
+    fn lane_held_memory(&self, _runtime_id: &str) -> Option<u64> {
+        None
+    }
+    /// The lane a seat's slice is set to now, or `None` without a lane to read.
+    fn live_lane(&self, _runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+        None
+    }
 }
 
 pub struct NativeRuntime {
@@ -968,6 +984,18 @@ impl RuntimeControl for NativeRuntime {
     fn end_lane(&self, runtime_id: &str) {
         fractal_runtime::end_lane(runtime_id);
     }
+
+    fn resize_lane(&self, runtime_id: &str, capacity: fractal_runtime::Capacity) -> Result<bool> {
+        fractal_runtime::resize_lane(capacity, runtime_id)
+    }
+
+    fn lane_held_memory(&self, runtime_id: &str) -> Option<u64> {
+        fractal_runtime::lane_held_memory(runtime_id)
+    }
+
+    fn live_lane(&self, runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+        fractal_runtime::live_lane(runtime_id)
+    }
 }
 
 impl NativeRuntime {
@@ -1255,6 +1283,9 @@ pub struct Reconciler<R = NativeRuntime> {
     /// A locally selected future standby tick is not a replicated scheduling claim.
     standby_due_ticks: Mutex<HashMap<String, (String, u64, i64)>>,
     schedule_replication_blocks: Mutex<HashMap<String, schedule_replication_block::BlockedTick>>,
+    member_admission: Mutex<member_admission::MemberAdmission>,
+    /// Whether this member waits after a start before acting on its seats' placement.
+    waits_for_peers_after_start: bool,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
     /// never enters the replicated graph; durable diagnostic dedupe survives a restart.
@@ -1502,6 +1533,8 @@ impl Reconciler<NativeRuntime> {
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
             schedule_replication_blocks: Mutex::default(),
+            member_admission: Mutex::default(),
+            waits_for_peers_after_start: false,
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1647,8 +1680,22 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Whether this host caps a seat that declares `capacity` in its lane (`lanes` in the
     /// install config). Applies to launches after this call.
-    pub fn with_lanes(self, enforced: bool) -> Self {
+    pub fn with_lanes(mut self, enforced: bool) -> Self {
         fractal_runtime::set_lanes_enforced(enforced);
+        self.seat_admission.lanes = enforced
+            .then(fractal_runtime::host::size)
+            .flatten()
+            .map(|size| seat_admission::LaneHost {
+                room: fractal_runtime::host::for_lanes(size),
+                outside: fractal_runtime::host::unlaned_seat_memory,
+            });
+        self
+    }
+
+    /// Admission by fit against a host of the test's choosing, without the process-wide switch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_lane_host(mut self, lanes: Option<seat_admission::LaneHost>) -> Self {
+        self.seat_admission.lanes = lanes;
         self
     }
 
@@ -1685,6 +1732,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
             schedule_replication_blocks: Mutex::default(),
+            member_admission: Mutex::default(),
+            waits_for_peers_after_start: false,
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1897,6 +1946,21 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Legacy configured peers supplement the current claim-derived fleet membership.
     pub fn with_schedule_peers(mut self, peers: Vec<String>) -> Self {
         self.schedule_peers = peers;
+        self
+    }
+
+    /// Wait after a start, before acting on seats' placement, until this member has caught up
+    /// with a peer (`wait_for_peers_after_start`). Off by default.
+    pub fn with_wait_for_peers_after_start(mut self, on: bool) -> Self {
+        self.waits_for_peers_after_start = on;
+        self
+    }
+
+    /// When this reconciler counts as started, so a test orders declarations against it without
+    /// waiting on the clock.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_started_at_for_test(mut self, started_at_unix_ms: u128) -> Self {
+        self.started_at_unix_ms = started_at_unix_ms;
         self
     }
 
@@ -2849,6 +2913,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn reconcile_pass(&self) -> Result<()> {
         self.refresh_seat_admission();
+        self.observe_member_admission()?;
         // Start completion can mutate the runtime-observation fence. Capture before
         // it can read the shared snapshot, so pre-completion evidence cannot later
         // be presented to planning as a post-completion observation.
@@ -3721,11 +3786,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 self.record_member(subject, &observation, false)?;
                             }
                             None if member.lifecycle == MemberLifecycle::AdoptOnly => {
-                                self.record_once(
-                                    &subject.subject,
-                                    "runtime.observed",
-                                    member_fields(member, "absent", None, false),
-                                )?;
+                                if self.member_admitted_for(&subject.subject)? {
+                                    self.record_once(
+                                        &subject.subject,
+                                        "runtime.observed",
+                                        member_fields(member, "absent", None, false),
+                                    )?;
+                                }
                             }
                             None => {
                                 let prior = self.store.latest_actual_value(&subject.subject)?;
@@ -3926,6 +3993,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         // wake-message bookkeeping so a large mailbox or work history cannot starve
         // newly-created runs of their first readiness pass.
         let _work_messages_span = crate::reconcile_telemetry::phase("pass/work-messages");
+        // A burst granted, given back or lapsed marks its seat's wake, which sets the live lane.
+        if let Err(error) = self.reconcile_lane_bursts() {
+            eprintln!("st3: WARN judging lane bursts: {error:#}");
+            smallclaims::touched::note_due(now_ms() + 5_000);
+        }
         // Earlier stages of this pass can change what a wake reads, such as a step a mission
         // cancelled, so see their changes first.
         self.incremental.observe(&self.store)?;
@@ -5849,6 +5921,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         // forgetting it would replay attempt 1 and notify this reconciler forever.
         let messages = self.store.work_wake_messages_for_reconcile(agent)?;
         let work = self.store.work_for_reconcile(agent)?;
+        if let Some(member) = member {
+            self.hold_step_lanes(agent, incarnation, member, &work)?;
+        }
         let harness = self.store.current_harness(agent)?;
         // When this host last heard the seat: an unchanged working re-stamp stays in its local log.
         let heard_at = match &harness {
@@ -7418,6 +7493,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         if subject.kind == "agent" {
             use crate::store::identities::{IdentityKind, IdentityStore as _};
             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+        }
+        // A member that has not caught up since it started may hold a placement that moved.
+        if !self.member_admitted_for(&subject.subject)? {
+            return Ok(false);
         }
         if request.is_none() && self.store.runtime_start_for(&subject.subject)?.is_some() {
             return Ok(false);
@@ -9145,6 +9224,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         observation: &RuntimeObservation,
     ) -> Result<()> {
+        if !self.member_admitted_for(&subject.subject)? { return Ok(()); }
         if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(()); }
         if subject.kind == "agent"
             && member.lifecycle == MemberLifecycle::Service
@@ -9889,6 +9969,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         observation: &RuntimeObservation,
         adopted: bool,
     ) -> Result<()> {
+        // An end is recorded only once the member knows the seat is still placed here; a
+        // runtime that is alive is recorded wherever the seat is placed.
+        if matches!(observation.status.as_str(), "exited" | "vanished" | "stopped" | "absent" | "failed")
+            && !self.member_admitted_for(&subject.subject)?
+        {
+            return Ok(());
+        }
         let mut fields = member_fields(
             member,
             &observation.status,
@@ -10901,6 +10988,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .blocked_reason
                             .as_deref()
                             .is_some_and(|reason| reason.starts_with("step baseline `"));
+                    // Waiting for room for the lane the step raises its seat to: tried again until
+                    // it fits.
+                    let lane_blocked = view.status == "blocked"
+                        && view.blocked_reason.as_deref().is_some_and(|reason| reason.starts_with("step lane "));
                     // A blocked step that names no blocker, holds no claim and waits on no ask
                     // is a lost reason, for example a revision that carried it without one.
                     // Nothing else will move it, so recompute it like a pending step.
@@ -10925,6 +11016,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if view.status == "pending"
                         || assignment_blocked
                         || baseline_blocked
+                        || lane_blocked
                         || ready_missing_agent
                     {
                         if view
@@ -11014,6 +11106,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     "no eligible agent is present in the desired graph: {eligible}"
                                 )),
                             )?;
+                            return Ok(changed);
+                        }
+                        // A step that raises its seat's lane is delivered only once the raised lane
+                        // fits this host (docs/st3/seat-lanes.md).
+                        if let Some(reason) = self.step_lane_wait(step.spec.capacity, view.assigned_to.as_deref())? {
+                            changed |= self.store.set_step_state(&view.subject, "blocked", Some(&reason))?;
                             return Ok(changed);
                         }
                         // Save readiness before diagnostic writes. A diagnostic failure must not
@@ -15380,7 +15478,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.clear_schedule_replication_block(schedule)?;
             return Ok(());
         }
-        if self.schedule_has_open_work(&schedule.subject)? {
+        if self.schedule_has_open_work(&schedule.subject, spec.host != self.host)? {
             if self.store.schedule_has_active_started_run(&schedule.subject)? {
                 self.clear_schedule_replication_block(schedule)?;
             }
@@ -15787,11 +15885,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn schedule_has_open_work(&self, schedule: &str) -> Result<bool> {
-        Ok(!self
+    fn schedule_has_open_work(&self, schedule: &str, on_standby: bool) -> Result<bool> {
+        // A standby starts only its own requests. A primary's request it will never start must
+        // not hold it either, or a primary that stops between requesting and starting its work
+        // holds every later occurrence until it returns.
+        Ok(self
             .store
             .pending_schedule_work_requests(schedule)?
-            .is_empty()
+            .iter()
+            .any(|request| !on_standby || request.origin == self.host)
             || self.store.schedule_has_active_started_run(schedule)?)
     }
 
@@ -17373,6 +17475,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     Err(error) => {
+                        let error = if let Some(checkpoint) = error.downcast_ref::<crate::resource::BudgetContinuation>() {
+                            match github_plugin.set_cursor(&observer_subject, &spec.resource, checkpoint.0.as_deref()) {
+                                Ok(()) => {
+                                    let next = checkpoint.0.clone();
+                                    kept_cursor = Some(next.clone());
+                                    completed_cursor = Some(next);
+                                    error
+                                }
+                                Err(persistence) => error.context(format!("could not keep GitHub poll continuation: {persistence:#}")),
+                            }
+                        } else {
+                            error
+                        };
                         let refusal_deadline = error.downcast_ref::<ProviderRateLimit>()
                             .map(|limit| limit.retry_at_unix_ms)
                             .or_else(|| error.downcast_ref::<LocalObserverBudget>()
@@ -18846,6 +18961,8 @@ fn mirror_observation(
     cursor: Option<&str>,
     recorded: &[crate::model::RecordedItem],
 ) {
+    let completed = crate::resource::completed_poll_cursor(polled_from);
+    let polled_from = completed.as_deref();
     let items = recorded
         .iter()
         .filter_map(|recorded| {
@@ -18913,6 +19030,8 @@ fn mirrored_prior(
     facts: &Value,
     polled_from: Option<&str>,
 ) -> Option<crate::model::MirroredPrior> {
+    let completed = crate::resource::completed_poll_cursor(polled_from);
+    let polled_from = completed.as_deref();
     let read = || -> Result<Option<crate::model::MirroredPrior>> {
         // Only a mirror that followed every look up to the one this look starts from knows at
         // least what the graph does.
@@ -19646,6 +19765,7 @@ pub fn append_work_wake_message(
             .map(|claim| claim.store_index)
             .unwrap_or_default(),
             attachments: Vec::new(),
+        status_from: None,
     })
 }
 
@@ -20603,6 +20723,9 @@ pub mod tests {
     mod schedule_standby_parent;
     pub mod mission_eval_reuse;
     mod mission_capacity_tests;
+    mod lane_admission_tests;
+    mod step_lane_tests;
+    mod lane_burst_tests;
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;
@@ -21039,6 +21162,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         keys_before_error: Mutex<Option<usize>>,
         leftovers: Mutex<Vec<(String, bool)>>,
         lanes_ended: Mutex<Vec<String>>,
+        pub lanes_resized: Mutex<Vec<(String, fractal_runtime::Capacity)>>,
+        pub lane_held: Mutex<Option<u64>>,
+        pub lane_live: Mutex<Option<fractal_runtime::Capacity>>,
     }
 
     #[test]
@@ -21361,6 +21487,16 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
         fn end_lane(&self, runtime_id: &str) {
             self.lanes_ended.lock().unwrap().push(runtime_id.into());
+        }
+        fn resize_lane(&self, runtime_id: &str, capacity: fractal_runtime::Capacity) -> Result<bool> {
+            self.lanes_resized.lock().unwrap().push((runtime_id.into(), capacity));
+            Ok(true)
+        }
+        fn lane_held_memory(&self, _runtime_id: &str) -> Option<u64> {
+            *self.lane_held.lock().unwrap()
+        }
+        fn live_lane(&self, _runtime_id: &str) -> Option<fractal_runtime::Capacity> {
+            *self.lane_live.lock().unwrap()
         }
     }
 
@@ -31307,17 +31443,37 @@ schedule "first" {{
             ),
             "first-unpinned",
         );
+        let wake = Arc::new(Notify::new());
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
             "node".into(),
-            Arc::new(Notify::new()),
+            wake.clone(),
         );
+        // The schedule's timer task writes the work request, then wakes the reconciler. Its wake
+        // keeps a permit, so one that comes before the wait still ends it; the bound only catches none.
+        // A loaded host can stall this one runtime thread past the timer's deadline and a fixed sleep
+        // alike, and then block_on polls the test before the timer task. Each wait first stalls the
+        // thread that way, so a wait that only sleeps fails here every time.
+        let requested = |subject: &'static str| {
+            let (store, wake) = (store.clone(), wake.clone());
+            tokio::spawn(async { std::thread::sleep(Duration::from_millis(120)) });
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let request = store.claims_for(subject, Some("schedule.work-requested")).unwrap();
+                        if !request.is_empty() {
+                            return request;
+                        }
+                        wake.notified().await;
+                    }
+                })
+                .await
+                .expect("the schedule's timer requested its work")
+            }
+        };
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        let first_request = store
-            .claims_for("schedule/first", Some("schedule.work-requested"))
-            .unwrap();
+        let first_request = requested("schedule/first").await;
         assert_eq!(first_request.len(), 1);
         assert_eq!(first_request[0].body["fields"]["mission_revision"], first);
 
@@ -31361,7 +31517,7 @@ schedule "second" {{
             "second-unpinned",
         );
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        requested("schedule/second").await;
         reconciler.reconcile_once().unwrap();
         let request = store
             .claims_for("schedule/second", Some("schedule.work-requested"))
@@ -41547,7 +41703,11 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         // keyed event, and neither writes a snapshot.
         let snapshots = count("resource.observed");
         let states = count("vcs.item.state");
+        // A suspended poll keeps the completed mirror position inside its private cursor.
+        let checkpoint = serde_json::json!({"poll_started_ms": 1, "cursor": "c3"}).to_string();
+        plugin.set_cursor("observer/repo", "resource/repo", Some(&checkpoint)).unwrap();
         poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4").await;
+        assert!(plugin.filled("resource/repo").unwrap(), "a resumed poll keeps mirror continuity");
         assert_eq!(count("resource.observed"), snapshots, "a compact-only change writes no snapshot");
         assert_eq!(count("vcs.item.state"), states + 1);
         assert_eq!(store.latest_actual_value(item).unwrap().unwrap()["facts"]["state"], "closed");
@@ -41678,8 +41838,13 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
     }
 
     /// The observer `repo` on acme/garden, a subscription so it polls, and its revision.
-    fn one_look_fixture(source: &str) -> (Arc<Store>, String) {
-        let store = Arc::new(Store::open_memory("node").unwrap());
+    /// The store for this file's multi-threaded look tests. A look task writes while the test
+    /// reads, and a shared-cache memory store fails one of them at once with SQLITE_LOCKED, which
+    /// no busy timeout waits out (#4720), so it is file-backed. The tempdir comes first so a caller's
+    /// binding drops it after the store.
+    fn one_look_fixture(source: &str) -> (tempfile::TempDir, Arc<Store>, String) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
         apply_source(
             &store,
             r#"version 2
@@ -41693,7 +41858,30 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
             source,
         );
         let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
-        (store, revision)
+        (root, store, revision)
+    }
+
+    #[test]
+    fn the_look_fixture_store_takes_a_write_while_a_reader_holds_a_snapshot() {
+        let (_root, store, _) = one_look_fixture("reader-writer");
+        store.read_snapshot(|_| {
+            assert!(store.latest_claim("agent/reader-writer", None)?.is_none());
+            // Join the other thread's commit while this thread still holds its read snapshot.
+            std::thread::scope(|scope| scope.spawn(|| {
+                store.append_claim(&ClaimInput {
+                    subject: "agent/reader-writer".into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some("agent/reader-writer".into()),
+                    fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+            }).join().unwrap())?;
+            assert!(store.latest_claim("agent/reader-writer", None)?.is_none());
+            Ok(())
+        }).unwrap();
+        assert!(store.latest_claim("agent/reader-writer", None).unwrap().is_some());
     }
 
     /// One look's listing: issue 1 titled `title`, and the cursor `cursor`.
@@ -41755,7 +41943,7 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
                 None
             }
         }
-        let (store, revision) = one_look_fixture("one-look");
+        let (_root, store, revision) = one_look_fixture("one-look");
         let asked = Arc::new(Mutex::new(Vec::new()));
         let (reached_tx, reached) = std::sync::mpsc::channel();
         let (release, release_rx) = std::sync::mpsc::channel();
@@ -41808,7 +41996,7 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
                 }
             }
         }
-        let (store, revision) = one_look_fixture("one-look-limit");
+        let (_root, store, revision) = one_look_fixture("one-look-limit");
         let asked = Arc::new(Mutex::new(Vec::new()));
         let mut reconciler = Reconciler::new(
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
@@ -47911,6 +48099,7 @@ mission "ios-proof-blocked" state="ready" {
             last_attempt_at_unix_ms: None,
             acknowledged_by: None,
             failure: None,
+            asks: Default::default(),
         });
         assert_eq!(
             work_wake_deadline(
@@ -47983,6 +48172,7 @@ mission "ios-proof-blocked" state="ready" {
                 last_attempt_at_unix_ms: Some(1_000),
                 acknowledged_by: None,
                 failure: None,
+                asks: Default::default(),
             }),
             progress_summary: None,
             progress_at_unix_ms: None,
@@ -48114,6 +48304,7 @@ mission "ios-proof-blocked" state="ready" {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         assert!(!work_wake_acknowledged(&[(1_000, &wake)], None));
@@ -48142,6 +48333,7 @@ mission "ios-proof-blocked" state="ready" {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         let mut harness: CurrentHarnessView = serde_json::from_value(serde_json::json!({
@@ -48179,6 +48371,7 @@ mission "ios-proof-blocked" state="ready" {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         let harness: CurrentHarnessView = serde_json::from_value(serde_json::json!({
@@ -48479,6 +48672,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
                 last_attempt_at_unix_ms: Some(1_000),
                 acknowledged_by: None,
                 failure: None,
+                asks: Default::default(),
             }),
             progress_summary: None,
             progress_at_unix_ms: None,

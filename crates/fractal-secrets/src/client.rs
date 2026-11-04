@@ -1553,7 +1553,7 @@ impl MailboxRetry {
 }
 
 /// The window over which drivers re-executed by one deploy spread what their seats' delivery does
-/// not need. At hetz2's 07:30:58Z restart, about 60 drivers sent their harness events, presence
+/// not need. At one host's 07:30:58Z restart, about 60 drivers sent their harness events, presence
 /// diagnostics and native sessions in the new daemon's first eight seconds. Those requests added
 /// about seven seconds of writer time to those eight, and write-acks queued behind them. Over 30
 /// seconds the same work takes under a quarter of the writer. Harness evidence stays fresh for 90
