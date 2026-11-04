@@ -108,8 +108,13 @@ REPLACE shape, not every possible custom trigger program.
 ## Store, snapshot and loan eligibility
 
 CoreStore::open opens one native writer, normalizes its opened filename, and
-constructs ReadPool from that same path. open_memory constructs one unique UUID
-shared-memory URI for both. Preparation rejects this mode before acquiring a
+constructs ReadPool from that same path. The test-only open_memory constructor
+now uses that same file-backed WAL path in an owned temporary directory. It uses
+/dev/shm when it has at least 2 GiB free and is executable, otherwise TMPDIR,
+following the memory_tempdir fixture rule. The writer thread, read pool and each
+read connection retain the directory until their last connection closes.
+open_shared_memory explicitly constructs a unique UUID shared-memory URI for
+tests of memory mode itself. Preparation rejects that mode before acquiring a
 reader or seed writer loan: its snapshot frontier reads sqlite_sequence and a
 shared-cache table read lock can reject an unrelated AUTOINCREMENT publication.
 The supported shared-memory store retains the unchanged canonical writer path;
@@ -228,14 +233,19 @@ transfer; the first compile and all 21 controls remain UNRUN.
 
 The normal daemon opens `state_dir/claims.sqlite3` in `main.rs::run_up`
 through `Store::open` (the function's startup `open-store` phase). That constructor
-pairs `GraphStore::open` with a file-backed reader pool. `Store::open_memory` is
-also a public constructor; it pairs `GraphStore::open_memory` with its shared
-memory URI and `shared_memory=true`. `api::AppState` accepts an `Arc<Store>` and
-`api::router` does not constrain the constructor. An in-process daemon can thus
-use a shared-memory store; `tests/log_diet.rs::Daemon::start` does exactly that.
-This correction covers that mode in preparation itself. It does not change the
-log_diet fixture, workload, assertions or retry settings, or assert that every
-embedded daemon uses files.
+pairs `GraphStore::open` with a file-backed reader pool. `Store::open_memory`
+also uses a file-backed WAL store, with its scratch lifetime owned by the
+connections. On Linux it first uses TMPDIR when that directory is already on
+tmpfs, so run cleanup also reclaims scratch left by a process that exits without
+dropping its stores. Otherwise it selects executable /dev/shm with at least 2 GiB
+free, or the ordinary temporary directory. Normal file-backed initialization also
+starts the resource-reference backfill for downstream test-support binaries,
+matching Store::open; unit-test builds keep that worker disabled. Both it and `Store::open_shared_memory` are available only under
+`cfg(test)` or the `test-support` feature. The compile gate prevents production
+callers from depending on fixture constructors. Existing callers, including the
+replica in `tests/log_diet.rs::run_workload`, keep their `open_memory` calls and
+now exercise the normal WAL path. Intentional shared-memory preparation controls use
+`open_shared_memory`; their mode guard and canonical writer assertions remain.
 
 The new shared-memory check short-circuits before `readers.get`, before the seed
 writer loan and before `read_snapshot`. It produces the existing unusable

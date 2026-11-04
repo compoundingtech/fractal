@@ -61,36 +61,103 @@ pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_mil
 // (including COMMIT), capped at five seconds per rest. In the uncapped regime this reserves
 // four times the acquired-loan work for other traffic. A slow statement can still exceed the
 // chunk budget; this pacing is not a hard statement or request-latency bound.
+/// What a test runs after each chunk a trim deletes, given how many it has deleted.
+pub type TrimChunkHook = Box<dyn FnMut(usize) + Send>;
+
+/// What a test sees of each line a trim writes to the daemon's stderr.
+pub type TrimLogHook = Box<dyn FnMut(&str) + Send>;
+
+/// How often a paced trim's run lets the views refold and the replication snapshot catch up,
+/// while it goes on, unless a test sets another interval. Both are reset once when the run stops.
+pub const TRIM_VIEW_REFOLD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What a trim's run owes the views and the replication snapshot: a refold and a new snapshot at
+/// most every [`TRIM_VIEW_REFOLD_INTERVAL`] while it deletes, and when it stops, however it stops,
+/// one forget and a snapshot built from nothing.
+///
+/// A chunk deletes the payloads of envelopes the checkpoint still lists, so the inventory's
+/// identities and digests stay as they were; a snapshot from before the chunk still answers for
+/// them, and export skips a payload that is gone. Rebuilding after every chunk only made each
+/// exchange wait for an inventory build that the next chunk made stale again.
+struct TrimViews<'a> {
+    store: &'a Store,
+    interval: std::time::Duration,
+    refolded: std::time::Instant,
+    pending: bool,
+}
+
+impl<'a> TrimViews<'a> {
+    fn new(store: &'a Store) -> Self {
+        let interval = std::time::Duration::from_micros(store.trim_view_refold_micros.load(Ordering::Acquire));
+        Self { store, interval, refolded: std::time::Instant::now(), pending: false }
+    }
+
+    /// A chunk deleted rows: if the last catch-up is an interval old, replication builds its
+    /// next snapshot on from the last one and the views refold.
+    fn deleted(&mut self) {
+        self.pending = true;
+        if self.refolded.elapsed() >= self.interval {
+            self.store.replica_inventory_changed();
+            self.store.runtime.claims_trimmed();
+            self.refolded = std::time::Instant::now();
+        }
+    }
+
+    /// The run stopped: forget the views once, if it deleted anything, and build the next
+    /// replication snapshot from nothing, so which payloads it holds and its counts are exact.
+    fn stopped(&mut self) {
+        if std::mem::take(&mut self.pending) {
+            self.store.replica_rows_changed();
+            self.store.forget_replication_snapshot();
+        }
+    }
+}
+
+impl Drop for TrimViews<'_> {
+    fn drop(&mut self) {
+        self.stopped();
+    }
+}
+
 pub(super) const TRIM_MIN_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// When a trim stops deleting to restart the WAL. A trim writes nearly all the time, and a busy
+/// daemon nearly always has a reader on an older snapshot, so the idle recycle never finds the WAL
+/// fully copied and the WAL grows for as long as the trim runs.
+#[derive(Clone, Copy, Debug)]
+pub struct TrimWal {
+    /// Frames past which the trim stops deleting and restarts the WAL.
+    pub frames: i32,
+    /// How long one restart waits, under the writer, for readers on older snapshots.
+    pub busy: std::time::Duration,
+    /// How long the trim keeps trying before it stops for this run.
+    pub wait: std::time::Duration,
+    /// How often the trim looks at the WAL.
+    pub check: std::time::Duration,
+}
+
+/// 65,536 frames is 256 MiB of 4 KiB pages: about 25 s of a large member's trim. Under a daemon
+/// on a 57 GB store, a restart held the writer at most 187 ms.
+pub const TRIM_WAL: TrimWal = TrimWal {
+    frames: 65_536,
+    busy: std::time::Duration::from_millis(200),
+    wait: std::time::Duration::from_secs(30),
+    check: std::time::Duration::from_secs(1),
+};
+
+/// A trim waiting for the WAL to restart tries again after this.
+const TRIM_WAL_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A trim's run's look at the WAL: when it last looked, and the connection it checkpoints with,
+/// apart from the writer and the daemon's recycle.
+#[derive(Default)]
+struct TrimWalState {
+    checked: Option<std::time::Instant>,
+    connection: Option<Connection>,
+}
 
 /// A trim chunk that holds the writer longer than this logs one line saying what it did.
 pub const LOGGED_TRIM_CHUNK: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Log one line for a trim chunk held over `LOGGED_TRIM_CHUNK`: its phase, the envelopes and
-/// claims it took, the bytes of the claim bodies it deleted, and its hold split into the steps
-/// and the commit, so a member attributes its own outliers.
-fn log_if_slow_trim_chunk(
-    phase: &str,
-    held: std::time::Duration,
-    commit: std::time::Duration,
-    envelopes: usize,
-    claims: usize,
-    body_bytes: u64,
-) {
-    if held <= LOGGED_TRIM_CHUNK {
-        return;
-    }
-    tracing::warn!(
-        phase,
-        held_ms = held.as_millis() as u64,
-        step_ms = held.saturating_sub(commit).as_millis() as u64,
-        commit_ms = commit.as_millis() as u64,
-        envelopes,
-        claims,
-        body_bytes,
-        "a trim chunk held the store's writer over 1 s",
-    );
-}
 
 /// The bytes of the bodies of `claims` that this store still holds.
 fn claim_body_bytes(transaction: &Transaction<'_>, claims: &[ClaimTombstone]) -> Result<u64> {
@@ -273,6 +340,11 @@ impl Tombstones for (&super::checkpoint_staging::StagedSet, &super::checkpoint_s
 
 impl Store {
     /// Set the minimum chunk rest. Tests only; zero disables both the floor and multiplier.
+    /// How long a trim's run goes between view refolds; see [`TRIM_VIEW_REFOLD_INTERVAL`].
+    pub fn set_trim_view_refold_interval(&self, interval: std::time::Duration) {
+        self.trim_view_refold_micros.store(u64::try_from(interval.as_micros()).unwrap_or(u64::MAX), Ordering::Release);
+    }
+
     pub fn set_trim_pause(&self, pause: std::time::Duration) {
         self.trim_pause_micros.store(
             u64::try_from(pause.as_micros()).unwrap_or(u64::MAX),
@@ -288,6 +360,95 @@ impl Store {
         held.saturating_mul(4)
             .max(std::time::Duration::from_micros(micros))
             .min(std::time::Duration::from_secs(5))
+    }
+
+    /// Write one line to the daemon's stderr, as its WAL checkpoint lines are: `up` sets no
+    /// stderr tracing subscriber unless telemetry export is on, so a tracing line from a trim
+    /// never reached a member's journal. A test's `trim_log_hook` sees the line too.
+    fn trim_log(&self, line: std::fmt::Arguments<'_>) {
+        let line = format!("st3: {line}");
+        if let Some(hook) = self.trim_log_hook.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+            hook(&line);
+        }
+        eprintln!("{line}");
+    }
+
+    /// Log one line for a trim chunk held over `LOGGED_TRIM_CHUNK`: its phase, the envelopes and
+    /// claims it took, the bytes of the claim bodies it deleted, and its hold split into the steps
+    /// and the commit, so a member attributes its own outliers.
+    fn log_if_slow_trim_chunk(
+        &self,
+        phase: &str,
+        held: std::time::Duration,
+        commit: std::time::Duration,
+        envelopes: usize,
+        claims: usize,
+        body_bytes: u64,
+    ) {
+        if held <= LOGGED_TRIM_CHUNK {
+            return;
+        }
+        self.trim_log(format_args!(
+            "a trim chunk held the store's writer over 1 s {}",
+            serde_json::json!({
+                "phase": phase,
+                "held_ms": held.as_millis(),
+                "step_ms": held.saturating_sub(commit).as_millis(),
+                "commit_ms": commit.as_millis(),
+                "envelopes": envelopes,
+                "claims": claims,
+                "body_bytes": body_bytes,
+            }),
+        ));
+    }
+
+    pub fn set_trim_wal(&self, limits: TrimWal) {
+        *self.trim_wal.lock().unwrap_or_else(PoisonError::into_inner) = limits;
+    }
+
+    /// Whether a trim may delete its next chunk: the WAL is under its bound, or a restart brought
+    /// it back. Past the bound the trim deletes nothing and restarts the WAL, trying again until
+    /// `TrimWal::wait`; false means it gave up, and the run stops where it is.
+    fn trim_wal_allows(
+        &self,
+        wal: &mut TrimWalState,
+        pause: &mut impl FnMut(std::time::Duration),
+    ) -> Result<bool> {
+        let limits = *self.trim_wal.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.shared_memory || wal.checked.is_some_and(|at| at.elapsed() < limits.check) {
+            return Ok(true);
+        }
+        wal.checked = Some(std::time::Instant::now());
+        if wal.connection.is_none() {
+            wal.connection = Some(Connection::open(&self.path)?);
+        }
+        let Some(connection) = wal.connection.as_mut() else { return Ok(true) };
+        let frames = crate::sqlite::checkpoint_wal_report(connection)?.frames;
+        if frames <= limits.frames {
+            return Ok(true);
+        }
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+        // Attempts that took the writer, and the longest of them.
+        let mut held = 0;
+        let mut held_ms = 0;
+        loop {
+            attempts += 1;
+            let report = self.restart_wal_report(connection, limits.busy, 0)?;
+            held += u32::from(report.truncate_ms.is_some());
+            held_ms = held_ms.max(report.truncate_ms.unwrap_or(0));
+            if report.recycled || started.elapsed() >= limits.wait {
+                let restarted = report.recycled;
+                self.trim_log(format_args!(
+                    "{} {}",
+                    if restarted { "a trim restarted the WAL" } else { "a trim could not restart the WAL and stops until the next step" },
+                    serde_json::json!({"frames": frames, "attempts": attempts, "held": held, "held_ms": held_ms, "pause_ms": started.elapsed().as_millis()}),
+                ));
+                wal.checked = Some(std::time::Instant::now());
+                return Ok(restarted);
+            }
+            pause(TRIM_WAL_RETRY);
+        }
     }
 
     fn pause_trim_chunk(&self, held: std::time::Duration) {
@@ -957,7 +1118,7 @@ impl Store {
                 let committing = std::time::Instant::now();
                 transaction.commit()?;
                 let held = held_since.elapsed();
-                log_if_slow_trim_chunk("record", held, committing.elapsed(), envelope - envelope_before, claim - claim_before, 0);
+                self.log_if_slow_trim_chunk("record", held, committing.elapsed(), envelope - envelope_before, claim - claim_before, 0);
                 drop(connection);
                 chunks += 1;
                 self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
@@ -1029,11 +1190,15 @@ impl Store {
         // capped.
         let day = self.trim_day.load(Ordering::Relaxed);
         let mut left = cursor.local.is_some().then(|| self.local_trim_left_today()).transpose()?;
+        let mut views = TrimViews::new(self);
+        let mut wal = TrimWalState::default();
         let delete = crate::profile::span("trim.delete");
         loop {
-            if left == Some(0) {
-                // The cut stays `trimming`, and the next day's first step goes on from here. What
-                // its deletes deferred is rebuilt now, so a deferral outlasts no day's run.
+            if left == Some(0) || !self.trim_wal_allows(&mut wal, &mut pause)? {
+                // The cut stays `trimming`, and the next step goes on from here: the next day's
+                // after the day's cap, the next one after a WAL that would not restart. What its
+                // deletes deferred is rebuilt now, so a deferral outlasts no run.
+                views.stopped();
                 self.rebuild_deferred_paced()?;
                 actions.push(CheckpointAction::TrimDeferred {
                     checkpoint: checkpoint.to_owned(),
@@ -1125,17 +1290,21 @@ impl Store {
             transaction.commit()?;
             let held = held_since.elapsed();
             let phase = if envelopes.is_empty() { "claims" } else { "envelopes" };
-            log_if_slow_trim_chunk(phase, held, committing.elapsed(), envelopes.len(), claims.len(), body_bytes);
+            self.log_if_slow_trim_chunk(phase, held, committing.elapsed(), envelopes.len(), claims.len(), body_bytes);
             drop(connection);
-            // A cursor-only chunk inspected already-absent rows. All chunks that actually
-            // delete keep the original invalidation; this does not coalesce mutations.
+            // A cursor-only chunk inspected already-absent rows. A chunk that deletes tells
+            // replication at once, and leaves the views serving until a refold is due: their
+            // folds from nothing take seconds, longer than a chunk and its pause.
             if !envelopes.is_empty() || !claims.is_empty() {
-                self.replica_rows_changed();
+                views.deleted();
             }
             deleted_envelopes += envelopes.len();
             deleted_claims += claims.len();
             left = left.map(|left| left.saturating_sub(claims.len() as u64));
             chunks += 1;
+            if let Some(hook) = self.trim_chunk_hook.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+                hook(chunks);
+            }
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
             pause(self.trim_pause_duration(held));
         }
@@ -1158,7 +1327,9 @@ impl Store {
             )?;
             transaction.commit()?;
         }
-        self.replica_rows_changed();
+        // The final mark expired every cursor: the views are forgotten once, deleted or not.
+        views.pending = true;
+        views.stopped();
         self.rebuild_deferred_paced()?;
         actions.push(CheckpointAction::Trimmed {
             checkpoint: checkpoint.to_owned(),
@@ -1187,7 +1358,7 @@ impl Store {
             let committing = std::time::Instant::now();
             transaction.commit()?;
             let held = held_since.elapsed();
-            log_if_slow_trim_chunk("rebuild", held, committing.elapsed(), 0, 0, 0);
+            self.log_if_slow_trim_chunk("rebuild", held, committing.elapsed(), 0, 0, 0);
             drop(connection);
             if !more {
                 return Ok(());

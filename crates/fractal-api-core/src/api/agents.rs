@@ -69,6 +69,12 @@ pub struct AgentRestartRequest {
     /// handoff that is ready since its last turn, which its new session is given first.
     #[serde(default)]
     fresh_session: bool,
+    /// Start the seat now even if its lane does not fit the host (docs/st3/seat-lanes.md,
+    /// "Admission by fit"). Needs a reason, recorded on the request with its actor.
+    #[serde(default)]
+    ignore_fit: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 pub async fn restart_agent(
@@ -76,6 +82,14 @@ pub async fn restart_agent(
     Json(request): Json<AgentRestartRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-restart-actor")?;
+    let ignore_fit_reason = match (request.ignore_fit, request.reason.as_deref().map(str::trim)) {
+        (false, _) => None,
+        (true, Some(reason)) if !reason.is_empty() => Some(reason.to_owned()),
+        (true, _) => return Err(ApiError::bad(St3Error::new(
+            "restart-ignore-fit-reason",
+            "starting a seat despite its lane's fit needs a reason, which is recorded with who asked",
+        ))),
+    };
     let subject = if request.subject.starts_with("agent/") {
         request.subject
     } else {
@@ -224,6 +238,10 @@ pub async fn restart_agent(
                 )
             }))
             .chain(request.fresh_session.then(|| ("fresh_session".to_owned(), Value::Bool(true))))
+            .chain(ignore_fit_reason.into_iter().flat_map(|reason| [
+                ("ignore_fit".to_owned(), Value::Bool(true)),
+                ("reason".to_owned(), Value::String(reason)),
+            ]))
             .collect(),
             evidence: vec![token],
             expected_subject: None,
@@ -387,6 +405,97 @@ pub async fn agent_lane(
         "sccache_server_uds": sccache,
         "lanes_enforced": fractal_runtime::lanes_enforced(),
     })))
+}
+
+#[derive(Deserialize)]
+pub struct LaneBurstRequest {
+    pub agent: String,
+    pub actor: String,
+    #[serde(default)]
+    pub cores: Option<u32>,
+    #[serde(default)]
+    pub memory: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Asks for or renews a lane burst: the agent's lane raised to `cores`/`memory` for one command's
+/// run (docs/st3/seat-lanes.md, "Bursts"). Each call renews its lease; the holder calls again within
+/// the lease while it runs. Answers `granted`, `waiting` with why, `refused` with why (it can never
+/// be held), or `none` with why the agent holds no lane here. Only the agent itself asks, and only
+/// its own host answers.
+pub async fn hold_lane_burst(
+    State(state): State<AppState>,
+    Json(request): Json<LaneBurstRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (subject, member) = lane_burst_seat(&state, &request).await?;
+    let (Some(cores), Some(memory)) = (request.cores, request.memory.as_deref()) else {
+        return Err(ApiError::bad(St3Error::new("lane-burst-size", "a lane burst names its cores and memory")));
+    };
+    let capacity = fractal_runtime::Capacity::declared(Some(cores), Some(memory))
+        .map_err(|error| ApiError::bad(St3Error::new("lane-burst-size", format!("{error:#}"))))?;
+    let none = |why: String| Ok(Json(json!({"agent": subject, "state": "none", "why": why})));
+    if !fractal_runtime::lanes_enforced() {
+        return none("lanes are off on this host".into());
+    }
+    if member.capacity.is_none() {
+        return none(format!("{subject} declares no lane"));
+    }
+    if fractal_runtime::live_lane(&member.runtime_id).is_none() {
+        return none(format!("{subject}'s lane is not in place on this host: it started without one"));
+    }
+    let now = u64::try_from(crate::gate_check::now_ms() / 1000).unwrap_or(u64::MAX);
+    let reason = request.reason.as_deref().map(str::trim).filter(|reason| !reason.is_empty()).unwrap_or("a command");
+    let burst = state.seat_admission.burst_hold(&subject, capacity, reason, now);
+    let lane = json!({"cores": capacity.cores, "memory": capacity.memory});
+    if let Some(why) = burst.refused {
+        state.seat_admission.burst_release(&subject);
+        return Ok(Json(json!({"agent": subject, "state": "refused", "why": why, "lane": lane})));
+    }
+    if burst.granted {
+        return Ok(Json(json!({"agent": subject, "state": "granted", "lane": lane,
+            "lease_secs": fractal_runtime::seat_admission_status::BURST_LEASE_SECS})));
+    }
+    super::signal_changed(&state);
+    Ok(Json(json!({"agent": subject, "state": "waiting", "lane": lane,
+        "why": burst.wait.unwrap_or_else(|| "asked; this host has not judged it yet".into()),
+        "lease_secs": fractal_runtime::seat_admission_status::BURST_LEASE_SECS})))
+}
+
+/// Gives the agent's lane burst back: its lane comes down to its own and its steps' (cores at once,
+/// memory once the lane holds less).
+pub async fn release_lane_burst(
+    State(state): State<AppState>,
+    Json(request): Json<LaneBurstRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (subject, _) = lane_burst_seat(&state, &request).await?;
+    let released = state.seat_admission.burst_release(&subject);
+    if released {
+        super::signal_changed(&state);
+    }
+    Ok(Json(json!({"agent": subject, "released": released})))
+}
+
+/// The agent a burst request names, when the agent asks for itself and is placed on this host.
+async fn lane_burst_seat(state: &AppState, request: &LaneBurstRequest) -> Result<(String, crate::model::MemberSpec), ApiError> {
+    let subject = agent_subject(request.agent.clone());
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
+    let actor = person_or_agent_actor(&request.actor, "invalid-lane-burst-actor")?;
+    if actor != subject {
+        return Err(ApiError::bad(St3Error::new("lane-burst-actor",
+            format!("only {subject} asks for its own lane burst, not {actor}"))));
+    }
+    let lookup = subject.clone();
+    let store = state.store.clone();
+    let desired = super::blocking_store(move || store.desired_subject_with_writer(&lookup)).await?;
+    let Some(member) = desired.and_then(|(desired, _)| desired.member) else {
+        return Err(ApiError::not_found(format!("{subject} has no declaration with a runtime")));
+    };
+    if member.host != state.node {
+        return Err(ApiError::bad(St3Error::new("lane-burst-other-host",
+            format!("{subject} runs on {}, and only its own host holds its lane burst", member.host))));
+    }
+    Ok((subject, member))
 }
 
 /// Ask the seat's owner to resume a suspended seat on the native session it suspended.
