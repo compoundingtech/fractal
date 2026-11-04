@@ -425,6 +425,8 @@ exchange names it with `shard_id = "messages"`; the default store's exchanges om
   A person's device-signed message and an external assistant's message stay graph claims.
 - **No checkpoint.** Nothing in the shard is superseded, so it is never sealed or trimmed and
   has no checkpoint or answers routes.
+- **Backups.** A claim backup carries the shard once it holds a stream item or a lifecycle
+  row, as archive version `5`; see [claim backups](backups.md#the-messages-shard).
 
 ## Rolling upgrades and waiting claims
 
