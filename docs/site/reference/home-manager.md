@@ -27,9 +27,13 @@ discover the domain where the recognized legacy daemon is loaded (`gui/<uid>` or
 `user/<uid>`). Missing, duplicate or split-domain jobs fail closed before staging
 changes. Home Manager's agent domains must match; staged user-domain plists retain
 their background-session properties. After cutover, guards use the journal's recorded
-domain rather than rediscovering a retired legacy job. Fresh installs without a
-migration journal keep their existing guard behavior. General service lifecycle and
-app-installer staging on headless hosts are not covered by this rename support.
+domain rather than rediscovering a retired legacy job. The generation-managed
+`st3/launchd-staged` marker distinguishes staging from a fresh install without changing
+the stage/completed daemon wrapper. Missing journals after migration fail closed.
+Fresh GUI fallback does not bypass the existing receipt/fence prerequisites.
+The first completed activation may print a harmless `rmdir: …/st3: Not a directory`
+while removing the marker through the legacy directory link; activation still succeeds.
+General service lifecycle and app-installer staging on headless hosts are not covered.
 
 
 ## Memory and startup

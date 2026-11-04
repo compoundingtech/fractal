@@ -150,11 +150,23 @@ let
       printf '%s\n' "$status" | ${pkgs.gnugrep}/bin/grep -Eq '^ActiveState=(inactive|failed)$' || exit 1
     done
   '' else ''
-    if [ -e ${lib.escapeShellArg "${config.xdg.configHome}/.fractal-host-cutover.json"} ] || [ ${lib.escapeShellArg (if completed then "completed" else "stage")} = stage ]; then
+    if [ -e ${lib.escapeShellArg "${config.xdg.configHome}/.fractal-host-cutover.json"} ] || [ -L ${lib.escapeShellArg "${config.xdg.configHome}/.fractal-host-cutover.json"} ]; then
       ${resolveDomain}
     else
-      # Fresh completed installs have no migration journal; preserve their existing guard.
-      domain="gui/$(id -u)"
+      for marker in ${lib.escapeShellArgs [ receipt "${config.xdg.configHome}/fractal/.fractal-migration-completed" configFence ]}; do
+        if [ -e "$marker" ] || [ -L "$marker" ]; then
+          echo "Refusing launchd ownership: migration marker/fence $marker exists but .fractal-host-cutover.json is missing" >&2
+          exit 1
+        fi
+      done
+      if [ -e ${lib.escapeShellArg "${config.xdg.configHome}/st3/launchd-staged"} ] || [ -L ${lib.escapeShellArg "${config.xdg.configHome}/st3/launchd-staged"} ]; then
+        ${resolveDomain}
+      elif [ "${hmDomain}" != gui ]; then
+        echo "Fresh user-domain launchd installation without a migration journal is unsupported" >&2
+        exit 1
+      else
+        domain="gui/$(id -u)"
+      fi
     fi
     for label in org.nix-community.home.smalltalk com.compoundingtech.st3; do
       if /bin/launchctl print "$domain/$label" >/dev/null 2>&1; then exit 1
@@ -334,6 +346,10 @@ in
         mkIf (cfg.declarationsApply.enable && hasDeclarations) {
           text = lib.generators.toPlist { escape = true; } targetApplyPlist;
         };
+    };
+    xdg.configFile."st3/launchd-staged" = {
+      enable = staging && !completed && pkgs.stdenv.hostPlatform.isDarwin;
+      text = "Home Manager launchd staging\n"; force = lib.mkForce false;
     };
     home.activation.fractalMigrationPreflight = lib.hm.dag.entryBetween
       [ "writeBoundary" ] [ ] ''

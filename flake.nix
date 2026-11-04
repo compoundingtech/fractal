@@ -1594,7 +1594,9 @@
                 completed = fixture domain "completed";
                 wrapper = builtins.head completed.launchd.agents.fractal.config.ProgramArguments;
               in assert domain != "user" || pkgs.lib.hasInfix "<string>Background</string>"
-                stage.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text; ''
+                stage.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
+              assert pkgs.lib.hasInfix "<string>${wrapper}</string>" stage.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
+              assert stage.xdg.configFile."st3/launchd-staged".enable && !completed.xdg.configFile."st3/launchd-staged".enable; ''
                 export DOMAIN="${domain}/$(id -u)" CALLS="$PWD/calls"
                 rm -rf config state
                 substitute ${pkgs.writeText "stage-preflight" stage.home.activation.fractalMigrationPreflight.data} preflight \
@@ -1621,7 +1623,23 @@
                 if QUERY_EXIT=1 ${pkgs.runtimeShell} guard; then exit 1; fi
                 if DOMAIN="wrong/$(id -u)" ${pkgs.runtimeShell} guard; then exit 1; fi
                 rm config/.fractal-host-cutover.json
-                DOMAIN="gui/$(id -u)" QUERY_EXIT=1 ${pkgs.runtimeShell} guard
+                if ${pkgs.runtimeShell} guard; then exit 1; fi
+                rm config/fractal/.fractal-migration-completed state/fractal/.fractal-migration-completed
+                # Isolate domain policy without weakening the real migrationReady proof.
+                substitute guard policy --replace-fail ${pkgs.diffutils}/bin/cmp ${pkgs.coreutils}/bin/true
+                ln -s fractal config/st3
+                touch config/st3/launchd-staged
+                for marker in config/fractal/.fractal-migration-completed state/fractal/.fractal-migration-completed config/fractal/config.home-manager.toml; do
+                  touch "$marker"
+                  if ${pkgs.runtimeShell} policy; then exit 1; fi
+                  rm "$marker"
+                done
+                ${pkgs.runtimeShell} policy
+                if QUERY_EXIT=1 ${pkgs.runtimeShell} policy; then exit 1; fi
+                rm config/st3/launchd-staged
+                if [ ${domain} = gui ]; then QUERY_EXIT=1 ${pkgs.runtimeShell} policy
+                elif ${pkgs.runtimeShell} policy; then exit 1; fi
+                if ${pkgs.runtimeShell} guard; then exit 1; fi
               ''
             ) [ "gui" "user" ] + "touch $out"
           );
