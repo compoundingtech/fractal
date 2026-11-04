@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { assertBundleBoundary } from '../src/extensions/bundle-policy.mjs'
-import { assertPublicChangelogBoundary, ensureChangelogRegistries, evaluateBuildIdentityModule, prepareChangelogBuild } from './changelog-build.mjs'
+import { assertPublicChangelogBoundary, defaultChangelogRegistries, ensureChangelogRegistries, evaluateBuildIdentityModule, prepareChangelogBuild } from './changelog-build.mjs'
 
 const changelogManifestModule = fileURLToPath(new URL('../src/changelog/build.ts', import.meta.url))
 const changelogMetadataModule = fileURLToPath(new URL('../src/changelog/metadata.ts', import.meta.url))
@@ -45,6 +45,9 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
       identityId = identity.id
     },
     resolveId(source, importer) {
+      // Development selects its prose registry independently of the eager extension composition.
+      if (source === '../../.changelog/mod.ts' && (importer === changelogManifestModule || importer === changelogMetadataModule))
+        return (changelogRegistries ?? defaultChangelogRegistries)[privateBuild ? 'private' : 'public']
       if (source.endsWith('/extensions/build.ts') ||
         (source === './build.ts' && importer?.includes('/src/extensions/')))
         return new URL(entry, import.meta.url).pathname

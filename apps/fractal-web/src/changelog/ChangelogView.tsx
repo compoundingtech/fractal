@@ -42,11 +42,12 @@ export interface ChangelogPopoverProps {
   readonly dark: boolean
   readonly isOpen: boolean
   readonly onOpenChange: (open: boolean) => void
+  readonly onPrefetch?: () => void
   readonly hasUnseen: boolean
   readonly children: React.ReactNode
 }
 /** Anchored to the visible status bar; the manifest remains independent of its host. */
-export const ChangelogPopover = ({ dark, isOpen, onOpenChange, hasUnseen, children }: ChangelogPopoverProps) => {
+export const ChangelogPopover = ({ dark, isOpen, onOpenChange, onPrefetch, hasUnseen, children }: ChangelogPopoverProps) => {
   const anchorRef = React.useRef<HTMLElement | null>(null)
   const detachOverflow = React.useRef<(() => void) | undefined>(undefined)
   const triggerRef = React.useCallback((node: HTMLButtonElement | null) => {
@@ -76,7 +77,7 @@ export const ChangelogPopover = ({ dark, isOpen, onOpenChange, hasUnseen, childr
     return detachOverflow.current
   }, [])
   return <Aria.DialogTrigger isOpen={isOpen} onOpenChange={onOpenChange}>
-    <Aria.Button ref={triggerRef} aria-label={hasUnseen ? 'Changes, unread' : 'Changes'} {...stylex.props(styles.trigger)}><span>Changes</span>{hasUnseen ? <span data-testid="changelog-unseen" aria-hidden="true" {...stylex.props(styles.dot)} /> : null}</Aria.Button>
+    <Aria.Button ref={triggerRef} onHoverStart={onPrefetch} onFocus={onPrefetch} aria-label={hasUnseen ? 'Changes, unread' : 'Changes'} {...stylex.props(styles.trigger)}><span>Changes</span>{hasUnseen ? <span data-testid="changelog-unseen" aria-hidden="true" {...stylex.props(styles.dot)} /> : null}</Aria.Button>
     <Aria.Popover data-changelog-popover="" triggerRef={anchorRef} placement="top end" offset={geometryNumbers.contextOffset} {...stylex.props(styles.popover, !dark && styles.popoverLight, dark ? assistantDarkTheme : assistantLightTheme)}>
       <Aria.Dialog aria-label="Recent changes" {...stylex.props(styles.dialog)}>
         <header {...stylex.props(styles.header)}><h1 {...stylex.props(styles.title)}>What's new</h1><Aria.Button slot="close" aria-label="Close recent changes" {...stylex.props(styles.button)}>Close</Aria.Button></header>
@@ -91,7 +92,7 @@ const styles = stylex.create({
   popover: { width: `min(${geometry.changelogMax}, calc(100vw - ${space.section}))`, backgroundColor: `color-mix(in srgb, ${surface.raised} 80%, transparent)`, color: ink.fg, borderWidth: geometry.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: radius.base, backdropFilter: `blur(${geometry.blur})`, boxShadow: elevation.popover, zIndex: 1100, fontFamily: type.fontSans },
   popoverLight: { borderColor: border.border },
   dialog: { outline: 'none' }, header: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: space.xl, borderBottom: `${geometry.hairline} solid ${border.border}` },
-  content: { paddingBlock: 0, paddingInline: space.xl, maxHeight: `min(${geometry.changelogHeight}, 65vh)`, overflowY: 'auto', overscrollBehavior: 'contain' },
+  content: { paddingBlock: 0, paddingInline: space.xl, height: `min(${geometry.changelogHeight}, 65vh)`, overflowY: 'auto', overscrollBehavior: 'contain' },
   heading: { fontSize: type.metaSize, color: ink.fgMuted, fontWeight: type.weightMedium, marginTop: space.xxl, marginInline: 0, marginBottom: space.xs }, list: { listStyle: 'none', margin: 0, padding: 0 },
   entry: { paddingBlock: space.xl, paddingInline: 0, borderBottom: `${geometry.hairline} solid ${border.border}`, ':last-child': { borderBottomWidth: 0 } },
   meta: { display: 'flex', gap: space.md, alignItems: 'center', color: ink.fgMuted, fontSize: type.metaSize }, badge: { border: `${geometry.hairline} solid ${border.borderStrong}`, borderRadius: radius.keyboard, paddingBlock: space.xxxs, paddingInline: space.sm, fontSize: type.denseSize },

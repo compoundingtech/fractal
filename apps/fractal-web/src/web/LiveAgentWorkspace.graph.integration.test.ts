@@ -85,6 +85,18 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
   })
 
+  it('keeps the changelog registry out of the eager workspace and AgentUsage graphs', () => {
+    for (const entry of ['main.tsx', '../shell/AgentUsage.tsx']) {
+      const graph = eagerGraph(resolve(web, entry))
+      expect(graph.files).toContain(resolve(web, '../extensions/app-public.ts'))
+      expect(graph.files.some(file => file.includes('/.changelog/'))).toBe(false)
+      expect(graph.files).not.toContain(resolve(web, '../changelog/build.ts'))
+    }
+    // The on-demand development manifest still reaches the real registry; production compiles it.
+    expect(eagerGraph(resolve(web, '../changelog/build.ts')).files)
+      .toContain(resolve(web, '../../.changelog/registry.generated.ts'))
+  })
+
   it('still reaches the real heavy composition through the on-demand pane', () => {
     const graph = eagerGraph(resolve(web, 'ConversationPane.tsx'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Transcript.tsx'))

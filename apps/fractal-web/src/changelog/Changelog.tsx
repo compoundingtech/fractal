@@ -8,6 +8,7 @@ import { persistence, persistedAtom } from '../state/persistence.ts'
 import { decodeChangelogManifest } from './contract.ts'
 import { ChangelogPopover, ChangelogView, type ChangelogLoad } from './ChangelogView.tsx'
 import { changelogDeployment, changelogEntryIds } from './metadata.ts'
+import { loadChangelog } from './load.ts'
 import { acknowledgeEntryIds, initialSeen, seenKey, type ChangelogSeen } from './seen.ts'
 
 const seen = persistedAtom({ key: seenKey(changelogDeployment), schema: Schema.Struct({ visited: Schema.Boolean, entryIds: Schema.Array(Schema.String) }), defaultValue: initialSeen })
@@ -15,7 +16,7 @@ const baseline = Atom.make<ChangelogSeen>(initialSeen)
 const manifest = Atom.make<ChangelogLoad>((get) => {
   let active = true
   get.addFinalizer(() => { active = false })
-  void import('./build.ts').then((module) => {
+  void loadChangelog().then((module) => {
     const decoded = decodeChangelogManifest(module.changelogManifest, { machineVersion: buildIdentity.machineVersion })
     if (active) get.setSelf({ _tag: 'Ready', manifest: decoded })
   }).catch(() => { if (active) get.setSelf({ _tag: 'Failed' }) })
@@ -41,7 +42,7 @@ export const useChangelogUnseen = (): boolean => {
   const ids = new Set(cursor.entryIds)
   return changelogEntryIds.some((id) => !ids.has(id))
 }
-/** The status-bar disclosure loads prose only after activation. */
+/** Warm prose on intent while keeping the disclosure immediately responsive. */
 export const Changelog = ({ dark }: { readonly dark: boolean }) => {
   const registry = React.useContext(RegistryContext)
   const hasUnseen = useChangelogUnseen()
@@ -50,5 +51,5 @@ export const Changelog = ({ dark }: { readonly dark: boolean }) => {
     if (next) acknowledgeChangelog(registry)
     setOpen(next)
   }
-  return <ChangelogPopover dark={dark} isOpen={open} onOpenChange={onOpenChange} hasUnseen={hasUnseen}>{open ? <ChangelogContent /> : null}</ChangelogPopover>
+  return <ChangelogPopover dark={dark} isOpen={open} onOpenChange={onOpenChange} onPrefetch={() => { registry.get(manifest) }} hasUnseen={hasUnseen}>{open ? <ChangelogContent /> : null}</ChangelogPopover>
 }

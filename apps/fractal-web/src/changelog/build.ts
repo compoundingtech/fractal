@@ -1,5 +1,5 @@
 import { buildIdentity } from 'virtual:build-identity'
-import { changelogDeployment, changelogSources } from '../extensions/build.ts'
+import { changelogDeployment, changelogSources } from '../../.changelog/mod.ts'
 import { compileChangelog } from './compiler.ts'
 import { changelogAudienceByDeployment } from './contract.ts'
 
