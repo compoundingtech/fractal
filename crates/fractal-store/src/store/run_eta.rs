@@ -4,7 +4,7 @@ use super::*;
 pub const SAMPLE_LIMIT: usize = 64;
 
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h1d1ee62dddd6 owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ r#"
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h9f4342e8c6fb owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_run_eta_samples (
  subject TEXT PRIMARY KEY, run_id TEXT NOT NULL, definition_hash TEXT NOT NULL,
  step_path TEXT NOT NULL, ended INTEGER NOT NULL, duration INTEGER NOT NULL
@@ -37,8 +37,8 @@ CREATE TRIGGER IF NOT EXISTS run_eta_claim_delete AFTER DELETE ON claims BEGIN
  OR subject=json_extract(OLD.body,'$.fields.origin_step')
  OR subject IN (SELECT json_extract(body,'$.fields.origin_step') FROM claims WHERE subject=OLD.subject AND kind='work.person-asked'); END;
 INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs
- WHERE NOT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v1');
-INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v1','1');
+ WHERE NOT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v2');
+INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v2','1');
 "#)?;
     flush(tx)
 }
@@ -53,23 +53,48 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
 }
 
 pub fn flush(tx: &Transaction<'_>) -> Result<()> {
-    let runs = tx
-        .prepare_cached("SELECT run_id FROM local_run_eta_pending ORDER BY run_id")?
-        .query_map([], |row| row.get::<_, String>(0))?
+    let keys = tx
+        .prepare_cached(
+            "SELECT definition_hash,step_path FROM local_run_eta_samples
+        WHERE run_id IN (SELECT run_id FROM local_run_eta_pending)
+        UNION SELECT definition_hash,step_path FROM step_runs
+        WHERE run_id IN (SELECT run_id FROM local_run_eta_pending)",
+        )?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for run in runs {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h080c6702874c owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE run_id=?1", [&run])?;
-        let steps = tx.prepare_cached("SELECT s.subject,s.definition_hash,s.step_path,s.attempt
+    for (hash, path) in keys {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h777dc35a3cdd owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2", params![hash,path])?;
+        // Terminal claim metadata is an upper bound on the selected attempt's end.
+        // Never hydrate older bodies once even their upper bound cannot enter the window.
+        let mut candidates = tx.prepare_cached("SELECT s.subject,s.run_id,s.attempt,
+            (SELECT MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
+             WHERE subject=s.subject AND kind IN ('step-run.state','work.failed','work.person-done','work.person-cancelled')) AS upper_end
             FROM step_runs s JOIN mission_runs r ON r.id=s.run_id AND r.current_generation_id=s.generation_id
-            WHERE r.id=?1 AND r.phase='terminal' AND r.status='completed' AND s.status='completed'")?
-            .query_map([&run], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,row.get::<_, u32>(3)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (subject, hash, path, attempt) in steps {
+            WHERE s.definition_hash=?1 AND s.step_path=?2
+            AND r.phase='terminal' AND r.status='completed' AND s.status='completed'
+            ORDER BY upper_end DESC,s.subject DESC")?;
+        let mut rows = candidates.query(params![hash, path])?;
+        while let Some(row) = rows.next()? {
+            let (subject, run, attempt, upper_end): (String, String, u32, Option<i64>) =
+                (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+            let Some(upper_end) = upper_end else { break };
+            let cutoff = tx.query_row("SELECT ended,subject FROM local_run_eta_samples
+                WHERE definition_hash=?1 AND step_path=?2 ORDER BY ended DESC,subject DESC LIMIT 1 OFFSET ?3",
+                params![hash,path,SAMPLE_LIMIT-1], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, String>(1)?))).optional()?;
+            if cutoff.is_some_and(|cutoff| {
+                (upper_end, subject.as_str()) <= (cutoff.0, cutoff.1.as_str())
+            }) {
+                break;
+            }
             let events = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h43c8328fcd04 owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ &format!("SELECT kind,body,claims.accepted_at_unix_ms FROM claims JOIN batches ON batches.id=claims.batch_id
                 WHERE subject=?1 ORDER BY {CANONICAL_ORDER}"))?
                 .query_map([&subject], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)))?
                 .map(|row| { let (kind,body,at)=row?; Ok((kind,serde_json::from_str(&body)?,at.parse()?)) })
                 .collect::<Result<Vec<_>>>()?;
+            #[cfg(test)]
+            BODY_ROWS.with(|count| count.set(count.get() + events.len()));
             let (Some(start), Some(end)) = step_timestamps(&events, attempt) else {
                 continue;
             };
@@ -114,9 +139,14 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
                 SELECT subject FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2 ORDER BY ended DESC,subject DESC LIMIT ?3)",
                 params![hash,path,SAMPLE_LIMIT])?;
         }
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h62f0aab7c5d9 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_pending WHERE run_id=?1", [&run])?;
     }
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h57ee6fe04659 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_pending", [])?;
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static BODY_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Overlapping person holds count once; queueing, released intervals and agent waits remain.
@@ -216,7 +246,13 @@ pub fn read(connection: &Connection, run: &str, at: u128) -> Result<Option<Value
         samples = samples.min(durations.len());
         // Nearest-rank empirical quartiles remain integer durations, including n=1.
         let n = durations.len();
-        weights.insert(path, (durations[n.div_ceil(4) - 1], durations[(3 * n).div_ceil(4) - 1]));
+        weights.insert(
+            path,
+            (
+                durations[n.div_ceil(4) - 1],
+                durations[(3 * n).div_ceil(4) - 1],
+            ),
+        );
     }
     let edges = flattened_dependencies(&mission);
     let mut totals = BTreeMap::<String, (u64, u64)>::new();
