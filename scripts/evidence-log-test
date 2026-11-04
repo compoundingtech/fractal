@@ -633,6 +633,27 @@ sys.exit(gc.main(sys.argv[1:]))
         self.assertEqual((self.host / log.PENDING).read_bytes(), previous)
         self.assertEqual(self.remote_head(), published)
 
+    def test_resume_checks_records_after_its_own_gc_even_when_another_gc_followed(self):
+        old = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([old])
+        first = json.loads(plan.read_text())
+        self.assertEqual(self.pull('--publish', '--plan', str(plan), mode='gc')[0], 0)
+        self.now += 25 * 3600
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan.write_text(json.dumps({**first, 'plan_sha256': 'a' * 64}))
+        self.assertEqual(self.pull('--publish', '--plan', str(plan), mode='gc')[0], 0)
+        lines = self.lines(f'trees/{self.tree[:2]}/{self.tree}')
+        self.assertEqual([line.split()[0] for line in lines], ['record', 'gc', 'record', 'gc'])
+        previous = (self.host / log.PENDING).read_bytes()
+        published = self.remote_head()
+        plan.write_text(json.dumps({**first, 'resumed': True}))
+        code, _, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 1, error)
+        self.assertIn('logged again', error)
+        self.assertEqual((self.host / log.PENDING).read_bytes(), previous)
+        self.assertEqual(self.remote_head(), published)
+
     def test_gc_can_refuse_a_busy_pull_without_waiting_or_changing_pending(self):
         record = self.record()
         self.assertEqual(self.pull('--publish')[0], 0)

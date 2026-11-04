@@ -954,6 +954,25 @@ sys.exit(gc.main(sys.argv[1:]))
             self.assertIn('differs', error)
             self.assertEqual(self.evidence_refs(bare), original)
 
+    def test_a_protection_only_outcome_finishes_the_journal_so_the_timer_plans_again(self):
+        env, bare, flag, head, doomed, stored, state = self.timer_world()
+        env['EVIDENCE_GC_LOG_TIMER'] = str(self.f.root / 'no-log-here')
+        flag.write_text('update deletion')
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse((state / 'pending-plan.json').exists(), 'protection is a completed outcome, not an unfinished operation')
+        self.assertTrue(set(doomed) <= {r.rsplit('/', 1)[1] for r in self.evidence_refs(bare)})
+        # A newly dead tagless group must still be collected on the next daily plan.
+        later = self.record(self.f.git('rev-parse', 'main'), 'd' * 40, 10)
+        ref = f'refs/notes/evidence/{"d" * 40}/{later}'
+        self.f.git('push', '-q', 'origin', f'{ref}:{ref}')
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse((state / 'pending-plan.json').exists())
+        self.assertEqual(len((self.f.root / 'curl.urls').read_text().splitlines()), 2)
+        self.assertNotIn(ref, self.evidence_refs(bare))
+        self.assertTrue(set(doomed) <= {r.rsplit('/', 1)[1] for r in self.evidence_refs(bare)})
+
     def test_the_timer_resumes_before_reading_new_open_heads(self):
         env, bare, flag, head, doomed, stored, state = self.timer_world()
         env['EVIDENCE_GC_LOG_TIMER'] = str(self.f.root / 'no-log-here')

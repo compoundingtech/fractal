@@ -50,9 +50,9 @@ disappear. If it fails, nothing is deleted (`refused`, exit 1).
 RESUMING (--resume-state FILE, with --apply --remote): persist the complete plan before its hook can run. While that file exists,
 finish that plan before fetching or planning another; its original repository, remote and hook must still match. Each attempt
 reconfirms the hook, then lists the remote to skip deletions already completed. Every remaining operation is leased to the original
-object id, and whole-group atomic deletion is unchanged. The journal stays until remote and local cleanup finish; protection or a
-failure leaves it for a later invocation. A file lock prevents two runs using the same journal. --resume-only refuses to start a new
-plan if another run completed this one meanwhile. Neither a retry loop nor a longer unit or hook timeout is needed.
+object id, and whole-group atomic deletion is unchanged. The journal stays until remote and local cleanup finish; a failure leaves
+it for a later invocation. Protection-kept groups finish as reported outcomes, so the next run can plan again. A file lock prevents
+two runs using the same journal. --resume-only refuses to start a new plan if another run completed this one meanwhile. Neither a retry loop nor a longer unit or hook timeout is needed.
 
 OPEN PULL REQUEST HEADS (--open-heads-from FILE, one commit id a line, an empty file for none): their trees are live however old
 the head is, so a pull request that waits longer than branch_days keeps its records. With --fetch the commits are fetched by id
@@ -707,7 +707,7 @@ def execute_plan(args, plan, before, resumed=False):
             summary['applied'] = True
         summary['deleted_refs'] = len(gone)
         if args.resume_state:
-            summary['unfinished'] = bool(failed or protected)
+            summary['unfinished'] = bool(failed)  # protection-kept groups are a completed outcome, as without a journal
             if not summary['unfinished']:
                 os.unlink(args.resume_state)
                 sync_directory(args.resume_state)

@@ -515,14 +515,16 @@ def gc(args):
         for path in list(removals):
             shown = git(args.repo, 'cat-file', 'blob', f'{head}:{path}', check=False) if head else None
             lines = shown.stdout.decode().splitlines() if shown and shown.returncode == 0 else []
-            if any(entry.startswith('gc ') and entry.split()[-1] == plan['plan_sha256'] for entry in lines):
-                if any(entry.startswith('record ') and entry.split()[1] in planned_records for entry in lines[lines_after_gc(lines):]):
+            receipt = next((i for i, entry in enumerate(lines)
+                            if entry.startswith('gc ') and entry.split()[-1] == plan['plan_sha256']), None)
+            if receipt is not None:
+                if any(entry.startswith('record ') and entry.split()[1] in planned_records for entry in lines[receipt + 1:]):
                     raise Refused('a record of the resumed plan was logged again: refusing its deletion')
                 del removals[path]  # a guarded publication below re-confirms the existing GC line, without appending it twice
     summary['gc_lines_added'] = len(removals)
     published = published_head(args.repo, args.remote) if args.publish else None
-    # The pending names go first: if the log commit then fails, GC deletes nothing (its hook failed) and they expire unlogged-again
-    # at worst a day later; the other order would leave a window where a pull logs them after the GC line.
+    # Hold names before extending the log, so a pull cannot log them after the GC line. Clean failure restores the previous hold
+    # and keeps copies. A local GC commit may remain after publication fails; the journal's next hook completes that operation.
     previous = pending(args.repo)
     held = dict(previous)
     held.update({name: args.now for name in plan['delete'] if parse(name)})

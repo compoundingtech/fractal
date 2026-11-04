@@ -3,7 +3,7 @@
   "summary": "Resume interrupted evidence GC deletions from a durable plan before planning another run",
   "replay": {
     "status": "changed",
-    "detail": "An opt-in local journal retains the frozen deletion plan. A later invocation re-confirms its log hook and completes remaining remote and local operations without fetching or verifying the records again. There are no graph replay changes."
+    "detail": "An opt-in local journal retains the frozen deletion plan. A later invocation re-confirms its log hook and completes remaining remote and local operations without fetching or verifying the records again. There are no graph replay changes. Protection-kept groups finish as reported outcomes, allowing the next run to plan fresh work; other failures retain the journal."
   },
   "schema": {
     "status": "changed",
@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "none",
-    "detail": "No daemon downtime or service deadline increase. A busy publisher makes the GC hook refuse promptly. The next scheduled run can finish the saved plan after a timeout or interruption."
+    "detail": "No daemon downtime or service deadline increase. A busy publisher makes the GC hook refuse promptly. The next scheduled run can finish the saved plan after a timeout or interruption. A collision with a pull can defer deletion until the next daily invocation; no hook retry loop is added."
   },
   "manual": {
     "status": "changed",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Keep pending-plan.json until completion; do not edit or discard it to bypass a refusal. Remote refs already gone and a local transaction already committed are safe to replay. A changed ref, remote, repository, hook, invalid journal or failed publication refuses further deletion. Failed publication preserves pending names and copies so a pull does not re-verify the records. Finish an outstanding journal with the new tool before downgrading."
+    "detail": "Keep pending-plan.json until completion; do not edit or discard it to bypass a refusal. Remote refs already gone and a local transaction already committed are safe to replay. A changed ref, remote, repository, hook, invalid journal or failed publication refuses further deletion. Failed publication preserves pending names and copies so a pull does not re-verify the records. Finish an outstanding journal with the new tool before downgrading. A failed publication may leave a signed local GC commit that an intervening pull publishes while copies stay retained; finish the journal to converge, or complete a later successful GC run for commands without a journal."
   }
 }

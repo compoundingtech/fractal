@@ -259,7 +259,9 @@ Migration replay keeps an already-created matching destination; a changed ref, r
 atomic pushes and remote protection remain in force. For live migrations and redundant-name cleanup, each deletion batch first
 re-reads the replacement from the remote and requires its original object id; these records remain live and need no GC line.
 Local cleanup is idempotent too, including a kill after its transaction
-committed but before the journal was removed. The journal is not part of the 30-day summary cleanup.
+committed but before the journal was removed. Protection-kept groups are a completed outcome: their remaining names stay
+remote, the journal closes, and the next run reads fresh open heads and plans again. Other failures retain the journal.
+The journal is not part of the 30-day summary cleanup.
 The saved plan has a unique `operation_id`; in journal mode `plan_sha256` includes that id with `delete` and `migrate`. The same
 operation keeps its hash on resume, while a later operation over identical refs gets a distinct GC marker. The pure plan's choices
 and `inputs_sha256` remain deterministic; commands without journal mode keep their existing plan hashes.
@@ -269,10 +271,12 @@ or re-verify the records. Reusing verification across aliases is a separate opti
 
 Every resumed attempt runs the original hook again before any deletion, so the signed GC lines must still publish through the
 existing fast-forward guard. A resumed plan is marked in its plan file: its hook reuses existing GC lines without duplicating them
-or dropping copies of newer records. If an old target was logged again after a GC line, resume refuses its deletion. Pending-name
-expiration is a separate concern; it is unchanged here. A failed publication leaves the previous pending set and copies intact and deletes no
-remote refs. The wrapper uses `--no-wait` for the log lock, refusing promptly when a pull is active; the hook's 600-second limit and
-the service's one-hour limit are unchanged. The durable journal allows the next scheduled invocation to continue.
+or dropping copies of newer records. If an old target was logged again after this operation's GC line, resume refuses its
+deletion even if a later GC line followed. Pending-name expiration is a separate concern; it is unchanged here. A failed publication leaves the previous pending set and copies intact and deletes no
+remote refs. Its signed local GC commit can remain and be published by an intervening pull while copies are retained; finishing
+the journal converges that state. Commands without a journal require a later successful GC run to converge after this failure.
+The wrapper uses `--no-wait` for the log lock, refusing promptly when a pull is active; a collision can defer deletion until the
+next daily invocation. The hook's 600-second limit and the service's one-hour limit are unchanged. The durable journal allows the next scheduled invocation to continue.
 
 **Before deleting.** `--before-delete JSON_ARGV` (with `--plan-out`) runs a command, without a shell and with the plan
 file's path as its last argument, after the plan is written and before any deletion or migration. If it exits non-zero
