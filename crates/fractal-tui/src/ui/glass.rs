@@ -182,10 +182,10 @@ impl TabBadge {
         if width == 0 {
             return String::new();
         }
-        // Other tabs surrender their digits first. Inbox only does so when its
-        // complete, unpadded label cannot fit at all.
         let counts = if self.inbox {
-            self.width(title, true).saturating_sub(2) <= width
+            let digits = self.alerts.filter(|count| *count > 0)
+                .map_or(0, |count| count.ilog10() as usize + 1);
+            text::width(self.glyph()) + digits <= width
         } else {
             counts
         };
@@ -231,6 +231,15 @@ impl TabBadge {
                 label.remove(0);
                 label.pop();
                 return label;
+            }
+            if self.inbox && counts && let Some(count) = self.alerts.filter(|count| *count > 0) {
+                let mut compact = format!("{glyph}{count}");
+                let room = width.saturating_sub(text::width(&compact));
+                if room > 1 {
+                    compact.push(' ');
+                    compact.push_str(&text::truncate(title, room - 1));
+                }
+                return compact;
             }
             use unicode_width::UnicodeWidthChar as _;
             // Padding may disappear, but truncation never consumes the status glyph.
@@ -2727,10 +2736,8 @@ impl Ui {
         let mut labels: Vec<_> = tabs
             .iter()
             .map(|(title, badge)| {
-                let width = if badge.inbox {
-                    let full = badge.width(title, true);
-                    let preferred = if compact_fits { full } else { full.saturating_sub(2) };
-                    label_width.max(preferred.min(usize::from(strip_room)))
+                let width = if badge.inbox && compact_fits {
+                    label_width.max(badge.width(title, true).min(usize::from(strip_room)))
                 } else {
                     label_width
                 };
@@ -2790,6 +2797,13 @@ impl Ui {
         } else {
             0
         };
+        if let Some(inbox) = (first..=last).find(|at| tabs.get(*at).is_some_and(|(_, badge)| badge.inbox)) {
+            let others: u16 = widths[first..=last].iter().enumerate()
+                .filter(|(offset, _)| first + offset != inbox).map(|(_, width)| *width).sum();
+            let room = strip_room.saturating_sub(before + tail).saturating_sub(others);
+            labels[inbox].0 = tabs[inbox].1.label(&tabs[inbox].0, usize::from(room), counts);
+            widths[inbox] = text::width(&labels[inbox].0) as u16;
+        }
         let tab_cells = widths
             .iter()
             .take(last + 1)
@@ -5670,13 +5684,13 @@ mod tests {
         for width in [40, 26, 18, 12, inbox_min_width] {
             let row = tab_badge_strip(&ui, width);
             println!("INBOX {width}: |{row}|");
-            assert!(row.contains("?2 Inbox"), "{width}: {row}");
+            assert!(row.contains("?2"), "{width}: {row}");
         }
         let compact = tab_badge_strip(&ui, compact_width);
-        assert!(compact.contains("?2 Inbox"), "{compact}");
+        assert!(compact.contains("?2"), "{compact}");
         assert!(!compact.contains("?2 Atlas"), "{compact}");
         assert_eq!(atlas.label("Atlas", 80, false), " ? Atlas ");
-        assert!(!tab_badge_strip(&ui, inbox_min_width - 1).contains("?2"));
+        assert_eq!(inbox.label("Inbox", 2, false), "?2");
     }
 
     #[test]
@@ -5808,12 +5822,32 @@ mod tests {
                 ui.frame.borrow_mut().hits.clear();
                 let shown = tab_badge_strip(&ui, width);
                 if current == 4 {
-                    assert!(shown.contains("?2 Inbox"), "{width}: {shown}");
-                } else {
-                    assert!(!shown.contains("?2"), "{width}: {shown}");
+                    assert!(shown.contains("?2"), "{width}: {shown}");
                 }
                 // An overflow marker appears only when a tab is hidden on that side.
-                assert_marker_counts(&ui, &tab_strip_row(&ui, width), 5);
+                let row = tab_strip_row(&ui, width);
+                let info = ui.frame.borrow();
+                let visible: Vec<_> = info.hits.iter().filter_map(|(_, hit)| match hit {
+                    Hit::GlassTab(0, tab) => Some(*tab),
+                    _ => None,
+                }).collect();
+                let first = *visible.iter().min().expect("selected tab is visible");
+                let last = *visible.iter().max().unwrap();
+                let before = first > 0;
+                let after = last < 4;
+                assert_eq!(row.contains('‹'), before, "{width}: {row}");
+                assert_eq!(row.contains('›'), after, "{width}: {row}");
+                let targets: Vec<_> = info.hits.iter().filter_map(|(_, hit)| match hit {
+                    Hit::GlassTabMore(0, tab) => Some(*tab),
+                    _ => None,
+                }).collect();
+                let expected: Vec<_> = first.checked_sub(1).into_iter()
+                    .chain(after.then_some(last + 1)).collect();
+                assert_eq!(targets, expected, "{width}: {row}");
+                if width == 18 && current == 0 { assert!(after, "{row}"); }
+                if width == 18 && current == 4 { assert!(before, "{row}"); }
+                drop(info);
+                assert_marker_counts(&ui, &row, 5);
                 for (rect, hit) in &ui.frame.borrow().hits {
                     if matches!(hit, Hit::GlassTabMore(..) | Hit::GlassTab(..)) {
                         assert!(rect.right() <= width, "{width}: {hit:?} {rect:?}");
