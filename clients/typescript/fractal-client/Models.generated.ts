@@ -2329,6 +2329,7 @@ export type MissionRunSummary = {
   blocker?: {
 
 } | null;
+  completed_at?: number | null;
   current_steps: Array<{
   assignee?: (ActorRef | null);
   claimant?: (ActorRef | null);
@@ -2350,6 +2351,7 @@ export type MissionRunSummary = {
   total: number;
 };
   requester: ActorRef;
+  started_at?: number | null;
   state_since: Timestamp;
   status: string;
   steps?: (Array<MissionStep> | null);
@@ -2374,6 +2376,7 @@ export type MissionStep = {
   blockers?: Array<Id>;
   claim_expires_at?: (Timestamp | null);
   claimant?: (ActorRef | null);
+  completed_at?: number | null;
   constraints?: Array<string>;
   goals?: Array<string>;
   id: Id;
@@ -2387,6 +2390,7 @@ export type MissionStep = {
   path: string;
   progress_at?: (Timestamp | null);
   since: Timestamp;
+  started_at?: number | null;
   state: WorkState;
   title?: string | null;
   wake?: (MissionWake | null);
@@ -2446,6 +2450,132 @@ export type MissionWake = {
 };
 
 export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | string);
+
+export type NoticeActor = string;
+
+export type NoticeClaimId = string;
+
+export type NoticeCreated = {
+  body?: string;
+  created_at: NoticeTimestamp;
+  dedupe_key: string;
+  expires_at?: NoticeTimestamp;
+  intent: "done" | "failed" | "blocked" | "fyi";
+  links: Array<NoticeLink>;
+  recipient: NoticePerson;
+  requested: boolean;
+  resource: string;
+  schema_version: 1;
+  source: NoticeSource;
+  speech?: string;
+  summary: string;
+  urgency: "info" | "attention" | "confirm";
+};
+
+export type NoticeDelivery = ({
+  state: "pending";
+  surface: "tray" | "speech" | "push" | "log";
+} | {
+  completed_at: NoticeTimestamp;
+  evidence: "spoken" | "shown" | "logged";
+  outcome_claim: NoticeClaimId;
+  state: "delivered";
+  surface: "tray" | "speech" | "push" | "log";
+} | {
+  outcome_claim: NoticeClaimId;
+  reason: string;
+  state: "failed";
+  surface: "tray" | "speech" | "push" | "log";
+} | {
+  reason: string;
+  state: "suppressed";
+  surface: "tray" | "speech" | "push" | "log";
+});
+
+export type NoticeDismissParameters = {
+  notice_id: NoticeId;
+};
+
+export type NoticeFence = {
+  control_revision: (Revision | null);
+  notice_id: NoticeId;
+  source_revision: Revision;
+};
+
+export type NoticeId = string;
+
+export type NoticeIntegrity = ({
+  manifest_claim: NoticeClaimId;
+  manifest_state: "ready";
+  state: "ready";
+} | {
+  manifest_state: "ready" | "missing" | "invalid" | "rebuilding" | "stale";
+  reason: "invalid-source" | "missing-source" | "missing-registration" | "rebuilding" | "stale";
+  state: "unavailable";
+} | {
+  creation_claims: Array<NoticeClaimId>;
+  manifest_state: "ready" | "conflicted";
+  state: "conflicted";
+});
+
+export type NoticeLink = {
+  label: string;
+  url: string;
+};
+
+export type NoticePerson = string;
+
+export type NoticePolicy = {
+  availability_basis: NoticeClaimId;
+  disposition: "deliver" | "held" | "suppressed";
+  reason: string;
+  revision: Revision;
+};
+
+export type NoticeRuntime = string;
+
+export type NoticeSeenParameters = {
+  notice_id: NoticeId;
+};
+
+export type NoticeSnapshot = {
+  basis_claim: NoticeClaimId;
+  control_revision: (Revision | null);
+  creation_claims: Array<NoticeClaimId>;
+  delivery: Array<NoticeDelivery>;
+  dismissed_at: (NoticeTimestamp | null);
+  id: NoticeId;
+  input: NoticeCreated;
+  integrity: NoticeIntegrity;
+  kind: "attention-notice";
+  policy: NoticePolicy;
+  producer: NoticeActor;
+  revision: Revision;
+  runtime: NoticeRuntime;
+  schema_version: 1;
+  seen_at: (NoticeTimestamp | null);
+  snoozed_until: (NoticeTimestamp | null);
+  source_id: NoticeSourceId;
+  source_revision: Revision;
+  updated_at: NoticeTimestamp;
+};
+
+export type NoticeSnoozeParameters = {
+  notice_id: NoticeId;
+  until: (NoticeTimestamp | null);
+};
+
+export type NoticeSource = {
+  agent?: NoticeRuntime;
+  cwd?: string;
+  host: string;
+  pty?: string;
+  repo?: string;
+};
+
+export type NoticeSourceId = string;
+
+export type NoticeTimestamp = string;
 
 export type ObservationAccepted = {
   accepted: true;

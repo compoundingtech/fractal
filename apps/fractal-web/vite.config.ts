@@ -8,6 +8,7 @@ import { fractalContentSecurityPolicy } from './scripts/vite-csp.mjs'
 import { fractalCssAssets } from './scripts/vite-css-assets.mjs'
 import { fractalDevReplay } from './scripts/vite-replay.mjs'
 import { pierreLanguagesPlugin } from '../../packages/fractal-ui/scripts/pierre-languages.mjs'
+import { fractalLazyChunks } from './scripts/vite-lazy-chunks.mjs'
 
 export default defineConfig({
   root: 'src/web',
@@ -35,6 +36,10 @@ export default defineConfig({
     react(),
     webfractalGateway(),
     fractalCssAssets(),
+    fractalLazyChunks({
+      conversation: new URL('./src/web/ConversationPane.tsx', import.meta.url).pathname,
+      terminal: new URL('./src/terminal/TerminalDetail.tsx', import.meta.url).pathname,
+    }),
   ],
   server: { strictPort: true, host: '127.0.0.1', allowedHosts: (process.env.WF_ALLOWED_HOSTS ?? '127.0.0.1,localhost').split(',') },
   resolve: { dedupe: ['effect', 'react', 'react-dom', '@stylexjs/stylex'] },

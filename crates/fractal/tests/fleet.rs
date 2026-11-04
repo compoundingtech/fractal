@@ -6312,6 +6312,180 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
 }
 
+/// A page cursor into the messages stream names its position in `stream_after` and leaves out
+/// `after`, so the previous release, whose cursor needs `after`, refuses it and the listing starts
+/// over rather than reading a stream position as a graph index. A subject the graph holds lists
+/// once, as the graph's, and a walk by small pages lists every message once, in order, on pages
+/// that are never empty. A cursor the release gave, into the graph or into the stream, still
+/// reads on this build.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_refuses_a_stream_cursor_and_lists_each_subject_once_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    // Pages of two, so the release's five messages and three stream items take four pages.
+    const QUERY: &str = "/v1/messages/page?to=agent/fleet-reader&limit=2";
+    let page = |node: &Node, cursor: Option<String>| {
+        let client = node.client();
+        async move {
+            let path = match cursor {
+                Some(cursor) => format!("{QUERY}&cursor={cursor}"),
+                None => QUERY.to_owned(),
+            };
+            client.get::<MessagePage>(&path).await
+        }
+    };
+    // Every page from `cursor` to the end, each with the cursor it gave.
+    let walk = |node: &Node, mut cursor: Option<String>| {
+        let client = node.client();
+        async move {
+            let mut pages = Vec::new();
+            loop {
+                let path = match &cursor {
+                    Some(cursor) => format!("{QUERY}&cursor={cursor}"),
+                    None => QUERY.to_owned(),
+                };
+                let page: MessagePage = client.get(&path).await.unwrap();
+                assert_eq!(page.has_more, page.next_cursor.is_some());
+                cursor = page.next_cursor.clone();
+                let subjects = page.items.iter().map(|item| item.subject.clone()).collect::<Vec<_>>();
+                pages.push((subjects, page.next_cursor));
+                if cursor.is_none() {
+                    return pages;
+                }
+                assert!(pages.len() < 20, "the listing never ended: {pages:?}");
+            }
+        }
+    };
+    let subjects = |pages: &[(Vec<String>, Option<String>)]| {
+        pages.iter().flat_map(|(subjects, _)| subjects.clone()).collect::<Vec<_>>()
+    };
+    // What a cursor says, as JSON.
+    let decoded = |cursor: &str| -> Value {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(cursor.strip_prefix("messages/").expect("a message cursor"))
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    let base = fractal_daemon::store::messages_shard::STREAM_INDEX_BASE;
+    let into_stream = |cursor: &Value| {
+        cursor["stream_after"].as_u64().or(cursor["after"].as_u64()).is_some_and(|after| after >= base)
+    };
+
+    // The release's mail, more than two pages of it.
+    let mut graph = Vec::new();
+    for n in 1..=5 {
+        let receipt: Value = o
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("release-{n}"), "from": PERSON, "to": "agent/fleet-reader",
+                "content": format!("graph mail {n}"),
+            }))
+            .await
+            .unwrap();
+        graph.push(receipt["subject"].as_str().expect("a send receipt names its message").to_owned());
+    }
+    let first = page(&o, None).await.unwrap();
+    assert_eq!(first.items.iter().map(|item| item.subject.clone()).collect::<Vec<_>>(), graph[..2]);
+    let release_cursor = first.next_cursor.expect("the release's first page has more");
+    assert!(decoded(&release_cursor)["after"].as_u64().is_some_and(|after| after < base));
+
+    // Upgrade in place, then the stream: three items, and two under subjects the graph holds,
+    // one between them and one last.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    let stream = ["message/0000000000000e01", "message/0000000000000e02", "message/0000000000000e03"];
+    for subject in [stream[0], graph[2].as_str(), stream[1], stream[2], graph[3].as_str()] {
+        append_stream_item(&o, subject).await;
+    }
+    for shared in &graph[2..4] {
+        assert_eq!(stream_items(&o, shared).await, 1);
+    }
+    let mut expected = graph.clone();
+    expected.extend(stream.map(str::to_owned));
+    let upgraded = walk(&o, None).await;
+    assert_eq!(subjects(&upgraded), expected, "each subject once, the graph's first: {upgraded:?}");
+    // The last stream item is the graph's, so the stream ends a page early rather than give a
+    // cursor to an empty one.
+    assert_eq!(
+        upgraded.iter().map(|(subjects, _)| subjects.len()).collect::<Vec<_>>(),
+        [2, 2, 2, 2],
+        "{upgraded:?}"
+    );
+    // The graph's subjects read as the graph's messages.
+    for (n, shared) in [(3, &graph[2]), (4, &graph[3])] {
+        let read: MessageView = o.client().get(&format!("/v1/messages/read/{shared}")).await.unwrap();
+        assert_eq!(read.content, format!("graph mail {n}"));
+    }
+    // A cursor into the graph keeps `after`; one into the stream names `stream_after` alone.
+    let cursors = upgraded.iter().filter_map(|(_, cursor)| cursor.as_deref()).map(decoded).collect::<Vec<_>>();
+    assert_eq!(cursors.len(), 3);
+    for cursor in &cursors[..2] {
+        assert!(cursor["after"].as_u64().is_some_and(|after| after < base), "{cursor}");
+        assert!(cursor.get("stream_after").is_none(), "{cursor}");
+    }
+    assert!(cursors[2]["stream_after"].as_u64().is_some_and(|after| after >= base), "{}", cursors[2]);
+    assert!(cursors[2].get("after").is_none(), "{}", cursors[2]);
+    let stream_cursor = upgraded[2].1.clone().unwrap();
+    // The cursor the release gave before the upgrade reads on through the stream.
+    assert_eq!(subjects(&walk(&o, Some(release_cursor.clone())).await), expected[2..]);
+
+    // Roll back: the release answers the stream cursor as invalid (422), and the listing starts over.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    let rolled_back = walk(&o, None).await;
+    let listed = subjects(&rolled_back);
+    // v0.3.25 then lists the stream, with the graph's subjects again among it; this build's guard
+    // is what lists each once.
+    assert_eq!(listed[..5], graph, "the release lists its mail first: {rolled_back:?}");
+    let release_cursors = rolled_back.iter().filter_map(|(_, cursor)| cursor.as_deref()).map(decoded).collect::<Vec<_>>();
+    if release_cursors.iter().any(|cursor| cursor.get("stream_after").is_some()) {
+        // A release with stream_after cursors reads this build's.
+        assert_eq!(subjects(&walk(&o, Some(stream_cursor.clone())).await), expected[6..]);
+    } else {
+        let refused = page(&o, Some(stream_cursor.clone())).await.unwrap_err();
+        let (status, code, message, _) =
+            fractal_daemon::client::api_error_parts(&refused).unwrap_or_else(|| panic!("{refused:#}"));
+        assert_eq!((status, code, message), (422, "validation-failed", "invalid message cursor"));
+    }
+    // A cursor the release gives into the stream, if it lists the stream, names it in `after`.
+    let release_stream_cursor = rolled_back
+        .iter()
+        .filter_map(|(_, cursor)| cursor.clone())
+        .find(|cursor| into_stream(&decoded(cursor)));
+
+    // Upgrade again: the whole walk is as it was, and the release's stream cursor reads on.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    // A cursor's `through` is the graph's index at its first page, which each start moves on.
+    let shape = |pages: &[(Vec<String>, Option<String>)]| {
+        pages
+            .iter()
+            .map(|(subjects, cursor)| {
+                let cursor = cursor.as_deref().map(decoded);
+                let position = cursor.map(|cursor| (cursor.get("after").cloned(), cursor.get("stream_after").cloned()));
+                (subjects.clone(), position)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(shape(&walk(&o, None).await), shape(&upgraded));
+    assert_eq!(subjects(&walk(&o, Some(release_cursor)).await), expected[2..]);
+    // The release's first stream cursor follows its page that ended at the first stream item.
+    if let Some(cursor) = release_stream_cursor {
+        assert_eq!(subjects(&walk(&o, Some(cursor)).await), expected[6..]);
+    }
+}
+
 /// Delivery and read state this build records as local marks (db break-up step 4b) reads beside
 /// the lifecycle claims the previous release wrote, on one node upgraded in place, backed up and
 /// rolled back. The release's claims read the same throughout; a mark replicates nothing and
@@ -7835,6 +8009,63 @@ async fn item_claim_with_head(node: &Node, kind: &str, head: &str) -> bool {
             && (claim.pointer("/body/fields/facts/head_sha") == Some(&json!(head))
                 || claim.pointer("/body/fields/head_sha") == Some(&json!(head)))
     })
+}
+
+/// The standing observer's declarations on `node`, oldest first, as (origin, stopped).
+async fn observer_declarations(node: &Node) -> Vec<(String, bool)> {
+    node.claims().await.iter()
+        .filter(|claim| claim["subject"] == "observer/github/fixture/app" && claim["kind"] == "intent.desired")
+        .map(|claim| (
+            claim["origin"].as_str().unwrap_or_default().to_owned(),
+            claim.pointer("/body/desired/children/0/name") == Some(&json!("stop")),
+        ))
+        .collect()
+}
+
+/// A member of the previous release watches a pull request beside a poller of this build that
+/// already observes the repository (#4831). The poller declares its observer once, in the write
+/// that declares the watch using it, so no pass stops it as unused and declares it again; the
+/// elder's watch, the released command, plans beside that one declaration and becomes a
+/// subscription on the poller's observer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_member_watches_beside_this_builds_poller() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let mut elder = Node::new(root.path(), "fixture-elder");
+    elder.binary = old;
+    elder.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api.clone())]);
+    let code = poller.invite("fixture-elder", &[]);
+    let output = elder.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    elder.start().await;
+    watch_fixture_app(&poller);
+    wait_until("the poller fills its mirror", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" }
+    }).await;
+    wait_until("the elder holds the poller's observer declaration", 90, || async {
+        observer_declarations(&elder).await.iter().any(|(origin, _)| origin == "fixture-poller")
+    }).await;
+    watch_fixture_app(&elder);
+    wait_until("the poller holds the elder's watch", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"].as_str().is_some_and(|subject| subject.starts_with("subscription/watch/fixture/app/12/"))
+                && claim["origin"] == "fixture-elder"
+        })
+    }).await;
+    let declarations = observer_declarations(&poller).await;
+    assert_eq!(
+        declarations.iter().filter(|(origin, _)| origin == "fixture-poller").collect::<Vec<_>>(),
+        [&("fixture-poller".to_owned(), false)],
+        "the poller declared its observer once and never stopped it: {declarations:?}",
+    );
 }
 
 /// A previous release without the GitHub plugin keeps the poller writing item snapshots.
