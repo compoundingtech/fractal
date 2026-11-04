@@ -24755,7 +24755,10 @@ mission "self-assigned" state="ready" {
         }
         let error = parse("gate \"review\" { unknown-predicate \"value\"; }").unwrap_err();
         assert_eq!(error.code, "unknown-gate");
-        for child in ["unknown-child \"value\"", "evidence \"summary\" type=\"text\""] {
+        for child in [
+            "unknown-child \"value\"",
+            "evidence \"summary\" type=\"text\"",
+        ] {
             let error = parse(&format!(
                 "gate \"review\" type=\"human\" {{ reviewer \"person/alex\"; {child}; }}"
             ))
