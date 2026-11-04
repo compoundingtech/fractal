@@ -11101,6 +11101,8 @@ mission "agent-human" state="ready" {
 
 #[test]
 fn an_unauthenticated_harness_is_waiting_not_starting() {
+    // This unpolled seat is assessed during the daemon's startup grace.
+    let _uptime = crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5));
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let store = state.store.clone();
