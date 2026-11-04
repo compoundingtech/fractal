@@ -937,6 +937,35 @@ class StTest(unittest.TestCase):
             os.chdir(cwd)
         return code, out.getvalue(), err.getvalue()
 
+    @contextlib.contextmanager
+    def simulated_limit(self, seconds, waited=False):
+        """Each check's time limit as if `seconds` passed once its running time began (for a check that streams scripts/ci-local's output,
+        once ci-local printed that it started), all of them spent waiting for a build slot when `waited` (its queue log then holds that wait).
+        A check is then over its limit, or past it only by waiting, without a real sleep against a 1 or 2 s --time-limit: no wall clock
+        decides the outcome, where a loaded host's time to start sh and date counted against those limits (#4879)."""
+        init, hear = st_test.Limit.__init__, st_test.Limit.output
+
+        def jump(limit):
+            limit.started -= seconds
+            if waited:
+                now = int(time.time())
+                with open(limit.queue_log, 'a') as log:  # whole seconds, as scripts/ci-local writes them
+                    log.write(f'wait {now - seconds} tests\nslot {now + 1} tests\n')
+
+        def begin(limit, *args, **kwargs):
+            init(limit, *args, **kwargs)
+            if not limit.begins_at:
+                jump(limit)
+
+        def output(limit, chunk):
+            starts = bool(limit.begins_at) and limit.begins_at in limit.tail + chunk
+            hear(limit, chunk)
+            if starts:
+                jump(limit)
+
+        with mock.patch.object(st_test.Limit, '__init__', begin), mock.patch.object(st_test.Limit, 'output', output):
+            yield
+
     def statements(self):
         found = []
         for ref in git(self.work, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/').splitlines():
@@ -1589,7 +1618,8 @@ class StTest(unittest.TestCase):
 
     def test_a_time_limit_is_a_failure_not_a_hang(self):
         self.commit('b.txt', 'two')
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '1', command=['sleep', '30'])
+        with self.simulated_limit(100):  # 100 s of running against a 50 s limit
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', command=['sleep', '30'])
         self.assertEqual(code, 1)
         self.assertIn('timed out', out)
 
@@ -1602,22 +1632,26 @@ class StTest(unittest.TestCase):
 
     def test_a_check_s_waits_for_a_build_slot_do_not_count_against_its_time_limit(self):
         self.commit('b.txt', 'two')
-        # The queue log holds whole seconds (scripts/ci-local writes `date +%s`), so the wait is written rounded outward: it starts no later
-        # than the check does and ends no earlier than the sleep. Written as the sleep's own `date +%s` bounds, it could read up to a second
-        # short, and the time a loaded host takes to start sh and date counted too: against a 2 s limit that timed out (#4879). Now only the
-        # moment between the slot line and the command's exit runs; were waits counted against the limit, the 3 s would still be over it.
-        begun = int(time.time())
-        wait = f'echo "wait {begun} tests" >> "$CI_LOCAL_QUEUE_LOG"; sleep 3; echo "slot $(( $(date +%s) + 1 )) tests" >> "$CI_LOCAL_QUEUE_LOG"'
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', command=['sh', '-c', wait])
+        # 100 s pass while the check runs, all of them waiting for a build slot: within a 50 s limit, where counting the wait would stop it.
+        # Simulated (simulated_limit): with a real 3 s sleep against a 2 s limit, the time a loaded host took to start sh and date counted
+        # too, and the check timed out (#4879).
+        with self.simulated_limit(100, waited=True):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', command=['true'])
         self.assertEqual(code, 0, out + err)
         waited = re.search(r'waited (\d+)s for build slots', out)
         self.assertIsNotNone(waited, out)
-        self.assertGreaterEqual(int(waited.group(1)), 3)
-        # The same, streamed as scripts/ci-local's output is.
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun', command=['sh', '-c', wait, 'scripts/ci-local'])
+        self.assertGreaterEqual(int(waited.group(1)), 100)
+        # The same, streamed as scripts/ci-local's output is: the wait comes once ci-local has started, where the limit begins.
+        started = ['sh', '-c', 'echo "ci-local: stage logs in /x"', 'scripts/ci-local']
+        with self.simulated_limit(100, waited=True):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', '--rerun', command=started)
         self.assertEqual(code, 0, out + err)
-        # Three seconds spent running, not waiting, are over the limit.
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun', command=['sh', '-c', 'sleep 3'])
+        waited = re.search(r'waited (\d+)s for build slots', out)
+        self.assertIsNotNone(waited, out)
+        self.assertGreaterEqual(int(waited.group(1)), 100)
+        # 100 s spent running, not waiting, are over the limit.
+        with self.simulated_limit(100):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', '--rerun', command=['sleep', '30'])
         self.assertEqual(code, 1, out + err)
         self.assertRegex(out, r'demo +timed out')
 
@@ -1644,9 +1678,10 @@ class StTest(unittest.TestCase):
         self.assertGreaterEqual(int(waited.group(1)), 100)
         statement, = self.statements()
         self.assertEqual(statement['predicate']['observed']['inputs']['pre_start_s'], waited.group(1))  # the note records the same wait
-        # Once ci-local has started the limit holds as before: 3 s of running is over it.
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun',
-                                          command=['sh', '-c', 'echo "ci-local: stage logs in /x"; sleep 3', 'scripts/ci-local'])
+        # Once ci-local has started the limit holds as before: 100 s of running is over it.
+        with self.simulated_limit(100):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', '--rerun',
+                                              command=['sh', '-c', 'echo "ci-local: stage logs in /x"; sleep 30', 'scripts/ci-local'])
         self.assertEqual(code, 1, out + err)
         self.assertRegex(out, r'demo +timed out')
 
@@ -3956,7 +3991,8 @@ finally:
 
     def test_a_streamed_check_keeps_the_time_limit_and_is_not_held_by_what_it_left_behind(self):
         self.commit('b.txt', 'two')
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '1', command=['sh', '-c', 'echo "ci-local: stage logs in x"; sleep 30', 'scripts/ci-local'])
+        with self.simulated_limit(100):  # 100 s of running, once ci-local has started, against a 50 s limit
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', command=['sh', '-c', 'echo "ci-local: stage logs in x"; sleep 30', 'scripts/ci-local'])
         self.assertEqual(code, 1, out + err)
         self.assertRegex(out, r'demo +timed out')
         self.assertEqual(self.runs()[-1]['exit'], 1)
