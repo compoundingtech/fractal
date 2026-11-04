@@ -3,7 +3,7 @@ import { ClientError, FractalClient, type ActionOf, type ErrorEnvelope } from '@
 import { ActionResult, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
 import * as Data from 'effect/Data'
 import * as Effect from 'effect/Effect'
-import type { FractalOptions } from './read.ts'
+import type { FractalOptions } from './mod.ts'
 import { traceContextOf } from './trace.ts'
 
 /** The daemon refused an action; retain its wire response for caller-specific handling. */

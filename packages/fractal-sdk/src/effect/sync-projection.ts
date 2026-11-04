@@ -1,5 +1,5 @@
 import type { FollowFreshness } from './freshness.ts'
-import type { FollowFailure } from './read.ts'
+import type { FollowFailure } from './mod.ts'
 import type { StaleReason, SyncStatus } from './sync-status.ts'
 
 /** Missing metadata is unknown, never a made-up server reason or retry deadline. */
