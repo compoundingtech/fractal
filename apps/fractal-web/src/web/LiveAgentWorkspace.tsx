@@ -32,9 +32,11 @@ import { NarrowSheet } from '../../../../packages/fractal-ui/src/assistant-ui/co
 import { darkTheme as assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-theme.ts'
 import { lightTheme as compositionLightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import type { SidebarActions } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { PinsSection } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/PinsSection.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
+import { sidebarPins } from '../data/sidebarPins.ts'
 import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
@@ -424,7 +426,16 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
   // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
   const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
-  const sidebarActions = React.useMemo<SidebarActions>(() => ({ declaration: setDeclarationRef }), [])
+  const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
+  const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
+  const pinnedItems = React.useMemo(() => {
+    const names = new Map(agents.map(agent => [agent.ref, agent.name]))
+    return pins.state.members.map(({ member }) => ({ id: member, label: names.get(member) ?? member }))
+  }, [agents, pins.state.members])
+  const sidebarActions = React.useMemo<SidebarActions>(() => ({
+    declaration: setDeclarationRef,
+    ...(pins.editable ? { pins: { has: (ref: string) => pinned.has(ref), toggle: pins.toggle } } : {}),
+  }), [pins.editable, pins.toggle, pinned])
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
@@ -604,6 +615,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
           : null}
       </>}
     <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
+      <PinsSection items={pinnedItems} editable={pins.editable} onOpen={ref => open({ ref })} onUnpin={pins.toggle} detail={pins.state.phase === 'unavailable' ? 'Pins are unavailable. Reconnect to make changes.' : undefined} onRetry={pins.retry} />
       {fleet._tag === 'Waiting' ? <>
         <RosterLoading />
         <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
