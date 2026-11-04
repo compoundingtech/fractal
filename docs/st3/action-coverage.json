@@ -1320,7 +1320,7 @@
       "description": "Re-key this member in place after peers install its prepared Fabric identity",
       "tests": [
         "crates/fractal/src/main_tests.rs::fleet_rekey_accepts_only_an_explicit_fabric_transport",
-        "crates/fractal-api-core/src/api/fleet.rs::tests::signed_rekey_route_commits_preserves_refresh_and_rolls_back"
+        "crates/fractal-api-core/src/api/fleet.rs::signed_rekey_route_commits_preserves_refresh_and_rolls_back"
       ],
       "verification": "CLI parser accepts only explicit Fabric; the real API route publishes signed transitions, preserves worker refreshes and rolls back"
     },
