@@ -17,6 +17,23 @@ Upgrade your own fleet deliberately and keep all members on the same release. A 
 
 Use the existing package manager. Do not overwrite a Nix-owned path with an archive installer or change service ownership mid-upgrade.
 
+Keep `.fractal-install.json` beside your installed `bin/fractal`: installers use this
+ownership receipt to recognize their executable even when compatibility aliases are
+absent. It records the executable's SHA-256, schema, canonical name, installer, and
+incoming build's version and commit. Before replacing bytes, installers publish
+`.fractal-install.json.pending`; a retry can recognize those exact incoming bytes
+if interrupted before the receipt is finalized. Keep both files with the executable;
+do not delete them or copy them between builds. An invalid, symlinked, or mismatched
+receipt without a matching pending intent stops an upgrade with its path and
+reinstall guidance; restore the matching executable and receipt together before
+reinstalling through the original installer. The separate `RELEASE.json` is release
+display metadata, not an ownership receipt.
+
+The downloader verifies ownership receipts with Python 3, independently of the
+selected release's CLI protocol, so retained tags remain installable. It never
+executes the destination to verify ownership. Missing, dangling or unreadable
+receipt-bound executables are refused with the receipt path and reinstall guidance.
+
 ## Install and restart deliberately
 
 For an archive installation, use the [installer](https://github.com/compoundingtech/fractal/blob/main/install.sh) and its release-selection options. Install without opening the interface so you can inspect the selected build before restarting. For Home Manager, update the selected input and activate through the same configuration that owns the service.

@@ -19,6 +19,7 @@ const QUERY: &str = "SELECT requested.key,
     (SELECT claim_id FROM desired WHERE subject=requested.value),
     (SELECT COALESCE(SUM(DISTINCT CASE kind WHEN 'message.delivered' THEN 1 WHEN 'message.read' THEN 2
         WHEN 'message.closed' THEN 4 ELSE 0 END), 0) FROM local_message_marks WHERE message=requested.value)
+        + 8 * EXISTS(SELECT 1 FROM local_message_staged WHERE message=requested.value)
     FROM json_each(?1) AS requested ORDER BY requested.key";
 
 pub fn read(connection: &Connection, subjects: &[&str]) -> Result<Vec<Version>> {
