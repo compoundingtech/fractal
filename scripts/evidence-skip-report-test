@@ -43,7 +43,7 @@ class FakeGitHub:
                               'completed_at': (start + datetime.timedelta(minutes=minutes)).strftime('%Y-%m-%dT%H:%M:%SZ')}
                              for offset, (name, label, conclusion, minutes) in enumerate(jobs)]
 
-    def run(self, run_id, number, branch, decisions, files, actor='bot', hours_ago=2):
+    def run(self, run_id, number, branch, decisions, files, actor='bot', hours_ago=2, jobs=()):
         created = (NOW - datetime.timedelta(hours=hours_ago)).strftime('%Y-%m-%dT%H:%M:%SZ')
         self.runs.append({'id': run_id, 'status': 'completed', 'created_at': created, 'actor': {'login': actor}, 'head_branch': branch,
                           'head_sha': f'{run_id:040x}', 'pull_requests': [{'number': number}]})
@@ -52,6 +52,8 @@ class FakeGitHub:
             job_id = run_id * 100 + offset
             self.jobs[run_id].append({'id': job_id, 'name': f'evidence-gate-{check}', 'status': 'completed', 'conclusion': 'success'})
             self.lines[job_id] = [text]
+        for offset, (name, conclusion) in enumerate(jobs, start=len(decisions)):  # the checks' own jobs, beside their gates
+            self.jobs[run_id].append({'id': run_id * 100 + offset, 'name': name, 'status': 'completed', 'conclusion': conclusion})
         self.files[number] = files
 
     def gh(self, *args):
@@ -161,7 +163,7 @@ class SkipReport(unittest.TestCase):
         self.assertEqual([(e['pr'], e['seat'], e['checks']) for e in result['not_signed']],
                          [(101, 'agent/seat-one', ['linux-gate']), (102, 'unknown', ['typescript-client'])])
         text = report.markdown(result)
-        self.assertIn('| linux-gate | 0 | 1 | 1 | 1 |', text)
+        self.assertIn('| linux-gate | 0 | 0 | 1 | 1 | 1 |', text)
         self.assertIn('#101 `agent/a`, seat agent/seat-one: linux-gate (1 run(s))', text)
 
     def test_an_unsigned_run_of_a_check_whose_skip_is_off_is_shadow_unsigned_and_not_listed(self):
@@ -182,7 +184,29 @@ class SkipReport(unittest.TestCase):
         self.assertEqual(result['checks']['linux-gate']['not_signed'], 1, 'an enforced check pushed unsigned stays not_signed')
         self.assertEqual(result['checks']['typescript-client']['not_signed'], 1, 'a check the policy does not name stays not_signed')
         self.assertEqual([(e['pr'], e['checks']) for e in result['not_signed']], [(101, ['linux-gate', 'typescript-client'])])
-        self.assertIn('| linux-fleet-compat | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |', report.markdown(result))
+        self.assertIn('| linux-fleet-compat | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |', report.markdown(result))
+
+    def test_an_unsigned_check_that_passed_with_its_execution_skipped_was_not_run_and_is_not_listed(self):
+        # st-test does not sign fractal-web when no web input changed ("not relevant: CI does not run the lane"); the gate finds no note
+        # and refuses, but fractal-web-changes says nothing is web-relevant, so execution is skipped and the fractal-web job passes.
+        refused = line('fractal-web', decision='refuse', reason='wrong_check', tree_of='head')
+        gh = FakeGitHub()
+        gh.run(1, 101, 'agent/a', {'fractal-web': refused}, ['crates/x.rs'],
+               jobs=[('fractal-web-changes', 'success'), ('fractal-web-execution', 'skipped'), ('fractal-web', 'success')])
+        gh.run(2, 102, 'agent/b', {'fractal-web': line('fractal-web', decision='refuse', reason='wrong_check', tree_of='merge')},
+               ['crates/y.rs'], jobs=[('fractal-web-execution', 'skipped'), ('fractal-web', 'success')])
+        # Web-relevant and unsigned: the refusal fails the fractal-web job, so it is an unsigned push, still listed.
+        gh.run(3, 103, 'agent/c', {'fractal-web': refused}, ['apps/web/x.ts'],
+               jobs=[('fractal-web-execution', 'skipped'), ('fractal-web', 'failure')])
+        # A check with no execution job of its own (linux-gate runs in its gate's place) is never read as not relevant.
+        gh.run(4, 104, 'agent/d', {'linux-gate': line('linux-gate', tree_of='head')}, ['crates/z.rs'], jobs=[('linux-gate', 'success')])
+        result = report.report(gh, ROOT, git_runner, NOW - datetime.timedelta(hours=24), NOW, {'bot'}, [])
+        self.assertEqual(result['checks']['fractal-web']['not_relevant'], 2)
+        self.assertEqual(result['checks']['fractal-web']['not_signed'], 1)
+        self.assertEqual(result['checks']['fractal-web']['merge_tree'], 0)
+        self.assertEqual(result['checks']['linux-gate']['not_signed'], 1)
+        self.assertEqual([(e['pr'], e['checks']) for e in result['not_signed']], [(103, ['fractal-web']), (104, ['linux-gate'])])
+        self.assertIn('| fractal-web | 0 | 2 | 0 | 0 | 1 |', report.markdown(result))
 
     def test_release_surface_pull_request_runs_are_counted_apart_with_their_minutes(self):
         gh = FakeGitHub()
