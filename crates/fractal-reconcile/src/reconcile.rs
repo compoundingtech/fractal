@@ -20729,6 +20729,7 @@ pub mod tests {
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;
+    mod scheduled_child_wake;
     mod ref_watch_tests;
     mod revision_seat_tests;
     mod rollout_tests;
