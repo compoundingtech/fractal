@@ -427,8 +427,10 @@ exchange names it with `shard_id = "messages"`; the default store's exchanges om
   every shard sequence while it has not ended. Before a member's leave, it writes
   `fleet.shard-bounds` (`member_key`, `shard_high_water: {"messages": N}`) with its own last
   shard sequence, signed by its own key, as `fleet.member-left` is, and only when N > 0. A key
-  that left counts at or below its N, and at none without bounds. A key superseded without a
-  leave, or removed, never counts. An older build holds the bounds as `unknown-claim-kind`
+  that left counts at or below its N, and at none without bounds. Bounds count only at a
+  writer sequence at or below the key's `fleet.member-left` (the two can share an envelope), so
+  bounds the key signs after it left, or that whoever holds it later signs, raise nothing. A
+  key superseded without a leave, or removed, never counts. An older build holds the bounds as `unknown-claim-kind`
   (one record per leave attempt), fences that key at every shard sequence until it upgrades,
   and then admits the bounds on retry. The graph admits membership on its own schedule (at
   startup after the shard, and as its claims replicate), so the shard records the graph's fleet

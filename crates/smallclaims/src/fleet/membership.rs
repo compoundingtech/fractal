@@ -78,6 +78,9 @@ pub struct Incarnation {
     /// Per shard, the last sequence this key wrote in the shard before it left, from its own
     /// `fleet.shard-bounds`. A shard it names in none is bounded at 0.
     pub shard_high_water: BTreeMap<String, u64>,
+    /// The writer sequence of this key's first counted `fleet.member-left`. Bounds count only at
+    /// or below it: a leave writes its bounds first, and the two can share an envelope.
+    left_sequence: Option<u64>,
     /// Who removed it and why, from the removal claim.
     pub removed_by: Option<String>,
     pub removal_reason: Option<String>,
@@ -92,6 +95,12 @@ impl Incarnation {
 
     fn holds(&self, sequence: u64) -> bool {
         sequence >= self.start && self.end.is_none_or(|end| sequence <= end)
+    }
+
+    /// Whether bounds at this writer sequence come no later than the key's leave. Bounds
+    /// written after it, by the key once it left or by anyone who holds it later, bound nothing.
+    fn bounds_precede_leave(&self, sequence: u64) -> bool {
+        self.left_sequence.is_none_or(|left| sequence <= left)
     }
 }
 
@@ -188,11 +197,30 @@ impl Membership {
                 end: None,
                 ended: None,
                 shard_high_water: BTreeMap::new(),
+                left_sequence: None,
                 removed_by: None,
                 removal_reason: None,
                 endpoints: Vec::new(),
                 endpoints_sequence: None,
             });
+        }
+        // Claims fold in ID order, which says nothing of when they were written, so each key's
+        // leave is placed by its writer sequence before any bounds are read.
+        for claim in counted.iter().filter(|claim| claim.kind == MEMBER_LEFT) {
+            let (Some(name), Some(key)) = (claim.name(), claim.text("member_key")) else {
+                continue;
+            };
+            if let Some(incarnation) = membership
+                .incarnations
+                .get_mut(name)
+                .and_then(|all| all.iter_mut().find(|i| i.member_key == key))
+            {
+                incarnation.left_sequence = Some(
+                    incarnation
+                        .left_sequence
+                        .map_or(claim.sequence, |left| left.min(claim.sequence)),
+                );
+            }
         }
         for claim in &counted {
             let Some(name) = claim.name() else {
@@ -245,6 +273,7 @@ impl Membership {
                         .incarnations
                         .get_mut(name)
                         .and_then(|all| all.iter_mut().find(|i| i.member_key == key))
+                        && incarnation.bounds_precede_leave(claim.sequence)
                     {
                         for (shard, sequence) in claim.shard_sequences("shard_high_water") {
                             let end = incarnation.shard_high_water.entry(shard).or_default();
@@ -449,6 +478,12 @@ fn claim_counts(anchor: &str, claim: &FleetClaim, membership: &Membership) -> bo
                 name == Some(claim.writer.as_str())
                     && keys.contains(key)
                     && claim.signers.contains(key)
+                    && (claim.kind != SHARD_BOUNDS
+                        || membership
+                            .incarnations
+                            .get(claim.writer.as_str())
+                            .and_then(|all| all.iter().find(|i| i.member_key == key))
+                            .is_none_or(|incarnation| incarnation.bounds_precede_leave(claim.sequence)))
             })
         }
         // A member is admitted by another member, never by itself (except the anchor).
@@ -645,6 +680,32 @@ mod tests {
         assert!(!membership.counts("6-a-bounds-b"));
         assert!(!membership.counts("8-b-late-bounds"));
         assert_eq!(membership.shard_window("messages", "b", 1), Window::Fenced);
+    }
+
+    /// Bounds the key signs after its leave raise nothing, even inside its writer window: a
+    /// key that left, or leaks later, cannot widen what its shard envelopes are admitted for.
+    /// Bounds in the leave's own envelope, or before it, still count.
+    #[test]
+    fn bounds_a_left_key_writes_after_its_leave_do_not_raise_its_window() {
+        let mut claims = base();
+        claims.push(bounds("6-b-bounds", "b", "kb", 7, 8));
+        claims.push(left("7-b-leaves", "b", "kb", 20, 9));
+        // Inside the window the leave's high water gives (up to 20), but after the leave.
+        claims.push(bounds("8-b-after-leave", "b", "kb", 500, 10));
+        let membership = Membership::fold(Some("ka"), &claims);
+        assert!(membership.counts("6-b-bounds"));
+        assert!(membership.counts("7-b-leaves"));
+        assert!(!membership.counts("8-b-after-leave"));
+        assert_eq!(membership.shard_window("messages", "b", 7), keyed(&["kb"]));
+        assert_eq!(membership.shard_window("messages", "b", 8), Window::Fenced);
+        assert_eq!(membership.shard_window("messages", "b", 500), Window::Fenced);
+
+        let mut together = base();
+        together.push(bounds("6-b-bounds", "b", "kb", 7, 9));
+        together.push(left("7-b-leaves", "b", "kb", 9, 9));
+        let membership = Membership::fold(Some("ka"), &together);
+        assert!(membership.counts("6-b-bounds"));
+        assert_eq!(membership.shard_window("messages", "b", 7), keyed(&["kb"]));
     }
 
     /// A key superseded without a leave never counts in a shard, even with bounds it signed.
