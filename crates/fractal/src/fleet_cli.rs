@@ -1121,7 +1121,8 @@ async fn save_and_publish_fleet_settings(
         });
     }
     let pending = actor.map(|_| fractal_daemon::config::FleetFile::path(&config.state_dir).with_extension("transport-change.json"));
-    let mutation_id = if let Some(path) = &pending {
+    let mut announcement = json!({"mode": file.mode.as_str(), "endpoints": endpoints});
+    let published: Result<Value> = if let Some(path) = &pending {
         let settings = serde_json::to_value(file)?;
         let base = serde_json::to_value(fractal_daemon::config::FleetFile::load(&config.state_dir)?)?;
         let intent: Value = match fs::read(path) {
@@ -1129,20 +1130,17 @@ async fn save_and_publish_fleet_settings(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
             Err(error) => return Err(error.into()),
         };
-        Some(if intent["base"] == base && intent["actor"].as_str() == actor && intent["target"] == settings {
-            intent["mutation_id"].as_str().context("pending transport change needs a mutation ID")?.to_owned()
+        let request = if intent["base"] == base && intent["actor"].as_str() == actor && intent["target"] == settings {
+            intent["request"].as_str().context("pending transport change needs its request")?.to_owned()
         } else {
-            let id = format!("fleet-transports:{}", uuid::Uuid::now_v7());
-            fractal_daemon::fleet::join::write_private(path, &serde_json::to_vec(&json!({"mutation_id": id, "base": base, "actor": actor, "target": settings}))?)?;
-            id
-        })
-    } else { None };
-    let announcement = json!({"mode": file.mode.as_str(), "endpoints": endpoints});
-    let published: Result<Value> = if let Some((actor, mutation_id)) = actor.zip(mutation_id.as_deref()) {
-        let mut change = announcement;
-        change["actor"] = json!(actor);
-        change["mutation_id"] = json!(mutation_id);
-        client.post("/v1/fleet/transports", &change).await
+            announcement["actor"] = json!(actor);
+            announcement["mutation_id"] = json!(format!("fleet-transports:{}", uuid::Uuid::now_v7()));
+            let request = serde_json::to_string(&announcement)?;
+            fractal_daemon::fleet::join::write_private(path, &serde_json::to_vec(&json!({"base": base, "actor": actor, "target": settings, "request": request}))?)?;
+            request
+        };
+        let raw: &serde_json::value::RawValue = serde_json::from_str(&request)?;
+        client.post("/v1/fleet/transports", &raw).await
     } else {
         client.post("/v1/internal/fleet/endpoints", &announcement).await
     };

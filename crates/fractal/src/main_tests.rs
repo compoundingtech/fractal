@@ -17,11 +17,11 @@ fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
 #[tokio::test]
 async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
     use fractal_store::store::fleet_admission_tests_shared_seats::{FLEET, admit, key, node};
-    for (changed_base, actor, count) in [(false, "agent/example", 1), (true, "agent/example", 2), (false, "agent/other", 2)] {
+    for (changed_base, actor, changed_endpoints, count) in [(false, "agent/example", false, 1), (true, "agent/example", false, 2), (false, "agent/other", false, 2), (false, "agent/example", true, 1)] {
         let root = tempfile::tempdir().unwrap();
         let config = Config { node: "local".into(), state_dir: root.path().into(), ..Config::default() };
         let file = fractal_daemon::config::FleetFile {
-            fleet_id: FLEET.into(), transports: vec!["tailscale".into(), "fabric".into(), "loopback".into()], ..Default::default()
+            fleet_id: FLEET.into(), port: Some(123), transports: vec!["tailscale".into(), "fabric".into(), "loopback".into()], ..Default::default()
         };
         file.save(root.path()).unwrap();
         let path = fractal_daemon::config::FleetFile::path(root.path());
@@ -32,16 +32,20 @@ async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
         let published = store.clone();
         let membership = store.clone();
         let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let observations = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = observations.clone();
         let app = axum::Router::new()
             .route("/v1/fleet/membership", axum::routing::get(move || {
-                let store = membership.clone(); async move { axum::Json(store.fleet_view().unwrap()) }
+                let mut view = membership.fleet_view().unwrap();
+                view.members[0].endpoints = if observed.load(std::sync::atomic::Ordering::SeqCst) { vec![] } else { vec![json!({"transport":"tailscale", "address":"100.64.0.1:123"})] };
+                async move { axum::Json(view) }
             }))
             .route("/v1/fleet/transports", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
                 let store = published.clone();
                 let lost = body["dry_run"] != true && fail.swap(false, std::sync::atomic::Ordering::SeqCst);
                 async move {
                     if body["dry_run"] != true {
-                        store.publish_fleet_endpoints(body["mode"].as_str().unwrap(), &[], "test",
+                        store.publish_fleet_endpoints(body["mode"].as_str().unwrap(), body["endpoints"].as_array().unwrap(), "test",
                             Some((body["actor"].as_str().unwrap(), body["mutation_id"].as_str().unwrap()))).unwrap();
                     }
                     (if lost { axum::http::StatusCode::INTERNAL_SERVER_ERROR } else { axum::http::StatusCode::OK }, axum::Json(json!({})))
@@ -55,6 +59,7 @@ async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(path.with_extension("transport-change.json").exists());
         if changed_base { let mut edited = file.clone(); edited.transports.swap(1, 2); edited.save(root.path()).unwrap(); }
+        observations.store(changed_endpoints, std::sync::atomic::Ordering::SeqCst);
         run_fleet_transports(&client, &config, prefer(actor), true).await.unwrap();
         assert_eq!(store.claims_for("host/local", Some("fleet.member-endpoints")).unwrap().len(), count);
         assert_eq!(store.latest_claim("host/local", Some("fleet.member-endpoints")).unwrap().unwrap().actor.as_deref(), Some(actor));
