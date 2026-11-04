@@ -98,10 +98,8 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
             }
         } else { children.push(rendered); }
     }
-    if parent.is_some() {
-        if let Some(first) = children.first_mut() {
-            annotations(first, mission.declarations_kdl.as_deref(), &mission.revision_owners, &mission.agent_constraints);
-        }
+    if parent.is_some() && let Some(first) = children.first_mut() {
+        annotations(first, mission.declarations_kdl.as_deref(), &mission.revision_owners, &mission.agent_constraints);
     }
     Ok(children)
 }
@@ -198,7 +196,7 @@ mod tests {
             title "Work"; goal "Do the work."; constraint "Do not drop fields."; fresh-context; keep-open
             capacity cores=3 memory="2G"; available-to "agent/a"; available-to "agent/b"
             depends-on { exists "file/node:/test"; }; baseline "start" { exists "file/node:/test"; }
-            document "doc/test"; retry { attempts 3; backoff "2ms"; }
+            document "doc/test@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; retry { attempts 3; backoff "2ms"; }
             agent "worker" { constraint "Keep this visible."; workspace "."; command "secret embedded declaration"; }
             produces { message "message/step" { text "complete"; }; }
             produces-mission "produced"
