@@ -140,7 +140,7 @@ mod tests {
     }
 
     fn body(mission: &MissionSpec) -> Result<Vec<KdlNode>, St3Error> {
-        Ok(vec![text("goal", &mission.goals[0]), block(node("completion", []),
+        Ok(vec![text("goal", &mission.goals[1]), block(node("completion", []),
             vec![text("when", "all-steps-exhausted")])])
     }
 
