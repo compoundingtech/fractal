@@ -19,6 +19,9 @@ use fractal_daemon::model::{ClaimInput, MessagePage, MessageView};
 fn st3() -> &'static str {
     test_env!("CARGO_BIN_EXE_fractal-fixture")
 }
+mod process;
+use process::DaemonProcess;
+
 const PERSON: &str = "person/fleet-tester";
 const NOTE: &str = "custom.fleet-test.note";
 
@@ -124,7 +127,7 @@ pub(super) struct Node {
     binary: PathBuf,
     pub(super) port: u16,
     pub(super) env: Vec<(String, String)>,
-    daemon: Option<Child>,
+    daemon: Option<DaemonProcess>,
     worker: Option<Child>,
     /// Every argument list this test passed to an st3 process on this node.
     arguments: std::sync::Mutex<Vec<Vec<String>>>,
@@ -296,13 +299,12 @@ impl Node {
         } else {
             vec!["up", "--web-listen", "off"]
         };
-        let daemon = self
-            .command(&up)
-            .stdin(Stdio::null())
-            .stdout(log("daemon.log"))
-            .stderr(log("daemon.stderr.log"))
-            .spawn()
-            .unwrap();
+        let daemon = DaemonProcess::spawn_isolated(
+            self.command(&up),
+            log("daemon.log"),
+            log("daemon.stderr.log"),
+        )
+        .unwrap();
         self.daemon = Some(daemon);
         let client = self.client();
         // The release compatibility binary may start while other CI lanes compile.
@@ -364,13 +366,10 @@ impl Node {
     }
 
     fn stop(&mut self) {
-        for child in [self.worker.take(), self.daemon.take()]
-            .into_iter()
-            .flatten()
-        {
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
+        self.stop_worker();
+        if let Some(mut daemon) = self.daemon.take() {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
         }
         let _ = fs::remove_file(self.root.join("worker.pid"));
         let _ = fs::remove_file(self.socket());
@@ -378,12 +377,18 @@ impl Node {
 
     /// Send `signal` (such as `STOP` or `CONT`) to this node's daemon and worker.
     fn signal(&self, signal: &str) {
-        for child in [&self.daemon, &self.worker].into_iter().flatten() {
+        for pid in [
+            self.daemon.as_ref().map(DaemonProcess::id),
+            self.worker.as_ref().map(Child::id),
+        ]
+        .into_iter()
+        .flatten()
+        {
             let status = Command::new("kill")
-                .args([format!("-{signal}"), child.id().to_string()])
+                .args([format!("-{signal}"), pid.to_string()])
                 .status()
                 .unwrap();
-            assert!(status.success(), "kill -{signal} {}", child.id());
+            assert!(status.success(), "kill -{signal} {pid}");
         }
     }
 
