@@ -402,10 +402,44 @@ in
             installReceipt="$binDir/.fractal-install.json"
             pendingReceipt="$installReceipt.pending"
             receiptOwned=false
+            # Boundary for rollback through a pre-receipt HM generation: that
+            # generation replaces the payload but leaves the newer HM receipt.
+            # Trust only the previous active generation's immutable package and
+            # intact reverse aliases, never an arbitrary digest mismatch.
+            previousHmPayload() {
+              local previous name hash
+              [[ -f "$installReceipt" && ! -L "$installReceipt" ]] || return 1
+              [[ ! -e "$pendingReceipt" && ! -L "$pendingReceipt" ]] || return 1
+              [[ -f "$target" && -x "$target" ]] || return 1
+              for name in st st3; do
+                [[ -L "$binDir/$name" ]] || return 1
+                case "$(${pkgs.coreutils}/bin/readlink "$binDir/$name")" in
+                  fractal|"$target") ;;
+                  *) return 1 ;;
+                esac
+              done
+              [[ -n "''${oldGenPath:-}" ]] || return 1
+              previous=$(${pkgs.coreutils}/bin/readlink -e "$oldGenPath/home-path/bin/fractal") || return 1
+              [[ "$previous" =~ ^/nix/store/[0-9a-z]{32}-[^/]+/ ]] || return 1
+              [[ -f "$previous" && -x "$previous" ]] || return 1
+              ${pkgs.diffutils}/bin/cmp -s "$previous" "$target" || return 1
+              hash=$(${pkgs.coreutils}/bin/sha256sum "$target") || return 1
+              hash=''${hash%% *}
+              ${pkgs.jq}/bin/jq -e -s --arg hash "$hash" '
+                length == 1 and (.[0] |
+                  type == "object" and .schema == 1 and .name == "fractal"
+                  and .installer == "hm"
+                  and (.sha256 | type == "string" and test("^[0-9a-fA-F]{64}$"))
+                  and .sha256 != $hash)
+              ' "$installReceipt" >/dev/null 2>&1
+            }
             if [[ -e "$installReceipt" || -L "$installReceipt" || -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
               # The incoming executable owns the receipt parser and checks it
               # against the prior installed payload before any replacement.
-              if ! "$source" setup --receipt-verify "$binDir"; then
+              if receiptError=$("$source" setup --receipt-verify "$binDir" 2>&1); then
+                if [[ -n "$receiptError" ]]; then printf '%s\n' "$receiptError" >&2; fi
+              elif ! previousHmPayload; then
+                if [[ -n "$receiptError" ]]; then printf '%s\n' "$receiptError" >&2; fi
                 printf 'Home Manager: invalid install receipt %s; reinstall Fractal to restore ownership.\n' "$installReceipt" >&2
                 exit 1
               fi

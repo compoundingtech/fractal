@@ -588,6 +588,14 @@ read or computed.
 **Inputs:** the agent row's runtime, harness observation, delivery, fault and queue, which the
 roster refresher already folds.
 
+An agent root without a primary member reduces only its currently declared, owned exec/PTY
+children. Unsuccessful exits are failures; failed or unknown children cannot be hidden by a
+running sibling. It is stopped only when all children have ended successfully or stopped.
+Its `runtime_ids` contains observed runtime resources, never unobserved declarations, ordered
+with terminal-capable runtimes first and then by runtime ID within each class. Clients may use
+the first resource to discover an available terminal. Root host/workspace come from root
+placement, not an arbitrary child's override; unresolved host placement remains unknown.
+
 | | Derivation | Differs from this contract |
 |---|---|---|
 | Terminal UI | Reads `presentation.state` and `because` (`crates/fractal-tui/src/ui/adapt.rs`); its derivation moved to `fractal-ui-model::agents` | Its labels still use mission titles from the missions window. |
@@ -662,6 +670,11 @@ the published revision rendered as KDL by Fractal's one renderer. Clients show i
 needs the same `read.declarations` grant as `publication.definition`. A refusal reads "Fractal does not
 show this declaration to this device". A published revision never changes, so this read reads
 it directly. It is a `person-read` path.
+
+The mission renderer emits deterministic KDL from `MissionSpec`, not original authored bytes.
+It redacts environment values and embedded declaration KDL. URI edges use stored subjects because
+published revisions do not retain URI locators. Legacy collection loops use their last accepted
+syntax with a `legacy loop shape` comment; the current parser still rejects those shapes.
 
 Today no client reads a declaration: the terminal UI shows one only in the demo, and
 `subject.definition` refuses missions.
