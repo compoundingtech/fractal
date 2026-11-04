@@ -445,10 +445,11 @@ def build_candidate(row, private_hash, checkpoints):
         known[key]={'outcome':'built','sha':row['sha']}
         atomic_json(cache,known)
         return True
+    full=text('rev-parse','HEAD')
+    # A refused probe must abort without poisoning the tree cache or ejecting a PR.
+    failed=first_break([c['sha'] for c in checkpoints],probe_revision)
     known[key]={'outcome':'failed','sha':row['sha']}
     atomic_json(cache,known)
-    full=text('rev-parse','HEAD')
-    failed=first_break([c['sha'] for c in checkpoints],probe_revision)
     git('checkout','-B','live-r3',full)
     if failed is None:
         raise RuntimeError('integrated build failed; no attributable single PR; previous build retained')
@@ -584,7 +585,11 @@ def install():
             cwd=C, timeout=900, sandbox_shell='web', network=True)
         state.write_text(lockhash)
 def build(name):
-    return run(['bash',BUILD_SCRIPT,C,text('rev-parse','HEAD'),name],check=False)
+    result=run(['bash',BUILD_SCRIPT,C,text('rev-parse','HEAD'),name],check=False)
+    # EX_TEMPFAIL is host capacity, never evidence about the candidate (or probe).
+    if result.returncode == 75:
+        result.check_returncode()
+    return result
 def recovery_select_build(sha):
     if not isinstance(sha,str) or not re.fullmatch(r'[0-9a-f]{40}',sha):
         raise ValueError('cached build has no full revision')
@@ -932,6 +937,9 @@ def tick():
         print('selection deadline:', error, flush=True)
     except Exception as e:
         row['error']=str(e)
+        if isinstance(e,subprocess.CalledProcessError) and e.returncode == 75:
+            row.update(build='error', reason='capacity-refused', retryable=True,
+                       error=f'capacity-refused: retryable host capacity refusal; previous build retained: {e}')
         if isinstance(e,subprocess.CalledProcessError):
             detail=((e.stdout or '') + '\n' + (e.stderr or '')).strip()
             # Host Git refusals must name every rejected key, without truncation.
