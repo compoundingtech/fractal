@@ -50,7 +50,8 @@ import { FolderAttentionSignal } from './AttentionControls.tsx'
 import { liveShowRows, liveSidebarTree } from './liveSidebarTree.ts'
 import { RosterLoading, RosterStaleNotice, RosterUnavailable, SidebarEmptyState } from './SidebarEmptyState.tsx'
 import { useAgentsLastObservedAt } from './lastObserved.tsx'
-import { ResponsiveAgentSidebar, sidebarMinimumWidth, useSidebarShortcut } from './ResponsiveAgentSidebar.tsx'
+import { ResponsiveAgentSidebar, sidebarMinimumWidth, useSidebarShortcut, useSidebarNavigation } from './ResponsiveAgentSidebar.tsx'
+import { SidebarTabs } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTabs.tsx'
 import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-line.ts'
 import { RosterDecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
@@ -454,6 +455,13 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const folderSource = useDataSource()
   const sidebarSettings = (folderSource.mode === 'fixtures' ? fixtureSidebarState : sidebarState)(folderSource.gateway ?? folderSource.mode)
   const [filters, setFilters] = useAtom(sidebarSettings.filters)
+  const [sidebarTab, setSidebarTab] = useAtom(sidebarSettings.tab)
+  const showAgents = React.useCallback(() => {
+    setSidebarTab('agents')
+    if (narrow) agentsDrawer.current?.open()
+    else setCollapsed(false)
+  }, [setSidebarTab, narrow, setCollapsed])
+  const shortcutHelp = useSidebarNavigation(showAgents)
   const machineMemory = useMachineMemory()
   const asking = useAskingAgents()
   // The query is the only Show state; live gateways start from this browser's remembered machines.
@@ -576,7 +584,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     </header>
     <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
   </aside>
-  const sidebarBody = <>
+  const sidebarBody = <SidebarTabs selectedId={sidebarTab === 'agents' ? sidebarTab : 'agents'} onSelectionChange={() => setSidebarTab('agents')} tabs={[{ id: 'agents', label: 'Agents', questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }]}>
     <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
     {fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
       : fleet._tag !== 'Observed' ? null
@@ -606,7 +614,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       <ChromeControl icon="checklist" label="Missions" tooltipPlacement="top" onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} />
       <ChromeControl icon="gauge" label="Usage" tooltipPlacement="top" onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} />
     </SidebarChromeFooter>
-  </>
+  </SidebarTabs>
   // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
   // Only the stable header DOM host and narrow geometry cross that boundary.
   return (<NarrowLayoutContext.Provider value={narrow}>
@@ -615,6 +623,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} style={phoneViewportStyle} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
+              {shortcutHelp}
               {narrow ? null : <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)} headerActions={<ClockedAlertsPopover onOpen={select} />}>{sidebarBody}</ResponsiveAgentSidebar>}
               <DockedSplit persistKey={persistGeometry ? `live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}` : undefined} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
                 <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
