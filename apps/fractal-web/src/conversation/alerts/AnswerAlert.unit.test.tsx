@@ -225,7 +225,7 @@ describe('AnswerAlert', () => {
 
   it('opens the first of several alerts and folds the rest under their titles', () => {
     const html = renderToStaticMarkup(
-      <AgentAlerts alerts={[item({ id: 'attention/one', title: 'First?' }), item({ id: 'attention/two', title: 'Second?' })]} calls={[]} onAct={async () => ({ _tag: 'Sent' })} />,
+      <AgentAlerts alerts={[item({ id: 'attention/one', title: 'First?' }), item({ id: 'attention/two', title: 'Second?' })]} onAct={async () => ({ _tag: 'Sent' })} />,
     )
     expect(html).toContain('◆ 2 alerts')
     expect(html.indexOf('First?')).toBeLessThan(html.indexOf('<details'))
@@ -351,20 +351,20 @@ describe('served sidebar prompts', () => {
       },
     })
     const html = renderToStaticMarkup(
-      <AgentAlerts alerts={[alert]} calls={[]} served onAnswer={async () => ({ _tag: 'Sent' })} />,
+      <AgentAlerts alerts={[alert]} onAnswer={async () => ({ _tag: 'Sent' })} />,
     )
     expect(html).toContain('deploy')
     expect(html.includes('>Allow</button>')).toBe(allow)
     expect(html).toContain('>Deny</button>')
   })
 
-  it('offers no allow action when a daemon serves no calls, even with unrelated conversation calls', () => {
+  it('offers no allow action when a daemon serves no calls', () => {
     const alert = item({
       attention_kind: 'harness-prompt', actions: ['prompt.respond'],
       action_parameters: { 'prompt.respond': { episode: 'prompt/one', call_id: 'call/one', answers: ['allow', 'deny'] } },
     })
     const html = renderToStaticMarkup(
-      <AgentAlerts alerts={[alert]} calls={[{ id: 'call/one', tool: 'Bash', lines: ['deploy'] }]} served onAnswer={async () => ({ _tag: 'Sent' })} />,
+      <AgentAlerts alerts={[alert]} onAnswer={async () => ({ _tag: 'Sent' })} />,
     )
     expect(html).not.toContain('>Allow</button>')
     expect(html).toContain('>Deny</button>')
