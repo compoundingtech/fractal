@@ -14,6 +14,9 @@ use smallclaims::store::AdmittedStore;
 
 use crate::config::{Config, STORE_DATABASE_FILES, store_dir};
 
+#[cfg(feature = "test-support")]
+pub mod stop_fixture;
+
 const FILE: &str = "node-identity.json";
 
 #[derive(Debug)]
@@ -130,6 +133,108 @@ pub fn lock(state_dir: &Path) -> Result<StateLock> {
 /// Hold the daemon's store-directory fence without creating any lock or database files.
 pub fn lock_directory(directory: &Path) -> Result<File> {
     lock_directory_for(directory, "store")
+}
+
+/// Prove that a stopped daemon has released both state locks, including inherited
+/// descriptors. This is a shutdown barrier: it never creates state or changes admission.
+pub fn wait_for_release(directory: &Path, deadline: std::time::Instant) -> Result<()> {
+    loop {
+        match try_stop_locks(directory) {
+            Ok(()) => return Ok(()),
+            Err(error) => match error.downcast_ref::<std::io::Error>().map(|e| e.kind()) {
+                Some(std::io::ErrorKind::NotFound) => return Ok(()),
+                Some(std::io::ErrorKind::WouldBlock) => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        anyhow::bail!(
+                            "state directory {} lock still held after stop; {}",
+                            directory.display(),
+                            lock_holders(directory)
+                        );
+                    }
+                    std::thread::sleep(remaining.min(std::time::Duration::from_millis(50)));
+                }
+                _ => return Err(error),
+            },
+        }
+    }
+}
+
+fn try_stop_locks(directory: &Path) -> Result<()> {
+    // Match startup's lock order without creating either directory or lock file.
+    let _directory = lock_directory_for(directory, "state")?;
+    let path = directory.join("node-identity.lock");
+    let file = match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
+    };
+    // SAFETY: both Files remain owned until this nonblocking attempt completes.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("lock {} after stop", path.display()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn lock_holders(directory: &Path) -> String {
+    let locks = [directory.to_path_buf(), directory.join("node-identity.lock")];
+    let inodes = locks.iter().filter_map(|path| {
+        fs::metadata(path).ok().map(|metadata| (metadata.dev(), metadata.ino(), path))
+    }).collect::<Vec<_>>();
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return "holders unavailable".into();
+    };
+    let mut holders = Vec::new();
+    for process in processes.flatten() {
+        let pid = process.file_name();
+        if !pid.as_encoded_bytes().iter().all(u8::is_ascii_digit) {
+            continue;
+        }
+        let Ok(descriptors) = fs::read_dir(process.path().join("fd")) else {
+            continue;
+        };
+        for descriptor in descriptors.flatten() {
+            let Ok(metadata) = fs::metadata(descriptor.path()) else {
+                continue;
+            };
+            let Some((_, _, path)) = inodes.iter().find(|(dev, ino, _)|
+                *dev == metadata.dev() && *ino == metadata.ino()
+            ) else { continue };
+            let Ok(info) =
+                fs::read_to_string(process.path().join("fdinfo").join(descriptor.file_name()))
+            else {
+                continue;
+            };
+            if info
+                .lines()
+                .any(|line| line.starts_with("lock:") && line.contains("FLOCK"))
+            {
+                // The lock record may name a dead ancestor. The /proc path names
+                // the process that actually retains this open file description.
+                holders.push(format!(
+                    "pid {} fd {} ({})",
+                    pid.to_string_lossy(),
+                    descriptor.file_name().to_string_lossy(),
+                    path.display()
+                ));
+                if holders.len() == 16 {
+                    return holders.join(", ");
+                }
+            }
+        }
+    }
+    if holders.is_empty() {
+        "holders unavailable".into()
+    } else {
+        holders.join(", ")
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lock_holders(_directory: &Path) -> String {
+    "holder details unavailable on this platform".into()
 }
 
 fn lock_directory_for(directory: &Path, kind: &str) -> Result<File> {

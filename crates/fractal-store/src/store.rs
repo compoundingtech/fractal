@@ -53,6 +53,7 @@ pub mod schedule_active_run_tests;
 pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod mission_capacity;
+pub mod marks_switch;
 pub mod glasses;
 pub mod mailbox_wakes;
 pub mod mailbox_changes;
@@ -220,6 +221,7 @@ pub mod summary_list;
 pub mod attention_ivm;
 pub mod backup;
 pub mod backup_ledgers;
+pub mod backup_shards;
 pub mod checkpoint_rules;
 pub mod harness_questions;
 pub mod checkpoint_status;
@@ -736,7 +738,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h409e2e2924d3 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h41cc86459915 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1231,6 +1233,12 @@ WHERE available_to!='[]';
 -- The steps that have not finished, a few of every step a fleet has run.
 CREATE INDEX IF NOT EXISTS step_runs_open_index ON step_runs(created_at_unix_ms, step_path)
 WHERE status NOT IN ('completed','failed','cancelled');
+-- Exact local native question generations. Registered before the observation; retained
+-- until its existing resolution claim is durable. Not a replicated lease or wall-clock TTL.
+CREATE TABLE IF NOT EXISTS local_harness_question_generations (
+    question TEXT PRIMARY KEY,
+    generation TEXT NOT NULL
+) WITHOUT ROWID;
 -- This daemon's native subscription ownership is transport state, outside shared projections.
 CREATE TABLE IF NOT EXISTS local_mailbox_owners (
     subject TEXT NOT NULL,
@@ -10799,6 +10807,17 @@ fn first_unknown_kind(kinds: impl IntoIterator<Item = String>) -> Option<String>
     kinds.into_iter().find(|kind| !known_replicated_claim_kind(kind))
 }
 
+/// The recipient a graph message was sent to, as its send names it.
+fn message_recipient_tx(connection: &Connection, subject: &str) -> Result<Option<String>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT json_extract(body,'$.fields.to') FROM claims WHERE subject=?1 AND kind='message.sent' LIMIT 1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-had57f3887933 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))
+        .optional()?
+        .flatten())
+}
+
 fn validate_message_transition(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
@@ -11509,6 +11528,7 @@ pub(crate) fn message_view_from(
         body_bytes: body.as_ref().map(|body| body.size),
         body_origin: body.map(|body| body.origin),
         created_index,
+        status_from: None,
     })
 }
 
@@ -19890,6 +19910,7 @@ fn enrich_step_wake_with(
             last_attempt_at_unix_ms: None,
             acknowledged_by: None,
             failure: None,
+            asks: Default::default(),
         });
         return Ok(());
     }
@@ -19904,8 +19925,8 @@ fn enrich_step_wake_with(
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h98fccb80a458 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-        "SELECT claims.body, claims.accepted_at_unix_ms,
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-habf9fbe214b0 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT claims.body, claims.accepted_at_unix_ms, claims.subject,
                 EXISTS(SELECT 1 FROM claims consumed
                        WHERE consumed.subject=claims.subject
                          AND consumed.kind IN ('message.read','message.closed')
@@ -19926,6 +19947,9 @@ fn enrich_step_wake_with(
                        WHERE staged.subject=claims.subject
                          AND staged.kind='message.staged'
                          AND staged.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_staged staged
+                       WHERE staged.message=claims.subject
+                         AND staged.recorded_at_unix_ms<=CAST(?1 AS INTEGER))
          FROM claims INDEXED BY claims_message_to_index
          WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
            AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
@@ -19943,14 +19967,15 @@ fn enrich_step_wake_with(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, bool>(2)?,
+                row.get::<_, String>(2)?,
                 row.get::<_, bool>(3)?,
                 row.get::<_, bool>(4)?,
+                row.get::<_, bool>(5)?,
             ))
         },
     )?;
     for row in rows {
-        let (body, accepted, consumed, delivered, staged) = row?;
+        let (body, accepted, message, consumed, delivered, staged) = row?;
         let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
         let fields = body.get("fields").unwrap_or(&body);
         if fields
@@ -19984,6 +20009,7 @@ fn enrich_step_wake_with(
                 consumed,
                 delivered,
                 staged,
+                message,
             ));
         }
     }
@@ -20014,14 +20040,14 @@ fn enrich_step_wake_with(
         Some("claim".into())
     } else if attempts
         .iter()
-        .any(|(_, incarnation, consumed, _, _)| *consumed && incarnation == wake_incarnation_key)
+        .any(|(_, incarnation, consumed, ..)| *consumed && incarnation == wake_incarnation_key)
     {
         Some("consumed".into())
     } else if harness.as_ref().is_some_and(|harness| {
         harness.state == "working" && current_incarnation_key == wake_incarnation_key
     }) && attempts
         .iter()
-        .any(|(_, incarnation, _, delivered, staged)| {
+        .any(|(_, incarnation, _, delivered, staged, _)| {
             incarnation == wake_incarnation_key
                 && (*delivered
                     || *staged
@@ -20041,6 +20067,18 @@ fn enrich_step_wake_with(
         Some("turn".into())
     } else {
         None
+    };
+    // What the assignee's host would have to say for the wake to be acknowledged, when it keeps
+    // its seats' receipts: the API asks it (db break-up step 4b).
+    let asks = crate::model::WakeAsks {
+        messages: attempts
+            .iter()
+            .filter(|(_, incarnation, consumed, ..)| !consumed && incarnation == wake_incarnation_key)
+            .map(|(.., message)| message.clone())
+            .collect(),
+        delivery_acknowledges: harness.as_ref().is_some_and(|harness| {
+            harness.state == "working" && current_incarnation_key == wake_incarnation_key
+        }),
     };
     let failure = connection
         .query_row(
@@ -20086,6 +20124,7 @@ fn enrich_step_wake_with(
             last_attempt_at_unix_ms,
             acknowledged_by,
             failure,
+            asks,
         });
     }
     Ok(())
@@ -22403,6 +22442,10 @@ pub fn append_claim_with_commit_context(
                 stored_fields = Some(fields);
             }
             if settled_receipt || validate_message_transition(transaction, input)? {
+                // A repeat of a step recorded as a mark answers that mark's receipt.
+                if let Some(receipt) = message_marks::recorded(transaction, &graph.origin, &input.subject, &input.kind).map_err(internal)? {
+                    return Ok((receipt, false));
+                }
                 let latest_id = latest_claim_id_tx(transaction, &input.subject)
                     .map_err(internal)?
                     .ok_or_else(|| {
@@ -22420,6 +22463,22 @@ pub fn append_claim_with_commit_context(
                         )
                     })?;
                 return Ok((latest, false));
+            }
+            // A seat this member hosts records its own delivery, read and close of graph mail as a
+            // local mark once marks are on (db break-up 4b-2; message_marks::local_consumer and
+            // recorded_as_mark: a staging stays a claim for now), whoever acts for it:
+            // the fences, replays and transition rules above have applied. A write acting for a
+            // retired seat or under a delegation stays a claim, which carries its proof, and so
+            // does a native read, whose proof links the native turn to its claim
+            // (local_native_delivery_receipts_v2, conversation_deliveries.rs).
+            if message_marks::recorded_as_mark(&input.kind)
+                && context.native_receipt.is_none()
+                && !input.fields.contains_key("acting_for")
+                && !input.fields.contains_key("delegation")
+                && let Some(recipient) = message_recipient_tx(transaction, &input.subject).map_err(internal)?
+                && message_marks::local_consumer(transaction, &graph.origin, &input.subject, &recipient).map_err(internal)?
+            {
+                return message_marks::record_tx(transaction, &graph.origin, &input.subject, &input.kind, &recipient);
             }
             let predecessor = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                 transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_, String>(0)).optional().map_err(internal)?

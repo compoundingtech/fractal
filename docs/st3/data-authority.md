@@ -312,11 +312,14 @@ order from the same admitted claims.
 | `local_git_change_records` | Local | Local Git change observation records and cursors. |
 | `local_glass_head_dirty` | Local | Glass heads whose published read needs refresh. |
 | `local_glass_head_pending` | Local | Glass-head projection work queue. |
+| `local_harness_question_generations` | Local | Exact admitted native question process/provider/session generations, persisted before observation and retired only after durable resolution. Survives restart; not replicated or included in shared projection digests. |
 | `local_idle_messages` | Local | Disposable message delivery and source-wake index, maintained by claim writes and backfilled in bounded startup batches. Excluded from replicated projection digests. |
 | `local_latest_slots` | Local | Local latest-retention publication slots and pending local observation pointers. |
 | `claims_stored` | Local | Claims stored here per kind and writing node and their body bytes, counted on insert and never lowered by deletes; not replicated, in no digest, not in backups. |
 | `local_limit_stops` | Local | Seats this node's limits policy stopped, once per account and weekly window. |
 | `local_message_marks` | Local | A consumer's delivery, read and close of a graph message recorded on this member instead of as a lifecycle claim. Never replicated, in no digest; carried by version 4 backups; the hourly trim removes superseded marks after seven days. |
+| `local_message_staged` | Local | A seat's native transport staging a graph message, recorded on this member instead of a `message.staged` claim. Read today; written once a release that reads it exists (`message_marks::RECORDS_STAGED`), since a release reading marks but not stagings would offer the mail again after a rollback. Never replicated, in no digest, not backed up (a restored staging is in flight again); the hourly trim removes it seven days after a later lifecycle supersedes it. |
+| `local_message_mark_events` | Local | One row per mark or staging written, read by mailbox wakes and changes the way they read lifecycle claims. Never replicated, in no digest, not backed up; the hourly trim keeps the newest 16,384. |
 | `local_mailbox_argv_bindings` | Local | Launch-argv binding evidence for native mailbox ownership. |
 | `local_mailbox_bindings` | Local | Stable binding request tokens mapped to daemon-allocated epochs. Lost acknowledgements retry the same binding; retired tokens cannot allocate a successor. Excluded from replicated projection digests. |
 | `local_mailbox_leases` | Local | Authenticated native custody for each subject/component, including exact runtime/provider/session/sequence, process birth, token/epoch and revocation. Retained across daemon restart; excluded from replicated projection digests. |

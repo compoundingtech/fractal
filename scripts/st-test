@@ -183,15 +183,16 @@ WEB = 'fractal-web'
 WEB_INPUTS = {'kit_shard_count': '1', 'shard_results': '0=success', 'kit_inputs': 'true', 'kit_play_set': 'all',
               'app_test_set': 'all', 'event_name': 'pull_request'}
 BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
-# The checks that build use one cargo target per pool tree (<pool>/target-N, outside the tree so the cleaning keeps it), kept between
+# The checks that build use two cargo targets per pool tree (<pool>/target-N and target-N-fleet-compat, outside the tree), kept between
 # runs, so a run does not start cold: the tree's path is the same every run, so the workspace's own crates rebuild only when they
-# changed and the dependencies and build scripts are reused. It is removed before a run once it passes TARGET_MAX_GB (the run holds
+# changed and the dependencies and build scripts are reused. Both are removed before a run once their sum passes TARGET_MAX_GB (the run holds
 # the tree's lock, so nobody else uses it). ST_EVIDENCE_TARGET=PATH names one shared target for all trees instead (kept as before:
 # trimmed only while no other run uses it); ST_EVIDENCE_TARGET=off builds in the tree itself; a CARGO_TARGET_DIR the caller set is
 # left alone.
 # One run (test build + clippy + fleet-compat profiles) ends near 60 GB; with incremental compilation on, a quarter to a half of that is debug/incremental
 # (a build host, 2026-10-23: target-0 99 GB of which incremental 40, deps 55, examples 5). The check is only made before a run, so a limit below one run's
-# size would empty the target every time and nothing would ever be warm: 80 GB lets one run's output stay.
+# size would empty the targets every time and nothing would ever be warm. The separate compatibility target can add about 20 GB;
+# 80 GB is still the combined budget for both targets, and measurements track whether either gets trimmed in normal use.
 TARGET_MAX_GB = 80.0
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
@@ -303,6 +304,25 @@ def report_environment(scratch, environment):
     bin_dir = Path(tempfile.mkdtemp(prefix='report-python-', dir=scratch))
     (bin_dir / 'python3').symlink_to(Path(sys.executable).resolve())
     return dict(environment, PATH=f'{bin_dir}{os.pathsep}{environment.get("PATH", os.defpath)}')
+
+
+def typescript_shell_diagnostics(report, environment, output=None):
+    """Describe a failed shell entry without retrying it or changing the failed check's status."""
+    stream = output or sys.stderr
+    print('fractal-test: typescript-client exit 127; caller environment before nix develop:', file=stream)
+    for name in ('PATH', 'BASH_ENV'):
+        print(f'  {name}={environment.get(name, "<unset>")!r}', file=stream)
+    print('fractal-test: web shell hook environment (before child Bash startup):', file=stream)
+    try:
+        with report.open(errors='replace') as source:
+            snapshot = source.read(16385)
+        shown = snapshot[:16384]
+        print(shown, end='' if shown.endswith('\n') else '\n', file=stream)
+        if len(snapshot) > 16384:
+            print('  [hook report truncated at 16 KiB]', file=stream)
+    except OSError as error:
+        print(f'  hook not observed: {error}', file=stream)
+    stream.flush()
 
 
 def scrub_seat_environment():
@@ -734,12 +754,27 @@ def in_pool(path):
     return True
 
 
-def trim(target, owned=False):
+def trim(target, owned=False, used_gb=None):
     """Empty a target past TARGET_MAX_GB. Only a directory cargo or st-test made (CACHEDIR.TAG at its root), or one `owned` (a pool
     tree's target-N inside the pool directory, tagged or not) is emptied: never one a caller named for something else."""
-    if ((target / 'CACHEDIR.TAG').is_file() or owned) and size_gb(target) > TARGET_MAX_GB:
+    if ((target / 'CACHEDIR.TAG').is_file() or owned) and (size_gb(target) if used_gb is None else used_gb) > TARGET_MAX_GB:
         shutil.rmtree(target, ignore_errors=True)
         make_target(target)
+
+
+def fleet_compat_target(target):
+    """ci-local's separate Cargo target for fleet-compat; both targets use the same run/tree lock."""
+    return target.with_name(target.name + '-fleet-compat')
+
+
+def prepare_targets(target, owned=False):
+    """Keep the existing TARGET_MAX_GB budget for both profiles together, under their common exclusive lock."""
+    targets = (target, fleet_compat_target(target))
+    for path in targets:
+        make_target(path)
+    used = sum(size_gb(path) for path in targets)
+    for path in targets:
+        trim(path, owned=owned and in_pool(path), used_gb=used)
 
 
 def shared_target(tree_target=None):
@@ -749,8 +784,7 @@ def shared_target(tree_target=None):
     if os.environ.get('ST_EVIDENCE_TARGET') == 'off' or os.environ.get('CARGO_TARGET_DIR'):
         return None, None
     if tree_target and not os.environ.get('ST_EVIDENCE_TARGET'):
-        make_target(tree_target)
-        trim(tree_target, owned=in_pool(tree_target))
+        prepare_targets(tree_target, owned=in_pool(tree_target))
         return tree_target, None
     target = Path(os.environ.get('ST_EVIDENCE_TARGET') or Path.home() / '.cache/st-test-target')
     make_target(target)
@@ -764,7 +798,7 @@ def shared_target(tree_target=None):
     except BlockingIOError:
         print(f'fractal-test: another run is using {target}; waiting for it (one run builds and tests in it at a time)', file=sys.stderr, flush=True)
         fcntl.flock(lock, fcntl.LOCK_EX)
-    trim(target)  # nobody else is using it: the moment to keep it small
+    prepare_targets(target)  # nobody else is using either target: the moment to keep them small
     return target, lock
 
 
@@ -1356,14 +1390,14 @@ def du_gb(path):
 
 
 def pool_units(base):
-    """[(last used, directory of the unit's lock, N, [paths])]: every pool tree with its target, across all the repositories' pools."""
+    """[(last used, directory of the unit's lock, N, [paths])]: every pool tree with its workspace and fleet-compat targets, across all the repositories' pools."""
     units = {}
     pools = sorted(path for path in base.iterdir() if path.is_dir() and path.name != 'pools') if base.is_dir() else []  # the old layout: one per clone
     if (base / 'pools').is_dir():
         pools += sorted(path for path in (base / 'pools').iterdir() if path.is_dir())
     for repo in pools:
         for entry in repo.iterdir():
-            match = re.fullmatch(r'(tree|target)-(\d+)(\.lock)?', entry.name)
+            match = re.fullmatch(r'(tree|target)-(\d+)(-fleet-compat)?(\.lock)?', entry.name)
             if match:
                 units.setdefault((repo, int(match.group(2))), []).append(entry)
     found = []
@@ -1403,7 +1437,7 @@ def evict_to_cap(base, limit_gb, keep=None):
                 shutil.rmtree(path, ignore_errors=True)
             total -= sizes[(repo, n)]
             idle = max(0, int((time.time() - used) / 60))
-            print(f'fractal-test: pool over {limit_gb:g} GB: evicted {repo.name}/tree-{n} and target-{n} ({sizes[(repo, n)]:.1f} GB, idle {idle} min)', file=sys.stderr)
+            print(f'fractal-test: pool over {limit_gb:g} GB: evicted {repo.name}/tree-{n} and target-{n} (including fleet-compat) ({sizes[(repo, n)]:.1f} GB, idle {idle} min)', file=sys.stderr)
         finally:
             lock.close()
     if total > limit_gb:
@@ -1516,7 +1550,7 @@ def ticket_rules(path):
     """The QUEUE_RULES a ticket was written under: 0 for a ticket of a copy older than versioned tickets (an empty file), or one that is unreadable."""
     try:
         found = re.fullmatch(r'rules (\d+)\n?', path.read_text())
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return 0
     return int(found.group(1)) if found else 0
 
@@ -3271,6 +3305,9 @@ def run_main(argv, cleanup):
                     if args.out:
                         wrap += ['--out', args.out]
                     environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
+                    shell_report = Path(scratch) / f'typescript-shell-{round_number}.log' if name == 'typescript-client' else None
+                    if shell_report is not None:
+                        environment['CI_WEB_SHELL_DIAGNOSTICS'] = str(shell_report)
                     environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                     if target and name in BUILDS:
                         environment['CARGO_TARGET_DIR'] = str(target)
@@ -3365,6 +3402,8 @@ def run_main(argv, cleanup):
                                            cwd=directory, env=environment, stdout=output,
                                            stderr=subprocess.STDOUT if output else None)
                     seconds = round(time.monotonic() - started)
+                    if code == 127 and shell_report is not None:
+                        typescript_shell_diagnostics(shell_report, environment, output)
                     ok = code == 0
                     if args.out:
                         why = 'packs exported, not imported or verified' if ok else 'export failed'
@@ -3463,8 +3502,10 @@ def run_main(argv, cleanup):
                     print(f'  base moved since signing: {args.base} is at {now[:12]} now; these notes are for {base_commit[:12]}, and a branch '
                           f'that merges {now[:12]} needs them signed again')
                 if tree_target and target and target == tree_target and target.exists():
-                    print(f'  target-{n}: {du_gb(target):.1f} GB (emptied before a run past {TARGET_MAX_GB:g} GB; the pool is capped at the sum of all, '
+                    print(f'  target-{n}: {du_gb(target):.1f} GB (emptied before a run past {TARGET_MAX_GB:g} GB across both targets; the pool is capped at the sum of all, '
                           f'ST_TEST_POOL_MAX_GB)')
+                    compat_target = fleet_compat_target(target)
+                    print(f'  target-{n}-fleet-compat: {du_gb(compat_target):.1f} GB (shares the combined target limit and pool cap)')
                 if args.push and any(result != 'NOT RUN' for _, result, _, _ in rows):
                     line = nudge_log()
                     if line:

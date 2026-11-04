@@ -117,7 +117,8 @@ describe('recorded transport fidelity', () => {
   it('keeps every slice recorded and excludes the proof from the published catalog', () => {
     const { world } = loadRecordedProof()
     expect(world.id).toBe('recorded-fleet-mid-refactor-proof')
-    expect(SLICE_KINDS.map((kind) => world.slices[kind].source._tag)).toEqual(SLICE_KINDS.map(() => 'recorded'))
+    // Recordings carry no objectives read; the world serves the synthetic empty one.
+    expect(SLICE_KINDS.map((kind) => world.slices[kind].source._tag)).toEqual(SLICE_KINDS.map((kind) => kind === 'objectives' ? 'synthetic' : 'recorded'))
     expect(catalog).toHaveLength(26)
     expect(catalog.some(({ id }) => id.startsWith('recorded-'))).toBe(false)
   })
@@ -126,7 +127,7 @@ describe('recorded transport fidelity', () => {
     const proof = loadRecordedProof()
     const imported = importRecording(proof.script, proof.rows)
     for (const kind of SLICE_KINDS) expect(proof.world.slices[kind].timeline.map((event) => event.store))
-      .toEqual(imported.slices[kind].timeline.map((event) => event.store))
+      .toEqual(imported.slices[kind]?.timeline.map((event) => event.store) ?? [])
     const unchanged = proof.world.with({ conversation: proof.world.slices.conversation })
     for (const kind of SLICE_KINDS) expect(unchanged.slices[kind].timeline.map((event) => event.store))
       .toEqual(proof.world.slices[kind].timeline.map((event) => event.store))

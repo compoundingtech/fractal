@@ -1073,8 +1073,11 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
         // A local mark (message_marks.rs) counts when it is further along than the claims.
         let marked: Option<TargetState> = connection
             .query_row(
-                "SELECT substr(kind, 9), CAST(recorded_at_unix_ms AS TEXT) FROM local_message_marks
-                 WHERE message=?1 ORDER BY CASE kind WHEN 'message.closed' THEN 3 WHEN 'message.read' THEN 2 ELSE 1 END DESC,
+                "SELECT substr(kind, 9), CAST(recorded_at_unix_ms AS TEXT) FROM (
+                     SELECT kind, recorded_at_unix_ms FROM local_message_marks WHERE message=?1
+                     UNION ALL SELECT 'message.staged', recorded_at_unix_ms FROM local_message_staged WHERE message=?1)
+                 ORDER BY CASE kind WHEN 'message.closed' THEN 3 WHEN 'message.read' THEN 2
+                     WHEN 'message.delivered' THEN 1 ELSE 0 END DESC,
                  recorded_at_unix_ms DESC LIMIT 1",
                 [target],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?.parse().ok())),
