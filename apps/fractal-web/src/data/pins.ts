@@ -116,7 +116,7 @@ export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
     })
     stream.subscribeArrangements('pins-layout', selection.owner, 1, selection.subject)
     await read()
-  } catch (error) { fail(error) }
+  } catch (error) { interrupt(error) }
   return {
     close: () => { closed = true; abort.abort(); stream?.close() },
     refresh,
