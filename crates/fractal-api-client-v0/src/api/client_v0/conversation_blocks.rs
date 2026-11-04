@@ -1387,8 +1387,10 @@ mod tests {
         use tower::ServiceExt as _;
         let root = tempfile::tempdir().unwrap();
         let details = Value::Object(
-            (0..200_000)
-                .map(|index| (format!("key-{index}"), json!(0)))
+            // Keys are never bounded, so many long keys with small values stay over the transport
+            // budget after the values are bounded: 6,000 keys of 200 bytes, about 1.2 MiB.
+            (0..6_000)
+                .map(|index| (format!("key-{index:0>196}"), json!(0)))
                 .collect(),
         );
         let native = fixture(

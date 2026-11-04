@@ -110,7 +110,10 @@ let
   '';
   targetExecutable = if externallyManaged then cfg.binary.path else "${targetDaemonState}/bin/fractal";
   targetArgs = lib.replaceStrings [ legacyState ] [ targetState ];
-  targetUpArgs = map targetArgs upArgs ++ [ "--config" "${config.xdg.configHome}/fractal/config.toml" ];
+  isConfigArg = arg: arg == "--config" || lib.hasPrefix "--config=" arg;
+  targetUpArgs = map targetArgs upArgs
+    ++ lib.optionals (!(builtins.any isConfigArg upArgs))
+      [ "--config" "${config.xdg.configHome}/fractal/config.toml" ];
   targetEnvironment = lib.mapAttrs (_: targetArgs) environment;
   migrationReady = ''
     for receipt in ${lib.escapeShellArgs [ receipt "${config.xdg.configHome}/fractal/.fractal-migration-completed" ]}; do
@@ -297,6 +300,9 @@ in
         ) config.xdg.configFile)
       ));
       message = "Fractal migration requires unforced legacy config and state ownership (including raw forced-path prefixes); remove forced old generations before cutover.";
+    } ++ lib.optional completed {
+      assertion = builtins.length (builtins.filter isConfigArg targetUpArgs) <= 1;
+      message = "services.smalltalk completed daemon arguments require at most one --config (including --config=PATH).";
     };
     home.file = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin) {
       "Library/LaunchAgents/com.compoundingtech.fractal.plist".text =

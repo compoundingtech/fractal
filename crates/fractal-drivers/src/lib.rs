@@ -1,24 +1,12 @@
-//! Harness drivers, native delivery, and catalog support shared by st2 and st3.
+//! Native harness drivers, delivery and state for Fractal.
 //!
-//! This is the single home for new harness-driver work. The root st2 crate re-exports
-//! its public APIs for compatibility; st3 imports this crate directly.
-//!
-//! Catalog reconciliation and resource-profile supervision remain coupled to the
-//! shared mailbox and validation paths. They move intact here; separating support
-//! that st3 does not call directly is later cleanup tracked by Fractal issue #819.
-//! Helpers exposed only for the remaining root modules are hidden from public docs.
-//!
-//! st2 reads a catalog of hand-authored agent declarations plus each agent's inbox. It keeps every
-//! declared task running and delivers native messages. Harness-specific behavior stays explicit in
-//! each declaration's command, environment, hooks, and workspace materialization block.
+//! Catalog declaration parsing and compatibility readers support their current callers.
+//! Shared helpers keep their established module paths.
 
 #[cfg(test)]
 #[macro_use]
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
-
-#[path = "../../pty-launch-environment.rs"]
-mod pty_launch_environment;
 
 /// A temporary directory whose path is already canonical. macOS puts temporary directories
 /// below the `/var` and `/tmp` symlinks, and its file watcher reports the physical path, so a
@@ -34,7 +22,7 @@ pub(crate) fn canonical_tempdir() -> tempfile::TempDir {
 pub mod account;
 pub mod access;
 pub mod catalog;
-pub mod catalog_archive;
+mod catalog_generation;
 pub mod catalog_lock;
 pub mod catalog_transaction;
 pub mod claude_channel;
@@ -49,20 +37,16 @@ pub mod context;
 pub mod contracts;
 pub mod delivery_ledger;
 pub mod ding;
-pub mod direct_actor;
 mod directory;
 pub mod driver;
 pub mod driver_diagnostic;
 pub mod driver_paths;
 pub mod eval_spec;
-pub mod event;
-pub mod exec_backend;
 pub mod expand;
-pub mod flapping;
 /// Private on purpose: every consumer is a sibling module in this crate, and the one site that
 /// deliberately keeps its own `flock` is documented in the module itself.
 mod flock;
-/// Atomic filesystem publication shared with the root st2 request API.
+/// Atomic filesystem publication for shared driver state.
 #[doc(hidden)]
 pub mod fsatomic;
 pub mod harness_admission;
@@ -77,7 +61,6 @@ pub mod hooks;
 pub mod host;
 pub mod host_lock;
 pub mod identity;
-pub mod isolate;
 pub mod materialize;
 pub mod message;
 pub mod metrics;
@@ -86,11 +69,9 @@ pub mod migrations;
 mod native_channel;
 pub mod omp_session;
 pub mod opencode_session;
-pub mod park;
-mod process;
 pub mod pi_channel;
 /// The launch body shared by the pi-family wrappers; crate-internal, reached through
-/// `pi_session::run` and `omp_session::run`.
+/// `pi_session::run_native` and `omp_session::run_native`.
 mod pi_family_session;
 pub mod pi_session;
 pub mod pretrust;
@@ -100,27 +81,20 @@ pub mod reconcile;
 pub mod reexec;
 
 pub mod residency;
-pub mod residency_host;
-pub mod resource_observe;
-pub mod resource_profile;
-pub mod resource_profile_supervisor;
-pub mod resync;
 pub mod run;
 
 pub mod session_control;
 pub mod status;
 pub mod subagents;
 pub mod supervisor_chain;
-pub mod task_inventory;
 pub mod telemetry;
 pub mod validate;
 pub mod version;
 pub mod work_claim_failure;
 mod watch;
 
-// The declaration model and the catalog walk live in the `agent-spec` crate, so st2 and any other
-// reader of the same catalog share one implementation. Re-exported under their original paths:
-// `fractal_legacy_runner::spec::…` / `fractal_legacy_runner::discovery::…` keep working for the binary and the test suite.
+// The declaration model and catalog walk live in `agent-spec`. Keep their established
+// driver-library paths for the shared implementation and its callers.
 pub use agent_spec::kdl_version;
 pub use agent_spec::{discovery, spec};
 
@@ -131,15 +105,9 @@ pub use agent_spec::spec::{
     SessionDriver, Task, TaskKind, TaskLifecycle, parse_duration,
 };
 pub use catalog_lock::CatalogLock;
-pub use exec_backend::ExecBackend;
 pub use expand::{expand_env, expand_vars};
-pub use flapping::FlappingCap;
 pub use host_lock::HostLock;
 pub use reconcile::{
     Launch, PtyPresentation, ReconcilePlan, Session, TaskLaunch, TaskTarget, Teardown, reconcile,
 };
-pub use run::{
-    PtyCli, Runner, SystemRunner, UpReport, detect_host, down, down_specs, exec_state_dir, execute,
-    up_loop, up_loop_specs, up_loop_with_residency, up_once, up_once_selected,
-    up_once_selected_specs, up_once_specs, up_once_with_residency,
-};
+pub use run::detect_host;

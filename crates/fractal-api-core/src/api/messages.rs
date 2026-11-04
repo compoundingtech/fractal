@@ -18,19 +18,52 @@ pub async fn message_delivery(
     } else {
         format!("message/{subject}")
     };
+    let (message, sent_at, host) = {
+        let (state, subject) = (state.clone(), subject.clone());
+        blocking_api(move || {
+            let message = state
+                .store
+                .message(&subject)
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| {
+                    ApiError::not_found(format!("message `{subject}` does not exist"))
+                })?;
+            let claims = state
+                .store
+                .claims_for(&subject, Some("message.sent"))
+                .map_err(ApiError::internal)?;
+            // A stream item's sent claim is in the messages shard, not the graph.
+            let sent = match claims.into_iter().next() {
+                Some(claim) => Some(claim),
+                None => {
+                    crate::store::messages_shard::mailbox_reads::sent_claim(&state.store, &subject)
+                        .map_err(ApiError::internal)?
+                }
+            };
+            let sent_at = sent
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or_default();
+            let host = super::message_reads::relay_host(&state.store, &message)
+                .map_err(ApiError::internal)?;
+            Ok((message, sent_at, host))
+        })
+        .await?
+    };
+    // The recipient's host keeps how far it got: ask it, within the status deadline.
+    let relayed = match host {
+        Some(host) => super::message_reads::read(
+            &state,
+            BTreeMap::from([(host, vec![subject.clone()])]),
+            super::message_reads::STATUS_DEADLINE,
+        )
+        .await
+        .remove(&subject),
+        None => None,
+    };
     blocking_api(move || {
-        let message = state.store.message(&subject).map_err(ApiError::internal)?
-            .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
-        let claims = state.store.claims_for(&subject, Some("message.sent")).map_err(ApiError::internal)?;
-        // A stream item's sent claim is in the messages shard, not the graph.
-        let sent = match claims.into_iter().next() {
-            Some(claim) => Some(claim),
-            None => crate::store::messages_shard::mailbox_reads::sent_claim(&state.store, &subject)
-                .map_err(ApiError::internal)?,
-        };
-        let sent_at = sent.map(|claim| claim.accepted_at_unix_ms).unwrap_or_default();
         Ok(Json(json!({ "id": subject, "from": message.from, "to": message.to,
-            "delivery": message_delivery_for(&state.store, &message, sent_at, client_now_ms()).map_err(ApiError::internal)? })))
+            "delivery": message_delivery_for(&state.store, &message, sent_at, client_now_ms(), relayed.as_ref())
+                .map_err(ApiError::internal)? })))
     }).await
 }
 
@@ -46,7 +79,8 @@ pub async fn message_by_key(
     State(state): State<AppState>,
     Query(query): Query<MessageKeyQuery>,
 ) -> Result<Json<MessageSendReceipt>, ApiError> {
-    blocking_api(move || {
+    let reads = state.clone();
+    let mut receipt = blocking_api(move || {
         let not_sent = || ApiError {
             status: StatusCode::NOT_FOUND,
             code: "message-not-sent".into(),
@@ -66,7 +100,7 @@ pub async fn message_by_key(
             .ok_or_else(not_sent)?;
         let requested_recipient = message.to.clone();
         let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
-        Ok(Json(MessageSendReceipt {
+        Ok(MessageSendReceipt {
             requested_recipient,
             recipient,
             recipient_identity,
@@ -82,9 +116,14 @@ pub async fn message_by_key(
             idempotency_key: query.key.clone(),
             already_sent: true,
             sent_at: Some(client_timestamp(claim.accepted_at_unix_ms)),
-        }))
+        })
     })
-    .await
+    .await?;
+    // The recipient's host keeps how far it got.
+    super::message_reads::read_view(&reads, &mut receipt.message)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(receipt))
 }
 
 #[derive(Deserialize)]
@@ -306,11 +345,12 @@ pub async fn list_messages_page(
     let cursor_to = to.clone();
     let cursor_from = from.clone();
     let cursor_actor = acting_as.clone();
-    let (items, next_after) = blocking_store(move || {
-        let native = !query.include_closed
-            && peer
-                .as_ref()
-                .is_some_and(|peer| to.as_deref() == Some(peer.0.agent.as_str()));
+    let native = !query.include_closed
+        && peer
+            .as_ref()
+            .is_some_and(|peer| to.as_deref() == Some(peer.0.agent.as_str()));
+    let include_closed = query.include_closed;
+    let (mut items, next_after) = blocking_store(move || {
         let filtered = from.is_some() || subject.is_some() || subject_prefix.is_some();
         let (mut items, next_after) = if filtered {
             store.messages_page_filtered(
@@ -334,6 +374,14 @@ pub async fn list_messages_page(
         Ok((items, next_after))
     })
     .await?;
+    // A seat's own delivery poll reads its own host's records. Any other page asks each
+    // message's seat's host; a page of open mail can come back shorter than `limit` when a host
+    // says some of it is closed, and the cursor goes on from where the records left off.
+    if !native {
+        super::message_reads::read_views(&state, &mut items, !include_closed)
+            .await
+            .map_err(ApiError::internal)?;
+    }
     let next_cursor = next_after
         .map(|after| {
             let cursor = MessagesPageCursor {
@@ -380,11 +428,12 @@ pub async fn list_messages(
         query.include_closed,
     );
     let store = state.store.clone();
-    blocking_store(move || {
-        let native = !query.include_closed
-            && peer
-                .as_ref()
-                .is_some_and(|peer| recipient.as_deref() == Some(peer.0.agent.as_str()));
+    let native = !query.include_closed
+        && peer
+            .as_ref()
+            .is_some_and(|peer| recipient.as_deref() == Some(peer.0.agent.as_str()));
+    let include_closed = query.include_closed;
+    let mut messages = blocking_store(move || {
         let mut messages = if native {
             store.messages_for_delivery_through(recipient.as_deref().unwrap(), store.index()?)?
         } else {
@@ -395,8 +444,15 @@ pub async fn list_messages(
         )?;
         Ok(messages)
     })
-    .await
-    .map(Json)
+    .await?;
+    // A seat's own delivery poll reads its own host's records. Any other list asks each
+    // message's seat's host.
+    if !native {
+        super::message_reads::read_views(&state, &mut messages, !include_closed)
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    Ok(Json(messages))
 }
 
 pub async fn read_message(
@@ -410,9 +466,13 @@ pub async fn read_message(
     };
     let store = state.store.clone();
     let lookup = subject.clone();
-    let message = blocking_store(move || store.message(&lookup))
+    let mut message = blocking_store(move || store.message(&lookup))
         .await?
         .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
+    // The recipient's host keeps how far it got.
+    super::message_reads::read_view(&state, &mut message)
+        .await
+        .map_err(ApiError::internal)?;
     let provenance = {
         let state = state.clone();
         let lookup = message.subject.clone();

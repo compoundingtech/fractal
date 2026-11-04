@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Prevent publication pending collisions and recover affected retained replica envelopes",
+  "replay": { "status": "changed", "detail": "A one-time store-open migration requeues retained envelopes with an invalid/internal record whose error is exactly UNIQUE constraint failed: local_publication_pending.claim_id. Normal backlog admission validates the original signed content." },
+  "schema": { "status": "changed", "detail": "Store open replaces publication pending enqueue triggers once with conflict-independent duplicate guards. A local meta marker makes recovery one-time and atomic with receipt requeueing; signed envelopes and record diagnostics are unchanged." },
+  "rules": { "status": "none", "detail": "Existing membership, signature, repair and retired-envelope admission gates remain in force." },
+  "compatibility": { "status": "none", "detail": "Existing stores receive the trigger upgrade automatically. Unrelated internal errors are not retried." },
+  "downtime": { "status": "none", "detail": "No interruption beyond a normal upgrade." },
+  "manual": { "status": "none", "detail": "Routine backlog admission processes the requeued envelopes; no manual database edits are needed." },
+  "recovery": { "status": "changed", "detail": "Repeated opens do not requeue again, including if later admission fails. Original diagnostics remain until normal admission updates them." }
+}

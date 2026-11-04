@@ -313,7 +313,7 @@ mod tests {
         for source in [
             r#"version 2
 agent "dotfiles/steward" {
-    host "dev3"
+    host "devbox-a"
     workspace "/srv/work"
     env { TOKEN "private"; MODE "ready" }
     harness "omp" {
