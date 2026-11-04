@@ -88,7 +88,11 @@ class Evaluation(rig.Run):
    "cost_basis":"actual provider token/cache usage multiplied by published Haiku4.5 rates; not an invoice"}
   (self.out/"evaluation.json").write_text(self.scrub(json.dumps(manifest,indent=2))+"\n")
  def api(self,path,title):
-  r=self.execute(title,shlex.join(["curl","--silent","--show-error","--fail","--unix-socket",f"/run/user/{self.m.uid}/st3.sock","http://localhost"+path]),timeout=15)
+  select_socket=f'socket=/run/user/{self.m.uid}/fractal.sock\n'
+  # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+  select_socket+=f'if [ ! -e "$socket" ] && [ -e /run/user/{self.m.uid}/st3.sock ]; then socket=/run/user/{self.m.uid}/st3.sock; fi\n'
+  # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+  r=self.execute(title,select_socket+'curl --silent --show-error --fail --unix-socket "$socket" '+shlex.quote("http://localhost"+path),timeout=15)
   if r["exit"]: return None
   return rig.unwrap(json.loads(r["stdout"]))
  def status(self):
