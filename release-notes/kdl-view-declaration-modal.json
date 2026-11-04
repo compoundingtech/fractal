@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Fractal web shows an agent's canonical KDL declaration, with environment values redacted, in a modal opened from the conversation header or the agent row menu; a mission opens as a labelled, redacted structured definition because st serves no mission KDL.",
+  "summary": "Fractal web shows an agent's canonical KDL declaration, with environment values redacted, in a modal opened from the conversation header or the agent row menu; older daemons use a labelled, redacted structured fallback for missions.",
   "replay": {"status": "none", "detail": "Web-only change. No startup replay or history rewrite."},
   "schema": {"status": "none", "detail": "No table, index, stored format, API schema or migration changes."},
   "rules": {"status": "none", "detail": "No claim vocabulary, admission, ordering, checkpoint or retention changes."},

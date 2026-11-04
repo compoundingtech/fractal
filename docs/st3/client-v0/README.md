@@ -749,8 +749,8 @@ entry ordering, and source paths are not retained. Clients label it, for example
 copy of the definition: re-publishing it would replace the environment values with `<redacted>`.
 
 Unknown agents and agents with observations but no applied desired declaration return typed
-`not-found`. Other subject kinds return `validation-failed`: a mission is published as a compiled
-revision (read it through `/missions/{id}`) and keeps no canonical declaration AST to render.
+`not-found`. Other subject kinds return `validation-failed`: missions use
+`GET /v1/client/mission-declaration?mission=mission%2Fexample%2Fdaily` instead.
 
 For canonical structured publication values, use
 `GET /v1/client/publication-definition?subject=mission%2Fexample%2Fdaily` (also accepts
@@ -765,6 +765,13 @@ These are the same values used by the [owned-set declaration diff](../owned-sets
 A definition is never truncated:
 when its serialized value exceeds `max_response_bytes - 4096` (reserving room for the envelope),
 the server returns `validation-failed` rather than an incomplete AST or KDL document.
+
+The mission declaration read returns `{mission, revision, published_at, text, legacy}` and
+requires `read.declarations`. Optional `revision` selects an exact published revision; omission
+selects the latest. `text` is deterministic server-rendered KDL with environment values and
+embedded declaration KDL redacted, not original authored bytes. `legacy` marks removed loop
+shapes. Fractal Web shows the served text and a legacy note. Only older daemons without the
+route use the labelled, redacted structured JSON view; a missing mission remains not found.
 
 ### Usage over a period
 
