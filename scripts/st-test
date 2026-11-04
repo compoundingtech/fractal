@@ -1852,9 +1852,12 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                         raise
                     now = time.monotonic()
                     seen = free_since.setdefault(n, now)
-                    if now - seen >= TREE_FREE_FALLBACK_SECONDS and (slot_ready is None or slot_ready()[0]):
-                        print(f'fractal-test: tree-{n} has been free for {round(now - seen)}s and the {ahead} ticket(s) ahead did not take it '
-                              f'(TREE_FREE_FALLBACK_SECONDS): trying it', file=sys.stderr, flush=True)
+                    # A granted burst was asked once the fallback had let this waiter try a tree: a free one is taken at once, as the head does.
+                    granted = burst is not None and burst.holder is not None
+                    if granted or (now - seen >= TREE_FREE_FALLBACK_SECONDS and (slot_ready is None or slot_ready()[0])):
+                        if not granted:
+                            print(f'fractal-test: tree-{n} has been free for {round(now - seen)}s and the {ahead} ticket(s) ahead did not take it '
+                                  f'(TREE_FREE_FALLBACK_SECONDS): trying it', file=sys.stderr, flush=True)
                         if burst_lets(n):
                             return taken(n, lock)
                         free_tree = True

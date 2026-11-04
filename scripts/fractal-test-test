@@ -4466,6 +4466,27 @@ class BurstAtTheTree(unittest.TestCase):
         head[0][1].close()
         self.assertEqual(self.lines(self.released), ['released', 'released'])
 
+    def test_a_waiter_behind_whose_ask_waits_takes_the_free_tree_once_its_burst_is_granted(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')  # best in the order, of this copy's rules, and never taking a tree
+        got = []
+        with mock.patch.dict(os.environ, self.fractal(f'echo "waiting burst lane 8 cores/24.0G does not fit"; '
+                                                      f'while [ ! -e {self.go} ]; do sleep 0.05; done; echo granted')), \
+                mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
+            burst = st_test.Burst((8, '24G'), 60)
+            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, burst=burst)), daemon=True)
+            waiter.start()
+            self.until(lambda: self.lines(self.calls))                      # past the fallback, it asks
+            time.sleep(1)                                                    # and its ask waits for longer than the fallback
+            self.go.touch()
+            waiter.join(10)
+        self.assertEqual([n for n, _ in got], [0])
+        self.assertEqual(burst.granted, (8, '24G'))
+        self.assertEqual((len(self.lines(self.calls)), self.lines(self.released)), (1, []))  # one ask, never given back
+        burst.release()
+        got[0][1].close()
+
     def test_a_handover_keeps_a_waiting_ask_and_its_place(self):
         """The holder is this process's child and keeps running through the exec: the newer copy reads its answer, and nothing asks again."""
         env = self.fractal(f'echo "waiting burst lane 8 cores/24.0G does not fit"; while [ ! -e {self.go} ]; do sleep 0.05; done; echo granted')
