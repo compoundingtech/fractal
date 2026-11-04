@@ -1657,6 +1657,12 @@ version 2
     store
         .populate_work_wake_for_reconcile(&mut lean, now_ms())
         .unwrap();
+    assert_eq!(
+        wake.asks.messages,
+        ["message/correct-recipient"],
+        "a wake not yet consumed asks its seat's host about its own message, not another's"
+    );
+    assert!(!wake.asks.delivery_acknowledges, "no harness works in the wake's incarnation");
     assert_eq!(lean.wake, Some(wake));
     for (kind, status) in [
         ("message.delivered", "delivered"),
@@ -1683,6 +1689,7 @@ version 2
         Some("consumed"),
         "a closed wake must not leave an overdue reconcile deadline"
     );
+    assert!(lean.wake.as_ref().unwrap().asks.messages.is_empty(), "a consumed wake asks nothing");
     let request = |incarnation: &str, key: &str| WorkRequest {
         wait_ms: None,
         actor: Some("agent/node.worker".into()),

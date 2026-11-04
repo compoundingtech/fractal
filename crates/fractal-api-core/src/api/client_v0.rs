@@ -1659,8 +1659,9 @@ pub fn refresh_operation_report(
     startup_audit: Option<tokio::sync::oneshot::Sender<anyhow::Result<Vec<String>>>>,
 ) {
     let report = if let Some(sender) = startup_audit {
+        // The store keeps this audit's result, which the report's operation check reads.
         let drift = state.store.operation_projection_drift();
-        let report = doctor_report_with_operation_drift(state, &drift);
+        let report = doctor_report(state);
         // The repair owns these findings, including any scan error. It re-derives just the
         // drifted rows from current claims, never reuses expected values from this snapshot.
         let _ = sender.send(drift);
@@ -1730,7 +1731,7 @@ pub async fn now(
     if history && actor.is_none() && owner_run.is_none() {
         return super::attention_history::page(state, snapshot, effective_query, "now").await;
     }
-    client_snapshot_page(
+    let (snapshot, Json(mut page)) = client_snapshot_page(
         &state,
         snapshot,
         "now",
@@ -1758,7 +1759,12 @@ pub async fn now(
             Ok(items)
         },
     )
-    .await
+    .await?;
+    // After the page's cache and digest: a seat's host's answer is never part of either.
+    super::relay_attention_target_states(&state, &mut page.items)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok((snapshot, Json(page)))
 }
 
 pub fn device_resources(

@@ -41,6 +41,8 @@ static TASK_ORIGINS: &[&str] = &[
     "startup.project_replication_backlog", "startup.warmup", "startup.isolation",
     "account_limits.enforce", "account_limits.catch_up", "maintenance.checkpoint",
     "maintenance.envelope_payloads", "maintenance.event_payloads", "maintenance.signature_backfill",
+    "maintenance.signature_bootstrap_page", "maintenance.signature_bootstrap_judgment",
+    "maintenance.signature_bootstrap_retire",
     "maintenance.coordination_counts", "maintenance.stop_deferral_history",
     "maintenance.response_expiry", "maintenance.wal_checkpoint",
     "observations.trim", "observations.trim_usage_responses", "observations.database_size",

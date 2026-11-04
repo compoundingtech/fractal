@@ -19,7 +19,9 @@ import argparse
 import datetime
 import json
 import os
+from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -39,7 +41,16 @@ def git(repo, *args):
                           capture_output=True, timeout=120, env=dict(clean, GIT_TERMINAL_PROMPT='0', LC_ALL='C'))
 
 
-def published_as_of(repo, remote):
+def rebuild(repo):
+    """Only the disposable fetch repository moves; watch.json retains the notification transition state."""
+    broken = f'{repo}.broken-{time.time_ns()}'
+    os.rename(repo, broken)
+    for previous in Path(repo).parent.glob(Path(repo).name + '.broken-*'):
+        if str(previous) != broken:
+            shutil.rmtree(previous)
+
+
+def published_as_of(repo, remote, repaired=False):
     """(unix time, head) of the remote's log head, or (None, why) when it cannot be read."""
     if not os.path.isdir(os.path.join(repo, 'objects')):
         done = subprocess.run(['git', 'init', '-q', '--bare', repo], capture_output=True)
@@ -50,8 +61,23 @@ def published_as_of(repo, remote):
     except subprocess.TimeoutExpired:
         return None, 'the fetch of the log head timed out'
     if done.returncode != 0:
+        # Repair demonstrated local damage only. An unreachable remote must not cause repeated repository replacement.
+        if not repaired:
+            try:
+                damaged = git(repo, 'fsck', '--connectivity-only', '--no-reflogs', '--no-dangling').returncode != 0
+            except subprocess.TimeoutExpired:
+                return None, 'checking the local log copy timed out'
+            if damaged:
+                rebuild(repo)
+                return published_as_of(repo, remote, repaired=True)
         return None, f'the fetch of the log head failed: {done.stderr.decode(errors="replace").strip()[-160:]}'
-    shown = git(repo, 'show', '-s', '--format=%H%x00%s', SEEN)
+    try:
+        shown = git(repo, 'show', '-s', '--format=%H%x00%s', SEEN)
+    except subprocess.TimeoutExpired:
+        return None, 'reading the log head timed out'
+    if shown.returncode != 0 and not repaired:
+        rebuild(repo)
+        return published_as_of(repo, remote, repaired=True)
     head, _, subject = shown.stdout.decode(errors='replace').strip().partition('\0')
     stamp = STAMP.search(subject)
     if shown.returncode != 0 or not stamp:
@@ -78,7 +104,14 @@ def save(path, state):
     temporary = f'{path}.{os.getpid()}'
     with open(temporary, 'w') as handle:
         json.dump(state, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(temporary, path)
+    directory = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def iso(unix):
