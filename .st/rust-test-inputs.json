@@ -327,6 +327,7 @@
   "fractal-store": {
    "extra": [
     ".github/workflows/perf.yml",
+    "AGENTS.md",
     "crates/fractal-daemon/fixtures/native-records/omp-parity.jsonl",
     "crates/fractal-daemon/fixtures/omp-admin-events.jsonl",
     "crates/fractal-daemon/fixtures/omp-native-events.jsonl",

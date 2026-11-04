@@ -2335,6 +2335,23 @@ pub struct MessageView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_grant_id: Option<String>,
     pub created_index: u64,
+    /// Who said how far the message got, when its recipient's seat runs on another host that keeps
+    /// the seat's receipts (db break-up step 4b): that host answered, and `status` is the further
+    /// of its answer and this member's own records, or it did not, and `status` is only this
+    /// member's own. Absent when this member's own records are the whole answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_from: Option<StatusFrom>,
+}
+
+/// The host a message's status was asked of, and whether it answered.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StatusFrom {
+    pub host: String,
+    /// `answered`, or `unknown` when the host did not answer.
+    pub state: String,
+    /// Why the host's answer is unknown, with `unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A definitive first-send refusal. Transport loss remains MessageSendUnconfirmed.
@@ -2958,6 +2975,19 @@ pub struct WorkWakeView {
     pub acknowledged_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// What to ask the assignee's host, when it keeps its seats' receipts (db break-up step 4b).
+    /// Never serialized.
+    #[serde(skip)]
+    pub asks: WakeAsks,
+}
+
+/// The wake's own messages to its incarnation that this member has not seen consumed, and
+/// whether one delivered would acknowledge the wake (its assignee is working in that
+/// incarnation), as this member's own records count them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WakeAsks {
+    pub messages: Vec<String>,
+    pub delivery_acknowledges: bool,
 }
 
 /// One agent seat's current claim and its ordered queue of mission runs.

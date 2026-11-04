@@ -341,6 +341,11 @@ impl AdhocWorkStore for Store {
                 match (seen, marked) {
                     (Some(receipt), _) => (receipt.clone(), vec![receipt, handoff.id]),
                     (None, Some(marked)) => (marked, vec![handoff.id]),
+                    // A reader this member hosts records its read as a mark once marks are on.
+                    (None, None) if crate::store::message_marks::local_consumer(tx, &self.origin, &input.message, &input.actor).map_err(internal)? => {
+                        let (receipt, _) = crate::store::message_marks::record_tx(tx, &self.origin, &input.message, "message.read", &input.actor)?;
+                        (receipt.id, vec![handoff.id])
+                    }
                     (None, None) => {
                         let receipt = append_claim_tx(tx, &self.origin, &input.message, "message.read", Some(&input.actor), &json!({"fields": {"status": "read"}}), &[], None).map_err(claim_append_error)?.id;
                         (receipt.clone(), vec![receipt, handoff.id])

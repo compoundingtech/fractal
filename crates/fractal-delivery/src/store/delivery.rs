@@ -1159,6 +1159,7 @@ impl DeliveryStore for Store {
                 .map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hea5ac5c547c1 owner=fractal_delivery::store::delivery TODO=trace-statement-and-value-representation */ [&fence.subject], |row| row.get(0))
                 .optional().map_err(internal)?,
             stream: fractal_store::store::messages_shard::mailbox_reads::position(self).map_err(internal)?,
+            marks: fractal_store::store::message_marks::event_position(&connection).map_err(internal)?,
         })
     }
 

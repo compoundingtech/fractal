@@ -61,6 +61,8 @@ export interface SidebarAgentRow extends SidebarReported {
   readonly statusSince?: number
   readonly lastActivityAt?: number
   readonly needsMe?: boolean
+  /** Only a reported harness question, not general open attention. */
+  readonly asking?: boolean
   readonly freshness: 'live' | 'stale' | 'unobserved'
   readonly unread?: number
   readonly usage: SidebarUsage
@@ -94,6 +96,7 @@ export const statuses = {
   waiting: { label: 'Needs you', tone: 'amber' },
   idle: { label: 'Idle', tone: 'gray' },
   pending: { label: 'Pending', tone: 'gray' },
+  failed: { label: 'Failed', tone: 'red' },
   stale: { label: 'Stale observation', tone: 'gray' },
   offline: { label: 'Offline', tone: 'gray' },
   ended: { label: 'Ended', tone: 'gray' },
