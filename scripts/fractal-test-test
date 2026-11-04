@@ -361,6 +361,50 @@ class TreeOrphansTest(unittest.TestCase):
                     st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=0)
                 shutil.rmtree(entry)
 
+    def test_a_live_st_test_or_its_process_in_a_free_tree_is_never_signalled_and_the_tree_is_left(self):
+        # A live run's processes in a tree free by its lock are never signalled (2026-11-04: two seats' runs died of SIGTERM, cause unconfirmed).
+        self.process(300, cwd='/', argv=[sys.executable, '/opt/repo/scripts/st-test', '--all', '--push', 'origin'], ppid=1)
+        self.process(301, cwd=self.tree, argv=['bash', 'scripts/ci-local', 'tests'], ppid=300)  # its child, in the tree
+        self.process(302, cwd=self.tree, argv=['cargo', 'nextest', 'run'], ppid=301)  # and a grandchild
+        for live in ((300, 301, 302), (301, 302)):  # the st-test itself in the tree too, or only its descendants
+            with self.subTest(live=live):
+                if 300 in live:
+                    (self.proc / '300' / 'cwd').unlink()
+                    (self.proc / '300' / 'cwd').symlink_to(self.tree)
+                with mock.patch.object(st_test.os, 'pidfd_open') as opened, \
+                        mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent, \
+                        contextlib.redirect_stderr(io.StringIO()) as said:
+                    self.assertIs(st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc), False)
+                opened.assert_not_called()
+                sent.assert_not_called()
+                self.assertIn('a live st-test is in it (', said.getvalue())
+                self.assertIn('302 of st-test 300', said.getvalue())
+                self.assertIn('cargo nextest run; cwd ', said.getvalue())  # each process named with its command and cwd
+                (self.proc / '300' / 'cwd').unlink()
+                (self.proc / '300' / 'cwd').symlink_to('/')
+        # Logged once per waiter's set, however often it looks.
+        told = set()
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            for _ in range(3):
+                self.assertIs(st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, told=told), False)
+        self.assertEqual(said.getvalue().count('a live st-test is in it'), 1)
+
+    def test_an_orphan_whose_st_test_is_gone_or_this_run_s_own_child_is_still_cleared_and_named(self):
+        self.process(os.getpid(), cwd='/', argv=[sys.executable, '/srv/scripts/st-test'], ppid=0)  # this process, itself an st-test
+        self.process(310, cwd=self.tree, argv=['cargo', 'build'], ppid=1)  # reparented: its st-test was killed
+        self.process(311, cwd=self.tree, argv=['sleep', '60'], ppid=os.getpid())  # this run's own child is not another's
+        signalled = []
+        with mock.patch.object(st_test.os, 'pidfd_open', side_effect=lambda pid: 600 + pid), \
+                mock.patch.object(st_test.os, 'close'), \
+                mock.patch.object(st_test.select, 'select', side_effect=lambda *args: (list(args[0]), [], [])), \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal', side_effect=lambda fd, sig: signalled.append(fd - 600)), \
+                mock.patch.object(st_test, 'tree_users', side_effect=[[310, 311], [310, 311], [310, 311], [310, 311], [], []]), \
+                contextlib.redirect_stderr(io.StringIO()) as said:
+            self.assertIs(st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc), True)
+        self.assertEqual(signalled, [310, 311])
+        self.assertIn('terminating 2 orphan process(es) in pool tree', said.getvalue())
+        self.assertIn('310 (cargo build; cwd ', said.getvalue())
+
     def test_termination_escalates_only_survivors_and_refuses_dirty_tree(self):
         for exits_on in (st_test.signal.SIGTERM, st_test.signal.SIGKILL, 'chdir', None):
             with self.subTest(exits_on=exits_on):
@@ -1352,6 +1396,87 @@ class StTest(unittest.TestCase):
             code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '60'})
         self.assertEqual(code, 0, out[-300:] + err[-300:])
 
+    def test_the_member_step_s_limit_counts_its_own_running_not_its_build_admission_waits(self):
+        now = [0.0]
+        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
+        limit.observe(True)  # 20 minutes in the gate
+        now[0] = 1200
+        limit.observe(True)
+        now[0] = 1201
+        limit.observe(False)  # admitted: the gate execs the command
+        self.assertAlmostEqual(limit.waiting(), 1201)
+        now[0] = 1231
+        self.assertAlmostEqual(limit.remaining(), 20)  # 30 s of its own running
+        now[0] = 1252
+        self.assertLess(limit.remaining(), 0)  # a slow member step is still over its 50 s
+        # The waits have a limit of their own.
+        now[0] = 0.0
+        limit = st_test.MembersLimit(50, 600, clock=lambda: now[0])
+        limit.observe(True)
+        now[0] = 600
+        self.assertLessEqual(limit.remaining(), 0)
+
+    def test_a_member_step_waits_for_admission_exactly_while_its_process_is_the_gate_s_start(self):
+        proc = Path(self.tmp.name) / 'proc'
+        for pid, argv in ((1, ['python3', '/opt/admission/bin/build-admission', 'start', 'heavy', 'nix:run', '--', '/nix/bin/nix', 'run']),
+                          (2, ['/nix/bin/nix', 'run', 'github:x/y#megarepo', '--', 'apply']),             # admitted: the gate exec'd nix
+                          (3, ['python3', '/opt/admission/bin/build-admission', 'run', 'heavy', 'nix:build', '--', 'nix']),  # run: it stays the parent
+                          (4, ['sh', '-c', 'echo build-admission start'])):
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / 'cmdline').write_bytes(b'\0'.join(arg.encode() for arg in argv) + b'\0')
+        self.assertEqual([st_test.admission_waiting(pid, proc) for pid in (1, 2, 3, 4, 5)], [True, False, False, False, False])
+
+    @contextlib.contextmanager
+    def members_clock(self, seconds, waiting):
+        """The member step's clock moves `seconds` on the first time it is seen waiting for admission (`waiting` True) or running (False):
+        simulated, so no wall clock decides the outcome."""
+        init, observe = st_test.MembersLimit.__init__, st_test.MembersLimit.observe
+        offset, moved = [0.0], []
+
+        def begin(limit, *args, **kwargs):
+            init(limit, *args, **kwargs)
+            limit.clock = lambda: time.monotonic() + offset[0]
+
+        def seen(limit, now_waiting):
+            observe(limit, now_waiting)
+            if now_waiting == waiting and not moved:
+                moved.append(True)
+                offset[0] += seconds
+
+        with mock.patch.object(st_test.MembersLimit, '__init__', begin), mock.patch.object(st_test.MembersLimit, 'observe', seen):
+            yield
+
+    def test_a_member_step_s_build_admission_wait_does_not_count_against_its_limit_and_a_slow_one_still_does(self):
+        self.commit('.gitignore', '/repos/\n')
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        bin_dir = Path(self.tmp.name) / 'admission-bin'
+        bin_dir.mkdir()
+        gate = bin_dir / 'build-admission'  # as the host's gate does in `start`: wait, then exec the command
+        gate.write_text('#!/bin/sh\nshift 4\nsleep "${GATE_WAIT:-3}"\nexec "$@"\n')
+        gate.chmod(0o755)
+
+        def through_gate(script):
+            return lambda directory: [str(gate), 'start', 'heavy', 'nix:run', '--', 'sh', '-c', script]
+
+        # 80 s in the host's build admission, then a quick run: within a 50 s limit. Waits counted as running would stop it (#5068).
+        with self.members_clock(80, True), mock.patch.object(st_test, 'members_command', through_gate('mkdir -p repos/x')):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50'}, command=['test', '-d', 'repos/x'])
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(err, r'megarepo members materialized; waited (8\d|9\d)s for build admission \(not counted against ST_TEST_MEMBERS_LIMIT\)')
+        # 80 s of the member step's own running, once admitted, is over the same limit.
+        self.commit('b.txt', 'two')
+        with self.members_clock(80, False), mock.patch.object(st_test, 'members_command', lambda directory: ['sh', '-c', 'sleep 30']):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('materializing the megarepo members timed out after 50s (ST_TEST_MEMBERS_LIMIT)', out)
+        # And a wait past --queue-limit is stopped.
+        self.commit('c.txt', 'three')
+        with self.members_clock(80, True), mock.patch.object(st_test, 'members_command', through_gate('true')):
+            code, out, err = self.run_st_test('--check', 'demo', '--queue-limit', '60', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_WAIT': '30'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('materializing the megarepo members waited 60s for build admission (--queue-limit)', out)
+        self.assertEqual(len(self.statements()), 1, 'only the first run signed')
+
     def test_the_members_limit_comes_from_the_environment_and_a_bad_value_is_the_default(self):
         for value, expected in (('30', 30), ('0', 1), ('x', st_test.MEMBERS_LIMIT), ('', st_test.MEMBERS_LIMIT)):
             with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_MEMBERS_LIMIT': value}):
@@ -2117,6 +2242,30 @@ finally:
         self.assertFalse((repo / 'target-1').exists())
         self.assertFalse((repo / 'tree-1').exists())
         self.assertFalse(orphan.exists(), 'an orphaned compat target still belongs to its eviction unit')
+
+    @mock.patch.object(st_test, 'du_gb', apparent_gb)
+    def test_the_pool_cap_never_evicts_a_tree_a_live_st_test_is_in_though_its_lock_is_free(self):
+        base = Path(self.tmp.name) / 'pool-live'
+        repo = base / 'pools/o-example'
+        for n in (0, 1, 2):
+            self.fake_unit(base / 'pools', 'o-example', n, 100, 1000 + n)  # tree-0 the oldest
+        runner = Path(self.tmp.name) / 'bin' / 'st-test'  # another seat's live run, in tree-0 without its flock (acquire_tree left the tree)
+        runner.parent.mkdir()
+        runner.write_text('import time\ntime.sleep(60)\n')
+        live = subprocess.Popen([sys.executable, str(runner)], cwd=repo / 'tree-0', start_new_session=True)
+        self.addCleanup(live.wait)
+        self.addCleanup(lambda: os.killpg(live.pid, signal.SIGKILL) if live.poll() is None else None)
+        for _ in range(200):
+            if st_test.tree_users(repo / 'tree-0', execution_only=True):
+                break
+            time.sleep(0.05)
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            st_test.evict_to_cap(base, 0.0003, keep=(repo, 2))  # room for one unit: this run holds tree-2
+        self.assertTrue((repo / 'tree-0/blob').exists(), 'the live run keeps its tree')
+        self.assertTrue((repo / 'target-0/blob').exists(), 'and its target')
+        self.assertFalse((repo / 'tree-1').exists(), 'an idle unit is still evicted')
+        self.assertIn('not evicting o-example/tree-0: free by its lock but a live st-test is in it', said.getvalue())
+        self.assertIsNone(live.poll())
 
     def test_a_tagless_target_the_caller_made_is_never_emptied(self):
         """ST_EVIDENCE_TARGET naming a directory st-test did not make, without cargo's tag, is left alone however big it is."""
@@ -3574,8 +3723,11 @@ finally:
         self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'top_up', 'checks',
                                                  'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages', 'tree_wait_s', 'tree_slot_wait_s',
                                                  'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s', 'burst', 'burst_wait_s']))
-        # Its tree: free at once, and nothing that waited in it (no check here runs scripts/ci-local).
-        self.assertEqual((record['tree_wait_s'], record['tree_slot_wait_s'], record['tree_blocked_s']), (0, 0, 0))
+        # This private pool has no contention, but acquisition includes ticket work and /proc orphan scans before taking the tree.
+        # Rounded elapsed time can be nonzero on a loaded host; no build slot or ci-local stage actually waits in this fixture.
+        self.assertIsInstance(record['tree_wait_s'], int)
+        self.assertGreaterEqual(record['tree_wait_s'], 0)
+        self.assertEqual((record['tree_slot_wait_s'], record['tree_blocked_s']), (0, 0))
         self.assertLessEqual(record['tree_held_s'], record['total_s'])
         for field in ('started', 'ended'):
             self.assertRegex(record[field], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
@@ -3997,6 +4149,11 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(got[0][0], 1)                                          # the new tree, while tree-0 is still held
         got[0][1].close()
 
+    def test_non_utf8_ticket_rules_are_unreadable(self):
+        ticket = Path(self.tmp.name) / 'ticket'
+        ticket.write_bytes(b'\xff\xfe')
+        self.assertEqual(st_test.ticket_rules(ticket), 0)
+
     def test_the_queue_orders_by_aged_rank_then_arrival_and_drops_dead_tickets(self):
         queue = Path(self.tmp.name) / 'queue'
         queue.mkdir()
@@ -4162,39 +4319,63 @@ class PoolQueue(unittest.TestCase):
         self.assertIsNotNone(left.poll())
         self.assertIn('terminating 1 orphan process', said.getvalue())
 
+    def test_a_live_st_test_in_a_free_locked_tree_survives_a_waiter_s_pass(self):
+        (self.root / 'tree-0').mkdir(parents=True)
+        runner = Path(self.tmp.name) / 'bin' / 'st-test'  # another seat's live run, its cwd in tree-0 though it holds no flock on it
+        runner.parent.mkdir()
+        runner.write_text('import subprocess, time\nsubprocess.Popen(["sleep", "60"])\ntime.sleep(60)\n')
+        live = subprocess.Popen([sys.executable, str(runner)], cwd=self.root / 'tree-0', start_new_session=True)
+        self.addCleanup(live.wait)
+        self.addCleanup(lambda: os.killpg(live.pid, signal.SIGKILL) if live.poll() is None else None)
+        for _ in range(200):  # until its child is up, so both are in the tree
+            if len(st_test.tree_users(self.root / 'tree-0', execution_only=True)) >= 2:
+                break
+            time.sleep(0.05)
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50)
+        self.addCleanup(lock.close)
+        self.assertEqual(n, 1)  # tree-0 was left; the waiter took the other tree
+        self.assertIsNone(live.poll(), 'the live st-test was signalled')
+        self.assertIn('a live st-test is in it', said.getvalue())
+        self.assertNotIn('terminating', said.getvalue())
+
+    def test_a_waiter_that_gives_a_free_tree_back_for_a_build_slot_signals_nothing_in_it(self):
+        self.root.mkdir(parents=True)
+        looks, cleared = [], []
+
+        def slot_ready():
+            looks.append(True)
+            return len(looks) >= 3, 'test: 1 of 1 heavy slots busy'
+
+        with mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.01), \
+                mock.patch.object(st_test, 'clear_tree_orphans', side_effect=lambda directory, **kwargs: cleared.append(directory.name) or True), \
+                contextlib.redirect_stderr(io.StringIO()):
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready)
+        lock.close()
+        self.assertEqual((n, len(looks)), (0, 3))
+        self.assertEqual(cleared, ['tree-0'])  # once, as it took the tree: not on the two passes that gave it back
+
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)
-        free, asked, waits, got = [False], [], {}, []
-        # Its third look, not a fixed 0.6 s: a waiter thread scheduled late on a loaded host had looked only twice by then (#4807).
-        third = threading.Event()
+        free, asked, waits = [False], [], {}
 
         def slot_ready():
             asked.append(time.monotonic())
-            if len(asked) >= 3:
-                third.set()
             return free[0], 'test: 1 of 1 heavy slots busy'
 
-        said = io.StringIO()
-        with contextlib.redirect_stderr(said):
-            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)))
-            waiter.start()
-            self.assertTrue(third.wait(30), f'the waiter looked {len(asked)} time(s) in 30 s')
-            self.assertEqual(got, [])                                           # both trees are free, but its build would wait for a slot
-            for n in range(2):                                                  # and it holds neither while it waits (only for its look)
+        def next_pass(seconds):
+            self.assertEqual(seconds, st_test.POOL_WAIT_SECONDS)
+            self.assertLessEqual(len(asked), 3, 'the next pass takes a tree once the slot is free')
+            for n in range(2):
                 with open(self.root / f'tree-{n}.lock', 'w') as probe:
-                    for _ in range(100):
-                        try:
-                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            time.sleep(0.01)
-                    else:
-                        self.fail(f'tree-{n} stayed held while its waiter waited for a slot')
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     fcntl.flock(probe, fcntl.LOCK_UN)
-            self.assertGreater(len(asked), 2, 'it looks again on every pass')
-            free[0] = True
-            waiter.join(5)
-        n, lock = got[0]
+            free[0] = len(asked) == 3
+
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said), mock.patch.object(st_test.time, 'sleep', side_effect=next_pass):
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)
+        self.assertEqual(len(asked), 4, 'three passes leave both trees free; the fourth takes one')
         lock.close()
         self.assertEqual(n, 0)
         self.assertGreaterEqual(waits['slot_wait_s'], 0)

@@ -8,7 +8,7 @@ order: 6
 
 The Fractal MCP server connects an MCP client to the daemon's paired-client gateway. It exposes a closed set of tools for alerts, missions, agents, conversations, and explicitly scoped writes. It does not expose daemon control or give an assistant person authority.
 
-The Rust package is `fractal-chatgpt`; its executable is `st-chatgpt`. The supported assistant principal is `assistant/chatgpt`, including when a generic MCP client uses the adapter. Pairing requires the configured owning person's explicit consent to disclose assistant reads to OpenAI. Do not use a person credential for this server.
+The Rust package is `fractal-chatgpt`; its binary is `fractal-chatgpt` (`st-chatgpt` kept as an alias binary). The supported assistant principal is `assistant/chatgpt`, including when a generic MCP client uses the adapter. Pairing requires the configured owning person's explicit consent to disclose assistant reads to OpenAI. Do not use a person credential for this server.
 
 The [external-assistant contract](https://github.com/compoundingtech/fractal/blob/main/docs/st3/external-assistants.md) defines the authority and wire behavior. Remote access is a restricted dogfood path, not an authenticated public service.
 
@@ -22,13 +22,13 @@ Build the adapter from the repository root with Rust and the repository's build 
 cargo build --release -p fractal-chatgpt --bin st-chatgpt
 ```
 
-The binary is `target/release/st-chatgpt`. Alternatively, obtain it from the repository's Nix package:
+The binary is `target/release/st-chatgpt`. The source package also provides the canonical `fractal-chatgpt` binary via `--bin fractal-chatgpt`; the examples here use `st-chatgpt`, which both installation methods provide. Alternatively, obtain the current Nix package:
 
 ```sh
 nix build github:compoundingtech/fractal#st-chatgpt
 ```
 
-That binary is `result/bin/st-chatgpt`. Use a matching Fractal revision. The examples below assume the binary is on `PATH`.
+That binary is `result/bin/st-chatgpt`. Use a matching Fractal revision. The shell examples below assume `st-chatgpt` is on `PATH`; in the MCP client configuration, use the absolute path to the binary produced by your chosen installation method.
 
 ## Pair and prepare a grant
 
@@ -147,7 +147,7 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_conversation_read` | `read.assistant.conversation` | Read | Read one bounded revision-pinned conversation content range. |
 | `fractal_message_send` | `write.assistant.messages` | Write | Send one exact message to any existing agent; person recipients are refused. |
 
-The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This deprecation concerns MCP tool names, not the `st-chatgpt` executable name.
+The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This tool-name deprecation is separate from the `st-chatgpt` alias binary.
 
 ## Limits and grant lifecycle
 

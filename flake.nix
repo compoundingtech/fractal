@@ -9,8 +9,8 @@
     # The runtime, Rust crates and native terminal library share one producer revision.
     pty.url = "github:compoundingtech/pty/79d526d1be4f77bb3764dc1d880492806f8a07fc";
     pty.inputs.nixpkgs.follows = "nixpkgs";
-    # Merged pairing stack, including the daemon-identity restricted client.
-    fabric.url = "github:compoundingtech/fabric/1e6e93e9a662a40749f91d63eeecc4e98de114bd";
+    # Fabric v0.9.4 includes bounded peer expiry and recoverable identity rotation.
+    fabric.url = "github:compoundingtech/fabric/19e7f8964ce8305aeb8c200fb717967aa03f738f";
     fabric.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
@@ -617,36 +617,43 @@
         st3 = fractal;
         # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 
-        stChatgpt = pkgs.rustPlatform.buildRustPackage {
-          pname = "st-chatgpt";
+        fractalChatgpt = pkgs.rustPlatform.buildRustPackage {
+          pname = "fractal-chatgpt";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "st-chatgpt" ];
+          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "fractal-chatgpt" ];
           # .cargo/config.toml links Linux targets with mold.
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+          postInstall = ''ln -s fractal-chatgpt "$out/bin/st-chatgpt"'';
+          # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
           meta = {
             description = "Standalone Fractal ChatGPT MCP adapter";
             homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
-            mainProgram = "st-chatgpt";
+            mainProgram = "fractal-chatgpt";
           };
         };
 
-        stFabricAdapter = pkgs.rustPlatform.buildRustPackage {
-          pname = "st-fabric-adapter";
+        fractalFabricAdapter = pkgs.rustPlatform.buildRustPackage {
+          pname = "fractal-fabric-adapter";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "fractal-fabric-adapter" "--bin" "st-fabric-adapter" ];
+          cargoBuildFlags = [ "-p" "fractal-fabric-adapter" "--bin" "fractal-fabric-adapter" ];
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
+          # One-release bridge for pinned consumers of the old package and binary.
+          postInstall = ''
+            ln -s fractal-fabric-adapter "$out/bin/st-fabric-adapter"
+          '';
           meta = {
             description = "External Fractal fleet to Fabric runtime-peers adapter";
             homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
-            mainProgram = "st-fabric-adapter";
+            mainProgram = "fractal-fabric-adapter";
           };
         };
 
@@ -844,8 +851,12 @@
         packages.fractal = fractal;
         # Preserve existing .#st2 profile upgrades for at least one release.
         packages.st2 = fractal;
-        packages.st-chatgpt = stChatgpt;
-        packages.st-fabric-adapter = stFabricAdapter;
+        packages.fractal-chatgpt = fractalChatgpt;
+        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        packages.st-chatgpt = fractalChatgpt;
+        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
+        packages.fractal-fabric-adapter = fractalFabricAdapter;
+        packages.st-fabric-adapter = fractalFabricAdapter;
         # Isolated bootstrap/live proofs use the exact pairing API revision.
         packages.fabric-pairing = fabric.packages.${system}.default;
         packages.st3-migrate = st3;
@@ -904,11 +915,76 @@
               rendered.systemd.user.services.smalltalk.Service.ExecStart
             else
               builtins.concatStringsSep " " rendered.launchd.agents.smalltalk.config.ProgramArguments;
-            fixturePackage = pkgs.writeShellScriptBin "fractal" "echo fixture-fractal";
+            fixturePackage = pkgs.writeShellScriptBin "fractal" ''
+              set -eu
+              if [ "$*" = "--version --json" ]; then
+                printf '%s\n' '{"machine_version":"fixture-version","commit":"fixture-commit"}'
+              elif [ "''${1:-}" = setup ]; then
+                operation=$2
+                directory=$3
+                receipt="$directory/.fractal-install.json"
+                pending="$receipt.pending"
+                matches() {
+                  test -f "$1" && test ! -L "$1" &&
+                    ${pkgs.jq}/bin/jq -e --arg hash "$hash" \
+                      '.schema == 1 and .name == "fractal" and .sha256 == $hash' "$1" >/dev/null
+                }
+                case "$operation" in
+                  --receipt-verify)
+                    hash=$(${pkgs.coreutils}/bin/sha256sum "$directory/fractal")
+                    hash=''${hash%% *}
+                    if ! { test ! -L "$receipt" && test ! -L "$pending" &&
+                      { matches "$receipt" || matches "$pending"; }; }; then
+                      printf 'fixture: invalid install receipt %s; reinstall Fractal\n' "$receipt" >&2
+                      exit 1
+                    fi
+                    ;;
+                  --receipt-prepare)
+                    test "$4" = --receipt-installer && test "$5" = hm
+                    hash=$(${pkgs.coreutils}/bin/sha256sum "$0")
+                    hash=''${hash%% *}
+                    temporary=$(${pkgs.coreutils}/bin/mktemp "$directory/.fractal-receipt.XXXXXX")
+                    trap '${pkgs.coreutils}/bin/rm -f "$temporary"' EXIT
+                    ${pkgs.jq}/bin/jq -n --arg hash "$hash" \
+                      '{schema:1,name:"fractal",sha256:$hash,installer:"hm",version:"fixture-version",commit:"fixture-commit"}' > "$temporary"
+                    ${pkgs.coreutils}/bin/mv -f "$temporary" "$pending"
+                    ;;
+                  --receipt-write)
+                    test "$#" -eq 3
+                    hash=$(${pkgs.coreutils}/bin/sha256sum "$directory/fractal")
+                    hash=''${hash%% *}
+                    matches "$pending"
+                    ${pkgs.coreutils}/bin/mv -f "$pending" "$receipt"
+                    ;;
+                  *) exit 1 ;;
+                esac
+              else
+                echo fixture-fractal
+              fi
+            '';
             fixtureActivation = (mkHmModuleEval {
               package = fixturePackage;
               ptyPackage = null;
             }).config.home.activation.smalltalkBinary.data;
+            preReceiptPackage = pkgs.writeShellScriptBin "fractal" ''
+              echo pre-receipt-fractal
+            '';
+            preReceiptGeneration = pkgs.runCommand "fractal-pre-receipt-hm-generation" { } ''
+              mkdir -p "$out"
+              ln -s ${preReceiptPackage} "$out/home-path"
+              # Model the old activation's copy-and-rename, without receipt writes.
+              cat > "$out/activate" <<'SH'
+              #!${pkgs.runtimeShell}
+              set -eu
+              directory=$1
+              ${pkgs.coreutils}/bin/cp ${preReceiptPackage}/bin/fractal "$directory/.legacy-fractal"
+              ${pkgs.coreutils}/bin/chmod 755 "$directory/.legacy-fractal"
+              ${pkgs.coreutils}/bin/mv -f "$directory/.legacy-fractal" "$directory/fractal"
+              ${pkgs.coreutils}/bin/ln -sfn fractal "$directory/st"
+              ${pkgs.coreutils}/bin/ln -sfn fractal "$directory/st3"
+              SH
+              chmod +x "$out/activate"
+            '';
           in
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/fractal-test.sock" args;
@@ -964,6 +1040,21 @@
             binDir=$PWD/state/bin
             target=$binDir/fractal
             source=${fixturePackage}/bin/fractal
+            receipt=$binDir/.fractal-install.json
+            pending=$receipt.pending
+            writeReceipt() {
+              hash=$(sha256sum "$target")
+              ${pkgs.jq}/bin/jq -n --arg hash "''${hash%% *}" \
+                '{schema:1,name:"fractal",sha256:$hash,installer:"script",version:"old-version",commit:"old-commit"}' > "$receipt"
+            }
+            assertReceipt() {
+              hash=$(sha256sum "$target")
+              test -f "$receipt" && test ! -L "$receipt"
+              ${pkgs.jq}/bin/jq -e --arg hash "''${hash%% *}" \
+                '.schema == 1 and .name == "fractal" and .sha256 == $hash and .installer == "hm" and .version == "fixture-version" and .commit == "fixture-commit"' \
+                "$receipt"
+              test ! -e "$pending" && test ! -L "$pending"
+            }
             export DRY_RUN_CMD=
             for kind in regular same-bytes symlink dangling directory; do
               rm -rf state
@@ -990,6 +1081,7 @@
               esac
               test ! -e "$binDir/st" && test ! -L "$binDir/st"
               test ! -e "$binDir/st3" && test ! -L "$binDir/st3"
+              test ! -e "$receipt" && test ! -L "$receipt"
               test "$(find "$binDir" -name '.fractal.*' | wc -l)" -eq 0
             done
             # A managed physical layout supports mixed exact reverse aliases.
@@ -1009,9 +1101,239 @@
             cmp old-executable <(printf 'older managed bytes\n')
             test "$(readlink "$binDir/st")" = fractal
             test "$(readlink "$binDir/st3")" = fractal
+            assertReceipt
             before=$(stat -c %i "$target")
             ${pkgs.runtimeShell} activate
             test "$(stat -c %i "$target")" = "$before"
+            assertReceipt
+            # A repeated activation repairs executable mode without replacing bytes.
+            chmod 644 "$target"
+            before=$(stat -c %i "$target")
+            ${pkgs.runtimeShell} activate
+            test "$(stat -c %i "$target")" = "$before"
+            test "$(stat -c %a "$target")" = 755
+            "$target"
+            assertReceipt
+            # Receipt ownership works with aliases present or absent, while a
+            # missing receipt still accepts the historical alias layout.
+            for layout in receipt-and-aliases receipt-only aliases-only; do
+              rm -rf state
+              mkdir -p "$binDir"
+              printf 'older managed bytes: not an executable identity provider\n' > "$target"
+              chmod +x "$target"
+              if [ "$layout" != receipt-only ]; then
+                ln -s fractal "$binDir/st"
+                ln -s fractal "$binDir/st3"
+              fi
+              if [ "$layout" != aliases-only ]; then writeReceipt; fi
+              ${pkgs.runtimeShell} activate
+              cmp "$source" "$target"
+              assertReceipt
+              test "$(readlink "$binDir/st")" = fractal
+              test "$(readlink "$binDir/st3")" = fractal
+            done
+            # New -> pre-receipt rollback -> new: old HM copies its package but
+            # leaves the new finalized receipt. Only its active generation proves
+            # those different bytes, for both copied and linked legacy payloads.
+            for layout in copy link; do
+              rm -rf state
+              ${pkgs.runtimeShell} activate
+              cp "$receipt" saved-receipt
+              ${preReceiptGeneration}/activate "$binDir"
+              if [ "$layout" = link ]; then
+                rm "$target"
+                ln -s ${preReceiptPackage}/bin/fractal "$target"
+              fi
+              cmp saved-receipt "$receipt"
+              cmp ${preReceiptPackage}/bin/fractal "$target"
+              if "$source" setup --receipt-verify "$binDir"; then
+                echo 'strict verification accepted stale rollback receipt' >&2; exit 1
+              fi
+              oldGenPath=${preReceiptGeneration} ${pkgs.runtimeShell} activate 2>rollback-error
+              test ! -s rollback-error
+              test ! -L "$target"
+              cmp "$source" "$target"
+              assertReceipt
+            done
+            # Neither aliases alone nor an unrelated previous generation waive a
+            # mismatch. Every rejected candidate retains its payload and receipt.
+            for kind in no-generation unknown-payload script setup broken-alias symlink malformed schema name hash multiple pending dangling-pending nonexecutable mutable-generation; do
+              rm -rf state
+              ${pkgs.runtimeShell} activate
+              ${preReceiptGeneration}/activate "$binDir"
+              generation=${preReceiptGeneration}
+              case "$kind" in
+                no-generation) generation= ;;
+                unknown-payload) printf 'unknown replacement\n' > "$target" ;;
+                script|setup)
+                  ${pkgs.jq}/bin/jq --arg installer "$kind" '.installer = $installer' "$receipt" > changed-receipt
+                  cp changed-receipt "$receipt"
+                  ;;
+                broken-alias) ln -sfn foreign "$binDir/st3" ;;
+                symlink) mv "$receipt" "$binDir/receipt-target"; ln -s receipt-target "$receipt" ;;
+                malformed) printf '{broken\n' > "$receipt" ;;
+                schema|name|hash)
+                  case "$kind" in
+                    schema) filter='.schema = 2' ;;
+                    name) filter='.name = "foreign"' ;;
+                    hash) filter='.sha256 = "not-a-digest"' ;;
+                  esac
+                  ${pkgs.jq}/bin/jq "$filter" "$receipt" > changed-receipt
+                  cp changed-receipt "$receipt"
+                  ;;
+                multiple) printf '{}\n' >> "$receipt" ;;
+                pending) cp "$receipt" "$pending" ;;
+                dangling-pending) ln -s missing "$pending" ;;
+                nonexecutable) chmod 644 "$target" ;;
+                mutable-generation)
+                  mkdir -p mutable-generation/home-path/bin
+                  cp ${preReceiptPackage}/bin/fractal mutable-generation/home-path/bin/fractal
+                  generation=$PWD/mutable-generation
+                  ;;
+              esac
+              cp "$target" saved-binary
+              cp "$receipt" saved-receipt
+              before=$(stat -c '%i:%f:%s' "$target")
+              if oldGenPath="$generation" ${pkgs.runtimeShell} activate 2>receipt-error; then
+                echo "activation adopted unproven rollback: $kind" >&2; exit 1
+              fi
+              ${pkgs.gnugrep}/bin/grep -F "$receipt" receipt-error
+              ${pkgs.gnugrep}/bin/grep -i reinstall receipt-error
+              cmp saved-binary "$target"
+              cmp saved-receipt "$receipt"
+              test "$(stat -c '%i:%f:%s' "$target")" = "$before"
+              if [ "$kind" = symlink ]; then test "$(readlink "$receipt")" = receipt-target; fi
+              if [ "$kind" = pending ]; then cmp saved-receipt "$pending"; fi
+              if [ "$kind" = dangling-pending ]; then test "$(readlink "$pending")" = missing; fi
+              if [ "$kind" = broken-alias ]; then
+                test "$(readlink "$binDir/st3")" = foreign
+              else
+                test "$(readlink "$binDir/st3")" = fractal
+              fi
+              test "$(readlink "$binDir/st")" = fractal
+            done
+            # An invalid receipt must veto even otherwise-owned aliases.
+            for kind in hash schema name symlink; do
+              rm -rf state
+              mkdir -p "$binDir"
+              printf 'older managed bytes\n' > "$target"
+              chmod +x "$target"
+              ln -s fractal "$binDir/st"
+              ln -s fractal "$binDir/st3"
+              writeReceipt
+              case "$kind" in
+                hash) filter='.sha256 = "wrong"' ;;
+                schema) filter='.schema = 2' ;;
+                name) filter='.name = "foreign"' ;;
+                symlink) filter='.' ;;
+              esac
+              ${pkgs.jq}/bin/jq "$filter" "$receipt" > saved-receipt
+              cp saved-receipt "$receipt"
+              if [ "$kind" = symlink ]; then
+                mv "$receipt" "$binDir/receipt-target"
+                ln -s receipt-target "$receipt"
+              fi
+              cp "$target" saved-binary
+              before=$(stat -c %i "$target")
+              if ${pkgs.runtimeShell} activate 2>receipt-error; then
+                echo "activation adopted invalid receipt: $kind" >&2; exit 1
+              fi
+              ${pkgs.gnugrep}/bin/grep -F "$receipt" receipt-error
+              ${pkgs.gnugrep}/bin/grep -i reinstall receipt-error
+              cmp saved-binary "$target"
+              cmp saved-receipt "$receipt"
+              test "$(stat -c %i "$target")" = "$before"
+              test "$(readlink "$binDir/st")" = fractal
+              test "$(readlink "$binDir/st3")" = fractal
+              if [ "$kind" = symlink ]; then test "$(readlink "$receipt")" = receipt-target; fi
+            done
+            # Kill activation immediately after binary publication, before finalization.
+            # Pending ownership recovers both a fresh install and a stale final receipt,
+            # without relying on aliases (which have not been published yet).
+            cat > crash-mv <<'SH'
+            #!${pkgs.runtimeShell}
+            set -eu
+            ${pkgs.coreutils}/bin/mv "$@"
+            for arg in "$@"; do
+              case "$arg" in */bin/fractal) kill -KILL "$PPID" ;; esac
+            done
+            SH
+            chmod +x crash-mv
+            substitute activate activate-crash \
+              --replace-fail '${pkgs.coreutils}/bin/mv' "$PWD/crash-mv"
+            for prior in fresh receipt-only; do
+              rm -rf state
+              mkdir -p "$binDir"
+              if [ "$prior" = receipt-only ]; then
+                printf 'older managed bytes\n' > "$target"
+                chmod +x "$target"
+                writeReceipt
+                cp "$receipt" saved-receipt
+              fi
+              if ${pkgs.runtimeShell} activate-crash; then
+                echo 'activation survived injected crash' >&2; exit 1
+              fi
+              cmp "$source" "$target"
+              test -f "$pending" && test ! -L "$pending"
+              if [ "$prior" = receipt-only ]; then
+                cmp saved-receipt "$receipt"
+              else
+                test ! -e "$receipt"
+              fi
+              test ! -e "$binDir/st" && test ! -L "$binDir/st"
+              test ! -e "$binDir/st3" && test ! -L "$binDir/st3"
+              before=$(stat -c %i "$target")
+              ${pkgs.runtimeShell} activate
+              test "$(stat -c %i "$target")" = "$before"
+              assertReceipt
+              test "$(readlink "$binDir/st")" = fractal
+              test "$(readlink "$binDir/st3")" = fractal
+            done
+            # Fail after both publications: restore the exact previous executable
+            # inode and receipt, rather than leaving a half-installed generation.
+            for priorPending in absent present rollback; do
+            rm -rf state
+            mkdir -p "$binDir"
+            if [ "$priorPending" = rollback ]; then
+              ${pkgs.runtimeShell} activate
+              ${preReceiptGeneration}/activate "$binDir"
+            else
+              printf 'older managed bytes\n' > "$target"
+              chmod +x "$target"
+              ln -s fractal "$binDir/st"
+              ln -s fractal "$binDir/st3"
+              writeReceipt
+            fi
+            cp "$target" saved-binary
+            cp "$receipt" saved-receipt
+            if [ "$priorPending" = present ]; then
+              cp "$receipt" "$pending"
+              cp "$pending" saved-pending
+            fi
+            before=$(stat -c %i "$target")
+            cat > fail-ln <<'SH'
+            #!${pkgs.runtimeShell}
+            for arg in "$@"; do
+              case "$arg" in */bin/st3) exit 1 ;; esac
+            done
+            exec ${pkgs.coreutils}/bin/ln "$@"
+            SH
+            chmod +x fail-ln
+            substitute activate activate-failure \
+              --replace-fail '${pkgs.coreutils}/bin/ln' "$PWD/fail-ln"
+            if oldGenPath=${preReceiptGeneration} ${pkgs.runtimeShell} activate-failure; then
+              echo 'activation ignored publication failure' >&2; exit 1
+            fi
+            cmp saved-binary "$target"
+            cmp saved-receipt "$receipt"
+            test "$(stat -c %i "$target")" = "$before"
+            test "$(find "$binDir" -name '.fractal.*' -o -name '.fractal-backup.*' -o -name '.fractal-receipt.*' | wc -l)" -eq 0
+            if [ "$priorPending" = present ]; then
+              cmp saved-pending "$pending"
+            else
+              test ! -e "$pending" && test ! -L "$pending"
+            fi
+            done
             # Both historical raw forward-alias targets remain owned.
             for link in st3 "$binDir/st3"; do
               rm -rf state
@@ -1024,6 +1346,7 @@
               cmp "$source" "$target"
               test "$(readlink "$binDir/st")" = fractal
               test "$(readlink "$binDir/st3")" = fractal
+              assertReceipt
             done
             touch $out
           '';

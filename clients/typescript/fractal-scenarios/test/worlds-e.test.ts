@@ -30,9 +30,11 @@ for (const definition of [empty, loading, replicationDiverged, unicode]) {
 
 it('empty retains override cast but returns successful empty resource pages', async () => {
   const world = buildWorld(empty, genericVariants, ANCHOR_MS)
-  for (const kind of SLICE_KINDS.filter((kind) => kind !== 'sync')) {
+  for (const kind of SLICE_KINDS.filter((kind) => kind !== 'sync' && kind !== 'objectives')) {
     expect(Object.values(world.slices[kind].state).every((rows) => Array.isArray(rows) && rows.length === 0)).toBe(true)
   }
+  expect(world.slices.objectives.state.list.rows).toEqual([])
+  expect(world.slices.objectives.state.usage.accounts).toEqual([])
   expect(world.cast.agents.length).toBeGreaterThan(0)
   expect(world.with({ roster: 'one-agent' }).slices.roster.state.agents).toHaveLength(1)
   const replay = createReplay(world, { clock: manualClock(world.now) })

@@ -5446,7 +5446,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
         .as_deref()
         .map(Endpoint::parse)
         .transpose()?
-        .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
+        .unwrap_or_else(|| Endpoint::DiscoveredUnix(config.client_discovery()));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -5876,7 +5876,7 @@ async fn run(cli: Cli) -> Result<()> {
         .as_deref()
         .map(Endpoint::parse)
         .transpose()?
-        .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
+        .unwrap_or_else(|| Endpoint::DiscoveredUnix(config.client_discovery()));
     let _ = DAEMON_WAIT.set(Duration::from_secs(cli.daemon_wait));
     let client = cli_client(&endpoint);
     // Drivers outlive daemon restarts and handle an outage in their own loops; doctor reports one.
@@ -5964,15 +5964,15 @@ async fn run(cli: Cli) -> Result<()> {
                     )?)
                     .map_err(anyhow::Error::msg)?,
                 };
-                let Endpoint::Unix(socket) = &endpoint else {
+                let Some(socket) = endpoint.unix_socket() else {
                     anyhow::bail!("Git change control commands require the trusted local Unix socket");
                 };
                 let named = if actor.starts_with("agent/") {
-                    Client::unix_agent(socket, actor)?
+                    Client::unix_agent(socket.as_ref(), actor)?
                 } else {
-                    Client::unix_as(socket, actor)?
+                    Client::unix_as(socket.as_ref(), actor)?
                 };
-                named.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                named.with_endpoint(endpoint.clone()).with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
             };
             change_cli::run(&client, arguments, cli.json).await
         }
@@ -5986,13 +5986,13 @@ async fn run(cli: Cli) -> Result<()> {
                 // A read relayed to the poller is made as a person or agent.
                 Some(actor) => {
                     let actor = actor.map(str::to_owned).or_else(|| config.person.clone());
-                    let named = match (&endpoint, actor) {
-                        (Endpoint::Unix(socket), Some(actor)) if actor.starts_with("agent/") => {
-                            Client::unix_agent(socket, actor)?.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                    let named = match (endpoint.unix_socket(), actor) {
+                        (Some(socket), Some(actor)) if actor.starts_with("agent/") => {
+                            Client::unix_agent(socket.as_ref(), actor)?.with_endpoint(endpoint.clone()).with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
                         }
-                        (Endpoint::Unix(socket), Some(actor)) => {
-                            Client::unix_as(socket, parse_person_subject(&actor).map_err(anyhow::Error::msg)?)?
-                                .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                        (Some(socket), Some(actor)) => {
+                            Client::unix_as(socket.as_ref(), parse_person_subject(&actor).map_err(anyhow::Error::msg)?)?
+                                .with_endpoint(endpoint.clone()).with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
                         }
                         _ => client.clone(),
                     };
@@ -6881,7 +6881,7 @@ fn select_private_gateway(
     };
     config.client_gateway_socket = parent
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("st3-client.sock");
+        .join("fractal-client.sock");
     if gateway_path_for_comparison(&config.client_gateway_socket)?
         == gateway_path_for_comparison(&Config::default().client_gateway_socket)?
     {
@@ -6919,6 +6919,9 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    if let Some(person) = &config.person {
+        let _ = store.question_principal_default.set(person.clone());
+    }
     if admitted.is_some() {
         fractal_daemon::node_identity::record_store_writer(
             config, admitted.as_deref(), &config.node,
@@ -7149,12 +7152,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
     };
     config.validate()?;
     fractal_daemon::resource::configure_github(&config)?;
-    validate_unix_socket_path(&config.socket, "--socket")?;
-    validate_unix_socket_path(&config.client_gateway_socket, "--client-gateway-socket")?;
+    validate_unix_socket_path(&fractal_daemon::config::socket_binding_path(&config.socket), "--socket")?;
+    validate_unix_socket_path(
+        &fractal_daemon::config::socket_binding_path(&config.client_gateway_socket),
+        "--client-gateway-socket",
+    )?;
     let startup = begin_admitted_startup(&config, &state_identity)?;
     startup_phases.configuration_ms = phase_elapsed_ms();
     startup.phase("bind-listeners");
-    let state_socket = config.state_dir.join("run/st3.sock");
+    let state_socket = config.state_dir.join("run/fractal.sock");
     state_identity.verify_store_directory(&config)?;
     let (local_reserved, gateway_reserved) = tokio::try_join!(
         fractal_daemon::api::reserve_unix_socket(&config.socket, Some(&state_socket)),
@@ -7525,6 +7531,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fractal_daemon::api::seat_freshness::start_seat_freshness_push(&state);
     // Pairing-secret expiry cleanup runs even with no attention readers or publications.
     fractal_daemon::api::start_push_registration_cleanup(&state);
+    // Native observation lifetimes also end when no successor reconnects after driver loss.
+    let _question_lifecycle = fractal_daemon::api::mailbox::start_question_lifecycle(&state);
     // Nor does an attention window fold every person's attention.
     fractal_daemon::api::start_attention_list(&state);
     // Nor does a missions window fold the missions it shows.
@@ -7608,8 +7616,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
                 Arc::downgrade(&store),
             ));
-            stderr_message("st", format_args!("local API listening at {}", config.socket.display()));
-            stderr_message("st", format_args!("paired client gateway listening at {}", config.client_gateway_socket.display()));
+            stderr_message("st", format_args!("local API listening at {}", fractal_daemon::config::socket_binding_path(&config.socket).display()));
+            stderr_message("st", format_args!("paired client gateway listening at {}", fractal_daemon::config::socket_binding_path(&config.client_gateway_socket).display()));
         }
     };
     let web_dist = args.web_dist.unwrap_or(std::env::current_exe()?
@@ -8533,6 +8541,7 @@ async fn attach_terminal(
 fn endpoint_label(endpoint: &Endpoint) -> String {
     match endpoint {
         Endpoint::Unix(socket) => socket.display().to_string(),
+        Endpoint::DiscoveredUnix(_) => endpoint.unix_socket().expect("Unix discovery").display().to_string(),
         Endpoint::Http(url) => url.clone(),
         Endpoint::Fabric(endpoint) => endpoint.to_string(),
     }
@@ -8952,7 +8961,7 @@ fn trace_scalar(value: &Value) -> String {
 
 fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<GeneratedClient> {
     let socket = match endpoint {
-        Endpoint::Unix(socket) => socket,
+        Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => endpoint.unix_socket().expect("Unix endpoint"),
         Endpoint::Fabric(endpoint) => {
             let mut client = GeneratedClient::fabric(endpoint.clone());
             if let Some(credential) = std::env::var_os("FRACTAL_CLIENT_CREDENTIAL") {
@@ -8968,14 +8977,14 @@ fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<Generat
             "client-v0 product commands require a trusted local Unix or native Fabric endpoint"
         ),
     };
-    if let Some(startup) = fractal_daemon::startup::read(socket)
+    if let Some(startup) = fractal_daemon::startup::read(socket.as_ref())
         && startup.status == "starting"
         // A bound API can already answer before both listeners have published `serving`.
         // Try the connection before interpreting an observation as an outage.
-        && std::os::unix::net::UnixStream::connect(socket).is_err()
+        && std::os::unix::net::UnixStream::connect(socket.as_ref()).is_err()
     {
         if startup.full_replay() {
-            if let Some(outage) = fractal_daemon::client::DaemonUnreachable::during_startup(socket)
+            if let Some(outage) = fractal_daemon::client::DaemonUnreachable::during_startup(socket.as_ref())
                 && outage.full_replay()
             {
                 return Err(outage.into());
@@ -8984,12 +8993,17 @@ fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<Generat
             stderr_message("st", format_args!("{}", startup.summary()));
         }
     }
-    Ok(person
-        .map_or_else(
-            || GeneratedClient::unix(socket),
-            |person| GeneratedClient::unix_as(socket, person),
-        )
-        .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
+    let client = match endpoint {
+        Endpoint::DiscoveredUnix(identity) => person.map_or_else(
+            || GeneratedClient::discovered_unix(identity.clone()),
+            |person| GeneratedClient::discovered_unix_as(identity.clone(), person),
+        ),
+        _ => person.map_or_else(
+            || GeneratedClient::unix(socket.as_ref()),
+            |person| GeneratedClient::unix_as(socket.as_ref(), person),
+        ),
+    };
+    Ok(client.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
 }
 
 async fn run_now(
@@ -9171,7 +9185,13 @@ async fn run_devices_fabric(
                 );
             }
             fabric
-                .expose_socket(&service, &config.client_gateway_socket)
+                .expose_socket(
+                    &service,
+                    &fractal_client::default_unix_socket(
+                        &config.client_gateway_socket,
+                        &config.client_gateway_socket,
+                    ),
+                )
                 .await
                 .context("Fabric could not expose the client gateway; nothing changed")?;
             GatewayExposure {
@@ -11919,7 +11939,7 @@ async fn run_doctor(
         );
         return Ok(());
     }
-    let readiness = client.socket_path().and_then(fractal_daemon::startup::read);
+    let readiness = client.socket_path().as_deref().and_then(fractal_daemon::startup::read);
 
     if args.performance {
         let mut report: Value =
@@ -12672,12 +12692,13 @@ async fn resolve_member_subject(
     if subject.contains('/') {
         return Ok(literal);
     }
-    let Endpoint::Unix(socket) = endpoint else {
+    let Some(socket) = endpoint.unix_socket() else {
         return Ok(literal);
     };
     let discovered = completion::LocalTarget::discover(&[]);
     let target = completion::LocalTarget {
-        socket: socket.clone(),
+        socket: socket.into_owned(),
+        discovery: match endpoint { Endpoint::DiscoveredUnix(identity) => Some(identity.clone()), _ => None },
         caller: discovered.as_ref().and_then(|target| target.caller.clone()),
         person: discovered.and_then(|target| target.person),
     };
@@ -16608,6 +16629,29 @@ impl NativeObservations {
                         },
                     ).await?;
                 }
+                "harness-question" => {
+                    let observation: fractal_drivers::omp_questions::Observation =
+                        serde_json::from_value(event.payload["event"].clone())?;
+                    let submitted: Result<Value> = client.post(
+                        "/v1/harness-questions/native",
+                        &json!({
+                            "agent": subject, "runtime_incarnation": event.runtime_incarnation,
+                            "event": observation,
+                        }),
+                    ).await;
+                    if let Err(error) = submitted {
+                        // A disabled receiver or superseded binding must not park unrelated
+                        // native events behind an observation it will never admit. An API outage
+                        // still retains this event for exact replay; refusal invents no closure.
+                        if !matches!(fractal_daemon::client::api_error_code(&error), Some(
+                            "foreign-harness-question" | "unsupported-capability"
+                            | "stale-incarnation" | "stale-mailbox-session" | "not-found"
+                            | "runtime-not-local"
+                        )) {
+                            return Err(error);
+                        }
+                    }
+                }
                 "harness-timeline" => {
                     let operation: fractal_drivers::harness_timeline::Operation =
                         serde_json::from_slice(&raw)?;
@@ -17203,7 +17247,7 @@ fn accept_managed_channel_frame(
         let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
             "state" | "session" | "ready" | "delivered" | "read" | "failed" | "todo" => true,
-            "timeline" | "context" | "turn" | "subagent" => observer.is_some(),
+            "timeline" | "context" | "turn" | "subagent" | "question.open" | "question.closed" => observer.is_some(),
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
             "delivery_ready" | "retry_pending_ask" | "diagnostic" => true,
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
