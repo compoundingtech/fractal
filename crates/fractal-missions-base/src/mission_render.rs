@@ -25,8 +25,10 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, St3Error> {
     property(&mut root, "revision-cutover", match mission.revision_cutover { RevisionCutover::RestartActive => "restart-active", RevisionCutover::WhenIdle => "when-idle" });
     if let Some(agent) = &mission.report_to { property(&mut root, "report-to", agent.as_str()); }
     if let Some(ms) = mission.stalled_after_ms { property(&mut root, "stalled-after", format!("{ms}ms")); }
-    property(&mut root, "report-stalls", mission.report_stalls);
-    property(&mut root, "report-completed", mission.report_completed);
+    if mission.report_to.is_some() {
+        property(&mut root, "report-stalls", mission.report_stalls);
+        property(&mut root, "report-completed", mission.report_completed);
+    }
     annotations(&mut root, mission.declarations_kdl.as_deref(), &mission.revision_owners, &mission.agent_constraints);
     Ok(block(root, mission_body(mission, None)?))
 }
@@ -183,19 +185,19 @@ mod tests {
         round_trip(r#"mission "test" state="draft" timeout="30s" revisions="human-only" revision-reviewer="person/test" revision-cutover="when-idle" report-to="agent/test" stalled-after="5s" report-stalls=#false report-completed=#true {
           goal "One \"quoted\" goal\nwith a newline."; constraint "Keep the contract."; system
           input "text" kind="text"; input "resource" kind="resource"; concurrent-runs max=2
-          capacity cores=2 memory="1GiB"
+          capacity cores=2 memory="1G"
           resource "explicit" subject="resource/test" reason="A reference."
           resource "uri" uri="https://example.com/test" reason="A URI."
           assigned-to "agent/test"
           agent "helper" { constraint "A helper constraint."; workspace "."; command "true"; env { TOKEN "secret"; }; }
-          baseline "before" { exists "file/test"; field "state" "file/test" "is" "ready"; }
+          baseline "before" { exists "file/node:/test"; field "state" "file/node:/test" "is" "ready"; }
           produces { message "message/test" { text "done"; }; }
           gate "bounded" { deadline "20s"; }
           completion { depends-on "work"; }
           step "work" timeout="10s" revisions="human-only" revision-reviewer="person/test" {
             title "Work"; goal "Do the work."; constraint "Do not drop fields."; fresh-context; keep-open
-            capacity cores=3 memory="2GiB"; available-to "agent/a"; available-to "agent/b"
-            depends-on { exists "file/test"; }; baseline "start" { exists "file/test"; }
+            capacity cores=3 memory="2G"; available-to "agent/a"; available-to "agent/b"
+            depends-on { exists "file/node:/test"; }; baseline "start" { exists "file/node:/test"; }
             document "doc/test"; retry { attempts 3; backoff "2ms"; }
             agent "worker" { constraint "Keep this visible."; workspace "."; command "secret embedded declaration"; }
             produces { message "message/step" { text "complete"; }; }
@@ -214,10 +216,10 @@ mod tests {
     fn canonical_loop_closure_inheritance_and_redaction() {
         round_trip(r#"mission "test" state="ready" timeout="30s" {
           goal "Loop."; input "parent" kind="text"
-          loop "retry" timeout="10s" { max-rounds 3; depends-on { exists "file/test"; }
+          loop "retry" timeout="10s" { max-rounds 3; depends-on { exists "file/node:/test"; }
             metric "score" direction="higher" { field "score" "resource/test"; }
             metric "exec" direction="lower" { exec "echo 1" { host "node"; workspace "."; env { TOKEN "secret"; }; }; }
-            until { gate "ready" { exists "file/test"; }; }
+            until { gate "ready" { exists "file/node:/test"; }; }
             round { input "local" kind="text"; completion { when "all-steps-exhausted"; }
               agent "helper" { workspace "."; command "secret"; }
               step "nested" { mission "nested" state="ready" { goal "Nested."; step "done" { agentless; }; }; }
