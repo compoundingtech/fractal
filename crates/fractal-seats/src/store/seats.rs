@@ -495,7 +495,7 @@ impl SeatsStore for Store {
             let step = subject.starts_with("step-run/") && matches!(kind.as_str(),
                 "step-run.state" | "step-run.retried" | "step-run.carried"
                 | "work.claimed" | "work.renewed" | "work.progress" | "work.submitted"
-                | "work.failed" | "work.released" | "work.extended"
+                | "work.failed" | "work.released" | "work.handoff-returned" | "work.extended"
                 | "work.person-asked" | "work.person-done" | "work.person-cancelled");
             // Any other kind on a run, generation or step (a fault, a nudge): a card sees these
             // subjects only through its owner and its queue, so refold the agents they own or
