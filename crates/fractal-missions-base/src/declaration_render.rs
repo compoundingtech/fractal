@@ -15,14 +15,11 @@ pub fn annotations(
     declaration: Option<&str>,
     owners: &[String],
     constraints: &std::collections::BTreeMap<String, Vec<String>>,
-) -> Result<(), St3Error> {
+) {
     if declaration.is_some() || !owners.is_empty() || !constraints.is_empty() {
-        // JSON escapes newlines, preventing a value from escaping a line comment.
-        let metadata = serde_json::to_string(&(owners, constraints))
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
-        comment(root, &format!("embedded declaration KDL redacted; revision owners and agent constraints: {metadata}"));
+        // Debug escapes every line separator, including Unicode separators JSON leaves literal.
+        comment(root, &format!("embedded declaration KDL redacted; revision owners: {owners:?}; agent constraints: {constraints:?}"));
     }
-    Ok(())
 }
 
 pub fn common_body(
