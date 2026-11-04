@@ -1,7 +1,7 @@
 # When something is wrong
 
 If a populated v0.3.4 store may have unsigned delegation grants, preserve raw state and keys
-and follow the founder signing audit (preserve raw state and keys before maintenance) **before** doctor, restart or
+and follow the [bounded signing audit](st3/backups.md#preserve-suspected-unsigned-history-before-maintenance) **before** doctor, restart or
 export. Doctor can seal pending work; these diagnostics are not the initial read-only capture
 for that affected history.
 

@@ -57,7 +57,7 @@ fn text(output: &Output) -> String {
 }
 
 /// The prefix of the account a test makes, so a later run can remove what a killed run left. A
-/// host may declare its own fixture users (hetz2 has `sttfx1`..`sttfx32`), so it is not theirs.
+/// host may declare its own fixture users (a build host may have `sttfx1`..`sttfx32`), so it is not theirs.
 const PREFIX: &str = "sttiletest";
 
 /// Whether the account `name` with user ID `uid` is one these tests made: a user ID in the test
@@ -174,7 +174,7 @@ impl Host {
             "root".as_ref(),
             "-m".as_ref(),
             "0755".as_ref(),
-            std::ffi::OsStr::new(test_env!("CARGO_BIN_EXE_st3")),
+            std::ffi::OsStr::new(test_env!("CARGO_BIN_EXE_fractal-unstamped")),
             st.as_os_str(),
         ]));
         let mut host = Self {
@@ -1068,7 +1068,7 @@ fn only_root_starts_a_tile_and_only_inside_its_unit() {
     // A st that someone other than root can change never runs as root in a tile's unit.
     let user_st = Command::new("sudo")
         .arg("-n")
-        .arg(test_env!("CARGO_BIN_EXE_st3"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-unstamped"))
         .args(["tiles", "run", "--registry"])
         .arg(&host.registry)
         .args([&a.name, "--", "true"])
@@ -1168,6 +1168,7 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
         let _context = runtime.enter();
         fractal_daemon::api::spawn_tile_endpoints_from(
             fractal_daemon::api::AppState {
+                seat_admission: Default::default(),
                 store: store.clone(),
                 notify: std::sync::Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,

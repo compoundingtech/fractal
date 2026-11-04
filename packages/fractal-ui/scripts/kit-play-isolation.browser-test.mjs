@@ -317,7 +317,7 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
     assert.deepEqual(error.isolation, {
       boundary: 'document-start', origin: base,
       storage: [{ kind: 'localStorage', keys: ['local-only-negative-control'] }],
-      workerId: 7, previousCase,
+      workerId: 7, previousCase, reaudit: { localStorage: ['local-only-negative-control'] },
     })
     return true
   })
@@ -328,7 +328,7 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
       assert.deepEqual(error.isolation, {
         boundary: 'reset', origin: base,
         storage: [{ kind: 'localStorage', keys: ['local-only-negative-control'] }],
-        workerId: 7, previousCase,
+        workerId: 7, previousCase, reaudit: { localStorage: ['local-only-negative-control'] },
       })
       return true
     })

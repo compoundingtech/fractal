@@ -391,6 +391,7 @@ fn changed_and_attempt_outcomes_match_the_canonical_path_and_retry_receipts() {
                 &[],
                 None,
                 None,
+                None,
             )
             .unwrap()
             .unwrap()
@@ -492,6 +493,7 @@ fn an_invalid_observation_keeps_the_canonical_error_without_partial_claims() {
             &[],
             None,
             None,
+            None,
         )
         .unwrap_err();
     assert_eq!(prepared.code, canonical.code);
@@ -540,6 +542,7 @@ fn no_change_preparation_fast_and_canonical_writer_work_do_not_grow_with_resourc
                 &json!({"state":"open"}),
                 3,
                 &[],
+                None,
                 None,
                 None,
             )
@@ -835,7 +838,7 @@ subscription "fixture" {
 
 #[test]
 fn shared_memory_observations_keep_canonical_outcomes_and_two_plus_one_progress() {
-    let (store, revision) = fixture_for(Store::open_memory("prepared-fixture").unwrap());
+    let (store, revision) = fixture_for(Store::open_shared_memory("prepared-fixture").unwrap());
     take_counts();
     let first = observe(&store, &revision, 1);
     let baseline = take_counts();
@@ -868,6 +871,7 @@ fn shared_memory_observations_keep_canonical_outcomes_and_two_plus_one_progress(
             &json!({"state":"open"}),
             2,
             &[],
+            None,
             None,
             None,
         )
@@ -929,6 +933,7 @@ fn shared_memory_observations_keep_canonical_outcomes_and_two_plus_one_progress(
             3,
             &[],
             Some(&|| false),
+            None,
             None,
         )
         .unwrap_err();

@@ -52,6 +52,11 @@ pub(super) fn unavailable(connection: &Connection, claim_id: &str) -> Result<Opt
             "signature-judgment-incomplete: {claim_id} has {count} candidates"
         )));
     }
+    if let Some(link) = requeue_ahead_of(connection, claim_id)? {
+        return Ok(Some(format!(
+            "signature-judgment-incomplete: {claim_id} waits for the requeue of {link}"
+        )));
+    }
     Ok(None)
 }
 

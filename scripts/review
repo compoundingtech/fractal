@@ -456,6 +456,27 @@ def run_harness(config, name, model, prompt, cwd, timeout):
     return text, (model or "default"), settings.get("family", name), metrics
 
 
+def factory_read(deterministic, final):
+    """(areas, needed): the areas where a medium change needs Factory's read, and whether this review's final risk makes it so.
+    A base whose review-risk does not report areas yet (the change that introduces them) gets (None, None): its schema does not know
+    the fields, so the verdict does not carry them."""
+    if "factory_read" not in deterministic:
+        return None, None
+    areas = deterministic["factory_read"]
+    return areas, final == "medium" and bool(areas)
+
+
+def with_factory_read(verdict, deterministic):
+    """VERDICT with the factory-read fields of its final risk, or without them when the base does not report them."""
+    areas, needed = factory_read(deterministic, verdict["risk"]["final"])
+    verdict["risk"]["deterministic"].pop("factory_read", None)
+    verdict["risk"].pop("needs_factory_read", None)
+    if areas is not None:
+        verdict["risk"]["deterministic"]["factory_read"] = areas
+        verdict["risk"]["needs_factory_read"] = needed
+    return verdict
+
+
 def assemble(answer, *, head, base, round_number, deterministic, patch, served, changed, structure, reviewer, digest):
     risk = answer.get("risk") or {}
     llm = {"level": risk.get("level"), "reasons": risk.get("reasons") or []}
@@ -474,7 +495,7 @@ def assemble(answer, *, head, base, round_number, deterministic, patch, served, 
     answers = [{"finding": entry.get("finding", ""), "change": head} for entry in (answer.get("answers") or []) if isinstance(entry, dict)]
     if answers:
         verdict["answers"] = answers
-    return verdict
+    return with_factory_read(verdict, deterministic)
 
 
 def validate(verdict, repo, base, folder, previous=None):
@@ -512,8 +533,9 @@ def carry(previous, *, head, base, patch, digest, deterministic, merge_base):
     """A new head that differs from the reviewed ancestor by nothing but a clean merge of main keeps its verdict."""
     verdict = json.loads(json.dumps(previous))
     verdict.update(head=head, base=base, patch_ids=patch, standard=digest)
-    verdict["risk"]["deterministic"] = {"level": deterministic["level"], "reasons": deterministic["reasons"]}
     verdict["risk"]["final"] = max(deterministic["level"], verdict["risk"]["llm"]["level"], key=ORDER.get)
+    verdict["risk"]["deterministic"] = {"level": deterministic["level"], "reasons": deterministic["reasons"]}
+    with_factory_read(verdict, deterministic)
     verdict["read"] = {"full": [], "structure": [], "record": sorted(patch)}
     verdict["text"] = (f"Carried from {previous['head']}: this head differs from it only by a clean merge of main "
                        f"(empty remerge diff, every per-file patch-id unchanged), so nothing was read again.\n\n" + previous["text"])
@@ -642,7 +664,9 @@ def finish(args, repo, verdict, metrics, base, folder, previous=None):
         folder = record_dir(repo)
         folder.mkdir(parents=True, exist_ok=True)
         (folder / f"{verdict['head']}-r{verdict['round']}.json").write_text(json.dumps(verdict, indent=2) + "\n")
-    print(f"review: {verdict['verdict']} at {verdict['risk']['final']} risk, round {verdict['round']}, "
+    need = "needs Factory read (" + ", ".join(area["area"] for area in verdict["risk"]["deterministic"]["factory_read"]) + ")" \
+        if verdict["risk"].get("needs_factory_read") else ""
+    print(f"review: {verdict['verdict']} at {verdict['risk']['final']} risk{', ' + need if need else ''}, round {verdict['round']}, "
           f"{metrics.get('seconds')} s, cost {metrics.get('cost_usd')}", file=sys.stderr)
     print(out)
     return 0

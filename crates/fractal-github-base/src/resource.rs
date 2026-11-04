@@ -10,6 +10,8 @@ use anyhow::{Context as _, Result, bail};
 /// What the built-in `merged` and `ci-passed` gates read from GitHub.
 pub mod github_gates;
 mod github_repository;
+mod github_poll;
+pub use github_poll::{BudgetContinuation, completed_poll_cursor};
 pub mod github_workflows;
 pub use github_repository::{
     RECENT_COMMENTS, merge_recent_comments, recent_comment_key, replicated_cursor,
@@ -486,11 +488,12 @@ fn github_cache_for(request: &ObservationRequest) -> Duration {
         .min(GITHUB_CACHE_FOR)
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct GithubPayload {
     value: Value,
     etag: Option<String>,
     next: Option<String>,
+    #[serde(skip, default = "Instant::now")]
     checked_at: Instant,
 }
 
@@ -752,6 +755,16 @@ async fn github_json(
     token: &GithubAuth,
     cache_for: Duration,
 ) -> Result<GithubPayload> {
+    let key = format!("REST {} {url}", token.cache_principal());
+    github_poll::read(key, github_json_read(client, url, token, cache_for)).await
+}
+
+async fn github_json_read(
+    client: &reqwest::Client,
+    url: String,
+    token: &GithubAuth,
+    cache_for: Duration,
+) -> Result<GithubPayload> {
     let selected = crate::github_http::read_auth_for_url(&url, token);
     let token = &selected;
     let entry = {
@@ -909,6 +922,17 @@ async fn github_graphql_with_cache_eligibility(
     query: &str,
     variables: Value,
 ) -> Result<(Value, bool)> {
+    let key = format!("GraphQL {} {api_base} {query} {variables}", token.cache_principal());
+    github_poll::read(key, github_graphql_read(client, api_base, token, query, variables)).await
+}
+
+async fn github_graphql_read(
+    client: &reqwest::Client,
+    api_base: &str,
+    token: &GithubAuth,
+    query: &str,
+    variables: Value,
+) -> Result<(Value, bool)> {
     let request = client
         .post(format!("{api_base}/graphql"))
         .header("Accept", "application/vnd.github+json")
@@ -936,11 +960,20 @@ async fn github_graphql_with_cache_eligibility(
                 status: 200,
             });
         }
-        let message = errors[0]
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("an unnamed error");
-        bail!("GitHub GraphQL refused the query: {message}");
+        let details = errors.iter().map(|error| {
+            let message = error.get("message").and_then(Value::as_str).unwrap_or("an unnamed error");
+            let kind = error.get("type").and_then(Value::as_str);
+            let path = error.get("path").and_then(Value::as_array).map(|segments|
+                segments.iter().map(|segment| segment.as_str().map_or_else(|| segment.to_string(), str::to_owned))
+                    .collect::<Vec<_>>().join("."));
+            match (kind, path) {
+                (Some(kind), Some(path)) => format!("{message} ({kind} at {path})"),
+                (Some(kind), None) => format!("{message} ({kind})"),
+                (None, Some(path)) => format!("{message} (at {path})"),
+                (None, None) => message.to_owned(),
+            }
+        }).collect::<Vec<_>>().join("; ");
+        bail!("GitHub GraphQL refused the query: {details}");
     }
     let data = body.get("data")
         .filter(|data| !data.is_null())
@@ -1229,6 +1262,22 @@ async fn observe_github_pull_request_at(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn graphql_refusal_names_error_type_and_field_path() {
+        let fixture = crate::github_http::app_read::tests::server(|_, _, _| {
+            (reqwest::StatusCode::OK, json!({"errors":[{
+                "message":"Resource not accessible by integration",
+                "type":"FORBIDDEN",
+                "path":["repository","pullRequests","nodes",0,"commits"]
+            }]}))
+        }).await;
+        let error = github_graphql_with_cache_eligibility(&reqwest::Client::new(),
+            &fixture.base, &GithubAuth::test("fixture-pat"), "query { repository { id } }",
+            json!({})).await.unwrap_err().to_string();
+        assert!(error.contains("Resource not accessible by integration"));
+        assert!(error.contains("FORBIDDEN at repository.pullRequests.nodes.0.commits"), "{error}");
+    }
 
     #[tokio::test]
     async fn forgetting_artifact_url_invalidates_every_principal_without_double_counting_responses() {

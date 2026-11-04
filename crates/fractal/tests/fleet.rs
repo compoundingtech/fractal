@@ -14,11 +14,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use fractal_daemon::client::Client;
-use fractal_daemon::model::ClaimInput;
+use fractal_daemon::model::{ClaimInput, MessagePage, MessageView};
 
 fn st3() -> &'static str {
     test_env!("CARGO_BIN_EXE_fractal-fixture")
 }
+mod process;
+use process::DaemonProcess;
+
 const PERSON: &str = "person/fleet-tester";
 const NOTE: &str = "custom.fleet-test.note";
 
@@ -124,7 +127,7 @@ pub(super) struct Node {
     binary: PathBuf,
     pub(super) port: u16,
     pub(super) env: Vec<(String, String)>,
-    daemon: Option<Child>,
+    daemon: Option<DaemonProcess>,
     worker: Option<Child>,
     /// Every argument list this test passed to an st3 process on this node.
     arguments: std::sync::Mutex<Vec<Vec<String>>>,
@@ -149,6 +152,24 @@ impl Node {
         let pty = root.join("bin/pty");
         fs::write(&pty, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&pty, fs::Permissions::from_mode(0o755)).unwrap();
+        // Private supervisor evidence, including replacement workers; never consult host services.
+        for (tool, script) in [
+            ("systemctl", "#!/bin/sh\ncase \"$*\" in\n*MainPID*) cat \"$HOME/../worker.pid\";;\n*'show st3-replication.service '*) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n*' show '*) printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\n';;\n*) exit 1;;\nesac\n"),
+            ("launchctl", "#!/bin/sh\ncase \"$*\" in\n*com.compoundingtech.st3.replication*) printf 'state = running\\npid = '; cat \"$HOME/../worker.pid\";;\n*) exit 1;;\nesac\n"),
+        ] {
+            let mut script = script.to_owned();
+            if tool == "systemctl"
+                && let Ok(real) = fractal_runtime::resolve_executable(tool, &std::env::vars().collect())
+            {
+                // Preserve user-scope isolation without consulting real fleet service units.
+                script = script.replace("case \"$*\" in\n", &format!(
+                    "case \"$*\" in\n*'.scope'*|*show-environment*) exec '{}' \"$@\";;\n",
+                    real.to_string_lossy().replace('\'', "'\\''")));
+            }
+            let path = root.join("bin").join(tool);
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         // A release without --pty-binary finds pty through the login shell's PATH.
         let profile = format!("export PATH=\"{}:$PATH\"\n", root.join("bin").display());
         for file in [".profile", ".bash_profile", ".zprofile", ".zshrc"] {
@@ -197,7 +218,7 @@ impl Node {
             .args(arguments)
             .current_dir(&self.root)
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("PATH", format!("{}:{}", self.root.join("bin").display(), std::env::var("PATH").unwrap_or_default()))
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))
@@ -278,13 +299,12 @@ impl Node {
         } else {
             vec!["up", "--web-listen", "off"]
         };
-        let daemon = self
-            .command(&up)
-            .stdin(Stdio::null())
-            .stdout(log("daemon.log"))
-            .stderr(log("daemon.stderr.log"))
-            .spawn()
-            .unwrap();
+        let daemon = DaemonProcess::spawn_isolated(
+            self.command(&up),
+            log("daemon.log"),
+            log("daemon.stderr.log"),
+        )
+        .unwrap();
         self.daemon = Some(daemon);
         let client = self.client();
         // The release compatibility binary may start while other CI lanes compile.
@@ -334,6 +354,7 @@ impl Node {
                 .spawn()
                 .unwrap(),
         );
+        fs::write(self.root.join("worker.pid"), self.worker.as_ref().unwrap().id().to_string()).unwrap();
     }
 
     fn stop_worker(&mut self) {
@@ -341,28 +362,33 @@ impl Node {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let _ = fs::remove_file(self.root.join("worker.pid"));
     }
 
     fn stop(&mut self) {
-        for child in [self.worker.take(), self.daemon.take()]
-            .into_iter()
-            .flatten()
-        {
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
+        self.stop_worker();
+        if let Some(mut daemon) = self.daemon.take() {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
         }
+        let _ = fs::remove_file(self.root.join("worker.pid"));
         let _ = fs::remove_file(self.socket());
     }
 
     /// Send `signal` (such as `STOP` or `CONT`) to this node's daemon and worker.
     fn signal(&self, signal: &str) {
-        for child in [&self.daemon, &self.worker].into_iter().flatten() {
+        for pid in [
+            self.daemon.as_ref().map(DaemonProcess::id),
+            self.worker.as_ref().map(Child::id),
+        ]
+        .into_iter()
+        .flatten()
+        {
             let status = Command::new("kill")
-                .args([format!("-{signal}"), child.id().to_string()])
+                .args([format!("-{signal}"), pid.to_string()])
                 .status()
                 .unwrap();
-            assert!(status.success(), "kill -{signal} {}", child.id());
+            assert!(status.success(), "kill -{signal} {pid}");
         }
     }
 
@@ -642,6 +668,103 @@ async fn joined_with(
     );
     node.start().await;
     node
+}
+
+#[test]
+fn offline_rename_proof_uses_supported_environment_aliases() {
+    let root = tempfile::tempdir().unwrap();
+    let node = Node::new(root.path(), "offline-proof");
+    fs::write(node.root.join("config/st3/config.toml"), "not valid toml = [").unwrap();
+    for kind in ["agents", "missions"] {
+        for (preferred, legacy) in [(None, None), (Some("0"), None), (None, Some("0")), (Some("0"), Some("invalid"))] {
+            let mut command = node.command(&[
+                "--endpoint", "not-a-valid-endpoint", kind, "rename-id", "proof", "verify",
+                "missing.json", "--fleet-anchor", "caller-anchor",
+            ]);
+            command.env_remove("FRACTAL_DAEMON_WAIT").env_remove("ST3_DAEMON_WAIT");
+            if let Some(value) = preferred { command.env("FRACTAL_DAEMON_WAIT", value); }
+            if let Some(value) = legacy { command.env("ST3_DAEMON_WAIT", value); }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(6), "{}", String::from_utf8_lossy(&output.stderr));
+            let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(verdict["ok"], false);
+            assert_eq!(verdict["error"]["code"], "malformed-bundle");
+        }
+    }
+}
+
+#[tokio::test]
+async fn rename_proofs_export_over_cli_and_verify_without_daemon_or_config() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "proof-source").await;
+    let anchor_value = node.st_json(&["fleet", "anchor", "show"]);
+    let fleet_anchor = anchor_value["fleet_anchor"].as_str().unwrap();
+    assert_eq!(node.st_ok(&["fleet", "anchor", "show"]).trim(), fleet_anchor);
+    let declaration = node.root.join("identities.kdl");
+    fs::write(&declaration, r#"version 2
+agent "proof-original/worker" { command "true"; workspace "/tmp"; restart "never"; }
+mission "proof-original" state="ready" {
+  goal "Prove portable identity history."
+  step "work" { agentless }
+}
+"#).unwrap();
+    node.st_ok(&["apply", declaration.to_str().unwrap(), "--as", PERSON]);
+    let mut proofs = Vec::new();
+    for (kind, prefix, suffix) in [("agents", "agent", "/worker"), ("missions", "mission", "")] {
+        let original = format!("{prefix}/proof-original{suffix}");
+        let renamed = format!("{prefix}/proof-renamed{suffix}");
+        let receipt = node.st_json(&[
+            kind, "rename-id", &original, &renamed,
+            "--as", PERSON, "--reason", "Clarify responsibility",
+        ]);
+        let revision = receipt["naming_revision"].as_str().unwrap().to_owned();
+        let denied = node.st(&[kind, "rename-id", "proof", "export", &original]);
+        assert!(!denied.status.success());
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("co-batched claims and blobs"));
+        let proof = root.path().join(format!("{kind}-proof.json"));
+        node.st_ok(&[
+            kind, "rename-id", "proof", "export", &original,
+            "--revision", &revision, "--out", proof.to_str().unwrap(),
+            "--include-co-batched-claims",
+        ]);
+        let from_file: Value = serde_json::from_slice(&fs::read(&proof).unwrap()).unwrap();
+        let from_stdout = node.st_json(&[
+            kind, "rename-id", "proof", "export", &renamed,
+            "--include-co-batched-claims",
+        ]);
+        for field in ["schema", "identity_kind", "storage_id", "canonical_id", "naming_revision", "declaration", "chain"] {
+            assert_eq!(from_file[field], from_stdout[field], "{field}");
+        }
+        assert_eq!(from_file["schema"], "fractal.rename-proof.v1");
+        assert_eq!(from_file["disclosure"], "fleet-internal");
+        proofs.push((kind, proof, renamed, revision));
+    }
+    node.stop();
+    // Deliberately invalid local configuration must be irrelevant to verification.
+    fs::write(node.root.join("config/st3/config.toml"), "not valid toml = [").unwrap();
+    for (kind, proof, renamed, revision) in proofs {
+        let offline = [
+            "--instance", "unconfigured-proof-verifier",
+            "--endpoint", "not-a-valid-endpoint",
+            kind, "rename-id", "proof", "verify", proof.to_str().unwrap(),
+            "--fleet-anchor", fleet_anchor,
+        ];
+        let verdict = node.st_json(&offline);
+        assert_eq!(verdict["schema"], "fractal.rename-proof-verdict.v1");
+        assert_eq!(verdict["ok"], true);
+        assert_eq!(verdict["disclosure"], "fleet-internal");
+        assert_eq!(verdict["to"], renamed);
+        let mut stale = offline.to_vec();
+        stale.extend(["--after-revision", &revision]);
+        let rejected = node.st(&stale);
+        assert_eq!(rejected.status.code(), Some(5));
+        let verdict: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+        assert_eq!(verdict["ok"], false);
+        assert_eq!(verdict["error"]["code"], "stale-revision");
+    }
 }
 
 /// Re-publication and parent revisions must preserve the weekly occurrence, even after its
@@ -2769,14 +2892,23 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
     // Replication can advance between CLI calls and make coverage pending again. Assert
     // against the settled comparison that satisfied the wait, including its table diff.
     let diff = settled_diff.unwrap();
-    let doctor = c.st(&["--json", "doctor"]);
-    let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
-    let admission = doctor["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["name"] == "fleet-admission")
-        .unwrap();
+    // The membership change wakes the daemon to count the admission residue again; doctor
+    // reports the new count once it is made.
+    let mut admission = Value::Null;
+    wait_until("doctor reports the admissions from before the rejoin", 120, || {
+        let doctor = c.st(&["--json", "doctor"]);
+        let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+        admission = doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "fleet-admission")
+            .cloned()
+            .unwrap();
+        let counted = admission["message"].as_str().unwrap().contains("admitted beyond high water");
+        async move { counted }
+    })
+    .await;
     let waited = c.st(&["fleet", "wait", "--timeout", "5s"]);
     eprintln!(
         "rejoin receipt: {}",
@@ -2931,8 +3063,7 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only what the test itself created remains: empty XDG roots, the stub pty, and the shell
-    // profiles (fish's config.fish among them) that put it on PATH.
+    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain.
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -2952,6 +3083,8 @@ async fn uninstall_leaves_nothing_behind() {
                 "run",
                 "bin",
                 "bin/pty",
+                "bin/systemctl",
+                "bin/launchctl",
             ]
             .iter()
             .any(|kept| relative == Path::new(kept))
@@ -4514,7 +4647,7 @@ async fn an_invitation_only_fabric_could_carry_fails_before_it_exists() {
         assert!(!output.status.success(), "{delivery:?} succeeded");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("Fabric invitations need st-fabric-adapter installed"),
+            stderr.contains("Fabric invitations need fractal-fabric-adapter installed"),
             "{delivery:?}: {stderr}"
         );
         assert!(output.stdout.is_empty(), "{delivery:?} printed a code");
@@ -4919,6 +5052,7 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
                 .spawn()
                 .unwrap(),
         );
+        fs::write(traveller.root.join("worker.pid"), traveller.worker.as_ref().unwrap().id().to_string()).unwrap();
         for node in [&a, &b, &traveller] {
             wait_for_notes(node, &expected, 10, &[&a, &b, &traveller]).await;
         }
@@ -5856,3 +5990,1744 @@ mission "orchard/release" state="ready" {
 
 #[path = "fleet/schedule_standby.rs"]
 mod schedule_standby;
+
+/// Whether `node`'s running release advertises `seat_freshness_reads` in its newest
+/// daemon.started. No feature names reading stream items; this one was first advertised by a
+/// build that already had the timeline waits (#4481), stream items in lists (#4512) and the marks
+/// reader (#4696), so every release that advertises it reads stream and graph mail as one timeline.
+async fn reads_seat_freshness(node: &Node) -> bool {
+    node.claims().await.iter().any(|claim| {
+        claim["subject"] == format!("daemon/{}", node.name)
+            && claim["kind"] == "daemon.started"
+            && claim.pointer("/body/fields/features/seat_freshness_reads").and_then(Value::as_i64) == Some(1)
+    })
+}
+
+/// An agent's message written straight into `node`'s messages shard. Nothing in this build
+/// writes the shard yet; tests reach it through a test-support route.
+async fn append_stream_item(node: &Node, subject: &str) {
+    let _: Value = node
+        .client()
+        .post(
+            "/v1/internal/test/messages-shard",
+            &ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/fleet-sender".into()),
+                fields: serde_json::from_value(json!({
+                    "from": "agent/fleet-sender", "to": "agent/fleet-reader",
+                    "content": "through the stream", "status": "sent"
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// How many claims `node`'s messages shard holds about `subject`.
+async fn stream_items(node: &Node, subject: &str) -> usize {
+    let items: Vec<Value> = node
+        .client()
+        .get(&format!("/v1/internal/test/messages-shard?subject={subject}"))
+        .await
+        .unwrap();
+    items.len()
+}
+
+/// The members `node` dials for its messages shard.
+async fn stream_peers(node: &Node) -> BTreeSet<String> {
+    let peers: Value = node
+        .client()
+        .get("/v1/internal/test/messages-shard/peers")
+        .await
+        .unwrap();
+    serde_json::from_value(peers["peers"].clone()).unwrap()
+}
+
+async fn wait_for_stream_item(node: &Node, subject: &str, seconds: u64) {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while stream_items(node, subject).await == 0 {
+        assert!(Instant::now() < deadline, "{} never received {subject}:\n{}", node.name, node.logs());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn wait_for_stream_peers(node: &Node, expected: &[&str], seconds: u64) {
+    let expected = expected.iter().map(|name| (*name).to_owned()).collect::<BTreeSet<_>>();
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        let peers = stream_peers(node).await;
+        if peers == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} dials {peers:?} for the messages shard, expected {expected:?}",
+            node.name
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Members that both hold the messages shard advertise it, dial each other for it, and
+/// replicate its items without writing them into the graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn members_that_advertise_the_messages_shard_replicate_it_beside_the_graph() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "4f1e2d3c-5b6a-4978-8e9d-0c1b2a3f4e5d";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([5_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut n1 = Node::new(root.path(), "n1");
+    let mut n2 = Node::new(root.path(), "n2");
+    n1.legacy_config(fleet_id, &secret, &[("n2", n2.port)]);
+    n2.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    for node in [&mut n1, &mut n2] {
+        node.start().await;
+        assert!(node.state_dir().join("shards/messages/claims.sqlite3").exists());
+    }
+    wait_for_stream_peers(&n1, &["n2"], 60).await;
+    wait_for_stream_peers(&n2, &["n1"], 60).await;
+    append_stream_item(&n1, "message/0000000000000a01").await;
+    wait_for_stream_item(&n2, "message/0000000000000a01", 60).await;
+    n1.note("graph-after-stream").await;
+    let expected = BTreeSet::from(["custom/fleet-test/graph-after-stream".to_owned()]);
+    wait_for_notes(&n2, &expected, 60, &[&n1, &n2]).await;
+    assert!(
+        n2.claims().await.iter().all(|claim| claim["subject"] != "message/0000000000000a01"),
+        "a stream item reached the graph"
+    );
+}
+
+/// A member's readers merge what the stream holds with the graph's mail: the recipient's page
+/// and the message read find a stream item that replicated in, and its recipient records it read
+/// on its own member with an offset receipt, writing no lifecycle claim to the graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn readers_find_stream_items_and_record_their_lifecycle_on_the_member() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "8c7b6a5d-4e3f-4210-9a8b-7c6d5e4f3a2b";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut n1 = Node::new(root.path(), "n1");
+    let mut n2 = Node::new(root.path(), "n2");
+    n1.legacy_config(fleet_id, &secret, &[("n2", n2.port)]);
+    n2.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    for node in [&mut n1, &mut n2] {
+        node.start().await;
+    }
+    wait_for_stream_peers(&n1, &["n2"], 60).await;
+    let subject = "message/0000000000000c01";
+    append_stream_item(&n1, subject).await;
+    wait_for_stream_item(&n2, subject, 60).await;
+
+    let page: MessagePage =
+        n2.client().get("/v1/messages/page?to=agent/fleet-reader").await.unwrap();
+    let listed = page.items.iter().find(|item| item.subject == subject)
+        .expect("the page lists the stream item");
+    assert_eq!(listed.content, "through the stream");
+    let read: MessageView =
+        n2.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(read.from, "agent/fleet-sender");
+
+    let _: Value = n2
+        .client()
+        .post(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "delivered", "actor": "agent/fleet-reader", "idempotency_key": "fleet-delivered"}),
+        )
+        .await
+        .unwrap();
+    let receipt: Value = n2
+        .client()
+        .post(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "read", "actor": "agent/fleet-reader", "idempotency_key": "fleet-read"}),
+        )
+        .await
+        .unwrap();
+    assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{receipt}");
+    let read: MessageView =
+        n2.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(read.status, "read");
+    let refused = n2
+        .client()
+        .post::<_, Value>(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "read", "actor": "agent/someone-else", "idempotency_key": "fleet-read-other"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("wrong-message-recipient"), "{refused}");
+    assert!(
+        n2.claims().await.iter().all(|claim| claim["subject"] != subject),
+        "a stream item's lifecycle reached the graph"
+    );
+    // The sender's member keeps its own record: the reader's receipt is not replicated.
+    let sent: MessageView =
+        n1.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(sent.status, "sent");
+}
+
+/// Mail the previous release wrote is read the same after an upgrade in place, and pages list it
+/// before the member's stream items. Rolling back to the release keeps every graph receipt either
+/// build wrote and leaves the stream's local records for the next upgrade.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    // A single-node install, as most upgrades are.
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    // seat_freshness_reads stands in for #4481/#4512: a release with it reads the stream items too.
+    let release_reads_stream = reads_seat_freshness(&o).await;
+    let send = |node: &Node, key: &str| {
+        let client = node.client();
+        let key = key.to_owned();
+        async move {
+            let receipt: Value = client
+                .post("/v1/messages", &json!({
+                    "idempotency_key": key, "from": PERSON, "to": "agent/fleet-reader",
+                    "content": format!("graph mail {key}"),
+                }))
+                .await
+                .unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    let read = |node: &Node, subject: &str, key: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+        let key = key.to_owned();
+        async move {
+            // Graph mail is read only once it was delivered.
+            let mut receipt = Value::Null;
+            for lifecycle in ["delivered", "read"] {
+                receipt = client
+                    .post(&path, &json!({
+                        "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                        "idempotency_key": format!("{key}-{lifecycle}"),
+                    }))
+                    .await
+                    .unwrap();
+            }
+            receipt
+        }
+    };
+    let listed = |node: &Node| {
+        let client = node.client();
+        async move {
+            let page: MessagePage = client
+                .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true")
+                .await
+                .unwrap();
+            page.items.into_iter().map(|item| (item.subject, item.status)).collect::<Vec<_>>()
+        }
+    };
+    // The release's own mail: one read, one not.
+    let first = send(&o, "release-first").await;
+    let second = send(&o, "release-second").await;
+    read(&o, &first, "release-read").await;
+    let before = listed(&o).await;
+    assert_eq!(
+        before,
+        [(first.clone(), "read".to_owned()), (second.clone(), "sent".to_owned())]
+    );
+
+    // Upgrade in place: the release's mail reads the same, and a stream item follows it.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+    assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
+    let stream = "message/0000000000000d01";
+    append_stream_item(&o, stream).await;
+    let mut merged = before.clone();
+    merged.push((stream.to_owned(), "sent".to_owned()));
+    assert_eq!(listed(&o).await, merged);
+    // Graph mail keeps its graph receipts; the stream item's receipt stays on the member.
+    let graph_receipt = read(&o, &second, "upgraded-read").await;
+    assert!(!graph_receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{graph_receipt}");
+    let stream_receipt = read(&o, stream, "stream-read").await;
+    assert!(stream_receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{stream_receipt}");
+    merged[1].1 = "read".into();
+    merged[2].1 = "read".into();
+    assert_eq!(listed(&o).await, merged);
+    assert!(o.claims().await.iter().all(|claim| claim["subject"] != stream));
+
+    // Roll back: the release reads every graph receipt. One that reads stream items also lists the
+    // stream item, read from its local receipt, after its graph mail; an older one ignores the
+    // shard beside it.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    let third = if release_reads_stream {
+        assert_eq!(listed(&o).await, merged);
+        let third = send(&o, "rolled-back").await;
+        let mut expected = merged.clone();
+        expected.insert(2, (third.clone(), "sent".to_owned()));
+        assert_eq!(listed(&o).await, expected);
+        third
+    } else {
+        assert_eq!(listed(&o).await, merged[..2]);
+        let third = send(&o, "rolled-back").await;
+        assert_eq!(listed(&o).await.last(), Some(&(third.clone(), "sent".to_owned())));
+        third
+    };
+
+    // Upgrade again: the stream item kept its local receipt and follows the newer graph mail.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    merged.insert(2, (third, "sent".to_owned()));
+    assert_eq!(listed(&o).await, merged);
+    // Pages by sender, and without a recipient, list the release's mail before the stream's.
+    let page = |query: &'static str| {
+        let client = o.client();
+        async move {
+            let page: MessagePage = client.get(&format!("/v1/messages/page?{query}")).await.unwrap();
+            page.items.into_iter().map(|item| item.subject).collect::<Vec<_>>()
+        }
+    };
+    let subjects = merged.iter().map(|(subject, _)| subject.clone()).collect::<Vec<_>>();
+    assert_eq!(page("include_closed=true").await, subjects);
+    assert_eq!(page("from=agent/fleet-sender&include_closed=true").await, [stream]);
+    assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
+}
+
+/// Delivery and read state this build records as local marks (db break-up step 4b) reads beside
+/// the lifecycle claims the previous release wrote, on one node upgraded in place, backed up and
+/// rolled back. The release's claims read the same throughout; a mark replicates nothing and
+/// writes no claim. A backup that carries marks is version 4: an older release refuses to restore
+/// it with a clear error, and one that reads marks restores it. Rolled back, the release runs on
+/// the same store and reads its own claims, and the marks too if it reads them; upgraded again,
+/// the marks still count.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    // A release with seat-freshness reads (v0.3.25 on) also reads marks and their backups (4b-1).
+    let release_reads_marks = reads_seat_freshness(&o).await;
+    let send = |node: &Node, key: &str| {
+        let client = node.client();
+        let key = key.to_owned();
+        async move {
+            let receipt: Value = client
+                .post("/v1/messages", &json!({
+                    "idempotency_key": key, "from": PERSON, "to": "agent/fleet-reader",
+                    "content": format!("graph mail {key}"),
+                }))
+                .await
+                .unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    let read = |node: &Node, subject: &str, key: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+        let key = key.to_owned();
+        async move {
+            for lifecycle in ["delivered", "read"] {
+                let _: Value = client
+                    .post(&path, &json!({
+                        "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                        "idempotency_key": format!("{key}-{lifecycle}"),
+                    }))
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+    let listed = |node: &Node| {
+        let client = node.client();
+        async move {
+            let page: MessagePage = client
+                .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true")
+                .await
+                .unwrap();
+            page.items.into_iter().map(|item| (item.subject, item.status)).collect::<Vec<_>>()
+        }
+    };
+    let state = |listed: &[(String, String)]| listed.iter().map(|(_, status)| status.clone()).collect::<Vec<_>>();
+    let first = send(&o, "release-first").await;
+    let second = send(&o, "release-second").await;
+    let third = send(&o, "release-third").await;
+    read(&o, &first, "release-read").await;
+    let before = listed(&o).await;
+    assert_eq!(state(&before), ["read", "sent", "sent"]);
+
+    // Upgrade in place: the release's claims read the same; marks count beside them.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
+    for kind in ["message.delivered", "message.read"] {
+        let receipt: Value = o
+            .client()
+            .post("/v1/internal/test/message-marks", &json!({"message": second, "kind": kind, "consumer": "agent/fleet-reader"}))
+            .await
+            .unwrap();
+        assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{receipt}");
+    }
+    assert_eq!(state(&listed(&o).await), ["read", "read", "sent"]);
+    assert!(
+        o.claims().await.iter().all(|claim| !(claim["subject"] == second && claim["kind"] != "message.sent")),
+        "a mark wrote a lifecycle claim"
+    );
+
+    // A backup with marks is version 4: a release that reads marks restores it, and an older one
+    // refuses it, naming the version.
+    let archive = root.path().join("marks.jsonl");
+    let created = o.command(&["backup", "create", archive.to_str().unwrap()]).output().unwrap();
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let header: Value = serde_json::from_str(fs::read_to_string(&archive).unwrap().lines().next().unwrap()).unwrap();
+    assert_eq!(header["data"]["version"], 4, "{header}");
+    o.binary = old.clone();
+    let target = root.path().join("restored-by-release.db");
+    let refused = o
+        .command(&["backup", "restore", "--database", target.to_str().unwrap(), archive.to_str().unwrap()])
+        .output()
+        .unwrap();
+    o.binary = PathBuf::from(st3());
+    if release_reads_marks {
+        assert!(refused.status.success(), "{}", String::from_utf8_lossy(&refused.stderr));
+        assert!(target.exists());
+    } else {
+        assert!(!refused.status.success());
+        let error = String::from_utf8_lossy(&refused.stderr);
+        assert!(error.contains("unsupported claim backup format/version"), "{error}");
+        assert!(!target.exists());
+    }
+
+    // Roll back: the release runs on this store. One that reads marks sees the marked message as
+    // read; an older one reads its own claims only, and sees it as sent, as the release note says.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    let marked = if release_reads_marks { "read" } else { "sent" };
+    assert_eq!(state(&listed(&o).await), ["read", marked, "sent"]);
+    read(&o, &third, "rolled-back-read").await;
+    let fourth = send(&o, "rolled-back-send").await;
+    assert_eq!(state(&listed(&o).await), ["read", marked, "read", "sent"]);
+
+    // Upgrade again: the mark still counts beside every claim either build wrote.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    let after = listed(&o).await;
+    assert_eq!(state(&after), ["read", "read", "read", "sent"]);
+    assert_eq!(after.last().map(|(subject, _)| subject.clone()), Some(fourth));
+}
+
+/// A member of the previous release and one of this build, side by side: delivery and read state
+/// the release writes as lifecycle claims reaches the new member and reads the same there, and a
+/// mark the new member records stays its own: it writes no claim, the release never sees it, and
+/// replication between the two stays valid.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_a_member_recording_message_marks() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "7b6c5d4e-3f2a-4b1c-8d9e-0f1a2b3c4d5e";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old;
+    let mut n1 = Node::new(root.path(), "n1");
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+    let status_of = |node: &Node, subject: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/read/{subject}");
+        async move { client.get::<Value>(&path).await.ok().and_then(|view| view["status"].as_str().map(str::to_owned)) }
+    };
+    let mut subjects = Vec::new();
+    for key in ["claimed", "marked"] {
+        let receipt: Value = o
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("side-by-side-{key}"), "from": PERSON, "to": "agent/fleet-reader",
+                "content": format!("mail to be {key}"),
+            }))
+            .await
+            .unwrap();
+        subjects.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (claimed, marked) = (subjects[0].clone(), subjects[1].clone());
+    // The release delivers and reads one message by claims.
+    for lifecycle in ["delivered", "read"] {
+        let _: Value = o
+            .client()
+            .post(&format!("/v1/messages/{}/claims", claimed.trim_start_matches("message/")), &json!({
+                "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                "idempotency_key": format!("side-by-side-{lifecycle}"),
+            }))
+            .await
+            .unwrap();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    while status_of(&n1, &claimed).await.as_deref() != Some("read") || status_of(&n1, &marked).await.is_none() {
+        assert!(std::time::Instant::now() < deadline, "the release's mail and claims did not reach the new member");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // The new member records its marks for the other message.
+    for kind in ["message.delivered", "message.read"] {
+        let _: Value = n1
+            .client()
+            .post("/v1/internal/test/message-marks", &json!({"message": marked, "kind": kind, "consumer": "agent/fleet-reader"}))
+            .await
+            .unwrap();
+    }
+    assert_eq!(status_of(&n1, &marked).await.as_deref(), Some("read"));
+    // A later write on each member still replicates, and the marks never do.
+    o.note("o-after-marks").await;
+    n1.note("n1-after-marks").await;
+    let expected = BTreeSet::from(["custom/fleet-test/o-after-marks".to_owned(), "custom/fleet-test/n1-after-marks".to_owned()]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert_eq!(status_of(&o, &marked).await.as_deref(), Some("sent"), "a mark reached the release");
+    assert_eq!(status_of(&o, &claimed).await.as_deref(), Some("read"));
+    for node in [&o, &n1] {
+        assert!(
+            node.claims().await.iter().all(|claim| !(claim["subject"] == marked && claim["kind"] != "message.sent")),
+            "{}: a mark became a lifecycle claim", node.name
+        );
+    }
+}
+
+/// A seat hosted on a member of the previous release is read from its lifecycle claims: the
+/// release advertises no seat-freshness reads, so a member of this build never asks it, and
+/// `conversations status` follows the claims the release writes, never `unknown`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "4c3b2a19-0f8e-4d7c-9b6a-5e4d3c2b1a09";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old;
+    let mut n1 = Node::new(root.path(), "n1");
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+    let declaration = root.path().join("old-host-seat.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"marks/old-host-seat\" {{ host \"o\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        o.root
+    )).unwrap();
+    n1.st_ok(&[
+        "apply",
+        "--no-gate-check",
+        declaration.to_str().unwrap(),
+        "--as",
+        PERSON,
+    ]);
+    let receipt: Value = n1
+        .client()
+        .post("/v1/messages", &json!({
+            "idempotency_key": "old-host-seat-mail", "from": PERSON, "to": "agent/marks/old-host-seat",
+            "content": "mail for a seat on the release",
+        }))
+        .await
+        .unwrap();
+    let subject = receipt["subject"].as_str().unwrap().to_owned();
+    let delivery = |node: &Node| {
+        let client = node.client();
+        let path = format!("/v1/messages/delivery/{subject}");
+        async move { client.get::<Value>(&path).await.unwrap()["delivery"].clone() }
+    };
+    let before = delivery(&n1).await;
+    assert_eq!(
+        before["phase"], "sent",
+        "the release's seat is read from claims, not asked: {before}"
+    );
+    // The mail reaches the release, which records its seat's delivery and read as claims.
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let reached: Result<Value, _> = o
+            .client()
+            .get(&format!("/v1/messages/read/{subject}"))
+            .await;
+        if reached.is_ok() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the mail did not reach the release"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    for lifecycle in ["delivered", "read"] {
+        let _: Value = o
+            .client()
+            .post(
+                &format!(
+                    "/v1/messages/{}/claims",
+                    subject.trim_start_matches("message/")
+                ),
+                &json!({
+                    "lifecycle": lifecycle, "actor": "agent/marks/old-host-seat",
+                    "idempotency_key": format!("old-host-seat-{lifecycle}"),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let now = delivery(&n1).await;
+        if now["phase"] == "read" {
+            break;
+        }
+        assert_ne!(now["phase"], "unknown", "{now}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the release's read claim did not reach the new member: {now}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // The new member's message view and lists read the same claims, and ask the release nothing:
+    // no `status_from`.
+    let read: Value = n1.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!((&read["status"], read.get("status_from")), (&json!("read"), None), "{read}");
+    let listed: Value = n1
+        .client()
+        .get("/v1/messages?to=agent/marks/old-host-seat&include_closed=true")
+        .await
+        .unwrap();
+    let page: Value = n1
+        .client()
+        .get(&format!("/v1/messages/page?from={PERSON}&include_closed=true"))
+        .await
+        .unwrap();
+    for messages in [&listed, &page["items"]] {
+        let message = messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["subject"] == subject.as_str())
+            .unwrap_or_else(|| panic!("{messages}"));
+        assert_eq!((&message["status"], message.get("status_from")), (&json!("read"), None), "{message}");
+    }
+}
+
+/// One node of the previous release, upgraded in place with mail mid-delivery to a seat it hosts:
+/// it is alone, so it records that seat's delivery, read and close as local marks at once (db
+/// break-up 4b-2), and its staging still as a claim. The release's claims keep counting, the
+/// delivery finishes with no further lifecycle claim but the staging, and upgraded again after a
+/// rollback the marks still count. Rolled back to a release that reads marks (v0.3.25 on), every
+/// message reads as this build left it, so nothing is offered again; to an older one, the release
+/// reads only its own claims, as the release note says.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid_delivery() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    let declaration = root.path().join("hosted-seat.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"marks/hosted\" {{ host \"o\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        o.root
+    )).unwrap();
+    o.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+    let seat = "agent/marks/hosted";
+    let send = |node: &Node, key: &str| {
+        let client = node.client();
+        let key = key.to_owned();
+        async move {
+            let receipt: Value = client
+                .post("/v1/messages", &json!({"idempotency_key": key, "from": PERSON, "to": seat, "content": format!("mail {key}")}))
+                .await
+                .unwrap();
+            receipt["subject"].as_str().unwrap().to_owned()
+        }
+    };
+    let step = |node: &Node, subject: &str, lifecycle: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+        let body = json!({"lifecycle": lifecycle, "actor": seat, "idempotency_key": format!("{subject}-{lifecycle}")});
+        async move {
+            let receipt: Value = client.post(&path, &body).await.unwrap();
+            receipt
+        }
+    };
+    let status = |node: &Node, subject: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/read/{subject}");
+        async move { client.get::<Value>(&path).await.unwrap()["status"].as_str().unwrap().to_owned() }
+    };
+    let delivered = send(&o, "delivered-by-release").await;
+    let staged = send(&o, "staged-by-release").await;
+    let unsent = send(&o, "unsent").await;
+    let release_staging = step(&o, &delivered, "staged").await;
+    step(&o, &delivered, "delivered").await;
+    step(&o, &staged, "staged").await;
+    let lifecycle_claims = |claims: &[Value]| -> usize {
+        claims.iter().filter(|claim| claim["kind"].as_str().is_some_and(|kind| kind.starts_with("message.") && kind != "message.sent")).count()
+    };
+    let claimed = lifecycle_claims(&o.claims().await);
+    assert_eq!(claimed, 3);
+    let release_reads_marks = reads_seat_freshness(&o).await;
+
+    // Upgraded in place, alone: marks are on at once.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let doctor: Value = o.client().get("/v1/doctor").await.unwrap();
+        let marks = doctor["checks"].as_array().unwrap().iter().find(|check| check["name"] == "message-marks").cloned();
+        if marks.as_ref().is_some_and(|check| check["message"].as_str().unwrap().starts_with("on:")) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "marks did not turn on for a member alone: {marks:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        [status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await],
+        ["delivered", "staged", "sent"],
+        "upgrade changed the release's mail"
+    );
+    for (subject, lifecycles) in [(&delivered, &["read", "closed"][..]), (&staged, &["delivered", "read"][..]), (&unsent, &["staged"][..])] {
+        for lifecycle in lifecycles {
+            let receipt = step(&o, subject, lifecycle).await;
+            // A staging stays a claim (message_marks::RECORDS_STAGED).
+            assert_eq!(
+                receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), *lifecycle != "staged",
+                "{lifecycle}: {receipt}"
+            );
+        }
+    }
+    // A repeated staging of mail already delivered answers the release's own staging, and stages
+    // nothing again.
+    let repeat = step(&o, &delivered, "staged").await;
+    assert_eq!(repeat["id"], release_staging["id"], "{repeat}");
+    assert_eq!(lifecycle_claims(&o.claims().await), claimed + 1, "a hosted seat's delivery, read or close wrote a claim");
+    let upgraded = ["closed", "read", "staged"];
+    assert_eq!([status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await], upgraded);
+    let listed = |node: &Node| {
+        let client = node.client();
+        async move {
+            let mut listed = client
+                .get::<Vec<Value>>("/v1/messages?to=agent%2Fmarks%2Fhosted")
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|message| (message["subject"].as_str().unwrap().to_owned(), message["status"].as_str().unwrap().to_owned()))
+                .collect::<Vec<_>>();
+            listed.sort();
+            listed
+        }
+    };
+    let before_rollback = listed(&o).await;
+
+    // Rolled back. A release that reads marks reads every message as this build left it, in the
+    // reads the mailbox offers from too, so a restart offers nothing again; an older release reads
+    // its own claims only.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    let rolled_back = [status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await];
+    if release_reads_marks {
+        assert_eq!(rolled_back, upgraded, "rolled back to a release that reads marks, mail went back");
+        assert_eq!(listed(&o).await, before_rollback, "rolled back, the mailbox's reads changed");
+    } else {
+        eprintln!("baseline release reads no marks: the rollback reads its own claims only, as the release note says");
+        assert_eq!(rolled_back, ["delivered", "staged", "staged"]);
+    }
+
+    // Upgraded again: the marks count again beside the claims.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert_eq!([status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await], upgraded);
+    assert_eq!(listed(&o).await, before_rollback);
+}
+
+/// Whether `node`'s own start advertises message view reads: a release whose message view and
+/// lists ask a seat's host for its marks (db break-up 4b-4), so a member of this build records
+/// them beside it.
+async fn reads_message_views(node: &Node) -> bool {
+    node.claims().await.iter().any(|claim| {
+        claim["subject"] == format!("daemon/{}", node.name) && claim["kind"] == "daemon.started"
+            && claim.pointer("/body/fields/features/message_view_reads").and_then(Value::as_i64) == Some(1)
+    })
+}
+
+/// A member of the previous release beside a member of this build that hosts a seat. A release
+/// without message view reads (v0.3.25 and earlier) keeps this build writing lifecycle claims,
+/// which it reads everywhere as it always has: a release with only seat-freshness reads (v0.3.25)
+/// would ask the seat's host in its delivery status but show the seat's read mail as sent in its
+/// message view and lists. A release with them lets this build record the seat's delivery and
+/// read as marks, which never replicate: the release asks the seat's host over the relay, in its
+/// delivery status and its message view alike (db break-up 4b-2, marks_switch).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "5d4c3b2a-1f0e-4d8c-9b7a-6e5d4c3b2a10";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old;
+    let mut n1 = Node::new(root.path(), "n1");
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+    let release_reads_marks = reads_message_views(&o).await;
+    let marks = || {
+        let marks = doctor_check(&n1, "message-marks");
+        marks["message"].as_str().unwrap().to_owned()
+    };
+    if release_reads_marks {
+        // The release's start reaches this build, which turns marks on at its next decision.
+        wait_until("this build turns marks on beside a release that reads them", 120, || {
+            let on = marks().starts_with("on:");
+            async move { on }
+        }).await;
+    } else {
+        let off = marks();
+        assert!(off.starts_with("off: lifecycle claims until every other member advertises message_view_reads=1"), "{off}");
+        assert!(off.contains("o: exchanges with this member outside its fleet membership and has not advertised message_view_reads=1"), "{off}");
+    }
+    let declaration = root.path().join("new-host-seat.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"marks/new-host-seat\" {{ host \"n1\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        n1.root
+    )).unwrap();
+    n1.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+    let receipt: Value = n1
+        .client()
+        .post("/v1/messages", &json!({
+            "idempotency_key": "new-host-seat-mail", "from": PERSON, "to": "agent/marks/new-host-seat",
+            "content": "mail for a seat on this build beside the release",
+        }))
+        .await
+        .unwrap();
+    let subject = receipt["subject"].as_str().unwrap().to_owned();
+    for lifecycle in ["delivered", "read"] {
+        let receipt: Value = n1
+            .client()
+            .post(
+                &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+                &json!({
+                    "lifecycle": lifecycle, "actor": "agent/marks/new-host-seat",
+                    "idempotency_key": format!("new-host-seat-{lifecycle}"),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), release_reads_marks, "{lifecycle}: {receipt}");
+    }
+    let claimed = n1.claims().await.iter().any(|claim| claim["subject"] == subject && claim["kind"] == "message.read");
+    assert_eq!(claimed, !release_reads_marks, "the seat's read was a claim: {claimed}");
+    // The release's delivery status (what `st conversations status` reads) reports the seat's
+    // read: from the claim it replicates, or by asking the seat's host on the relay.
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let status: Result<Value, _> = o.client().get(&format!("/v1/messages/delivery/{subject}")).await;
+        if status.as_ref().is_ok_and(|status| status["delivery"]["state"] == "read" && status["delivery"]["phase"] == "read") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the release did not read the seat's read: {status:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    if release_reads_marks {
+        assert!(
+            !o.claims().await.iter().any(|claim| claim["subject"] == subject && claim["kind"] == "message.read"),
+            "a mark replicated as a claim"
+        );
+    }
+    // The message view reads the seat's read too: from the claim, or by asking the seat's host.
+    let view: Value = o.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(view["status"], "read", "{view}");
+}
+
+/// Two members of this build: each advertises message view reads, so both record their own seats'
+/// delivery, read and close as marks, which never replicate. The other member reads the seat's
+/// mail from the seat's host, in its message view and its lists, and says so in `status_from`; a
+/// list of open mail leaves out what the host closed (db break-up 4b-4).
+#[tokio::test(flavor = "multi_thread")]
+async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "6e5d4c3b-2a1f-4e9d-8c7b-5a4d3c2b1a09";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut a = Node::new(root.path(), "a");
+    let mut b = Node::new(root.path(), "b");
+    a.legacy_config(fleet_id, &secret, &[("b", b.port)]);
+    b.legacy_config(fleet_id, &secret, &[("a", a.port)]);
+    for node in [&mut a, &mut b] {
+        node.start().await;
+    }
+    assert!(reads_message_views(&a).await && reads_message_views(&b).await);
+    for node in [&a, &b] {
+        wait_until("a member of this build turns marks on beside another", 120, || {
+            let on = doctor_check(node, "message-marks")["message"].as_str().unwrap().starts_with("on:");
+            async move { on }
+        })
+        .await;
+    }
+    let declaration = root.path().join("b-seat.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"marks/b-seat\" {{ host \"b\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        b.root
+    )).unwrap();
+    b.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+    let seat = "agent/marks/b-seat";
+    let mut subjects = Vec::new();
+    for key in ["b-seat-read", "b-seat-closed"] {
+        let receipt: Value = b
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": key, "from": PERSON, "to": seat, "content": format!("mail {key}"),
+            }))
+            .await
+            .unwrap();
+        subjects.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (read, closed) = (subjects[0].clone(), subjects[1].clone());
+    for (subject, lifecycles) in [(&read, &["delivered", "read"][..]), (&closed, &["delivered", "read", "closed"][..])] {
+        for lifecycle in lifecycles {
+            let receipt: Value = b
+                .client()
+                .post(
+                    &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+                    &json!({"lifecycle": lifecycle, "actor": seat, "idempotency_key": format!("{subject}-{lifecycle}")}),
+                )
+                .await
+                .unwrap();
+            assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{lifecycle}: {receipt}");
+        }
+    }
+    // The mail reaches `a`, but none of the seat's lifecycle does: `a` asks `b`.
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    let replicated = loop {
+        let claims = a.claims().await;
+        let ours = claims.into_iter()
+            .filter(|claim| subjects.iter().any(|subject| claim["subject"] == subject.as_str()))
+            .collect::<Vec<_>>();
+        if subjects.iter().all(|subject| ours.iter().any(|claim| claim["subject"] == subject.as_str())) {
+            break ours;
+        }
+        assert!(std::time::Instant::now() < deadline, "the seat's mail did not replicate to a");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        replicated.iter().all(|claim| claim["kind"] == "message.sent"),
+        "a mark replicated as a claim: {replicated:?}"
+    );
+    let answered = json!({"host": "b", "state": "answered"});
+    wait_until("a's message view reads the seat's read from b", 90, || {
+        let client = a.client();
+        let (read, answered) = (read.clone(), answered.clone());
+        async move {
+            let view: Result<Value, _> = client.get(&format!("/v1/messages/read/{read}")).await;
+            view.is_ok_and(|view| view["status"] == "read" && view["status_from"] == answered)
+        }
+    })
+    .await;
+    let all: Value = a.client().get(&format!("/v1/messages?to={seat}&include_closed=true")).await.unwrap();
+    let state = |list: &Value, subject: &str| {
+        list.as_array().unwrap().iter().find(|message| message["subject"] == subject)
+            .map(|message| (message["status"].clone(), message["status_from"].clone()))
+    };
+    assert_eq!(state(&all, &read), Some((json!("read"), answered.clone())), "{all}");
+    assert_eq!(state(&all, &closed), Some((json!("closed"), answered.clone())), "{all}");
+    let open: Value = a.client().get(&format!("/v1/messages?to={seat}")).await.unwrap();
+    assert_eq!(state(&open, &read), Some((json!("read"), answered.clone())), "{open}");
+    assert_eq!(state(&open, &closed), None, "b closed it, so a's list of open mail leaves it out: {open}");
+    // The seat's own host reads its own marks, with no host to name.
+    let own: Value = b.client().get(&format!("/v1/messages/read/{read}")).await.unwrap();
+    assert_eq!((own["status"].clone(), own.get("status_from").cloned()), (json!("read"), None), "{own}");
+}
+
+/// A fleet of the previous release upgraded to this build, then one member rolled back. Before
+/// the upgrade every member writes lifecycle claims. Once both run this build, the seat's host
+/// records its read as a mark, which the other member reads from it. Rolling the other member
+/// back turns marks off on the host: its next lifecycle write is a claim again, and the
+/// rolled-back member reads it from the claim. Nothing is redelivered on the host. With a
+/// release that has seat-freshness reads, the rolled-back member's delivery status still reads
+/// the mark from the host (db break-up 4b-4).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "7f6e5d4c-3b2a-4f1e-9d8c-6b5a4d3c2b18";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    let mut h = Node::new(root.path(), "h");
+    o.legacy_config(fleet_id, &secret, &[("h", h.port)]);
+    h.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut h] {
+        node.binary = old.clone();
+        node.start().await;
+    }
+    let release_reads_relay = reads_seat_freshness(&o).await;
+    let declaration = root.path().join("h-seat.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"marks/h-seat\" {{ host \"h\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        h.root
+    )).unwrap();
+    h.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+    let seat = "agent/marks/h-seat";
+    let mut subjects = Vec::new();
+    for key in ["h-seat-before", "h-seat-marked"] {
+        let receipt: Value = h
+            .client()
+            .post("/v1/messages", &json!({"idempotency_key": key, "from": PERSON, "to": seat, "content": key}))
+            .await
+            .unwrap();
+        subjects.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (before, marked) = (subjects[0].clone(), subjects[1].clone());
+    let lifecycle = |node: &Node, subject: &str, lifecycle: &str| {
+        let client = node.client();
+        let (path, key) = (
+            format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            format!("{subject}-{lifecycle}"),
+        );
+        let lifecycle = lifecycle.to_owned();
+        async move {
+            let receipt: Value = client
+                .post(&path, &json!({"lifecycle": lifecycle, "actor": seat, "idempotency_key": key}))
+                .await
+                .unwrap();
+            receipt["id"].as_str().unwrap().to_owned()
+        }
+    };
+    // The release writes claims.
+    assert!(!lifecycle(&h, &before, "delivered").await.starts_with("offset-receipt/"));
+
+    // Both upgrade: marks turn on, and the host's read is a mark that `o` reads from `h`.
+    for node in [&mut o, &mut h] {
+        node.stop();
+        node.binary = PathBuf::from(st3());
+        node.start().await;
+    }
+    wait_until("the host turns marks on once both members run this build", 120, || {
+        let on = doctor_check(&h, "message-marks")["message"].as_str().unwrap().starts_with("on:");
+        async move { on }
+    })
+    .await;
+    for kind in ["delivered", "read"] {
+        assert!(lifecycle(&h, &marked, kind).await.starts_with("offset-receipt/"), "{kind}");
+    }
+    let view = |node: &Node, subject: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/read/{subject}");
+        async move { client.get::<Value>(&path).await.ok() }
+    };
+    wait_until("o reads the host's mark from it", 90, || {
+        let read = view(&o, &marked);
+        async move { read.await.is_some_and(|view| view["status"] == "read" && view["status_from"]["host"] == "h") }
+    })
+    .await;
+    assert_eq!(view(&o, &before).await.unwrap()["status"], "delivered", "the release's claim still counts");
+
+    // `o` rolls back: the host stops recording marks, and its next lifecycle write is a claim.
+    o.stop();
+    o.binary = old.clone();
+    o.start().await;
+    wait_until("the host turns marks off beside a member that does not read them", 150, || {
+        let off = doctor_check(&h, "message-marks")["message"].as_str().unwrap().starts_with("off:");
+        async move { off }
+    })
+    .await;
+    if release_reads_relay {
+        wait_until("the rolled-back member's delivery status reads the mark from the host", 90, || {
+            let client = o.client();
+            let path = format!("/v1/messages/delivery/{marked}");
+            async move {
+                client.get::<Value>(&path).await.is_ok_and(|status| {
+                    status["delivery"]["state"] == "read" && status["delivery"]["phase"] == "read"
+                })
+            }
+        })
+        .await;
+    }
+    assert!(!lifecycle(&h, &marked, "closed").await.starts_with("offset-receipt/"), "a close after marks turn off");
+    wait_until("the rolled-back member reads the host's close from its claim", 90, || {
+        let read = view(&o, &marked);
+        async move { read.await.is_some_and(|view| view["status"] == "closed") }
+    })
+    .await;
+    // The host's own records are whole: its marks and the claim after them.
+    assert_eq!(view(&h, &marked).await.unwrap()["status"], "closed");
+    assert_eq!(view(&h, &before).await.unwrap()["status"], "delivered");
+}
+
+/// A seat's conversation and `conversations wait` across the previous release and this build, on
+/// one node upgraded in place and rolled back. The release's mail reads the same after the
+/// upgrade, a stream item joins the conversation behind the graph claim it arrived after, and a
+/// wait ends on a stream reply. A cursor the release gave out resumes on this build; one this
+/// build gave out asks an older release for a full read rather than skipping, and resumes on a
+/// release that reads stream items. A CLI of either build waits on a daemon of the other.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_conversation_and_waits_read_stream_items_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let new = PathBuf::from(st3());
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    // seat_freshness_reads stands in for #4481/#4512: a release with it merges stream and graph mail.
+    let release_reads_stream = reads_seat_freshness(&o).await;
+    let reader = "agent/fleet-reader";
+    let _: Value = o
+        .client()
+        .post("/v1/claims", &ClaimInput {
+            subject: reader.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(reader.into()),
+            fields: serde_json::from_value(json!({
+                "status": "running", "runtime_id": "fleet-reader-runtime",
+                "incarnation_id": "fleet-reader-runtime:i1",
+            }))
+            .unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let person = |node: &Node| Client::unix_as(node.socket(), PERSON).unwrap();
+    let changes_path = |after: Option<&str>| {
+        let mut path = format!("/v1/client/conversations/{}/changes", reader.replace('/', "%2F"));
+        if let Some(after) = after {
+            path.push_str(&format!("?after={}", urlencoding::encode(after)));
+        }
+        path
+    };
+    let changes = |node: &Node, after: Option<String>| {
+        let client = person(node);
+        let path = changes_path(after.as_deref());
+        async move {
+            let value: Value = client.get(&path).await.unwrap();
+            let messages = value["items"].as_array().unwrap().iter()
+                .filter(|item| item["type"] == "message")
+                .map(|item| (item["body"]["message_id"].as_str().unwrap().to_owned(), item["sequence"].as_u64().unwrap()))
+                .collect::<Vec<_>>();
+            (value["next_cursor"].as_str().unwrap().to_owned(), messages)
+        }
+    };
+    let send = |node: &Node, key: &str, from: &str, to: &str| {
+        let client = node.client();
+        let body = json!({"idempotency_key": key, "from": from, "to": to, "content": format!("graph mail {key}")});
+        async move {
+            let receipt: Value = client.post("/v1/messages", &body).await.unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    // A wait as the seat, by `binary`'s CLI against `node`'s daemon. A reply it finds is marked
+    // read, so each wait below has its own.
+    let wait = |node: &Node, binary: &Path, extra: &[&str]| -> Value {
+        let mut arguments = vec!["--json", "conversations", "wait", "--as", reader, "--from", "agent/fleet-sender", "--timeout", "0"];
+        arguments.extend_from_slice(extra);
+        let environment = node.command(&[]).get_envs()
+            .filter_map(|(key, value)| Some((key.to_owned(), value?.to_owned())))
+            .collect::<Vec<_>>();
+        let output = fractal_daemon::test_support::command(binary)
+            .args(&arguments).envs(environment).current_dir(&node.root).env("ST_AGENT", reader)
+            .output().unwrap();
+        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    // The release's own conversation.
+    let (opened, _) = changes(&o, None).await;
+    let first = send(&o, "release-first", PERSON, reader).await;
+    let (release_cursor, listed) = changes(&o, Some(opened)).await;
+    assert_eq!(listed.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), std::slice::from_ref(&first));
+    let first_sequence = listed[0].1;
+
+    // Upgrade in place: the release's cursor resumes, and a stream item joins the conversation
+    // after the graph claim it arrived behind.
+    o.stop();
+    o.binary = new.clone();
+    o.start().await;
+    let (cursor, none) = changes(&o, Some(release_cursor.clone())).await;
+    assert!(none.is_empty(), "the release's cursor read nothing new: {none:?}");
+    let stream = "message/0000000000000e01";
+    append_stream_item(&o, stream).await;
+    let (upgraded_cursor, joined) = changes(&o, Some(cursor)).await;
+    assert_eq!(joined.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), [stream], "{joined:?}");
+    assert!(joined[0].1 > first_sequence && joined[0].1 % 4 == 2, "{joined:?}");
+    let health: Value = o.client().get("/v1/health").await.unwrap();
+    assert!(health["messages_store_index"].as_u64().unwrap() > 0, "{health}");
+
+    // A wait after the release's message ends on a stream reply, by either build's CLI: the
+    // release's finds it in the mailbox page this build merges.
+    let (this_reply, release_reply) = ("message/0000000000000e02", "message/0000000000000e03");
+    let release = wait(&o, &old, &["--after", &first]);
+    assert_eq!(release["message"]["subject"], stream, "{release}");
+    append_stream_item(&o, this_reply).await;
+    let this_build = wait(&o, &new, &["--after", &first]);
+    assert_eq!(this_build["message"]["subject"], this_reply, "{this_build}");
+    // After a stream item, a graph reply counts for this build's CLI. An older release's CLI
+    // compares indexes across the stores and misses it, as the release note says; one that reads
+    // stream items finds it.
+    let graph_reply = send(&o, "graph-reply", "agent/fleet-sender", reader).await;
+    let this_build = wait(&o, &new, &["--after", this_reply]);
+    assert_eq!(this_build["message"]["subject"], graph_reply, "{this_build}");
+    append_stream_item(&o, release_reply).await;
+    let unseen = send(&o, "graph-unseen", "agent/fleet-sender", reader).await;
+    let release = wait(&o, &old, &["--after", release_reply]);
+    if release_reads_stream {
+        assert_eq!(release["message"]["subject"], unseen, "{release}");
+    } else {
+        assert_eq!(release["reply"], false, "{release}");
+    }
+
+    // Roll back. An older release asks for a full read on this build's cursor; one that reads
+    // stream items resumes it, with the stream and graph mail since. The release's mail and the
+    // graph reply read as before.
+    o.stop();
+    o.binary = old.clone();
+    o.start().await;
+    if release_reads_stream {
+        let (_, resumed) = changes(&o, Some(upgraded_cursor.clone())).await;
+        assert_eq!(
+            resumed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            [this_reply, graph_reply.as_str(), release_reply, unseen.as_str()],
+            "{resumed:?}"
+        );
+    } else {
+        let refused = person(&o).get::<Value>(&changes_path(Some(&upgraded_cursor))).await.unwrap_err().to_string();
+        assert!(refused.contains("cursor-gap"), "{refused}");
+    }
+    let (reopened, _) = changes(&o, None).await;
+    let later = send(&o, "rolled-back", PERSON, reader).await;
+    let (_, after_rollback) = changes(&o, Some(reopened)).await;
+    assert_eq!(after_rollback.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [later]);
+    // Either build's CLI waits on the release. An older release's CLI finds the graph reply it
+    // missed; one that reads stream items found that reply already, and finds the stream reply.
+    let release = wait(&o, &old, &["--after", &first]);
+    let expected = if release_reads_stream { release_reply } else { unseen.as_str() };
+    assert_eq!(release["message"]["subject"], expected, "{release}");
+    let last = send(&o, "graph-last", "agent/fleet-sender", reader).await;
+    let this_build = wait(&o, &new, &["--after", &first]);
+    assert_eq!(this_build["message"]["subject"], last, "this build's CLI on the release reads the graph: {this_build}");
+}
+
+/// When the previous release predates the messages shard, it is never dialed for it.
+/// Upgrading it in place opens the shard; rolling it back leaves the shard file in place
+/// and new members stop dialing it. If the release already opens the shard, only these
+/// transition-specific expectations are skipped. Both baselines must retain history,
+/// receive stream items after upgrade, and keep graph sync working without invalid records.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "6a5b4c3d-2e1f-4a0b-9c8d-7e6f5a4b3c2d";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([6_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n1 = Node::new(root.path(), "n1");
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+    // The release's own history, written before any upgrade.
+    o.note("o-before").await;
+    n1.note("n1-before").await;
+    let mut expected = BTreeSet::from([
+        "custom/fleet-test/o-before".to_owned(),
+        "custom/fleet-test/n1-before".to_owned(),
+    ]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+    }
+    let release_opens_shard = o.state_dir().join("shards").exists();
+    if release_opens_shard {
+        eprintln!(
+            "baseline release already opens shards/: the messages-shard transition is behind \
+             this fleet; skipping only the no-shard/no-advertisement and rollback transition assertions"
+        );
+    } else {
+        assert!(stream_peers(&n1).await.is_empty(), "the release does not advertise the shard");
+    }
+    append_stream_item(&n1, "message/0000000000000b01").await;
+    o.note("o-mixed").await;
+    n1.note("n1-mixed").await;
+    expected.extend(["custom/fleet-test/o-mixed".to_owned(), "custom/fleet-test/n1-mixed".to_owned()]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert!(o.claims().await.iter().all(|claim| claim["subject"] != "message/0000000000000b01"));
+
+    // Upgrade the release in place: its store opens with the shard beside it.
+    let retained: BTreeSet<String> = o.notes().await;
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert!(retained.is_subset(&o.notes().await), "upgrade lost release history");
+    wait_for_stream_peers(&n1, &["o"], 90).await;
+    wait_for_stream_item(&o, "message/0000000000000b01", 90).await;
+
+    // Roll back in place; a release predating the shard leaves it alone and stops advertising it.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    if !release_opens_shard {
+        assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+        wait_for_stream_peers(&n1, &[], 90).await;
+    }
+    o.note("o-rolled-back").await;
+    n1.note("n1-after-rollback").await;
+    expected.extend([
+        "custom/fleet-test/o-rolled-back".to_owned(),
+        "custom/fleet-test/n1-after-rollback".to_owned(),
+    ]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+}
+
+/// A GitHub with one repository, `fixture/app`, and one open pull request, #12, whose head is
+/// the value of `head`. Every other read answers an empty list, as the watch fixture's does.
+async fn fake_github_with_pull_request(head: std::sync::Arc<std::sync::Mutex<String>>) -> String {
+    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", http.local_addr().unwrap());
+    let issue = json!({"number": 12, "state": "open", "title": "Copper proof", "node_id": "PR_copper",
+        "html_url": "https://github.com/fixture/app/pull/12", "updated_at": "2026-10-01T00:00:00Z",
+        "created_at": "2026-10-01T00:00:00Z", "user": {"login": "fixture-author"}, "comments": 0,
+        "pull_request": {"url": "https://api.github.com/repos/fixture/app/pulls/12"}});
+    let listed = issue.clone();
+    let graphql_head = head.clone();
+    let app = axum::Router::new()
+        .route("/graphql", axum::routing::post(move || {
+            let head = graphql_head.lock().unwrap().clone();
+            async move {
+                let pull = json!({
+                    "id": "PR_copper", "number": 12, "title": "Copper proof",
+                    "url": "https://github.com/fixture/app/pull/12", "isDraft": false,
+                    "headRefOid": head, "headRefName": "agent/copper", "baseRefName": "main",
+                    "createdAt": "2026-10-01T00:00:00Z", "author": {"login": "fixture-author"},
+                    "reviewDecision": "REVIEW_REQUIRED", "mergeQueueEntry": null,
+                    "latestReviews": {"nodes": []},
+                    "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {"nodes": [
+                        {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE"},
+                    ]}}}}]},
+                });
+                axum::Json(json!({"data": {
+                    "repository": {"pullRequests": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [pull]}},
+                    "nodes": [{"id": "PR_copper", "state": "OPEN", "number": 12, "url": "https://github.com/fixture/app/pull/12"}],
+                }}))
+            }
+        }))
+        .fallback(axum::routing::get(move |uri: axum::http::Uri| {
+            let issue = listed.clone();
+            async move {
+                let path = uri.path();
+                axum::Json(if path == "/repos/fixture/app" {
+                    json!({"id": 77, "full_name": "fixture/app"})
+                } else if path.ends_with("/issues/12") {
+                    issue
+                } else if path.ends_with("/issues") {
+                    json!([issue])
+                } else if path == "/user" {
+                    json!({"login": "fixture-bot"})
+                } else {
+                    json!([])
+                })
+            }
+        }));
+    tokio::spawn(async move {
+        axum::serve(http, app).await.unwrap();
+    });
+    api
+}
+
+/// `st gh prs` as `actor` on `node`, as JSON, or null while it fails, as it does until the
+/// repository's observer is declared.
+fn gh_prs(node: &Node, actor: &str) -> Value {
+    let output = node.st(&["--json", "gh", "prs", "fixture/app", "--state", "all", "--as", actor]);
+    if !output.status.success() {
+        return Value::Null;
+    }
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// Wait until `node` answers `st gh prs fixture/app` from its own mirror, which it fills from
+/// GitHub right after a look it recorded; until then it answers from its graph. A wait that runs
+/// out says which step it stopped at (#4470): the last answer's source and reason, what the
+/// poller's claims say its observer did, and the tail of its logs.
+async fn wait_for_mirror(node: &Node, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let answer = gh_prs(node, PERSON);
+        assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
+        if answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // Read without unwrapping, so a stopped daemon cannot hide this message.
+            let trace = node.st(&["--json", "trace", "show", "observer/github/fixture/app"]);
+            let claims = String::from_utf8_lossy(&trace.stdout).lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>();
+            let observer = |kind: &str| claims.iter()
+                .filter(|claim| claim["kind"] == kind)
+                .map(|claim| claim["body"].clone())
+                .collect::<Vec<_>>();
+            panic!(
+                "timed out waiting until {what}: the last answer came from {}; the poller recorded {} looks; its observer's last state is {}\n{}",
+                answer["source"],
+                observer("observer.observed").len(),
+                observer("observer.state").last().unwrap_or(&Value::Null),
+                node.logs(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Declare a watching seat of `node`'s own, `agent/example/watch-NODE`, and watch fixture/app#12
+/// as it, so `node` polls the repository. Each node's seat is its own: one seat declared on two
+/// nodes is one subscription, which the other node's copy can change while this one plans it.
+fn watch_fixture_app(node: &Node) {
+    let seat = format!("example/watch-{}", node.name);
+    let agent = format!("agent/{seat}");
+    let file = node.root.join("seat.kdl");
+    fs::write(&file, format!(
+        "version 2\nagent {seat:?} {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        node.name, node.root,
+    )).unwrap();
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
+    let output = node
+        .command(&["gh", "watch", "fixture/app#12", "--as", &agent])
+        .env("ST_AGENT", &agent)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stderr), node.logs());
+}
+
+/// The member that polls a repository answers `st gh prs|pr|checks` from its plugin mirror.
+/// Another member relays the read to it and shows the poller's mirror; with the poller down, it
+/// answers from its own graph and says why.
+#[tokio::test(flavor = "multi_thread")]
+async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from_a_member() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let mut poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let reader = joined(root.path(), &poller, "fixture-reader", &[]).await;
+    watch_fixture_app(&poller);
+    wait_for_mirror(&poller, "the poller mirrors pull request 12").await;
+
+    let pull = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(pull["pull"]["facts"]["title"], "Copper proof", "{pull}");
+    assert_eq!(pull["source"]["host"], "host/fixture-poller");
+    let checks = poller.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(checks["checks"]["head_sha"], "a".repeat(40), "{checks}");
+    assert_eq!(checks["checks"]["heads"].as_array().unwrap().len(), 1);
+    let human = poller.st_ok(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert!(human.contains("from the GitHub plugin mirror on host/fixture-poller"), "{human}");
+
+    // A lost mirror refills from GitHub itself, not the graph, and serves full facts again;
+    // until then the poller answers from its graph and says so.
+    poller.stop();
+    let plugin = poller.state_dir().join("plugins/github");
+    for entry in fs::read_dir(&plugin).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().unwrap().to_string_lossy().starts_with("github.sqlite3") {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    poller.start().await;
+    poller.wait_listening().await;
+    wait_for_mirror(&poller, "the poller refills its lost mirror from GitHub").await;
+    let refilled = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(refilled["pull"]["facts"]["title"], "Copper proof", "{refilled}");
+    assert_eq!(refilled["pull"]["facts"]["head_sha"], "a".repeat(40));
+    assert!(refilled["source"]["filled_at_unix_ms"].is_i64(), "{refilled}");
+
+    // Another member relays to the poller.
+    wait_until("the reader relays to the poller's mirror", 90, || {
+        let answer = gh_prs(&reader, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["source"]["host"] == "host/fixture-poller" }
+    }).await;
+    let relayed = reader.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(relayed["pull"]["facts"]["head_sha"], "a".repeat(40), "{relayed}");
+    assert_eq!(relayed["poller"], "host/fixture-poller");
+
+    // With the poller down, the reader answers from its graph and says why. Relayed reads need no
+    // replication, so first wait for the pull request's claims to reach the reader.
+    wait_until("the reader's graph holds the pull request", 90, || async {
+        reader.claims().await.iter().any(|claim| claim["subject"] == "resource/github/fixture/app/pull-request/12")
+    }).await;
+    poller.stop();
+    let fallback = gh_prs(&reader, PERSON);
+    assert_eq!(fallback["source"]["kind"], "graph", "{fallback}");
+    assert_eq!(fallback["source"]["host"], "host/fixture-reader");
+    assert!(fallback["source"]["reason"].as_str().unwrap().contains("did not answer"), "{fallback}");
+    assert_eq!(fallback["pulls"][0]["number"], 12, "{fallback}");
+    let checks = reader.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert!(checks["checks"]["heads"].is_null(), "the graph keeps no head history: {checks}");
+    let human = reader.st_ok(&["gh", "prs", "fixture/app", "--as", PERSON]);
+    assert!(human.contains("from host/fixture-reader's graph"), "{human}");
+    poller.start().await;
+}
+
+/// An older poller beside a member of this build: if the release predates the GitHub plugin,
+/// the member answers from its graph and explains the missing plugin. A release that already
+/// advertises the plugin skips only those fallback expectations. Both keep replicating, and
+/// upgrading the poller in place must leave its mirror readable and the member relaying to it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_poller_beside_a_github_plugin_member_and_its_upgrade() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("b".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let member = anchor(root.path(), "fixture-member").await;
+    let mut poller = Node::new(root.path(), "fixture-old-poller");
+    poller.binary = old;
+    poller.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api)]);
+    let code = member.invite("fixture-old-poller", &[]);
+    let output = poller.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    poller.start().await;
+    watch_fixture_app(&poller);
+
+    wait_until("the member reads the old poller's pull request", 120, || {
+        let answer = gh_prs(&member, PERSON);
+        async move { answer["pulls"][0]["number"] == 12 }
+    }).await;
+    let answer = gh_prs(&member, PERSON);
+    let release_has_plugin = poller.claims().await.iter().any(|claim| {
+        claim["subject"] == "daemon/fixture-old-poller" && claim["kind"] == "daemon.started"
+            && claim.pointer("/body/fields/features/github_plugin").and_then(Value::as_i64)
+                .is_some_and(|version| version >= 1)
+    });
+    assert_eq!(answer["poller"], "host/fixture-old-poller");
+    if release_has_plugin {
+        eprintln!(
+            "baseline release already advertises the GitHub plugin; skipping only the \
+             graph-fallback and missing-plugin reason assertions before upgrade"
+        );
+    } else {
+        assert_eq!(answer["source"]["kind"], "graph", "{answer}");
+        assert!(answer["source"]["reason"].as_str().unwrap().contains("runs a build without the GitHub plugin"), "{answer}");
+    }
+    for node in [&member, &poller] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // The old poller's history, upgraded in place.
+    poller.stop();
+    poller.binary = PathBuf::from(st3());
+    poller.start().await;
+    poller.wait_listening().await;
+    wait_until("the upgraded poller refills its mirror from GitHub", 120, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
+    }).await;
+    wait_until("the member relays to the upgraded poller", 120, || {
+        let answer = gh_prs(&member, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["source"]["host"] == "host/fixture-old-poller" }
+    }).await;
+    let checks = member.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(checks["checks"]["head_sha"], "b".repeat(40), "{checks}");
+}
+
+/// Ask `node` to look at fixture/app again now, as a refresh does.
+fn refresh_fixture_app(node: &Node, id: &str) {
+    let file = node.root.join(format!("refresh-{id}.kdl"));
+    fs::write(&file, format!("version 2\nresource \"github/fixture/app\" {{ refresh {id:?} {{ timeout \"60s\" }} }}\n")).unwrap();
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
+}
+
+/// Whether `node` holds a claim of `kind` on pull request 12 of fixture/app whose head is `head`.
+async fn item_claim_with_head(node: &Node, kind: &str, head: &str) -> bool {
+    node.claims().await.iter().any(|claim| {
+        claim["subject"] == "resource/github/fixture/app/pull-request/12"
+            && claim["kind"] == kind
+            && (claim.pointer("/body/fields/facts/head_sha") == Some(&json!(head))
+                || claim.pointer("/body/fields/head_sha") == Some(&json!(head)))
+    })
+}
+
+/// A previous release without the GitHub plugin keeps the poller writing item snapshots.
+/// If the release already advertises the plugin, skip only that snapshot expectation and
+/// require the elder to receive compact state instead. After upgrade, both baselines must
+/// allow compact-only changes and read the latest head.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let mut elder = Node::new(root.path(), "fixture-elder");
+    elder.binary = old;
+    elder.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api.clone())]);
+    let code = poller.invite("fixture-elder", &[]);
+    let output = elder.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    elder.start().await;
+    watch_fixture_app(&poller);
+    wait_until("the poller fills its mirror", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" }
+    }).await;
+    // Compact mode depends on every current fleet member's capability, regardless of its
+    // subscriptions. The elder reads the replicated item; it need not declare another watch
+    // against the poller's shared observer while the previous release is running.
+    let release_has_plugin = elder.claims().await.iter().any(|claim| {
+        claim["subject"] == "daemon/fixture-elder" && claim["kind"] == "daemon.started"
+            && claim.pointer("/body/fields/features/github_plugin").and_then(Value::as_i64)
+                .is_some_and(|version| version >= 1)
+    });
+    let item_kind = if release_has_plugin {
+        eprintln!(
+            "baseline release already advertises the GitHub plugin; skipping only the \
+             pre-upgrade item-snapshot expectation and checking compact-state receipt instead"
+        );
+        "vcs.item.state"
+    } else {
+        "resource.observed"
+    };
+    // The elder must receive the new head in the representation its capability requires.
+    *head.lock().unwrap() = "c".repeat(40);
+    refresh_fixture_app(&poller, "head-c");
+    wait_until("the elder receives head c", 120, || async {
+        item_claim_with_head(&elder, item_kind, &"c".repeat(40)).await
+    }).await;
+
+    if release_has_plugin {
+        let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+        assert_eq!(pull["pull"]["facts"]["head_sha"], "c".repeat(40), "{pull}");
+    } else {
+        // Pre-plugin releases have no `gh pr`; read their full snapshot through their API.
+        let snapshots: Value = elder.client().get(
+            "/v1/claims?subject=resource/github/fixture/app/pull-request/12&limit=500",
+        ).await.unwrap();
+        let snapshot = snapshots["claims"].as_array().unwrap().iter().find(|claim| {
+            claim["kind"] == "resource.observed"
+                && claim.pointer("/body/fields/facts/head_sha") == Some(&json!("c".repeat(40)))
+        }).expect("the previous release serves its head-c snapshot");
+        assert_eq!(snapshot["body"]["fields"]["facts"]["title"], "Copper proof", "{snapshot}");
+    }
+
+    // The elder upgrades in place and advertises the plugin: the next head is compact state alone.
+    elder.stop();
+    elder.binary = PathBuf::from(st3());
+    elder.start().await;
+    elder.wait_listening().await;
+    wait_until("the poller sees the elder advertise the plugin", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"] == "daemon/fixture-elder" && claim["kind"] == "daemon.started"
+                && claim.pointer("/body/fields/features/github_plugin").is_some()
+        })
+    }).await;
+    *head.lock().unwrap() = "d".repeat(40);
+    refresh_fixture_app(&poller, "head-d");
+    wait_until("the poller records head d as compact state", 120, || async {
+        item_claim_with_head(&poller, "vcs.item.state", &"d".repeat(40)).await
+    }).await;
+    assert!(!item_claim_with_head(&poller, "resource.observed", &"d".repeat(40)).await, "no snapshot of head d");
+    let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(pull["pull"]["facts"]["head_sha"], "d".repeat(40), "{pull}");
+}

@@ -171,12 +171,9 @@ export const StreamingControlsPersistenceLight: Story = { ...StreamingControlsPe
 export const StreamingInlineMarkup: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'inline-streaming' },
   play: async ({ canvasElement }) => {
-    const adversarial = '['.repeat(50_000)
-    const started = performance.now()
-    const completed = completeStreamingTail(adversarial)
-    const durationMs = performance.now() - started
-    canvasElement.dataset.streamingTailDuration = String(durationMs)
-    if (durationMs >= 50) throw new Error(`50k opening brackets exceeded the 50ms streaming-tail budget: ${durationMs}ms`)
+    // The 50 ms budget for this input is a CPU-time check in Markdown.unit.test.mjs; wall time here also counts time
+    // the host's scheduler gives other work.
+    const completed = completeStreamingTail('['.repeat(50_000))
     if (completed !== '['.repeat(49_999)) throw new Error('Streaming tail must remove only the last unmatched opening bracket')
     if (completeStreamingTail('Read [**label**](https://example.com') !== 'Read **label**') throw new Error('Incomplete destination did not retain its formatted label')
     if (completeStreamingTail('\\[literal') !== '\\[literal') throw new Error('Escaped opening bracket must remain literal')

@@ -293,6 +293,18 @@ class Rule2PerCrateUnion(Fixture):
         self.assertEqual(done.returncode, 1)
         self.assertIn('merge-only shards must be skipped', done.stdout)
 
+    def test_main_proof_uses_all_four_shards_without_forging_its_event(self):
+        self.queue_shards(*self.GREEN)
+        env = self.environment(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/main', CI_TEST_TOPOLOGY='merge-group')
+        planned = self.planned(env)
+        self.assertEqual(planned['event_name'], 'push')
+        self.assertEqual(planned['partitions'], [f'hash:{index}/4' for index in range(1, 5)])
+        missing = self.needs()
+        missing['linux-tests-shard-4']['result'] = 'skipped'
+        done, _ = self.plan(dict(env, NEEDS_JSON=json.dumps(missing)))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('linux-tests-shard-4=skipped', done.stdout)
+
 
 class Rule3NothingFromPartialData(Fixture):
     def refused(self, why, env=None):
@@ -490,6 +502,14 @@ class Rule5SameKeysAndRecordsAsStTest(Fixture):
 
 
 class Rule6PublishedFailSoft(unittest.TestCase):
+    def test_explicit_topology_changes_planning_not_signing_authority(self):
+        self.assertEqual(notes.planning_event('push', 'merge-group'), 'merge_group')
+        self.assertEqual(notes.planning_event('push', ''), 'push')
+        self.assertEqual(len(notes.expected_shards(notes.planning_event('push', 'merge-group'))[0]), 4)
+        for event, topology in [('pull_request', 'merge-group'), ('workflow_dispatch', 'merge-group'), ('push', 'unknown')]:
+            with self.assertRaises(notes.Refused):
+                notes.planning_event(event, topology)
+
     def test_the_note_job_is_fail_soft_takes_its_scripts_from_the_base_and_judges_before_the_key(self):
         blocks = workflow_blocks()
         job = blocks['evidence-note-rust-tests']

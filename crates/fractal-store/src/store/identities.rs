@@ -176,27 +176,8 @@ fn request_digest(kind: &str, request: &Value) -> Result<String, St3Error> {
 /// Check immutable request/effect binding before a replicated fact enters the projection.
 /// Missing declaration/predecessor evidence is intentionally left to the fail-closed reducer.
 pub fn validate_replicated(claim: &ClaimRecord) -> Result<(), St3Error> {
-    if !KINDS.contains(&claim.kind.as_str()) { return Ok(()); }
-    let invalid = || St3Error::new("invalid-replicated-claim", "naming claim request, operation or owner evidence disagrees");
-    let fields = &claim.body["fields"];
-    let request_value = &fields["request"];
-    let request: RenameRequest = RenameRequest::deserialize(request_value).map_err(|_| invalid())?;
-    let kind = if claim.kind == AGENT_RENAMED { IdentityKind::Agent } else { IdentityKind::Mission };
-    if IdentityKind::of(&claim.subject) != Some(kind)
-        || IdentityKind::of(&request.from) != Some(kind)
-        || IdentityKind::of(&request.to) != Some(kind)
-        || request.reason.trim().is_empty()
-        || fields["to"].as_str() != Some(request.to.as_str())
-        || fields["reason"].as_str() != Some(request.reason.as_str())
-        || fields["owner_host"].as_str() != Some(claim.origin.as_str())
-        || claim.actor.is_none()
-        || (!request.actor.starts_with("agent/") && claim.actor.as_deref() != Some(request.actor.as_str()))
-        || request.expected_declaration.as_deref().is_some_and(|expected| fields["declaration"].as_str() != Some(expected))
-        || request.expected_naming_revision.as_deref().is_some_and(|expected| fields["previous_revision"].as_str() != Some(expected))
-    { return Err(invalid()); }
-    let Some((operation,digest)) = operation_parts(&claim.body) else { return Err(invalid()); };
-    if operation != operation_id_for_key(&request.idempotency_key) || digest != request_digest(&claim.kind, request_value)? {
-        return Err(invalid());
+    if !smallclaims::naming::admits_replicated(claim).map_err(internal)? {
+        return Err(St3Error::new("invalid-replicated-claim", "naming claim request, operation or owner evidence disagrees"));
     }
     Ok(())
 }
@@ -468,11 +449,7 @@ pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-struct Fact {
-    id: String, kind: IdentityKind, identity: String, from: String, to: String,
-    previous: Option<String>, declaration: String, origin: String, repaired: bool,
-}
-struct Head { kind: IdentityKind, canonical: String, revision: Option<String>, blocked: Option<&'static str> }
+use smallclaims::naming::{Fact, Head, reduce as reduce_naming};
 
 /// Reduce the naming subgraph, independent of canonical-time or replication arrival order.
 /// Only naming/declaration lifecycle changes invoke this fold; unrelated work never does.
@@ -482,7 +459,7 @@ pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
 
 fn reduce(transaction: &Transaction<'_>, clear: bool) -> Result<()> {
     let connection: &Connection = transaction;
-    let mut heads = BTreeMap::<String,Head>::new();
+    let mut heads = BTreeMap::<String,Head<IdentityKind>>::new();
     let mut names = BTreeMap::<String,(String,Option<String>)>::new();
     {
         let mut statement = connection.prepare("SELECT subject,kind FROM claims WHERE kind IN ('intent.desired','mission.published') AND subject IN (SELECT subject FROM claims WHERE kind IN ('agent.renamed','mission.renamed') UNION SELECT json_extract(body,'$.fields.to') FROM claims WHERE kind IN ('agent.renamed','mission.renamed') UNION SELECT json_extract(body,'$.fields.from') FROM claims WHERE kind IN ('agent.renamed','mission.renamed')) GROUP BY subject,kind")?;
@@ -509,76 +486,21 @@ fn reduce(transaction: &Transaction<'_>, clear: bool) -> Result<()> {
             if IdentityKind::of(&identity) != Some(kind) || IdentityKind::of(from) != Some(kind) || IdentityKind::of(to) != Some(kind) || fields["owner_host"].as_str() != Some(origin.as_str()) {
                 heads.get_mut(&identity).expect("inserted head").blocked = Some("conflict"); continue;
             }
-            facts.push(Fact { id,kind,identity,from:from.into(),to:to.into(),previous:fields["previous_revision"].as_str().map(str::to_owned),declaration:declaration.into(),origin,repaired });
+            let mut unavailable = match claim_by_id_tx(connection, declaration)? {
+                None => Some("pending-replication"),
+                Some(claim) if claim.subject != identity
+                    || (kind == IdentityKind::Agent && claim.kind != "intent.desired")
+                    || (kind == IdentityKind::Mission && claim.kind != "mission.published")
+                    || owner_admission(connection,kind,&identity,declaration,&origin).is_err() => Some("conflict"),
+                Some(_) => None,
+            };
+            let declaration_repaired: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND state='repaired')", [declaration], |row|row.get(0))?;
+            let operation_conflict: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM claims c JOIN operations o ON o.id=json_extract(c.body,'$._operation.id') WHERE c.id=?1 AND o.state='conflict')", [&id], |row|row.get(0))?;
+            if declaration_repaired || operation_conflict { unavailable = Some("conflict"); }
+            facts.push(Fact { id,identity,from:from.into(),to:to.into(),previous:fields["previous_revision"].as_str().map(str::to_owned),repaired,unavailable });
         }
     }
-    // Reserve every historical target, even a claim whose predecessor has not arrived. Base
-    // storage identities can never be stolen by a rename, irrespective of lexical claim ID.
-    let mut winners = BTreeMap::<String,String>::new();
-    for fact in &facts {
-        if !names.contains_key(&fact.to) { winners.entry(fact.to.clone()).or_insert_with(|| fact.id.clone()); }
-    }
-    let mut branches = BTreeMap::<(String,Option<String>),Vec<String>>::new();
-    for fact in facts.iter().filter(|fact| !fact.repaired) { branches.entry((fact.identity.clone(),fact.previous.clone())).or_default().push(fact.id.clone()); }
-    let mut done = BTreeSet::new();
-    loop {
-        let mut advanced = false;
-        for fact in &facts {
-            if done.contains(&fact.id) { continue; }
-            if fact.repaired { done.insert(fact.id.clone()); continue; }
-            let head = heads.get(&fact.identity).expect("fact head");
-            if fact.previous.is_some() && fact.previous != head.revision { continue; }
-            if fact.previous.is_none() && head.revision.is_some() { continue; }
-            let mut reason = None;
-            let evidence = claim_by_id_tx(connection, &fact.declaration)?;
-            match evidence {
-                None => reason = Some("pending-replication"),
-                Some(claim) => {
-                    if claim.subject != fact.identity || (fact.kind == IdentityKind::Agent && claim.kind != "intent.desired") || (fact.kind == IdentityKind::Mission && claim.kind != "mission.published") || owner_admission(connection,fact.kind,&fact.identity,&fact.declaration,&fact.origin).is_err() {
-                        reason = Some("conflict");
-                    }
-                }
-            }
-            let declaration_repaired: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND state='repaired')", [&fact.declaration], |row|row.get(0))?;
-            if declaration_repaired { reason = Some("conflict"); }
-            if branches[&(fact.identity.clone(),fact.previous.clone())].len() > 1 { reason = Some("conflict"); }
-            if winners.get(&fact.to) != Some(&fact.id) || fact.from != head.canonical { reason = Some("conflict"); }
-            let operation_conflict: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM claims c JOIN operations o ON o.id=json_extract(c.body,'$._operation.id') WHERE c.id=?1 AND o.state='conflict')", [&fact.id], |row|row.get(0))?;
-            if operation_conflict { reason = Some("conflict"); }
-            let head = heads.get_mut(&fact.identity).expect("fact head");
-            if let Some(reason) = reason { head.blocked = Some(reason); }
-            else if head.blocked != Some("conflict") {
-                head.blocked = None; head.canonical.clone_from(&fact.to); head.revision = Some(fact.id.clone());
-            }
-            done.insert(fact.id.clone()); advanced = true;
-        }
-        if !advanced { break; }
-    }
-    let by_id = facts.iter().map(|fact| (fact.id.as_str(),fact)).collect::<BTreeMap<_,_>>();
-    for fact in &facts {
-        if !done.contains(&fact.id) {
-            let head = heads.get_mut(&fact.identity).expect("fact head");
-            if head.blocked.is_none() {
-                let mut visited = BTreeSet::new();
-                let mut previous = fact.previous.as_deref();
-                let mut reason = "conflict";
-                while let Some(id) = previous {
-                    if !visited.insert(id) { break; }
-                    let Some(predecessor) = by_id.get(id) else { reason = "pending-replication"; break; };
-                    if predecessor.identity != fact.identity || predecessor.repaired { break; }
-                    previous = predecessor.previous.as_deref();
-                }
-                head.blocked = Some(reason);
-            }
-        }
-        if winners.get(&fact.to) == Some(&fact.id) { names.insert(fact.to.clone(),(fact.identity.clone(),Some(fact.id.clone()))); }
-    }
-    // A received edge can precede its predecessor. Reserve its asserted prior spelling too,
-    // so a missing predecessor cannot turn that spelling into an undeclared-recipient bypass.
-    // A real target reservation or original storage subject always takes precedence.
-    for fact in &facts {
-        names.entry(fact.from.clone()).or_insert_with(|| (fact.identity.clone(),Some(fact.id.clone())));
-    }
+    let smallclaims::naming::Projection { heads, names, .. } = reduce_naming(heads, names, facts, None);
     if clear {
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h4d43fd014a3c owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM identity_names", [])?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h5ef5d37f634d owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM identity_heads", [])?;

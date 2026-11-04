@@ -281,7 +281,11 @@ impl Store {
             }))
             .map_err(internal)?,
         ));
+        // The lend records where its hold goes; scheduled starts at :00 and :30 queue every write
+        // behind it. Nothing in it asks this thread for another writer loan.
+        let stages = holds::Stages::begin();
         let mut connection = self.connection.write();
+        stages.enter("existing-occurrence");
         if let Some(subject) = occurrence_subject
             && let Some(run) = connection
                 .query_row(
@@ -292,8 +296,11 @@ impl Store {
                 .optional()
                 .map_err(internal)?
         {
-            return mission_run_view_tx(&connection, &run).map_err(internal);
+            // The occurrence's run is committed: build its view on a reader, not the writer.
+            drop(connection);
+            return mission_run_view_tx(&self.readers.get(), &run).map_err(internal);
         }
+        stages.enter("idempotency");
         smallclaims::store::idempotency::cached_response(&connection, &request.idempotency_key)?;
         if let Some((response, stored_hash)) = connection
             .query_row(
@@ -312,6 +319,7 @@ impl Store {
             }
             return serde_json::from_str(&response).map_err(internal);
         }
+        stages.enter("admission");
         let transaction = connection.transaction().map_err(internal)?;
         owned_sets::guard_mission_start(&transaction, mission_id)?;
         // Recheck naming availability under the writer lock; a conflicting replicated
@@ -321,6 +329,7 @@ impl Store {
             && let Some(reason) = stale_ref_request_tx(&transaction, resource, discovery).map_err(internal)? {
             return Err(St3Error::new("stale-ref-head", reason));
         }
+        stages.enter("inputs");
         let inputs = resolve_mission_run_inputs(&transaction, &mission, &request.inputs)?;
         if let Some((resource, discovery)) = latest_ref {
             if let Some(reason) = stale_pull_request_request_tx(&transaction, resource, discovery)
@@ -330,6 +339,7 @@ impl Store {
             }
             let is_pull_request = claim_by_id_tx(&transaction, discovery)
                 .map_err(internal)?
+                .map(|mut claim| { claim.body = fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body); claim })
                 .is_some_and(|claim| {
                     claim.subject == resource
                         && claim.body.pointer("/fields/kind").and_then(Value::as_str)
@@ -356,7 +366,9 @@ impl Store {
                 }
             }
         }
+        stages.enter("capacity");
         enforce_mission_run_capacity(&transaction, &mission)?;
+        stages.enter("run-rows");
         let subject = occurrence_subject.map(str::to_owned).unwrap_or_else(|| {
             self.mission_run_subject_for_idempotency_key(&request.idempotency_key)
         });
@@ -475,6 +487,7 @@ impl Store {
                 )
                 .map_err(internal)?;
         }
+        stages.enter("claims");
         let body = json!({
             "fields": {
                 "status": "running",
@@ -524,7 +537,9 @@ impl Store {
             None,
         )
         .map_err(internal)?;
-        let view = mission_run_view_tx(&transaction, &run_id).map_err(internal)?;
+        stages.enter("view");
+        let view = created_mission_run_view_tx(&transaction, &run_id).map_err(internal)?;
+        stages.enter("idempotency-record");
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-ha48fc9d01a74 owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
@@ -540,6 +555,7 @@ impl Store {
                 params![opaque_cache_key(&request.idempotency_key), request_hash],
             )
             .map_err(internal)?;
+        stages.enter("commit");
         transaction.commit().map_err(internal)?;
         Ok(view)
     }
@@ -709,6 +725,21 @@ impl Store {
         at_index: Option<u64>,
         declared_agents: &BTreeSet<String>,
     ) -> Result<MissionResponse, St3Error> {
+        // Concurrent publication changes both run existence and capacity. Preview them
+        // from one snapshot, along with the subject tokens that fence publication.
+        self.read_snapshot_unindexed(|| {
+            Ok(self.mission_at_in_snapshot(intent, resolved_intent, at_index, declared_agents))
+        })
+        .map_err(internal)?
+    }
+
+    fn mission_at_in_snapshot(
+        &self,
+        intent: &NormalizedIntent,
+        resolved_intent: IntentInput,
+        at_index: Option<u64>,
+        declared_agents: &BTreeSet<String>,
+    ) -> Result<MissionResponse, St3Error> {
         let connection = self.readers.get();
         let normalized_intent = identities::normalize_intent(&connection, intent)?;
         let intent = normalized_intent.as_ref();
@@ -723,6 +754,9 @@ impl Store {
             blockers.push(format!("{}: {}", error.code, error.message));
         }
         if let Err(error) = schedule_standby::validate_publication(&connection, &self.origin, intent) {
+            blockers.push(format!("{}: {}", error.code, error.message));
+        }
+        if let Err(error) = mission_capacity::validate_publication(&connection, &self.origin, intent) {
             blockers.push(format!("{}: {}", error.code, error.message));
         }
         if let Err(error) = crate::provenance::validate_publication(&connection, intent) {
@@ -1217,6 +1251,14 @@ impl Store {
 
 const AGENT_WORK_PREVIEW_LIMIT: usize = 5;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Commit a concurrent publication between the run lookup and later preview reads.
+    pub static MISSION_AFTER_RUN_LOOKUP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_mission_run_declaration(
     connection: &Connection,
@@ -1261,6 +1303,10 @@ fn prepare_mission_run_declaration(
         )
         .optional()
         .map_err(internal)?;
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(after_lookup) = MISSION_AFTER_RUN_LOOKUP.with(|hook| hook.borrow_mut().take()) {
+        after_lookup();
+    }
     if let Some(creation) = &declaration.creation {
         if let Some((mission, revision, workspace, requester, _, _, inputs, mode)) = &current {
             let stored_inputs = serde_json::from_str::<BTreeMap<String, MissionRunInput>>(inputs)

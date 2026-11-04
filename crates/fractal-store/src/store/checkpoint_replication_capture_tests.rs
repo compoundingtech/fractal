@@ -138,7 +138,7 @@ fn replicated_admission_duplicate_reoffers_and_projection_leave_older_capture_un
     source.set_write_clock_at(100).unwrap();
     for index in 0..ROUNDS {
         let claim = source
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/sender".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,

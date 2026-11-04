@@ -90,6 +90,11 @@ WebSockets through the returned Unix tunnel socket. An explicit NodeID bypasses
 peer-name lookup. It does not start a TCP proxy or forward trusted-local person
 headers. Pairing credentials and signing requirements remain gateway-owned.
 
+The Rust and Node native readers accept exactly `fabric://<NodeID-or-name>/st3-client-v0`
+and `fabric://<NodeID-or-name>/fractal-client-v0`. Both dial the exposed
+`st3-client-v0` gateway service; endpoint formatting and gateway defaults still use
+`st3-client-v0`. Other service names, URI suffixes and trailing line breaks are rejected.
+
 The native TypeScript adapter recognizes canonical hex/base32 NodeID syntax and
 leaves Ed25519 key validity to Fabric. Unlike the Rust adapter's exact identity
 parser, it does not fall back to peer-name lookup for a syntactically valid but

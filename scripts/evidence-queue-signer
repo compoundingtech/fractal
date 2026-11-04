@@ -497,7 +497,9 @@ def seed(args):
         log.parent.mkdir(parents=True, exist_ok=True)
         started = time.time()
         # The commit, not origin/main: fractal-test fetches the base again, and main may have moved since; this tip is the one recorded.
-        _, reason, seconds, peak = W.run(st_test, repo, [], 'seed', rules, log, extra=('--seed', commit))
+        # Last in the pool (ST_TEST_POOL_RANK=last): a seed takes a pool tree only while no seat's run waits for one (Factory, 2026-11-01:
+        # the seed held 18% of one build host's tree-hours in a day).
+        _, reason, seconds, peak = W.run(st_test, repo, [], 'seed', rules, log, extra=('--seed', commit), environment={'ST_TEST_POOL_RANK': 'last'})
     rows = seed_rows(log)
     result, detail = rows.pop('rust-tests', ('no result', ''))
     tests_started = bool(TESTS_STARTED.search(log.read_text(errors='replace')))
