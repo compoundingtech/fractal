@@ -5661,16 +5661,22 @@ mod tests {
         let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
         group.tabs.retain(|tab| tab.pane == "agent:agent/a" || tab.pane == "list:home");
         group.current = 1;
-        for width in [40, 26, 18, 12, 9] {
+        let atlas = ui.tab_badge(&Tab::pane("agent:agent/a"), Pane::parse("agent:agent/a").as_ref());
+        let inbox = ui.tab_badge(&Tab::pane("list:home"), Some(&Pane::List(0)));
+        // The strip reserves one leading cell and the three-cell add button.
+        let chrome = 1 + 3;
+        let compact_width = (atlas.width("Atlas", true) + inbox.width("Inbox", true) + chrome - 1) as u16;
+        let inbox_min_width = (inbox.width("Inbox", true).saturating_sub(2) + chrome) as u16;
+        for width in [40, 26, 18, 12, inbox_min_width] {
             let row = tab_badge_strip(&ui, width);
             println!("INBOX {width}: |{row}|");
             assert!(row.contains("?2 Inbox"), "{width}: {row}");
-            if width == 26 {
-                assert!(row.contains("? Atlas "), "{row}");
-                assert!(!row.contains("?2 Atlas"), "{row}");
-            }
         }
-        assert!(!tab_badge_strip(&ui, 8).contains("?2"));
+        let compact = tab_badge_strip(&ui, compact_width);
+        assert!(compact.contains("?2 Inbox"), "{compact}");
+        assert!(!compact.contains("?2 Atlas"), "{compact}");
+        assert_eq!(atlas.label("Atlas", 80, false), " ? Atlas ");
+        assert!(!tab_badge_strip(&ui, inbox_min_width - 1).contains("?2"));
     }
 
     #[test]
@@ -5806,11 +5812,8 @@ mod tests {
                 } else {
                     assert!(!shown.contains("?2"), "{width}: {shown}");
                 }
-                if current > 0 {
-                    assert!(shown.contains('‹'), "{width}: {shown}");
-                    assert!(ui.frame.borrow().hits.iter().any(|(_, hit)| *hit == Hit::GlassTabMore(0, current - 1)));
-                }
-                if current < 4 { assert!(shown.contains('›'), "{width}: {shown}"); }
+                // An overflow marker appears only when a tab is hidden on that side.
+                assert_marker_counts(&ui, &tab_strip_row(&ui, width), 5);
                 for (rect, hit) in &ui.frame.borrow().hits {
                     if matches!(hit, Hit::GlassTabMore(..) | Hit::GlassTab(..)) {
                         assert!(rect.right() <= width, "{width}: {hit:?} {rect:?}");
