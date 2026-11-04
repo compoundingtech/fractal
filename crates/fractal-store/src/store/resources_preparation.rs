@@ -15,7 +15,7 @@ pub(super) static PENDING_QUERY: std::sync::LazyLock<String> = std::sync::LazyLo
     )
 });
 const PREPARATION_SCHEMA: &str =
-    /* sqlite-large-value: allow-for-now lv-h8120ab5909d9 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
+    /* sqlite-large-value: allow-for-now lv-h6926004f4a7e owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
     r#"
 CREATE TABLE IF NOT EXISTS local_resource_preparation (
     subject TEXT PRIMARY KEY,
@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS local_resource_preparation_claims (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS local_resource_preparation_claims_subject
 ON local_resource_preparation_claims(subject);
+CREATE INDEX IF NOT EXISTS local_resource_preparation_claims_order
+ON local_resource_preparation_claims(subject, sort_key);
 CREATE TABLE IF NOT EXISTS local_resource_preparation_pending (
     claim_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
@@ -673,11 +675,27 @@ pub(super) fn flush_deferred(transaction: &Transaction<'_>, budget: std::time::D
     }
 }
 
+// A stage's next claims, seeking past its key; deleted claims come back with no claims row.
+pub(super) static WALK: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "SELECT prepared.claim_id,prepared.sort_key,claims.id IS NOT NULL,claims.kind,claims.body,
+            claims.accepted_at_unix_ms,
+            ({ACTUAL_STATE_CLAIM} AND claims.kind NOT LIKE 'harness.%' AND {UNREPAIRED_CLAIM}),
+            CASE WHEN claims.kind='resource.observed'
+                THEN COALESCE(json_extract(claims.body,'$.fields.attribution_only'),0) END
+         FROM local_resource_preparation_claims prepared INDEXED BY local_resource_preparation_claims_order
+         LEFT JOIN claims ON claims.id=prepared.claim_id AND claims.subject=prepared.subject
+         WHERE prepared.subject=?1 AND prepared.sort_key>?2
+         ORDER BY prepared.sort_key LIMIT 64"
+    )
+});
+
 /// Fold a deferred subject's claims onward from its stage until `deadline` (at least one claim),
 /// and say whether its rebuild finished.
 ///
 /// The walk reads the subject's claims through `local_resource_preparation_claims`, in sort-key
-/// order, which is canonical order. Every present claim of the subject has its row there with its
+/// order, which is canonical order, seeking past the stage's key in `(subject, sort_key)`: a step
+/// reads only the claims it folds, however long the subject's history. Every present claim of the subject has its row there with its
 /// current key, because flush keeps them; the deleted ones a trim left behind are skipped and
 /// their rows dropped. The stage stays valid only while nothing else rebuilds the subject:
 /// `rebuild_subject` drops it, and a new claim on a deferred subject goes through that. The
@@ -692,19 +710,6 @@ fn step_deferred(transaction: &Transaction<'_>, subject: &str, deadline: std::ti
         }
         None => (Fold::default(), Vec::new(), 0),
     };
-    static WALK: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        format!(
-            "SELECT prepared.claim_id,prepared.sort_key,claims.id IS NOT NULL,claims.kind,claims.body,
-                claims.accepted_at_unix_ms,
-                ({ACTUAL_STATE_CLAIM} AND claims.kind NOT LIKE 'harness.%' AND {UNREPAIRED_CLAIM}),
-                CASE WHEN claims.kind='resource.observed'
-                    THEN COALESCE(json_extract(claims.body,'$.fields.attribution_only'),0) END
-             FROM local_resource_preparation_claims prepared
-             LEFT JOIN claims ON claims.id=prepared.claim_id AND claims.subject=prepared.subject
-             WHERE prepared.subject=?1 AND prepared.sort_key>?2
-             ORDER BY prepared.sort_key LIMIT 64"
-        )
-    });
     let mut stale = Vec::new();
     let finished = 'walk: loop {
         let mut statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h70484bec3d02 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &WALK)?;

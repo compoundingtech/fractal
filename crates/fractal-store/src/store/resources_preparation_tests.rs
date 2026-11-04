@@ -1532,3 +1532,23 @@ fn a_staged_rebuild_on_a_store_copy() {
     eprintln!("every subject: {} equal to a whole rebuild", every.len());
     transaction.rollback().unwrap();
 }
+
+/// A staged rebuild's step seeks past its key in (subject, sort_key) and joins only the claims it
+/// reads, so a step costs the claims it folds however long the subject's history is.
+#[test]
+fn a_staged_rebuild_step_seeks_its_claims_without_scanning_the_subject() {
+    let store = Store::open_memory("example-staged-plan").unwrap();
+    let connection = store.readers.get();
+    let plan = connection
+        .prepare(/* sqlite-large-value: allow-for-now lv-h56c3f7754656 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {}", *super::preparation::WALK))
+        .unwrap()
+        .query_map(["resource/example-plan", "key"], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter().any(|step| step.starts_with("SEARCH prepared USING COVERING INDEX local_resource_preparation_claims_order (subject=? AND sort_key>?)")),
+        "{plan:?}"
+    );
+    assert!(!plan.iter().any(|step| step.contains("TEMP B-TREE") || step.starts_with("SCAN")), "{plan:?}");
+}
