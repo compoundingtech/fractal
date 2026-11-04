@@ -674,6 +674,7 @@ pub async fn client_agents_detail(
     let created_at = snapshot.created_at.clone();
     let snapshot_index = snapshot.store_index;
     let subject = identity.to_owned();
+    let node = state.node.clone();
     let mut items = blocking_store(move || {
         let selected = BTreeSet::from([subject]);
         let mut items = client_agent_resources_selected(
@@ -684,6 +685,16 @@ pub async fn client_agents_detail(
         )?;
         add_agent_todos(&store, &mut items, snapshot_index)?;
         overlay_agent_resources(&store, &mut items, &created_at)?;
+        for item in &mut items {
+            if let Some(subject) = item["id"].as_str()
+                && let Some((desired, _)) = store.desired_subject_with_writer(subject)?
+                && desired.member.as_ref().is_some_and(|member| member.host == node)
+            {
+                item["launch_contract"] = crate::contract::status(
+                    &store, &desired, item["incarnation_id"].as_str(),
+                );
+            }
+        }
         for item in &mut items {
             if let Some(subject) = item["id"].as_str()
                 && let Some(operation) = store.runtime_start_for(subject)?
