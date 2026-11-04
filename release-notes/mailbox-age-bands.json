@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Separate recent unread mailbox latency from stale backlog",
+  "replay": { "status": "none", "detail": "Telemetry only; no claim replay changes." },
+  "schema": { "status": "none", "detail": "No persisted schema, query or index changes; age bands are classified in Rust." },
+  "rules": { "status": "none", "detail": "Message delivery, read, close and silent-message rules are unchanged. Repeated sends use their oldest accepted timestamp." },
+  "compatibility": { "status": "changed", "detail": "Both st.mailbox.unread and st.mailbox.oldest_unread_age now require st.mailbox.age_band=recent|stale alongside st.agent and st.mailbox.state=pending|delivered|held. Recent means the oldest accepted message.sent is less than 86,400,000 ms before refresh time; the exact boundary is stale. Each gauge emits six state/band pairs per local managed agent, including zeros, except both held bands are omitted during incomplete bootstrap. Age still advances at scrape time from each cached pair's oldest accepted send. This supersedes the original mailbox gauge attribute contract." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout; no backfill." },
+  "manual": { "status": "changed", "detail": "Select st_mailbox_age_band=recent on live-latency alerts so stale backlog cannot mask recent mail; select stale on weekly st_mailbox_unread backlog lists. Bands change only at the next refresh, normally at most about 30 seconds late; slow or failed refreshes can delay this further." },
+  "recovery": { "status": "none", "detail": "Binary rollback restores the unbanded metric contract without changing durable state; adapt metric selectors accordingly." }
+}
