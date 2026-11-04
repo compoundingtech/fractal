@@ -23,6 +23,7 @@ export const sidebarPins: (client?: FractalClient) => Atom.Atom<SidebarPins> = A
   let generation = 0
   let editing = false
   let follow: PinsFollow | undefined
+  let initializing: AbortController | undefined
   let current: SidebarPins
   const publish = (state: PinsState) => {
     if (!active) return
@@ -34,11 +35,13 @@ export const sidebarPins: (client?: FractalClient) => Atom.Atom<SidebarPins> = A
     if (!active || client === undefined) return
     const version = ++generation
     editing = false
+    initializing?.abort()
+    initializing = new AbortController()
     follow?.close()
     follow = undefined
     publish({ ...current.state, phase: 'connecting' })
     try {
-      const next = await followPins({ gateway: client, onState: (state) => {
+      const next = await followPins({ gateway: client, signal: initializing.signal, onState: (state) => {
         if (!active || version !== generation) return
         publish(state.phase === 'unavailable' ? { ...state, detail: 'Pins are unavailable. Try again.' } : editing && state.phase === 'synced' ? { ...state, phase: 'pending' } : state)
       } })
@@ -68,7 +71,7 @@ export const sidebarPins: (client?: FractalClient) => Atom.Atom<SidebarPins> = A
       }
     })()
   }
-  get.addFinalizer(() => { active = false; generation++; follow?.close() })
+  get.addFinalizer(() => { active = false; generation++; initializing?.abort(); follow?.close() })
   current = { state: { phase: client === undefined ? 'synced' : 'connecting', members: [] }, editable: false, toggle, retry }
   if (client !== undefined) void Promise.resolve().then(start)
   return current

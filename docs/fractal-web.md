@@ -631,6 +631,9 @@ Consumers close and reopen the follow after a socket interruption; an HTTP refre
 cannot restore synced or editable state on an interrupted follow. Failed reads
 retain the last complete members with an unavailable phase. Sidebar rendering is
 independent of this data API.
+The source-owned Pins binding reuses the source's fetch/socket transports, including
+replay. Source switches, unmounts and retries abort initializing reads and close their
+collection sockets before starting another follow. Kit consumers receive plain views.
 
 The live sidebar renders returned Pins in membership order above the roster and
 hides an empty section. Pin/unpin menus appear only with a synced writable follow.
