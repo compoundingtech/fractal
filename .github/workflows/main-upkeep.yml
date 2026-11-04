@@ -177,8 +177,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Use the runner's own caches
@@ -393,8 +406,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Use the runner's own caches
@@ -587,8 +613,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Use the runner's own caches
@@ -765,8 +804,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
         if: success() && (steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Use the runner's own caches
@@ -899,8 +951,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Use the runner's own caches
@@ -1217,8 +1282,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
@@ -2375,8 +2453,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Test release and PR classification safety
         run: python3 scripts/release_notes_test.py
@@ -2425,8 +2516,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
         if: needs.proof-evidence-gate-genie-freshness.outputs.skip != 'true' && needs.proof-evidence-gate-genie-freshness.outputs.refuse != 'true'
       - name: Use the runner's own caches
@@ -2585,8 +2689,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
         if: needs.proof-evidence-gate-ci-script-tests.outputs.skip != 'true' && needs.proof-evidence-gate-ci-script-tests.outputs.refuse != 'true'
       - name: Use the runner's own caches
@@ -2893,8 +3010,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - # v3.24.1
         name: Install Nix
@@ -3000,8 +3130,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - # v3.24.1
         name: Install Nix
@@ -3117,8 +3260,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
@@ -3310,8 +3466,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
@@ -3542,8 +3711,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
@@ -3771,8 +3953,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
@@ -4000,8 +4195,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
@@ -4224,8 +4432,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
@@ -4440,8 +4661,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
@@ -4756,8 +4990,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Take the signer scripts from the base commit
         id: base
@@ -4895,8 +5142,21 @@ jobs:
             export GIT_CONFIG_VALUE_0
           fi
           head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Take the signer scripts from the base commit
         id: base

@@ -5215,7 +5215,10 @@ fn cli_main() -> ExitCode {
         Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion && json_version => {
             println!(
                 "{}",
-                json!({ "machine_version": fractal_drivers::version::machine_version() })
+                json!({
+                    "machine_version": fractal_drivers::version::machine_version(),
+                    "commit": fractal_drivers::version::build_commit(),
+                })
             );
             return ExitCode::SUCCESS;
         }
@@ -7284,7 +7287,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok())}),
             ),
@@ -7406,6 +7409,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.marks_switch", refresh_marks_switch(store.clone(), state.configured_peers.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
@@ -16604,6 +16608,29 @@ impl NativeObservations {
                         },
                     ).await?;
                 }
+                "harness-question" => {
+                    let observation: fractal_drivers::omp_questions::Observation =
+                        serde_json::from_value(event.payload["event"].clone())?;
+                    let submitted: Result<Value> = client.post(
+                        "/v1/harness-questions/native",
+                        &json!({
+                            "agent": subject, "runtime_incarnation": event.runtime_incarnation,
+                            "event": observation,
+                        }),
+                    ).await;
+                    if let Err(error) = submitted {
+                        // A disabled receiver or superseded binding must not park unrelated
+                        // native events behind an observation it will never admit. An API outage
+                        // still retains this event for exact replay; refusal invents no closure.
+                        if !matches!(fractal_daemon::client::api_error_code(&error), Some(
+                            "foreign-harness-question" | "unsupported-capability"
+                            | "stale-incarnation" | "stale-mailbox-session" | "not-found"
+                            | "runtime-not-local"
+                        )) {
+                            return Err(error);
+                        }
+                    }
+                }
                 "harness-timeline" => {
                     let operation: fractal_drivers::harness_timeline::Operation =
                         serde_json::from_slice(&raw)?;
@@ -17199,7 +17226,7 @@ fn accept_managed_channel_frame(
         let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
             "state" | "session" | "ready" | "delivered" | "read" | "failed" | "todo" => true,
-            "timeline" | "context" | "turn" | "subagent" => observer.is_some(),
+            "timeline" | "context" | "turn" | "subagent" | "question.open" | "question.closed" => observer.is_some(),
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
             "delivery_ready" | "retry_pending_ask" | "diagnostic" => true,
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
@@ -20506,6 +20533,21 @@ async fn import_retired_identities(store: Arc<Store>) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
+    }
+}
+
+/// Decide, at startup and every minute after, whether this member records its seats' lifecycle
+/// as local marks: once every other member, and every configured peer, reads marks and asks hosts
+/// for them (store/marks_switch.rs). A member that joins without that turns it off again within a
+/// minute.
+async fn refresh_marks_switch(store: Arc<Store>, peers: Vec<String>) {
+    loop {
+        let (worker, peers_now) = (store.clone(), peers.clone());
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.marks_switch", || worker.refresh_marks_switch(&peers_now))).await;
+        if !matches!(result, Ok(Ok(_))) {
+            stderr_message("st3", format_args!("message marks switch check failed: {result:?}"));
+        }
+        tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }
 
