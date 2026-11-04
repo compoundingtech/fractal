@@ -55,8 +55,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Whether a laned seat's lane fits now: what the host gives lanes, less the lanes of its other
-    /// live seats and what its seats outside lanes hold. Seats wait for room in order, so a large
-    /// lane is not passed by smaller ones; one larger than the host can ever give waits out of line.
+    /// live seats, what its seats outside lanes hold and the room kept for a burst. Seats wait for
+    /// room in order, so a large lane is not passed by smaller ones; one larger than the host can
+    /// ever give, or than it gives beside the burst reserve, waits out of line.
     fn lane_fit(&self, subject: &DesiredSubject, member: &MemberSpec, request: Option<&crate::model::ClaimRecord>) -> Result<LaneFit> {
         let (Some(host), Some(lane)) = (self.seat_admission.lanes, member.capacity) else {
             return Ok(LaneFit::Unlaned);
@@ -78,22 +79,31 @@ impl<R: RuntimeControl> Reconciler<R> {
         let status = &self.seat_admission.status;
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         let room = host.room;
-        if lane.cores > room.cores || lane.memory > room.memory {
-            let reason = format!("lane {} can never fit on this host, which gives lanes {}", show_lane(lane), show_lane(room));
+        let reserve = self.burst_reserve(&subject.subject, lane)?;
+        let out_of_line = if lane.cores > room.cores || lane.memory > room.memory {
+            Some(format!("lane {} can never fit on this host, which gives lanes {}", show_lane(lane), show_lane(room)))
+        } else if lane.memory > room.memory.saturating_sub(reserve.full) {
+            Some(format!("lane {} does not fit beside the {} this host keeps from starts for a burst, of the {} it gives lanes",
+                show_lane(lane), show_memory(reserve.full), show_memory(room.memory)))
+        } else { None };
+        if let Some(reason) = out_of_line {
             if status.lane_wait(&subject.subject, reason, false, now) {
                 self.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
             }
+            // The reserve follows the host's smallest lane: try again soon.
+            smallclaims::touched::note_due(now_ms() + LANE_RETRY_MS);
             return Ok(LaneFit::Waits);
         }
         let held = self.held_lanes(&subject.subject, now)?;
         let outside = (host.outside)().unwrap_or(0);
-        let free = room.memory.saturating_sub(held).saturating_sub(outside);
+        let free = room.memory.saturating_sub(held).saturating_sub(outside).saturating_sub(reserve.kept);
         let head = status.lane_head(now);
         if lane.memory <= free && head.as_deref().is_none_or(|head| head == subject.subject) {
             return Ok(LaneFit::Fits(lane));
         }
+        let kept = if reserve.full == 0 { String::new() } else { format!(", kept for a burst {}", show_memory(reserve.kept)) };
         let room_now = format!(
-            "{} free of the {} this host gives lanes (other lanes hold {}, seats outside lanes {})",
+            "{} free of the {} this host gives lanes (other lanes hold {}, seats outside lanes {}{kept})",
             show_memory(free), show_memory(room.memory), show_memory(held), show_memory(outside));
         let reason = match head.filter(|head| *head != subject.subject && lane.memory <= free) {
             Some(head) => format!("lane {} waits behind {head}, first in line for room: {room_now}", show_lane(lane)),
@@ -106,6 +116,35 @@ impl<R: RuntimeControl> Reconciler<R> {
         // again soon.
         smallclaims::touched::note_due(now_ms() + LANE_RETRY_MS);
         Ok(LaneFit::Waits)
+    }
+
+    /// The room admission keeps from seat starts so one lane burst fits (docs/st3/seat-lanes.md,
+    /// "Bursts"): what a burst to the host's burst lane raises its smallest laned seat by,
+    /// `candidate` (at `lane`) among them. A granted burst already holds its raise, so while one is
+    /// held the reserve keeps only what is left of it. Bursts may use the reserve; starts may not.
+    pub(super) fn burst_reserve(&self, candidate: &str, lane: fractal_runtime::Capacity) -> Result<BurstReserve> {
+        let burst_lane = self.seat_admission.lanes.map_or(0, |host| host.burst_lane);
+        if burst_lane == 0 {
+            return Ok(BurstReserve { full: 0, kept: 0 });
+        }
+        let granted = self.seat_admission.status.state().lane_bursts.iter().filter(|burst| burst.granted)
+            .map(|burst| (burst.subject.clone(), burst.capacity.memory)).collect::<BTreeMap<_, _>>();
+        let (mut smallest, mut burst_raise) = (lane.memory, 0);
+        for desired in self.store.desired_subjects()? {
+            let Some(base) = desired.member.as_ref().filter(|member| member.host == self.host).and_then(|member| member.capacity)
+            else { continue };
+            if desired.kind != "agent" || desired.subject == candidate {
+                continue;
+            }
+            smallest = smallest.min(base.memory);
+            if let Some(asked) = granted.get(&desired.subject) {
+                burst_raise = burst_raise.max(asked.saturating_sub(base.memory));
+            }
+        }
+        let full = burst_lane.saturating_sub(smallest);
+        let reserve = BurstReserve { full, kept: full.saturating_sub(burst_raise) };
+        self.seat_admission.status.state().burst_reserve = Some((reserve.full, reserve.kept));
+        Ok(reserve)
     }
 
     /// The memory of this host's other laned seats that run, or were admitted to start and are not
@@ -229,6 +268,12 @@ pub(super) fn show_memory(bytes: u64) -> String {
 
 /// How soon a seat waiting for room is tried again without a claim to wake it.
 const LANE_RETRY_MS: u128 = 30_000;
+
+/// The room kept from starts for a burst: `full` with no burst held, `kept` left of it now.
+pub(super) struct BurstReserve {
+    pub(super) full: u64,
+    pub(super) kept: u64,
+}
 
 enum LaneFit {
     /// No lane, or lanes are off: admission by fit does not apply.
