@@ -6443,6 +6443,198 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
     assert_eq!(after.last().map(|(subject, _)| subject.clone()), Some(fourth));
 }
 
+/// Each record of the archive at `path`, as JSON.
+fn archive_records(path: &Path) -> Vec<Value> {
+    fs::read_to_string(path).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+/// A standalone node started by this build on `archive`, restored with this build's CLI into its
+/// state directory and named for the restored writer, as the restore says to.
+async fn restored_node(parent: &Path, directory: &str, archive: &Path) -> (Node, Value) {
+    let mut node = Node::named(parent, directory, "restoring");
+    let database = node.state_dir().join("claims.sqlite3");
+    let restored = node
+        .command(&["--json", "backup", "restore", "--database", database.to_str().unwrap(), archive.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
+    let report: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    let writer = report["writer"].as_str().unwrap().to_owned();
+    fs::write(node.root.join("config/st3/config.toml"), format!("node = \"{writer}\"\nperson = \"{PERSON}\"\n")).unwrap();
+    node.name = writer;
+    node.start().await;
+    (node, report)
+}
+
+/// Backups across the messages shard (db break-up step 4c-1). While the shard holds nothing, the
+/// previous release and this build restore each other's archives, and this build writes what the
+/// release writes from the same database: its version and every record but the build that wrote
+/// it. Once the shard holds a stream item the archive is version 5: the release refuses it, naming
+/// the format, and this build restores it with the item and its read on the member.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_and_this_build_restore_each_others_archives_until_the_shard_holds_items() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    let send = |node: &Node, key: &str| {
+        let client = node.client();
+        let key = key.to_owned();
+        async move {
+            let receipt: Value = client
+                .post("/v1/messages", &json!({
+                    "idempotency_key": key, "from": PERSON, "to": "agent/fleet-reader",
+                    "content": format!("graph mail {key}"),
+                }))
+                .await
+                .unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    let read = |node: &Node, subject: &str, key: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+        let key = key.to_owned();
+        async move {
+            let mut receipt = Value::Null;
+            for lifecycle in ["delivered", "read"] {
+                receipt = client
+                    .post(&path, &json!({
+                        "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                        "idempotency_key": format!("{key}-{lifecycle}"),
+                    }))
+                    .await
+                    .unwrap();
+            }
+            receipt
+        }
+    };
+    let listed = |node: &Node| {
+        let client = node.client();
+        async move {
+            let page: MessagePage = client
+                .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true")
+                .await
+                .unwrap();
+            page.items.into_iter().map(|item| (item.subject, item.status)).collect::<Vec<_>>()
+        }
+    };
+    let backup = |node: &Node, archive: &Path, database: Option<&Path>| {
+        let mut arguments = vec!["backup", "create", archive.to_str().unwrap()];
+        if let Some(database) = database {
+            arguments.extend(["--database", database.to_str().unwrap()]);
+        }
+        let created = node.command(&arguments).output().unwrap();
+        assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+        archive_records(archive)
+    };
+    let release_restore = |node: &mut Node, archive: &Path, database: &Path| {
+        node.binary = old.clone();
+        let restored = node
+            .command(&["--json", "backup", "restore", "--database", database.to_str().unwrap(), archive.to_str().unwrap()])
+            .output()
+            .unwrap();
+        node.binary = PathBuf::from(st3());
+        restored
+    };
+    let first = send(&o, "release-first").await;
+    let second = send(&o, "release-second").await;
+    read(&o, &first, "release-read").await;
+    let before = listed(&o).await;
+    assert_eq!(before, [(first.clone(), "read".to_owned()), (second.clone(), "sent".to_owned())]);
+
+    // The release's archive: this build restores it, and reads the same mail on it.
+    let release_archive = root.path().join("release.jsonl");
+    let release_records = backup(&o, &release_archive, None);
+    let release_version = release_records[0]["data"]["version"].as_u64().unwrap();
+    assert!(release_version < 5, "{}", release_records[0]);
+    let (mut from_release, report) = restored_node(root.path(), "from-release", &release_archive).await;
+    assert!(report.get("shards").is_none_or(|shards| shards.as_object().is_some_and(|shards| shards.is_empty())), "{report}");
+    assert_eq!(listed(&from_release).await, before, "the release's archive restored different mail");
+    from_release.stop();
+
+    // Upgrade in place. The shard is open and empty, and this build's archive of the database is
+    // the one the release writes of it: the same version, and every record but the writing build.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+    assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
+    o.stop();
+    let database = o.state_dir().join("claims.sqlite3");
+    let copy = root.path().join("release-export/claims.sqlite3");
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
+        .unwrap();
+    let empty_shard_archive = root.path().join("empty-shard.jsonl");
+    let ours = backup(&o, &empty_shard_archive, Some(&database));
+    o.binary = old.clone();
+    let theirs = backup(&o, &root.path().join("release-of-upgraded.jsonl"), Some(&copy));
+    o.binary = PathBuf::from(st3());
+    let without_build = |records: &[Value]| {
+        let mut header = records[0].clone();
+        header["data"].as_object_mut().unwrap().remove("source_build");
+        // The end record's hash covers the header, so only its count can match.
+        let end = &records[records.len() - 1];
+        assert_eq!(end["record"], "end", "{end}");
+        (header, records[1..records.len() - 1].to_vec(), end["data"]["envelopes"].clone())
+    };
+    assert!(ours[0]["data"]["version"].as_u64().unwrap() < 5, "{}", ours[0]);
+    assert!(ours[0]["data"].get("shards").is_none(), "{}", ours[0]);
+    assert!(ours.iter().all(|record| !record["record"].as_str().unwrap().starts_with("shard-")));
+    assert_eq!(without_build(&ours), without_build(&theirs), "an empty shard changed the archive");
+    // The release restores it.
+    let restored = release_restore(&mut o, &empty_shard_archive, &root.path().join("release-restored/claims.sqlite3"));
+    assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
+    let report: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(report["graph_digest"], ours[0]["data"]["graph_digest"], "{report}");
+    assert_eq!(report["projections_match"], true, "{report}");
+
+    // A stream item, read on the member: the next archive carries the shard, as version 5.
+    o.start().await;
+    let stream = "message/0000000000000e01";
+    append_stream_item(&o, stream).await;
+    let receipt = read(&o, stream, "stream-read").await;
+    assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{receipt}");
+    let mut merged = before.clone();
+    merged.push((stream.to_owned(), "read".to_owned()));
+    assert_eq!(listed(&o).await, merged);
+    let shard_archive = root.path().join("shard.jsonl");
+    let records = backup(&o, &shard_archive, None);
+    let header = &records[0]["data"];
+    assert_eq!(header["version"], 5, "{header}");
+    assert_eq!(header["shards"]["messages"]["envelope_count"], 1, "{header}");
+    assert!(header["shards"]["messages"]["local"]["stream_lifecycle"]["count"].as_u64() > Some(0), "{header}");
+    for kind in ["shard-envelope", "shard-local"] {
+        assert!(records.iter().any(|record| record["record"] == kind), "the archive has no {kind} record");
+    }
+
+    // The release refuses it and publishes nothing.
+    let target = root.path().join("release-refused/claims.sqlite3");
+    let refused = release_restore(&mut o, &shard_archive, &target);
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    // The release names no version: that is the message an operator sees.
+    assert!(error.trim_end().ends_with(": unsupported claim backup format/version"), "{error}");
+    assert!(!target.exists());
+
+    // This build restores it: the graph's mail, and the stream item still read.
+    let (restored, report) = restored_node(root.path(), "from-shard", &shard_archive).await;
+    assert_eq!(report["shards"]["messages"]["envelope_count"], 1, "{report}");
+    assert_eq!(stream_items(&restored, stream).await, 1);
+    assert_eq!(listed(&restored).await, merged, "the shard's archive restored different mail");
+    let view: MessageView = restored.client().get(&format!("/v1/messages/read/{stream}")).await.unwrap();
+    assert_eq!((view.from.as_str(), view.status.as_str()), ("agent/fleet-sender", "read"));
+    assert!(restored.claims().await.iter().all(|claim| claim["subject"] != stream), "a restored stream item reached the graph");
+}
+
 /// A member of the previous release and one of this build, side by side: delivery and read state
 /// the release writes as lifecycle claims reaches the new member and reads the same there, and a
 /// mark the new member records stays its own: it writes no claim, the release never sees it, and
