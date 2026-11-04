@@ -72,7 +72,10 @@ describe('conversation eager graph boundary', () => {
     const graph = eagerGraph(resolve(web, 'main.tsx'))
     // Positive witnesses prevent an empty or incorrectly resolved graph from passing.
     expect(graph.files).toContain(resolve(web, 'LiveAgentWorkspace.tsx'))
-    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/shell.ts'))
+    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Shell.tsx'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/shell.ts'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/sidebar/RowOverlays.tsx'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/declaration/DeclarationPanel.tsx'))
     expect(graph.files.some(file => /\/(?:ConversationPane|Transcript|Markdown)\.tsx$/.test(file))).toBe(false)
     expect(graph.dependencies.some(specifier => /^(?:refractor|react-markdown)(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.dependencies).not.toContain('@assistant-ui/react')
