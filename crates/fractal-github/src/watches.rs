@@ -22,8 +22,8 @@ pub trait WatchesStore {
     /// roster can predate changes the preceding stages wrote and the change feed observed.
     fn github_watch_declarations(&self) -> Result<Vec<DesiredSubject>>;
     /// Declare a seat's watch on one thread, from now, and the repository's standing observer when
-    /// it is not running. Watching a thread the seat already watches keeps that watch and takes
-    /// the new deadline; watching one whose watch ended begins a new watch.
+    /// it is not running, in one write. Watching a thread the seat already watches keeps that
+    /// watch and takes the new deadline; watching one whose watch ended begins a new watch.
     fn declare_watch(
         &self,
         thread: &ThreadRef,
@@ -39,6 +39,13 @@ pub trait WatchesStore {
         locator: &str,
         observers: &[(String, ObserverSpec)],
     ) -> Result<bool, St3Error>;
+    /// The declaration that `ensure_standing_observer` applies, and its idempotency key, or
+    /// nothing when the observer already runs on its resource.
+    fn standing_observer_source(
+        &self,
+        locator: &str,
+        observers: &[(String, ObserverSpec)],
+    ) -> Result<Option<(String, String)>, St3Error>;
     /// The resource a repository's standing observer records into. While another observer of the
     /// repository runs, it is that observer's resource: both then record the same item facts,
     /// and a poll by either delivers to the subscriptions of both, so moving a subscription from
@@ -151,19 +158,42 @@ impl WatchesStore for Store {
                 "a watch's deadline must be in the future",
             ));
         }
-        self.ensure_watch_observer(thread)?;
+        let observers = self.repository_observers()?;
+        let observer = self.standing_observer_source(&thread.locator(), &observers)?;
         let subject = thread.watch(agent);
         let current = self.live_watch(&subject)?;
         let since = current
             .as_ref()
             .map_or(now, |(_, watch)| watch.since_unix_ms);
-        if current
+        let watch = current
             .as_ref()
             .is_none_or(|(_, watch)| watch.until_unix_ms != until_unix_ms)
-        {
-            let source = github_watch::watch_source(thread, agent, since, until_unix_ms);
+            .then(|| {
+                (
+                    github_watch::watch_source(thread, agent, since, until_unix_ms),
+                    format!("github-watch:{subject}:{since}"),
+                )
+            });
+        // One apply declares the observer and the watch that uses it. Applied apart, a pass
+        // between them stopped the observer as unused and the next declared it again, and a
+        // member planning beside that churn met a stale observer (#4831).
+        let declarations = observer.into_iter().chain(watch).collect::<Vec<_>>();
+        if !declarations.is_empty() {
+            let source = declarations
+                .iter()
+                .enumerate()
+                .map(|(index, (source, _))| match index {
+                    0 => source.as_str(),
+                    _ => source.strip_prefix("version 2\n").unwrap_or(source),
+                })
+                .collect::<String>();
+            let key = declarations
+                .iter()
+                .map(|(_, key)| key.as_str())
+                .collect::<Vec<_>>()
+                .join("+");
             let intent = crate::graph::parse_internal_intent(&source, &self.origin)?;
-            self.apply_internal(&intent, &format!("github-watch:{subject}:{since}"))?;
+            self.apply_internal(&intent, &key)?;
         }
         self.watch_view(&subject)?.ok_or_else(|| {
             St3Error::new(
@@ -183,6 +213,19 @@ impl WatchesStore for Store {
         locator: &str,
         observers: &[(String, ObserverSpec)],
     ) -> Result<bool, St3Error> {
+        let Some((source, key)) = self.standing_observer_source(locator, observers)? else {
+            return Ok(false);
+        };
+        let intent = crate::graph::parse_internal_intent(&source, &self.origin)?;
+        self.apply_internal(&intent, &key)?;
+        Ok(true)
+    }
+
+    fn standing_observer_source(
+        &self,
+        locator: &str,
+        observers: &[(String, ObserverSpec)],
+    ) -> Result<Option<(String, String)>, St3Error> {
         let subject = github_watch::standing_observer(locator);
         let current = observers
             .iter()
@@ -190,21 +233,16 @@ impl WatchesStore for Store {
             .map(|(_, spec)| spec);
         let resource = self.standing_resource(locator, &subject, current, observers)?;
         if current.is_some_and(|spec| !spec.stopped && spec.resource == resource) {
-            return Ok(false);
+            return Ok(None);
         }
         let declare_resource = self
             .desired_subjects_named(std::slice::from_ref(&resource))
             .map_err(internal)?
             .is_empty();
-        let intent = crate::graph::parse_internal_intent(
-            &github_watch::observer_source(locator, &resource, declare_resource),
-            &self.origin,
-        )?;
-        self.apply_internal(
-            &intent,
-            &format!("github-watch-observer:{locator}:{resource}"),
-        )?;
-        Ok(true)
+        Ok(Some((
+            github_watch::observer_source(locator, &resource, declare_resource),
+            format!("github-watch-observer:{locator}:{resource}"),
+        )))
     }
 
     fn standing_resource(
