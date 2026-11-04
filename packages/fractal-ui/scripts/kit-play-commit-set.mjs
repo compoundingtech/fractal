@@ -55,6 +55,8 @@ export const BOTH_WIDTHS = [
   'fractal-ui-composer--kit-label-resize',
   'fractal-ui-composer--layout-shapes',
   'fractal-ui-sidebar-agent-row--densities-and-children',
+  'fractal-ui-sidebar-tabs--all-states',
+  'fractal-ui-sidebar-tabs--keyboard',
   'fractal-ui-transcript-composer--host-width',
   'fractal-ui-transcript-composer--reading-column',
   'fractal-ui-workbench--all-states',

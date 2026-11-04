@@ -27,6 +27,11 @@ const filters = Atom.family((gateway: string) =>
     defaultValue: defaultFilters,
   }),
 )
+export const SidebarTab = Schema.Literals(['agents', 'alerts', 'missions', 'fleet'])
+export type SidebarTab = typeof SidebarTab.Type
+const tab = Atom.family((gateway: string) => persistedAtom({
+  key: `${gateway}:sidebar.tab`, schema: SidebarTab, defaultValue: 'agents',
+}))
 const collapsed = Atom.family((gateway: string) =>
   persistedAtom({
     key: `${gateway}:sidebar.collapsedFolders`,
@@ -38,6 +43,7 @@ const collapsed = Atom.family((gateway: string) =>
 export const sidebarState = (gateway: string) => ({
   filters: filters(gateway),
   collapsed: collapsed(gateway),
+  tab: tab(gateway),
 })
 /** Cache the subscribed atoms themselves: a weak-cached wrapper could be collected between renders. */
 const fixtureFilters = Atom.family((_gateway: string) =>
@@ -46,8 +52,12 @@ const fixtureFilters = Atom.family((_gateway: string) =>
 const fixtureCollapsed = Atom.family((_gateway: string) =>
   Atom.make<readonly string[]>([]).pipe(Atom.keepAlive),
 )
+const fixtureTab = Atom.family((_gateway: string) =>
+  Atom.make<SidebarTab>('agents').pipe(Atom.keepAlive),
+)
 /** Story registries are isolated, including filters and collapse; no writes to live browser state. */
 export const fixtureSidebarState = (gateway: string) => ({
   filters: fixtureFilters(gateway),
   collapsed: fixtureCollapsed(gateway),
+  tab: fixtureTab(gateway),
 })
