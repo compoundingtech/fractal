@@ -222,10 +222,10 @@ test('sidebar tab contracts retain both widths through story-local policy tags',
   const module = storyModules['./assistant-ui/sidebar/SidebarTabs.stories.tsx']
   expect(module).toBeDefined()
   for (const name of ['AllStates', 'Keyboard']) {
-    const story = module[name]
+    const story = module![name]
     expect(isStory(story)).toBe(true)
     if (!isStory(story)) throw new Error(`Missing sidebar tab story ${name}`)
-    expect(composeStory(story, module.default, {}, name).tags).toEqual(expect.arrayContaining(['critical', 'both-widths']))
+    expect(composeStory(story, module!.default, {}, name).tags).toEqual(expect.arrayContaining(['critical', 'both-widths']))
   }
 })
 
