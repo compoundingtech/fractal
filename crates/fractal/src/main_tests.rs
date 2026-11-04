@@ -1628,7 +1628,7 @@ async fn execution_requests_carry_actor_without_changing_the_work() {
                 move |headers: HeaderMap, Json(body): Json<Value>| async move {
                     assert_eq!(headers["x-st3-person"], actor);
                     assert_eq!(body, json!({"repository": "fixture/garden"}));
-                    Json(json!({"value": {}}))
+                    Json(json!({"api_version": "st3.v1", "value": {}}))
                 },
             ))
             .route("/v1/gate-checks", axum::routing::post(
