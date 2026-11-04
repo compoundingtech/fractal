@@ -90,6 +90,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_work_lease_renewals",
         "local_git_change_records",
         "local_git_change_latest",
+        "local_harness_question_generations",
         "local_mailbox_owners",
         "local_mailbox_bindings",
         "local_mailbox_argv_bindings",
@@ -106,6 +107,10 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_publications",
         "local_client_message_cut_epoch",
         "local_idle_messages",
+        // Member-local consumer marks: never replicated, outside every digest.
+        "local_message_marks",
+        "local_message_staged",
+        "local_message_mark_events",
         "coordination_sends",
         "local_coordination_backfill",
         "stop_deferral_claims",

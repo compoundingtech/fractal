@@ -7,7 +7,7 @@ import { accentVars as accent, borderVars as border, geometryVars as g, radiusVa
 import { Icon, type IconName } from '../composition/Icons'
 import { SidebarAgentRow } from '../sidebar/SidebarAgentRow'
 import { ResourceCardV1, ResourceHoverV1, WholeResourceMeta } from '../resources/ResourceCardV1'
-import { AgentHoverCard } from '../sidebar/SidebarAgentRow'
+import { AgentHoverCard } from '../sidebar/DeferredRowActions.tsx'
 import { AGENT_DRAG_MIME, agentPaneKey } from '../workbench/agent-drag'
 import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from './model'
 import type { TraceSeries, TraceSubagent } from './trace-series'

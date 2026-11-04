@@ -13,6 +13,9 @@ use crate::mailbox::{Fence, Frame, Receipt};
 pub use fractal_api_core::api::mailbox::*;
 pub use fractal_api_core::api::mailbox::{hold_pre_boot_mail};
 pub mod authority;
+mod questions;
+mod question_lifecycle;
+pub use question_lifecycle::start as start_question_lifecycle;
 #[cfg(test)]
 #[path = "mailbox_profile.rs"]
 pub mod profile;
@@ -27,6 +30,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/mailbox/bind", post(bind))
         .route("/v1/mailbox/attachment", get(attachment))
         .route("/v1/mailbox/receipts", post(receipt))
+        .route("/v1/harness-questions/native", post(questions::ingest))
 }
 
 #[derive(serde::Deserialize)]
@@ -738,9 +742,9 @@ fn own_post_reactor(state: &AppState, fence: &Fence) -> tokio::sync::mpsc::Sende
         while let Some(subject) = pending.recv().await {
             let store = state.store.clone();
             let binding = fence.clone();
-            let result = store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+            let result = store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || crate::profile::task("task mailbox-own-post", || {
                 store.close_mailbox_own_post_wake(&binding, &subject)
-            })).await;
+            }))).await;
             match result {
                 Ok(Ok(true)) => signal_message_changed(&state, "message.closed", false),
                 Ok(Ok(false)) => {},
@@ -796,10 +800,10 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         let Ok(admission) = fractal_drivers::harness_state::record_lock_admission(
             &authority::source_agent_dir(&state, &fence),
         ).await else { return; };
-        let _ = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+        let _ = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || crate::profile::task("task mailbox-loss", || {
             let _admission = admission;
             authority::loss_if_current(&state, &fence, &peer)
-        })).await;
+        }))).await;
     }
 }
 
@@ -947,8 +951,8 @@ async fn stream_with_timers_inner<F, S, H>(
             if let Some((primary, wrapper)) = primary_peer.clone() {
                 let state = state.clone();
                 let fence = fence.clone();
-                let admitted = crate::api::read_deadline::spawn_blocking(move ||
-                    authority::with_claude_primary(&state, &fence, &primary, wrapper, || Ok(()))).await;
+                let admitted = crate::api::read_deadline::spawn_blocking(move || crate::profile::task("task mailbox-primary", ||
+                    authority::with_claude_primary(&state, &fence, &primary, wrapper, || Ok(())))).await;
                 match proof.observe(admitted) {
                     ProofDecision::Valid => {},
                     ProofDecision::Refused => return,
@@ -961,9 +965,9 @@ async fn stream_with_timers_inner<F, S, H>(
                 let checked_state = state.clone();
                 let binding = fence.clone();
                 let peer = peer.clone();
-                replay_proven = crate::api::read_deadline::spawn_blocking(move || {
+                replay_proven = crate::api::read_deadline::spawn_blocking(move || crate::profile::task("task mailbox-replay", || {
                     proof.is_current(&checked_state, &binding, &peer).then_some(proof)
-                }).await.ok().flatten();
+                })).await.ok().flatten();
             }
             let admission_store = state.store.clone();
             let store = state.store.clone();
@@ -983,7 +987,7 @@ async fn stream_with_timers_inner<F, S, H>(
                 let Ok(admission) = fractal_drivers::harness_state::record_lock_admission(
                     &authority::source_agent_dir(&state, &fence),
                 ).await else { return; };
-                match tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+                match tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || crate::profile::task("task mailbox-fence", || {
                     let _admission = admission;
                     let started = std::time::Instant::now();
                     let admitted = repair_state.store.check_mailbox(&repair_fence).is_ok();
@@ -993,7 +997,7 @@ async fn stream_with_timers_inner<F, S, H>(
                     matches!(authority::with_authority(&repair_state, &repair_fence, &peer, || {}, |owner, validate| {
                         repair_state.store.repair_mailbox_checked(&repair_fence, owner, validate)
                     }), Ok(true))
-                })).await {
+                }))).await {
                     Ok(repaired) => repaired,
                     Err(_) => return,
                 }
@@ -1102,9 +1106,7 @@ async fn stream_with_timers_inner<F, S, H>(
                 replay_challenge_sent = true;
             }
             if fence.component == "delivery" {
-                let drain = state
-                    .store
-                    .rollout(&fence.subject)
+                let drain = crate::profile::task("task mailbox-rollout", || state.store.rollout(&fence.subject))
                     .ok()
                     .flatten()
                     .filter(|o| o.holds_intake() && o.old_incarnation == fence.incarnation)
@@ -1135,7 +1137,7 @@ async fn stream_with_timers_inner<F, S, H>(
             }
             let store = state.store.clone();
             let binding = fence.clone();
-            let evaluated = crate::api::read_deadline::spawn_blocking(move || {
+            let evaluated = crate::api::read_deadline::spawn_blocking(move || crate::profile::task("task mailbox-attachment", || {
                 // Presence and deadline wakes skip the durable pass, so check this stream's own
                 // binding too. A stale one sends nothing; the next pass ends the stream.
                 store.check_mailbox(&binding).ok()?;
@@ -1144,7 +1146,7 @@ async fn stream_with_timers_inner<F, S, H>(
                     &binding.subject,
                     &binding.incarnation,
                 ))
-            })
+            }))
             .await;
             match evaluated {
                 Ok(Some(proof)) => {
@@ -1216,12 +1218,12 @@ async fn stream_with_timers_inner<F, S, H>(
                 Some(Ok(WsMessage::Text(report))) => {
                     // A Claude primary proves its physical generation before its report is admitted.
                     if let Some((primary, wrapper)) = primary_peer.clone()
-                        && state.store.check_mailbox(&fence).is_ok()
+                        && crate::profile::task("task mailbox-fence", || state.store.check_mailbox(&fence)).is_ok()
                     {
                         let state = state.clone();
                         let fence = fence.clone();
-                        let checked = crate::api::read_deadline::spawn_blocking(move ||
-                            authority::with_claude_primary(&state, &fence, &primary, wrapper, || Ok(()))).await;
+                        let checked = crate::api::read_deadline::spawn_blocking(move || crate::profile::task("task mailbox-primary", ||
+                            authority::with_claude_primary(&state, &fence, &primary, wrapper, || Ok(())))).await;
                         match proof.observe(checked) {
                             ProofDecision::Valid => {},
                             ProofDecision::Refused => return,
@@ -1240,11 +1242,11 @@ async fn stream_with_timers_inner<F, S, H>(
                         let legacy = false;
                         #[cfg(test)]
                         let blocking_started = control.report_blocking_started.clone();
-                        let action = move || crate::task_cpu::blocking("mailbox.write", || {
+                        let action = move || crate::task_cpu::blocking("mailbox.write", || crate::profile::task("task mailbox-report", || {
                             #[cfg(test)]
                             if let Some(started) = blocking_started { let _ = started.send(()); }
                             authority::admit_report(&checked_state, &binding, &peer, &raw)
-                        });
+                        }));
                         if legacy {
                             // Test-only baseline: retain the original dispatch so the same
                             // physical stream fixture can demonstrate pool exhaustion.
@@ -1260,7 +1262,7 @@ async fn stream_with_timers_inner<F, S, H>(
                         }
                     } else {
                         let started = std::time::Instant::now();
-                        let admitted = state.store.check_mailbox(&fence).is_ok();
+                        let admitted = crate::profile::task("task mailbox-fence", || state.store.check_mailbox(&fence)).is_ok();
                         crate::otel::record_mailbox_fence_check(
                             crate::otel::MailboxFenceCaller::Report, started.elapsed(),
                         );
@@ -1275,9 +1277,9 @@ async fn stream_with_timers_inner<F, S, H>(
                             let checked_state = state.clone();
                             let binding = fence.clone();
                             let peer = peer.clone();
-                            replay_proven = crate::api::read_deadline::spawn_blocking(move || {
+                            replay_proven = crate::api::read_deadline::spawn_blocking(move || crate::profile::task("task mailbox-replay", || {
                                 proof.is_current(&checked_state, &binding, &peer).then_some(proof)
-                            }).await.ok().flatten();
+                            })).await.ok().flatten();
                         }
                         let recorded = record_admitted_report(&fence, &report);
                         let value = serde_json::from_str::<Value>(&report).unwrap_or(Value::Null);
@@ -1308,15 +1310,15 @@ async fn stream_with_timers_inner<F, S, H>(
                             let Ok(admission) = fractal_drivers::harness_state::record_lock_admission(
                                 &authority::source_agent_dir(&state, &fence),
                             ).await else { return; };
-                            replay_proven = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+                            replay_proven = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || crate::profile::task("task mailbox-replay", || {
                                 let _admission = admission;
                                 authority::repair_proven(&repair_state, &binding, &peer, &raw)
-                            })).await.ok().and_then(Result::ok);
+                            }))).await.ok().and_then(Result::ok);
                         }
                         if let Ok(value) = serde_json::from_str::<Value>(&report)
                             && fence.component == "delivery"
                             && let Some(id) = value["drain_operation"].as_str()
-                            && let Ok(Some(operation)) = state.store.rollout(&fence.subject)
+                            && let Ok(Some(operation)) = crate::profile::task("task mailbox-rollout", || state.store.rollout(&fence.subject))
                             && operation.id == id && operation.old_incarnation == fence.incarnation && operation.drain_ack.is_none()
                         {
                             let _ = crate::rollout::phase(&state.store, &fence.subject, &operation, "drain-ack", None, &[]);
@@ -2036,6 +2038,18 @@ mod tests {
         }
     }
 
+    /// The next frame past any seat frame: a declared seat's stream names its declaration first.
+    async fn next_mailbox(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+    ) -> Frame {
+        loop {
+            match next(socket).await {
+                Frame::Seat { .. } => continue,
+                frame => return frame,
+            }
+        }
+    }
+
     async fn next(
         socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
     ) -> Frame {
@@ -2361,11 +2375,23 @@ mod tests {
     }
 
     async fn restart_recovers_recent_unoffered_mail_once(transport: &'static str) {
+        restart_recovers_recent_unoffered_mail_once_with(transport, false).await;
+    }
+
+    /// With `marks`, the seat is declared on this member and marks are on (db break-up 4b-2):
+    /// every receipt is a local mark, none a lifecycle claim, and the stream behaves the same.
+    async fn restart_recovers_recent_unoffered_mail_once_with(transport: &'static str, marks: bool) {
         let root = tempfile::tempdir().unwrap();
         let mut state = crate::api::tests_shared::state(root.path());
         let database = root.path().join("graph.db");
         state.store = Arc::new(Store::open(&database, "node").unwrap());
         let seat = "agent/eval.worker";
+        if marks {
+            let source = "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; command \"true\"; }";
+            let intent = crate::graph::parse_intent(source, "node").unwrap();
+            state.store.apply_internal(&intent, "declare-eval-worker").unwrap();
+            assert_eq!(state.store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+        }
         crate::store::mailbox_tests::ready(&state.store, "session-1");
         let send = |id: &str| {
             state
@@ -2439,8 +2465,10 @@ mod tests {
             .await
             .unwrap();
         let mut socket = client.open_mailbox(&fence).await.unwrap();
+        let first = next_mailbox(&mut socket).await;
         assert!(
-            matches!(next(&mut socket).await, Frame::Mailbox { messages } if messages.is_empty())
+            matches!(&first, Frame::Mailbox { messages } if messages.is_empty()),
+            "{first:?}"
         );
         socket.close(None).await.unwrap();
         send("just-before-restart");
@@ -2455,7 +2483,7 @@ mod tests {
         }
         let mut socket = client.open_mailbox(&fence).await.unwrap();
         assert!(
-            matches!(next(&mut socket).await, Frame::Mailbox { messages }
+            matches!(next_mailbox(&mut socket).await, Frame::Mailbox { messages }
             if messages.len() == 1 && messages[0].subject == "message/just-before-restart"),
             "{transport} lost recent unoffered mail across daemon restart"
         );
@@ -2481,7 +2509,7 @@ mod tests {
                 .unwrap();
             if lifecycle == "staged" {
                 assert!(
-                    matches!(next(&mut socket).await, Frame::Mailbox { messages }
+                    matches!(next_mailbox(&mut socket).await, Frame::Mailbox { messages }
                     if messages.len() == 1 && messages[0].status == "staged"),
                     "{transport} removed an admitted recovery before its receipts finished"
                 );
@@ -2490,22 +2518,24 @@ mod tests {
                 .post::<_, ClaimRecord>("/v1/mailbox/receipts", &receipt)
                 .await
                 .unwrap();
-            assert_eq!(
-                state
-                    .store
-                    .claims_for(
-                        "message/just-before-restart",
-                        Some(&format!("message.{lifecycle}"))
-                    )
-                    .unwrap()
-                    .len(),
-                1
-            );
+            let claimed = state
+                .store
+                .claims_for("message/just-before-restart", Some(&format!("message.{lifecycle}")))
+                .unwrap()
+                .len();
+            let marked: usize = state.store.readers.get().query_row(
+                "SELECT (SELECT COUNT(*) FROM local_message_marks WHERE message=?1 AND kind=?2)
+                      + (SELECT COUNT(*) FROM local_message_staged WHERE message=?1 AND ?2='message.staged')",
+                rusqlite::params!["message/just-before-restart", format!("message.{lifecycle}")],
+                |row| row.get(0),
+            ).unwrap();
+            // A staging stays a claim while marks are on (message_marks::RECORDS_STAGED).
+            assert_eq!((claimed, marked), if marks && lifecycle != "staged" { (0, 1) } else { (1, 0) }, "{lifecycle}");
         }
         socket.close(None).await.unwrap();
         let mut socket = client.open_mailbox(&fence).await.unwrap();
         assert!(
-            matches!(next(&mut socket).await, Frame::Mailbox { messages } if messages.is_empty()),
+            matches!(next_mailbox(&mut socket).await, Frame::Mailbox { messages } if messages.is_empty()),
             "{transport} replayed recovered or historical mail"
         );
         assert!(
@@ -2528,6 +2558,11 @@ mod tests {
     #[tokio::test]
     async fn claude_restart_recovers_recent_unoffered_mail_once() {
         restart_recovers_recent_unoffered_mail_once("claude-channel").await;
+    }
+
+    #[tokio::test]
+    async fn a_seat_that_records_marks_recovers_recent_unoffered_mail_once() {
+        restart_recovers_recent_unoffered_mail_once_with("omp-channel", true).await;
     }
 
     #[tokio::test]
@@ -3598,6 +3633,35 @@ mod tests {
             server.abort();
         });
         }
+    }
+
+    #[cfg(all(feature = "test-support", target_os = "linux"))]
+    #[tokio::test]
+    async fn a_profiled_stream_names_its_fence_report_and_rollout_work() {
+        // Profiling is process-global. A child gives this test its own enabled profiler without
+        // changing the accounting of other tests running in parallel.
+        const CHILD: &str = "ST3_PROFILE_MAILBOX_LABEL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "api::mailbox::tests::a_profiled_stream_names_its_fence_report_and_rollout_work", "--nocapture"])
+                .env(CHILD, "1")
+                .env("ST3_PROFILE_DIR", directory.path())
+                .env("ST3_PROFILE_SLOW_MS", "0")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated mailbox label test failed");
+            let records = std::fs::read_to_string(directory.path().join("slow.jsonl")).unwrap();
+            let records = records.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).collect::<Vec<_>>();
+            // Without the labels this work ran on worker threads with no operation.
+            for label in ["task mailbox-fence", "task mailbox-report", "task mailbox-rollout"] {
+                assert!(records.iter().any(|record| record["label"] == label && record["sql_count"].as_u64() > Some(0)),
+                    "{label} missing from the profile");
+            }
+            return;
+        }
+        crate::profile::init_from_env();
+        report_control_effects(true).await;
     }
 
     #[cfg(all(feature = "test-support", target_os = "linux"))]

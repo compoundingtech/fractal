@@ -238,5 +238,8 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .assistantTerminalContent: "/v1/client/assistant/terminal-content",
 ]
 
+/// Each person's ordered Pins use version-2 memberships at arrangement/person/NAME/<this UUID>.
+public let st3PinsArrangementUuid: String = "00000000-0000-7000-8000-000000000002"
+
 /// Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043).
 public let st3SidebarArrangementUuid: String = "00000000-0000-7000-8000-000000000001"
