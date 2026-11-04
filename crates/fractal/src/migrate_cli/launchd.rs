@@ -25,7 +25,6 @@ impl std::fmt::Display for DomainError {
 }
 impl std::error::Error for DomainError {}
 #[derive(Debug)]
-
 pub(super) enum Probe { Available(Vec<String>), Unavailable }
 pub(super) fn probe(domain: &str, output: Output) -> Result<Probe> {
     let text = String::from_utf8_lossy(&output.stdout);
@@ -36,14 +35,16 @@ pub(super) fn probe(domain: &str, output: Output) -> Result<Probe> {
     let failure = || DomainError::Inspection { domain: domain.into(), detail: format!("{}: {detail}; output: {text}", output.status) };
     if !output.status.success() { return Err(failure().into()); }
     let mut lines = text.lines();
-    if lines.next() != Some(format!("{domain} = {{").as_str()) { return Err(failure().into()); }
+    if lines.next().and_then(|line| line.strip_suffix(" = {")) != Some(domain) { return Err(failure().into()); }
     if !lines.by_ref().any(|line| line.trim() == "services = {") { return Err(failure().into()); }
     let mut jobs = Vec::new();
     for line in lines {
         if line.trim() == "}" { return Ok(Probe::Available(jobs)); }
-        let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() != 3 { return Err(failure().into()); }
-        jobs.push(fields[2].to_owned());
+        let mut fields = line.split_whitespace();
+        if fields.next().is_none() || fields.next().is_none() { return Err(failure().into()); }
+        let label = fields.next().ok_or_else(failure)?;
+        if fields.next().is_some() { return Err(failure().into()); }
+        jobs.push(label.to_owned());
     }
     Err(failure().into())
 }
