@@ -1373,6 +1373,7 @@ fn migration_settings(args: &FleetMemberArgs, config: &Config) -> fractal_daemon
 
 async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateArgs, json_output: bool) -> Result<()> {
     if args.finish || args.unfinish {
+        let _lock = lock_fleet_settings(&config.state_dir).await?;
         let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
             .context("this machine has not migrated yet")?;
         if args.finish {

@@ -13,7 +13,6 @@ fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
         assert!(guard_mutating_cli_actor(&cli.command, Some("agent/example"), None).is_err());
     }
 }
-
 #[tokio::test]
 async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
     use fractal_store::store::fleet_admission_tests_shared_seats::{FLEET, admit, key, node};
