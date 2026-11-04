@@ -27,7 +27,7 @@ const Group = ({ title, entries }: { readonly title: string; readonly entries: r
 </section>
 /** Manifest membership, never version or timestamp comparisons, determines the new group. */
 export const ChangelogView = ({ state, baseline = initialSeen, onRetry, buildRevision }: ChangelogViewProps) => {
-  if (state._tag === 'Loading') return <p role="status" {...stylex.props(styles.notice)}>Loading recent changes…</p>
+  if (state._tag === 'Loading') return <div role="status" {...stylex.props(styles.notice)}>Loading recent changes…</div>
   if (state._tag === 'Failed') return <div {...stylex.props(styles.notice)}><h2 {...stylex.props(styles.title)}>Changes couldn't be loaded</h2><p>Your workspace is unaffected. Try loading the changelog again.</p><Aria.Button onPress={onRetry} {...stylex.props(styles.button)}>Retry</Aria.Button></div>
   const { entries } = state.manifest
   const build = <p data-changelog-build="" {...stylex.props(styles.build)}>{buildRevision?.slice(0, 7) ?? state.manifest.build.machineVersion}</p>
