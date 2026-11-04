@@ -500,11 +500,13 @@ pub fn shard(graph: &super::Store) -> Option<Arc<GraphStore>> {
 
 /// This member's last writer sequence in the shard, for its leave's `shard_high_water`: its key
 /// counts in the shard at or below it, and above it its envelopes are fenced. Empty when the
-/// shard did not open, so the leave bounds the key at 0 there.
+/// shard did not open, so the leave bounds the key at 0 there. Local batches are sealed first,
+/// so every message already written counts below it.
 pub fn leave_high_water(graph: &super::Store) -> anyhow::Result<BTreeMap<String, u64>> {
     let Some(shard) = shard(graph) else {
         return Ok(BTreeMap::new());
     };
+    shard.seal_local_batches()?;
     Ok(BTreeMap::from([(SHARD_ID.to_owned(), shard.own_writer_sequence()?)]))
 }
 
