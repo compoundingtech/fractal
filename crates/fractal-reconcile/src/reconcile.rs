@@ -19765,6 +19765,7 @@ pub fn append_work_wake_message(
             .map(|claim| claim.store_index)
             .unwrap_or_default(),
             attachments: Vec::new(),
+        status_from: None,
     })
 }
 
@@ -48098,6 +48099,7 @@ mission "ios-proof-blocked" state="ready" {
             last_attempt_at_unix_ms: None,
             acknowledged_by: None,
             failure: None,
+            asks: Default::default(),
         });
         assert_eq!(
             work_wake_deadline(
@@ -48170,6 +48172,7 @@ mission "ios-proof-blocked" state="ready" {
                 last_attempt_at_unix_ms: Some(1_000),
                 acknowledged_by: None,
                 failure: None,
+                asks: Default::default(),
             }),
             progress_summary: None,
             progress_at_unix_ms: None,
@@ -48301,6 +48304,7 @@ mission "ios-proof-blocked" state="ready" {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         assert!(!work_wake_acknowledged(&[(1_000, &wake)], None));
@@ -48329,6 +48333,7 @@ mission "ios-proof-blocked" state="ready" {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         let mut harness: CurrentHarnessView = serde_json::from_value(serde_json::json!({
@@ -48366,6 +48371,7 @@ mission "ios-proof-blocked" state="ready" {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         let harness: CurrentHarnessView = serde_json::from_value(serde_json::json!({
@@ -48666,6 +48672,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
                 last_attempt_at_unix_ms: Some(1_000),
                 acknowledged_by: None,
                 failure: None,
+                asks: Default::default(),
             }),
             progress_summary: None,
             progress_at_unix_ms: None,

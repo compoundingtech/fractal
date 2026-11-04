@@ -666,6 +666,24 @@ impl EventObserver {
             }
             self.native_session = native.map(str::to_owned);
         }
+        if matches!(frame["type"].as_str(), Some("question.open" | "question.closed")) {
+            if self.driver != "omp" || !crate::omp_questions::enabled() {
+                return Ok(());
+            }
+            let observation: crate::omp_questions::Observation = serde_json::from_value(frame.clone())?;
+            observation.validate()?;
+            anyhow::ensure!(self.native_session.as_deref() == Some(observation.session()),
+                "question observation belongs to another native session");
+            return harness_state::with_current_ownership(
+                &self.agent_dir, &self.owner, self.ownership_seq, || {
+                    anyhow::ensure!(crate::omp_session::bound_native_session(
+                        &self.session_dir, &self.identity, &self.runtime, &self.owner,
+                    )?.as_deref() == Some(observation.session()),
+                        "question observation has no confirmed native session");
+                    crate::harness_events::write_question(&self.agent_dir, &self.owner, &observation)
+                },
+            );
+        }
         if let Some(inventory) = crate::harness_inventory::observation(
             frame, self.driver, self.native_session.as_deref(), &self.runtime,
         )? {
