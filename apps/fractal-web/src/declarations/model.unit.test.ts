@@ -1,5 +1,5 @@
 import type { ClientOptions } from '@fractal/client'
-import { AgentDeclaration, PublicationDefinition, decodeUnknownSync } from '@fractal/client/schema'
+import { AgentDeclaration, MissionDeclaration, PublicationDefinition, decodeUnknownSync } from '@fractal/client/schema'
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
@@ -55,9 +55,13 @@ const declaration = missionSpec('mission/kdl-view', {
 })
 const missionWire = { kind: 'publication-definition', subject: 'mission/kdl-view', revision: 'rev-3', token: 'token-3', declaration }
 const secrets = Object.values(SECRET)
+// Served exactly as Fractal rendered it, including spacing the client must not reflow.
+const missionKdl = 'version 2\nmission "kdl-view" state="ready" {\n    goal "Show declarations"\n    gate "check" { exec "just check"; env { TOKEN "<redacted>"; }; }\n}\n'
+const servedWire = { mission: 'mission/kdl-view', revision: 'rev-4', published_at: 1760000000000, text: missionKdl, legacy: false }
 
-/** A gateway whose every request is recorded, so a test can prove which reads were issued. */
-const recordingGateway = (body: unknown) => {
+/** A gateway whose every request is recorded, so a test can prove which reads were issued. Without `served`, the
+ *  mission declaration route answers like an older daemon that lacks it: an empty, non-JSON 404. */
+const recordingGateway = (body: unknown, served?: unknown) => {
   const urls: Array<string> = []
   const options: ClientOptions = {
     baseUrl: 'http://gateway.invalid',
@@ -66,6 +70,8 @@ const recordingGateway = (body: unknown) => {
       urls.push(url)
       if (url.endsWith('/capabilities'))
         return Response.json(envelope({ kind: 'capabilities', capabilities: [], limits: { max_page_items: 100, max_event_items: 100, max_wait_ms: 1000, max_response_bytes: 65536 }, schemas: [] }))
+      if (url.includes('/v1/client/mission-declaration'))
+        return served === undefined ? new Response(null, { status: 404 }) : Response.json(envelope(served))
       return Response.json(envelope(body))
     },
   }
@@ -103,10 +109,27 @@ describe('agent declaration read', () => {
   })
 })
 
-describe('mission definition read', () => {
-  it('redacts every environment value before the read resolves, keeping names visible', async () => {
+describe('mission declaration read', () => {
+  it('shows the served canonical KDL byte for byte with its revision', async () => {
+    const { urls, reads } = recordingGateway(missionWire, servedWire)
+    const value = await Effect.runPromise(reads.missionDefinition.read('mission/kdl-view'))
+    const request = urls.find(url => url.includes('/v1/client/mission-declaration'))
+    expect(new URL(request!).searchParams.get('mission')).toBe('mission/kdl-view')
+    expect(urls.some(url => url.includes('/v1/client/publication-definition'))).toBe(false)
+    expect(missionDeclarationState(observed({ value }))).toEqual({ _tag: 'Ready', text: missionKdl, language: 'kdl', source: 'Canonical KDL from Fractal · revision rev-4 · environment values redacted' })
+  })
+
+  it('labels a legacy loop shape the current parser rejects', () => {
+    const value = decodeUnknownSync(MissionDeclaration)({ ...servedWire, legacy: true })
+    const state = missionDeclarationState(observed({ value }))
+    expect(state._tag === 'Ready' && state.text).toBe(missionKdl)
+    expect(state._tag === 'Ready' && state.source).toBe('Canonical KDL from Fractal · revision rev-4 · legacy loop shape: display only, the current parser rejects it · environment values redacted')
+  })
+
+  it('falls back to the redacted structured definition when the daemon lacks the declaration route', async () => {
     const { urls, reads } = recordingGateway(missionWire)
     const value = await Effect.runPromise(reads.missionDefinition.read('mission/kdl-view'))
+    expect(urls.map(url => new URL(url).pathname).filter(path => path.includes('/v1/client/mission-declaration') || path.includes('/v1/client/publication-definition'))).toEqual(['/v1/client/mission-declaration', '/v1/client/publication-definition'])
     const request = urls.find(url => url.includes('/v1/client/publication-definition'))
     expect(new URL(request!).searchParams.get('subject')).toBe('mission/kdl-view')
     const held = JSON.stringify(value)
@@ -116,7 +139,7 @@ describe('mission definition read', () => {
     expect(state._tag).toBe('Ready')
     if (state._tag !== 'Ready') return
     expect(state.language).toBe('json')
-    expect(state.source).toBe('Structured definition · revision rev-3 · Fractal serves no mission KDL; environment values redacted')
+    expect(state.source).toBe('Structured definition · revision rev-3 · this Fractal daemon predates the mission declaration route; environment values redacted')
     for (const secret of secrets) expect(state.text).not.toContain(secret)
     expect(state.text).toContain(WITHHELD_DECLARATIONS)
   })
