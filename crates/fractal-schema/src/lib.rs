@@ -2802,6 +2802,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "fleet.shard-bounds",
+            &["host"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("fleet"),
+            false,
+            &[],
+        ),
+        (
             "rule.set",
             &["rule"],
             WritePolicy::SystemOnly,
@@ -3658,6 +3667,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("high_water", required_integer()),
             ("reason", required_string()),
             ("removed_by", reference_to(&["person"])),
+        ],
+        "fleet.shard-bounds" => &[
+            ("member_key", required_string()),
+            ("shard_high_water", required_object()),
         ],
         "rule.set" => &[
             ("mode", required_enum(&["off", "audit", "enforce"])),

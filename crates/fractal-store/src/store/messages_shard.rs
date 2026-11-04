@@ -498,6 +498,16 @@ pub fn shard(graph: &super::Store) -> Option<Arc<GraphStore>> {
     graph.extension::<Slot>().get().cloned()
 }
 
+/// This member's last writer sequence in the shard, for its leave's `shard_high_water`: its key
+/// counts in the shard at or below it, and above it its envelopes are fenced. Empty when the
+/// shard did not open, so the leave bounds the key at 0 there.
+pub fn leave_high_water(graph: &super::Store) -> anyhow::Result<BTreeMap<String, u64>> {
+    let Some(shard) = shard(graph) else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(BTreeMap::from([(SHARD_ID.to_owned(), shard.own_writer_sequence()?)]))
+}
+
 /// Open the messages shard under `root`, the directory that holds the graph's database, and
 /// bind it to the graph's fleet. The file is created and bound the first time; a later open
 /// finds it bound. It signs with the graph's member key.
@@ -814,6 +824,83 @@ mod tests {
         // The shard holds the graph weakly: letting the graph go closes the authority.
         drop(graph);
         assert!(opened.fleet_membership().is_err());
+    }
+
+    /// A graph keyed as the daemon keys it: the member key is loaded before the shard opens.
+    fn keyed_graph(root: &Path) -> (Arc<Store>, Arc<smallclaims::fleet::MemberKey>) {
+        let graph = Arc::new(Store::open(&root.join("claims.sqlite3"), "alder").unwrap());
+        graph.bind_fleet(FLEET).unwrap();
+        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        graph.load_member_key(Some(key.clone())).unwrap();
+        graph.use_key_directory(&root.join("keys")).unwrap();
+        (graph, key)
+    }
+
+    /// A keyed member's shard signs an agent's message with the member key and writes no
+    /// principal claim of its own. Seen before: the shard minted the agent a key and wrote its
+    /// `principal.key-granted` into the shard, which refuses it, so the message failed.
+    #[test]
+    fn a_keyed_members_shard_signs_its_messages_and_writes_no_principal_claims() {
+        let root = tempfile::tempdir().unwrap();
+        let (graph, key) = keyed_graph(root.path());
+        let shard = open(&graph, root.path()).unwrap();
+        shard
+            .append_claim(&input("message.sent", Some("agent/birch"), sent("agent/birch")))
+            .unwrap();
+        let kinds = shard
+            .readers
+            .get()
+            .prepare("SELECT kind FROM claims")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(kinds, ["message.sent"]);
+        let exchange = shard.export_replication_exchange(FLEET, &Default::default()).unwrap();
+        let [envelope] = exchange.envelopes.as_slice() else {
+            panic!("one envelope, not {}", exchange.envelopes.len());
+        };
+        assert!(smallclaims::fleet::verify_signature(
+            key.public(),
+            &smallclaims::fleet::envelope_signature_message_in(
+                Some(SHARD_ID), FLEET, "alder", envelope.sequence, &envelope.hash,
+            ),
+            envelope.signature.as_deref().expect("the shard signs with the member key"),
+        ));
+    }
+
+    /// A member's leave first bounds its key in the shard at its own last shard sequence, in a
+    /// `fleet.shard-bounds` of its own; the leave itself is as before. Without an open shard,
+    /// or before the shard is written, there is nothing to bound.
+    #[test]
+    fn a_leave_bounds_the_leavers_key_at_its_own_last_shard_sequence() {
+        let root = tempfile::tempdir().unwrap();
+        let (graph, key) = keyed_graph(root.path());
+        assert!(leave_high_water(&graph).unwrap().is_empty());
+        let shard = open(&graph, root.path()).unwrap();
+        assert_eq!(leave_high_water(&graph).unwrap(), BTreeMap::from([(SHARD_ID.to_owned(), 0)]));
+        shard
+            .append_claim(&input("message.sent", Some("agent/birch"), sent("agent/birch")))
+            .unwrap();
+        let (written, _) = shard.writer_head("alder").unwrap().unwrap();
+        assert!(written > 0);
+        let bounds = leave_high_water(&graph).unwrap();
+        assert_eq!(bounds, BTreeMap::from([(SHARD_ID.to_owned(), written)]));
+        let leave = graph.leave_fleet("person/ada", &bounds).unwrap();
+        assert_eq!(
+            leave.body["fields"],
+            json!({"member_key": key.public(), "high_water": leave.body["fields"]["high_water"]})
+        );
+        let bounded = graph
+            .latest_claim("host/alder", Some("fleet.shard-bounds"))
+            .unwrap()
+            .expect("the leave bounds the key");
+        assert_eq!(
+            bounded.body["fields"],
+            json!({"member_key": key.public(), "shard_high_water": {"messages": written}})
+        );
+        assert!(bounded.store_index < leave.store_index);
     }
 
     #[test]
