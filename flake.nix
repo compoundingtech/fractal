@@ -1595,7 +1595,7 @@
                 wrapper = builtins.head completed.launchd.agents.fractal.config.ProgramArguments;
               in assert domain != "user" || pkgs.lib.hasInfix "<string>Background</string>"
                 stage.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
-              assert pkgs.lib.hasInfix "<string>${wrapper}</string>" stage.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
+              assert pkgs.lib.hasInfix "<string>${builtins.unsafeDiscardStringContext wrapper}</string>" stage.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
               assert stage.xdg.configFile."st3/launchd-staged".enable && !completed.xdg.configFile."st3/launchd-staged".enable; ''
                 export DOMAIN="${domain}/$(id -u)" CALLS="$PWD/calls"
                 rm -rf config state
