@@ -24742,7 +24742,7 @@ mission "self-assigned" state="ready" {
                 requester: Some("person/test".into()),
                 mode: Some("run".into()),
                 inputs: BTreeMap::new(),
-                idempotency_key: "review-contract".into(),
+                idempotency_key: "review-contract-run".into(),
             })
             .unwrap();
         // Fix the binding inputs, not the hashing implementation under test.
