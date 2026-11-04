@@ -190,8 +190,10 @@ mod tests {
             spec.candidates = Some(LoopCandidatesSpec { count: 3, max_parallel: 2, select: selector });
             let rendered = render_loop_node(spec, &[], &body).unwrap();
             let mut actual = rendered.children().unwrap().nodes().iter().find(|n| n.name().value() == "candidates").unwrap().clone();
+            actual.clear_format_recursive();
             actual.autoformat();
             let mut expected: KdlNode = golden.parse().unwrap();
+            expected.clear_format_recursive();
             expected.autoformat();
             assert_eq!(actual.to_string(), expected.to_string());
             assert!(has_legacy_loop_shapes(&mission));
