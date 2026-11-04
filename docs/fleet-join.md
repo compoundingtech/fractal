@@ -207,8 +207,8 @@ different actor or omitting the actor fails closed before local settings change.
 Attributed commands authorize through the public transport endpoint before local
 effects and publish before saving settings, so a refusal leaves `fleet.toml`
 unchanged. A private pending intent next to `fleet.toml` retains the mutation ID
-and target settings until the save succeeds, so a retry after a lost publication
-response reuses that ID. Distinct changes use new IDs, not content-derived IDs.
+and base/target settings until the save succeeds. A retry reuses that ID only
+when base, actor and target match; stale intents and different actors get new IDs.
 Automatic worker announcements use the internal route.
 
 Adding Fabric requires a listening member with a configured replication port and a working

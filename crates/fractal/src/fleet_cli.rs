@@ -1123,16 +1123,17 @@ async fn save_and_publish_fleet_settings(
     let pending = actor.map(|_| fractal_daemon::config::FleetFile::path(&config.state_dir).with_extension("transport-change.json"));
     let mutation_id = if let Some(path) = &pending {
         let settings = serde_json::to_value(file)?;
+        let base = serde_json::to_value(fractal_daemon::config::FleetFile::load(&config.state_dir)?)?;
         let intent: Value = match fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
             Err(error) => return Err(error.into()),
         };
-        Some(if intent["settings"] == settings {
+        Some(if intent["base"] == base && intent["actor"].as_str() == actor && intent["target"] == settings {
             intent["mutation_id"].as_str().context("pending transport change needs a mutation ID")?.to_owned()
         } else {
             let id = format!("fleet-transports:{}", uuid::Uuid::now_v7());
-            fractal_daemon::fleet::join::write_private(path, &serde_json::to_vec(&json!({"mutation_id": id, "settings": settings}))?)?;
+            fractal_daemon::fleet::join::write_private(path, &serde_json::to_vec(&json!({"mutation_id": id, "base": base, "actor": actor, "target": settings}))?)?;
             id
         })
     } else { None };
