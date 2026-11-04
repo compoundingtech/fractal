@@ -990,11 +990,14 @@ fn repeated_agent_list_reads_only_local_frontier_without_rebuilding() {
     // The former zero-reader cache hit missed same-index local activity. Correct warm
     // reads now perform one indexed frontier seek, but never reduce cards again.
     let builds = state.store.agent_resources_builds_for_test();
-    let work = smallclaims::sqlite::work::total();
+    // Count this thread's statements only: the read runs on it, and the process-wide total also
+    // takes in other tests' SQL when they share the process.
+    let work = smallclaims::sqlite::work::SqliteWorkScope::start();
     let rows = client_agent_resources(&state.store, false, "second", index).unwrap();
+    let work = work.finish();
     assert!(rows.is_empty());
     assert_eq!(state.store.agent_resources_builds_for_test(), builds);
-    assert!((smallclaims::sqlite::work::total() - work).vm_steps < 100);
+    assert!(work.vm_steps < 100, "{work:?}");
 }
 
 #[tokio::test]
@@ -1180,9 +1183,10 @@ fn agent_page_refs_reuse_warm_metadata_and_rebuild_for_new_membership() {
     let index = state.store.index().unwrap();
     let refs = client_agent_page_refs(&state.store, false, index).unwrap();
     assert_eq!(refs, client_agent_page_refs_uncached(&state.store, false, index).unwrap());
-    let work = smallclaims::sqlite::work::total();
+    // This thread's statements only, as above.
+    let work = smallclaims::sqlite::work::SqliteWorkScope::start();
     assert_eq!(client_agent_page_refs(&state.store, false, index).unwrap(), refs);
-    assert_eq!((smallclaims::sqlite::work::total() - work).statements, 0);
+    assert_eq!(work.finish().statements, 0);
     // A repeated live status has the same result; runtime changes still rebuild shallow refs.
     append("agent/refs-first");
     let index = state.store.index().unwrap();
@@ -1423,7 +1427,7 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
             "queued behind FIFO head message/claude-preparation-head: body unavailable; later mail cannot overtake it");
     }
     for (message, sent_at) in &messages {
-        let delivery = message_delivery_for(&store, message, *sent_at, *sent_at).unwrap();
+        let delivery = message_delivery_for(&store, message, *sent_at, *sent_at, None).unwrap();
         assert_eq!(delivery["state"], "waiting");
         assert_eq!(delivery["phase"], "sent");
         assert_eq!(delivery["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
@@ -1431,7 +1435,7 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
         assert!(!delivery["reason"].as_str().unwrap().contains("private-detail"));
         let mut accepted = message.clone();
         accepted.status = "delivered".into();
-        assert!(!message_delivery_for(&store, &accepted, *sent_at, *sent_at).unwrap()["reason"]
+        assert!(!message_delivery_for(&store, &accepted, *sent_at, *sent_at, None).unwrap()["reason"]
             .as_str().unwrap().contains("FIFO"));
     }
     // Match an operator's actor-scoped list: a person filter selects that person's
@@ -1449,13 +1453,13 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
     }
     // A different message's clear cannot release the head or its queued successors.
     diagnostic(&messages[2].0, "first", "ready", "preparation succeeded; FIFO blocker cleared");
-    assert!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)
+    assert!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1, None)
         .unwrap()["reason"].as_str().unwrap().contains("preparation is unavailable"));
     // Recovery clears each message. Late previous-incarnation reports cannot undo it.
     for (message, sent_at) in &messages {
         diagnostic(message, "first", "ready", "preparation succeeded; FIFO blocker cleared");
         diagnostic(message, "old", "waiting", "stale incarnation failure");
-        let delivery = message_delivery_for(&store, message, *sent_at, *sent_at).unwrap();
+        let delivery = message_delivery_for(&store, message, *sent_at, *sent_at, None).unwrap();
         assert_eq!(delivery["state"], "pending");
         assert!(!delivery["reason"].as_str().unwrap().contains("failure"));
     }
@@ -1464,9 +1468,9 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
     }), Vec::new());
     diagnostic(&messages[0].0, "second", "waiting", "current attachment preparation failed");
     diagnostic(&messages[0].0, "first", "ready", "old incarnation clear");
-    assert_eq!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)
+    assert_eq!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1, None)
         .unwrap()["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
-    let stale = message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1 + 90_001).unwrap();
+    let stale = message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1 + 90_001, None).unwrap();
     assert_eq!(stale["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
     assert_eq!(messages.iter().map(|(message, _)| store.message(&message.subject).unwrap().unwrap().content)
         .collect::<Vec<_>>(), ["head", "later", "last"]);
@@ -1500,7 +1504,7 @@ fn a_stream_items_delivery_is_unknown_while_its_seat_runs_on_another_host() {
     };
     let delivery = |subject: &str, sent_at: u128| {
         let view = store.message(subject).unwrap().unwrap();
-        message_delivery_for(&store, &view, sent_at, sent_at).unwrap()
+        message_delivery_for(&store, &view, sent_at, sent_at, None).unwrap()
     };
     let (near, far) = ("message/00000000000000d1", "message/00000000000000d2");
     let near_sent = shard.append_claim(&message(near, "agent/example/near")).unwrap().accepted_at_unix_ms;
@@ -1880,6 +1884,29 @@ async fn channel_history_queries_do_not_renew_delivery() {
     }
 }
 
+/// Doctor says whether this member records its seats' lifecycle as marks, and when it does not,
+/// what holds them off: here a configured peer whose start has not reached it.
+#[test]
+fn doctor_shows_whether_marks_are_on_and_what_holds_them_off() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    let marks = |state: &AppState| {
+        doctor_report(state).unwrap().0.checks.into_iter().find(|check| check.name == "message-marks").unwrap()
+    };
+    let undecided = marks(&state);
+    assert!(undecided.message.starts_with("off: every member is ready"), "{undecided:?}");
+    assert_eq!(state.store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+    let on = marks(&state);
+    assert_eq!(on.status, "pass");
+    assert!(on.message.starts_with("on:"), "{on:?}");
+    state.configured_peers = vec!["birch".into()];
+    assert!(!state.store.refresh_marks_switch(&state.configured_peers).unwrap().0);
+    let held = marks(&state);
+    assert_eq!(held.status, "pass");
+    assert!(held.message.starts_with("off: lifecycle claims until every other member advertises message_view_reads=1"), "{held:?}");
+    assert!(held.message.contains("birch: exchanges with this member outside its fleet membership"), "{held:?}");
+}
+
 #[test]
 fn doctor_names_failed_admission_even_if_opencode_reports_ready() {
     let root = tempfile::tempdir().unwrap();
@@ -1963,12 +1990,101 @@ async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
 
 #[test]
 fn doctor_unread_counts_exclude_historical_recipients_and_people() {
-    let store = Store::open_memory("amber").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = AppState { store: Arc::new(Store::open_memory("amber").unwrap()), ..state(root.path()) };
+    let store = app.store.clone();
+    let send = |id: &str, from: &str, recipient: &str, tags: &[&str]| {
+        store
+            .append_claim(&ClaimInput {
+                subject: format!("message/{id}"),
+                kind: "message.sent".into(),
+                actor: Some(from.into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!(from)),
+                    ("to".into(), json!(recipient)),
+                    ("status".into(), json!("sent")),
+                    ("content".into(), json!("probe")),
+                    ("tags".into(), json!(tags)),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(id.into()),
+            })
+            .unwrap();
+    };
     for (id, recipient) in [
         ("current", "agent/example/current"),
         ("retired", "agent/example/retired"),
         ("person", "person/eval"),
     ] {
+        send(id, "person/operator", recipient, &[]);
+    }
+    let current = BTreeSet::from(["agent/example/current"]);
+    assert_eq!(unread_current_seat_counts(&app, &current, client_now_ms(), None).unwrap(), (0, 0, BTreeMap::new()));
+    let later = || client_now_ms() + 20_000;
+    assert_eq!(unread_current_seat_counts(&app, &current, later(), None).unwrap(), (1, 0, BTreeMap::new()));
+    assert_eq!(
+        store.messages(None, false).unwrap().len(),
+        3,
+        "inspection does not erase historical messages"
+    );
+
+    // A read or closed record, as a claim or only as a local mark, makes a message read. A
+    // delivered mark is a native handoff the recipient has not read yet, and held mail waits for
+    // its seat's next turn.
+    for id in ["read-by-mark", "closed-by-mark", "read-by-claim", "accepted"] {
+        send(id, "person/operator", "agent/example/current", &[]);
+    }
+    send("held", "agent/example/sender", "agent/example/current", &[crate::silent::SILENT_TAG]);
+    crate::store::message_marks::record(&store, "message/read-by-mark", "message.read", "agent/example/current").unwrap();
+    crate::store::message_marks::record(&store, "message/closed-by-mark", "message.closed", "agent/example/current").unwrap();
+    crate::store::message_marks::record(&store, "message/accepted", "message.delivered", "agent/example/current").unwrap();
+    for status in ["delivered", "read"] {
+        store
+            .append_claim(&ClaimInput {
+                subject: "message/read-by-claim".into(),
+                kind: format!("message.{status}"),
+                actor: Some("agent/example/current".into()),
+                fields: BTreeMap::from([("status".into(), json!(status))]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("read-by-claim-{status}")),
+            })
+            .unwrap();
+    }
+    // current and accepted are late; one of them was accepted.
+    assert_eq!(unread_current_seat_counts(&app, &current, later(), None).unwrap(), (2, 1, BTreeMap::new()));
+    // The same set the full message views give: unread, not held, to a current seat.
+    let views = store
+        .operational_messages(None, false)
+        .unwrap()
+        .into_iter()
+        .filter(|message| {
+            current.contains(crate::store::normalize_message_party(&message.to).as_str())
+                && !matches!(message.status.as_str(), "read" | "closed")
+                && !crate::silent::waits_for_turn(message)
+        })
+        .map(|message| message.subject)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(views, BTreeSet::from(["message/accepted".into(), "message/current".into()]));
+}
+
+/// The overdue count reads the unread mail, not the history: thousands of read messages cost it
+/// no more than none.
+#[test]
+fn doctor_overdue_mail_count_does_not_grow_with_read_history() {
+    let store = Store::open_memory("amber").unwrap();
+    let steps = |store: &Store| {
+        let connection = store.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h6d012e85d16c owner=fractal_api_core::api::tests TODO=trace-statement-and-value-representation */ crate::store::unread_mail::OVERDUE_BY_RECIPIENT).unwrap();
+        let rows = statement
+            .query_map([i64::MAX], |row| row.get::<_, i64>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .sum::<i64>();
+        (rows, statement.get_status(rusqlite::StatementStatus::VmStep))
+    };
+    let send = |id: String| {
         store
             .append_claim(&ClaimInput {
                 subject: format!("message/{id}"),
@@ -1976,32 +2092,30 @@ fn doctor_unread_counts_exclude_historical_recipients_and_people() {
                 actor: Some("person/operator".into()),
                 fields: BTreeMap::from([
                     ("from".into(), json!("person/operator")),
-                    ("to".into(), json!(recipient)),
+                    ("to".into(), json!("agent/example/current")),
                     ("status".into(), json!("sent")),
                     ("content".into(), json!("probe")),
                 ]),
                 evidence: vec![],
                 expected_subject: None,
-                idempotency_key: Some(id.into()),
+                idempotency_key: Some(id),
             })
             .unwrap();
+    };
+    for n in 0..5 {
+        send(format!("unread-{n}"));
     }
-    let current = BTreeSet::from(["agent/example/current"]);
-    let messages = store.operational_messages(None, false).unwrap();
-    assert_eq!(
-        unread_current_seat_counts(&store, &current, &messages, client_now_ms()).unwrap(),
-        (0, 0)
-    );
-    assert_eq!(
-        unread_current_seat_counts(&store, &current, &messages, client_now_ms() + 20_000)
-            .unwrap(),
-        (1, 0)
-    );
-    assert_eq!(
-        store.messages(None, false).unwrap().len(),
-        3,
-        "inspection does not erase historical messages"
-    );
+    let (rows, few) = steps(&store);
+    assert_eq!(rows, 5);
+    for n in 0..2_000 {
+        send(format!("read-{n}"));
+        crate::store::message_marks::record(&store, &format!("message/read-{n}"), "message.read", "agent/example/current").unwrap();
+    }
+    // Flush the queued subjects the way a writer's count does, so the history is indexed.
+    store.unread_mail_count_before(u128::MAX).unwrap();
+    let (rows, many) = steps(&store);
+    assert_eq!(rows, 5);
+    assert!(many < few * 2 + 200, "{few} VM steps with no history, {many} with 2,000 read messages");
 }
 
 /// The per-PR contract for the messaging-faults `handoff_failed` case: once the recipient's
@@ -6737,11 +6851,13 @@ fn terminal_retirement_agent_cards_follow_lifecycle_at_the_snapshot_cut() {
     ).unwrap();
     let after = store.index().unwrap();
     for cut in [before, after] {
-        let work = smallclaims::sqlite::work::total();
+        // This thread's statements only: the read runs on it, and the process-wide total also
+        // takes in other tests' SQL when they share the process.
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
         let terminal = crate::store::retirements::retired_subjects_at(
             &store.readers.get(), &[retired.into(), stopped.into()], cut,
         ).unwrap();
-        assert_eq!((smallclaims::sqlite::work::total() - work).statements, 1);
+        assert_eq!(work.finish().statements, 1);
         assert_eq!(terminal.contains(retired), cut == after);
         assert!(!terminal.contains(stopped));
         let cards = client_agent_resources_uncached(&store, true, cut).unwrap();
@@ -9484,13 +9600,17 @@ fn roster_folds_outside_a_request_and_a_snapshot_read_faults_through_scheduling_
         let cut = store.index().unwrap();
         // Test folds call these directly, with no request budget and no pinned snapshot. A
         // pause past the 25 ms work allowance spends no query work: the card keeps its fault.
-        for name in ["cold", "cached", "exact"] {
+        for name in ["selected", "cold", "cached", "exact", "page", "chunk"] {
+            store.forget_current_views();
             Store::stall_next_card_fault_read_for_test(std::time::Duration::from_millis(60));
             let started = std::time::Instant::now();
             let cards = match name {
+                "selected" => client_agent_resources_selected(store, history, cut, None),
                 "cold" => client_agent_resources_uncached(store, history, cut),
                 "cached" => client_agent_resources_cached(store, history, cut),
-                _ => client_exact_agent_resources(store, history, cut, subject),
+                "exact" => client_exact_agent_resources(store, history, cut, subject),
+                _ => client_agent_cards_selected(store, history, cut,
+                    &BTreeSet::from([subject.to_owned()]), name == "chunk"),
             }.unwrap();
             assert!(started.elapsed() >= std::time::Duration::from_millis(60), "the {name} fold must read the stalled faults");
             let card = cards.iter().find(|card| card["id"] == subject).unwrap();
@@ -9848,6 +9968,8 @@ async fn roster_resilience_fresh_idle_and_new_attempt_after_failure_wait_for_wri
 
 
 async fn assert_agent_roster_survives_other_mode_publications(history: bool) {
+    // The unpolled seat's delivery reason reads the daemon's uptime; both pages read the same one.
+    let _uptime = crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5));
     let root = tempfile::tempdir().unwrap();
     let mut state = state(root.path());
     state.store = Arc::new(roster_followup_store());
@@ -10981,6 +11103,8 @@ mission "agent-human" state="ready" {
 
 #[test]
 fn an_unauthenticated_harness_is_waiting_not_starting() {
+    // This unpolled seat is assessed during the daemon's startup grace.
+    let _uptime = crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5));
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let store = state.store.clone();
@@ -13888,6 +14012,106 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
 
 
 #[test]
+fn fleet_admission_reports_live_holds_and_the_daemons_last_residue_count() {
+    use crate::store::{FleetResidueRecord, OPERATION_AUDIT_PERIOD};
+    let now = 10 * OPERATION_AUDIT_PERIOD.as_millis();
+    let counted = |age_ms: u128, result: Result<Vec<smallclaims::store::FleetAdmissionResidue>, String>| {
+        Some((FleetResidueRecord { finished_at_unix_ms: now - age_ms, took: Duration::from_millis(4_200), result }, false))
+    };
+    let check = |unsigned, residue| {
+        let check = fleet_admission_check(unsigned, 2, residue, now);
+        assert_eq!(check.name, "fleet-admission");
+        (check.status, check.message)
+    };
+    let (status, message) = check(0, counted(60_000, Ok(Vec::new())));
+    assert_eq!((status.as_str(), message.as_str()), ("pass", "0 envelopes wait for their writer's signature; 2 are fenced"));
+    // What waits for a signature is live, whatever the count's age.
+    assert_eq!(check(3, counted(60_000, Ok(Vec::new()))).0, "warn");
+    // Residue says how old its count is and why that is accurate.
+    let residue = vec![smallclaims::store::FleetAdmissionResidue {
+        writer: "node-b".into(),
+        reason: "admitted-unsigned".into(),
+        envelopes: 858,
+    }];
+    let (status, message) = check(0, counted(25 * 60_000, Ok(residue)));
+    assert_eq!(status, "warn");
+    assert_eq!(message, "0 envelopes wait for their writer's signature; 2 are fenced; 858 envelopes from node-b were admitted unsigned; those were counted 25 min ago (4.2 s); admitted envelopes are never readmitted, so an hour-old count is accurate");
+    // A stale count warns with its age and the same reason.
+    let (status, message) = check(0, counted(2 * OPERATION_AUDIT_PERIOD.as_millis() + 60_000, Ok(Vec::new())));
+    assert_eq!(status, "warn");
+    assert!(message.contains("counted 121 min ago (4.2 s), longer ago than the 60 min the daemon counts them every; admitted envelopes are never readmitted, so an hour-old count is accurate"), "{message}");
+    // A count from before a membership change is outdated: the daemon counts again.
+    let mut moved = counted(60_000, Ok(Vec::new()));
+    moved.as_mut().unwrap().1 = true;
+    let (status, message) = check(0, moved);
+    assert_eq!(status, "warn");
+    assert!(message.contains("fleet membership changed since envelopes admitted before this node knew better were counted; the daemon is counting them again"), "{message}");
+    // Before the first count, and when it failed.
+    let (status, message) = check(0, None);
+    assert_eq!(status, "warn");
+    assert!(message.contains("has not finished since the daemon started; it runs at startup and then every 60 min"), "{message}");
+    let (status, message) = check(0, counted(0, Err("database disk image is malformed".into())));
+    assert_eq!(status, "fail");
+    assert!(message.contains("failed: database disk image is malformed; counted 0 min ago"), "{message}");
+}
+
+#[test]
+fn doctor_reports_the_last_operation_audit_and_never_audits_inline() {
+    use crate::store::{OperationAuditRecord, OPERATION_AUDIT_PERIOD};
+    let now = 10 * OPERATION_AUDIT_PERIOD.as_millis();
+    let audit = |age_ms: u128, drift: Result<Vec<String>, String>| Some(OperationAuditRecord {
+        finished_at_unix_ms: now - age_ms,
+        took: Duration::from_millis(13_900),
+        result: drift,
+    });
+    let check = |audit| {
+        let check = operation_projection_check(audit, now);
+        assert_eq!(check.name, "operation-projection");
+        (check.status, check.message)
+    };
+    let (status, message) = check(None);
+    assert_eq!(status, "warn");
+    assert!(message.starts_with("no operation audit has finished since the daemon started"), "{message}");
+    let (status, message) = check(audit(5 * 60_000, Ok(Vec::new())));
+    assert_eq!(status, "pass");
+    assert_eq!(message, "the operation projection matched the claim log at the audit that finished 5 min ago (13.9 s)");
+    // Two periods old is still current; past that it is stale.
+    let two = 2 * OPERATION_AUDIT_PERIOD.as_millis();
+    assert_eq!(check(audit(two, Ok(Vec::new()))).0, "pass");
+    let (status, message) = check(audit(two + 60_000, Ok(Vec::new())));
+    assert_eq!(status, "warn");
+    assert!(message.ends_with("but audits run every 60 min"), "{message}");
+    // Drift and a failed audit fail whatever their age.
+    let (status, message) = check(audit(two + 60_000, Ok(vec!["op/a".into(), "op/b".into()])));
+    assert_eq!(status, "fail");
+    assert!(message.starts_with("operation projection drift: op/a, op/b; found by the audit that finished 121 min ago"), "{message}");
+    let (status, message) = check(audit(0, Err("database disk image is malformed".into())));
+    assert_eq!(status, "fail");
+    assert!(message.starts_with("the last operation audit failed: database disk image is malformed"), "{message}");
+
+    // A store whose projection drifted, with no audit yet: doctor warns rather than reading
+    // every operation to find the drift.
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.append_client_claim(&ClaimInput {
+        subject: "resource/doctor-audit".into(),
+        kind: "resource.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([("kind".into(), json!("custom.test.doctor-audit"))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("doctor-audit-operation".into()),
+    }).unwrap();
+    state.store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h03a0c43d19d5 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict'", []).unwrap();
+    let projection = |state: &AppState| doctor_report(state).unwrap().0.checks.into_iter()
+        .find(|check| check.name == "operation-projection").unwrap().status;
+    assert_eq!(projection(&state), "warn");
+    assert!(state.store.last_operation_audit().is_none());
+    assert_eq!(state.store.operation_projection_drift().unwrap().len(), 1);
+    assert_eq!(projection(&state), "fail");
+}
+
+#[test]
 fn a_doctor_check_past_its_deadline_reports_timeout_and_the_next_check_still_runs() {
     let clock = DoctorClock::new(Duration::from_secs(5), Duration::from_millis(100));
     let pass = |name: &str| DoctorCheck { name: name.into(), status: "pass".into(), message: String::new() };
@@ -13918,12 +14142,14 @@ fn a_doctor_check_past_its_deadline_reports_timeout_and_the_next_check_still_run
 
 #[test]
 fn doctor_checks_after_the_total_is_spent_say_they_did_not_run() {
-    let clock = DoctorClock::new(Duration::from_millis(150), Duration::from_millis(100));
+    // The second check starts 600 ms in, well inside the total even on a loaded host, and
+    // ends past it.
+    let clock = DoctorClock::new(Duration::from_millis(1000), Duration::from_millis(100));
     let ran = std::cell::Cell::new(0);
     for _ in 0..2 {
         clock.checks("slow-check", || {
             ran.set(ran.get() + 1);
-            std::thread::sleep(Duration::from_millis(110));
+            std::thread::sleep(Duration::from_millis(600));
             Ok(Vec::new())
         });
     }

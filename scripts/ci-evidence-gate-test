@@ -2167,6 +2167,65 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((fields['log'], fields['decision']), ('unlogged_pass', plain['decision']), 'shadow only')
 
 
+class HistoryFetch(unittest.TestCase):
+    """The generated "Fetch the whole history without evidence tags" step, run on a one-commit clone whose remote drops
+    transfers: a dropped transfer is tried once more, and a fetch that still fails leaves the checkout as it was."""
+
+    @staticmethod
+    def script():
+        text = (ROOT / '.github/workflows/fleet.yml').read_text()
+        step = re.search(r'- name: Fetch the whole history without evidence tags\n(?:\s+(?!run:)[a-z-]+:.*\n|\s+[A-Z_]+:.*\n)*'
+                         r'(\s+)run: \|\n((?:\1  .*\n|\n)+)', text)
+        indent = len(step.group(1)) + 2
+        return ''.join(line[indent:] if line.strip() else '\n' for line in step.group(2).splitlines(keepends=True))
+
+    def fetched(self, fails, message):
+        tmp = Path(tempfile.mkdtemp(prefix='history-fetch-'))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        git = lambda *args, cwd=tmp: subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True).stdout
+        git('init', '-q', '--bare', 'origin.git')
+        git('init', '-q', 'seed')
+        for number in range(3):
+            (tmp / 'seed/file').write_text(f'{number}\n')
+            git('add', 'file', cwd=tmp / 'seed')
+            git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', f'c{number}', cwd=tmp / 'seed')
+        git('push', '-q', str(tmp / 'origin.git'), 'HEAD:refs/heads/main', cwd=tmp / 'seed')
+        git('clone', '-q', '--depth', '1', '--branch', 'main', f'file://{tmp}/origin.git', 'clone')
+        # The remote answers through a command that drops the first `fails` transfers with `message`, as GitHub does.
+        (tmp / 'remote').write_text('n=$(cat "$COUNT" 2>/dev/null || echo 0); echo $((n + 1)) > "$COUNT"\n'
+                                    'if [ "$n" -lt "$FAILS" ]; then echo "$MESSAGE" >&2; exit 128; fi\nexec "$1" "$2"\n')
+        clone = tmp / 'clone'
+        git('config', 'protocol.ext.allow', 'always', cwd=clone)
+        git('remote', 'set-url', 'origin', f'ext::sh {tmp}/remote %S {tmp}/origin.git', cwd=clone)
+        env = {**os.environ, 'FETCH_TOKEN': 'unused', 'COUNT': str(tmp / 'count'), 'FAILS': str(fails), 'MESSAGE': message}
+        run = subprocess.run(['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', self.script()], cwd=clone, env=env,
+                             capture_output=True, text=True)
+        attempts = int((tmp / 'count').read_text()) if (tmp / 'count').exists() else 0
+        intact = subprocess.run(['git', 'fsck', '--connectivity-only', '--no-dangling'], cwd=clone, capture_output=True).returncode == 0
+        # A checkout left without its marker but with only one commit's objects cannot even count its history: None.
+        listed = subprocess.run(['git', 'rev-list', '--count', 'HEAD'], cwd=clone, capture_output=True, text=True)
+        commits = int(listed.stdout) if listed.returncode == 0 else None
+        shallow = Path(git('rev-parse', '--git-path', 'shallow', cwd=clone).strip())
+        return run, attempts, intact, commits, (clone / shallow).exists()
+
+    def test_a_dropped_transfer_is_fetched_again_once(self):
+        run, attempts, intact, commits, shallow = self.fetched(1, 'error: RPC failed; HTTP 408 curl 22 The requested URL returned error: 408')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((attempts, intact, commits, shallow), (2, True, 3, False))
+        self.assertIn('trying once more', run.stderr)
+
+    def test_a_fetch_that_keeps_failing_fails_red_and_leaves_the_one_commit_checkout_intact(self):
+        run, attempts, intact, commits, shallow = self.fetched(2, 'error: RPC failed; HTTP 408 curl 22 The requested URL returned error: 408')
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual((attempts, intact, commits, shallow), (2, True, 1, True))
+
+    def test_a_failure_that_is_not_the_transport_is_not_tried_again(self):
+        run, attempts, intact, commits, shallow = self.fetched(1, "fatal: Authentication failed for 'https://github.com/example/repo/'")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual((attempts, intact, commits, shallow), (1, True, 1, True))
+        self.assertNotIn('trying once more', run.stderr)
+
+
 class WorkflowStructure(unittest.TestCase):
     """The loops factory named, checked on the workflow files themselves."""
 

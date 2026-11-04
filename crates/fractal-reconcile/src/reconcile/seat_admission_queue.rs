@@ -111,6 +111,16 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// The memory of this host's other laned seats that run, or were admitted to start and are not
     /// yet seen running.
     pub(super) fn held_lanes(&self, candidate: &str, now: u64) -> Result<u64> {
+        self.lanes_held(candidate, now, true)
+    }
+
+    /// What [`Self::held_lanes`] would be once every step's raise and every burst were given back:
+    /// each such seat at its own lane.
+    pub(super) fn held_base_lanes(&self, candidate: &str, now: u64) -> Result<u64> {
+        self.lanes_held(candidate, now, false)
+    }
+
+    fn lanes_held(&self, candidate: &str, now: u64, raised: bool) -> Result<u64> {
         const STARTING_SECS: u64 = 600;
         let status = &self.seat_admission.status;
         let mut held = 0;
@@ -119,7 +129,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(member) = desired.member.as_ref().filter(|member| member.host == self.host) else { continue };
             let Some(base) = member.capacity else { continue };
             // A seat holding a step that raises its lane holds the raised lane.
-            let lane = status.state().lane_raised.get(&desired.subject).copied().unwrap_or(base);
+            let lane = status.state().lane_raised.get(&desired.subject).copied().filter(|_| raised).unwrap_or(base);
             if desired.kind != "agent" || desired.subject == candidate {
                 continue;
             }

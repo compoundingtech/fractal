@@ -30,24 +30,52 @@ pub fn stream_index(graph: &super::super::Store) -> anyhow::Result<Option<u64>> 
     shard(graph).map(|shard| shard.index()).transpose()
 }
 
+/// Arrivals recorded per writer transaction: a long backlog takes the shard's writer in short turns.
+const ARRIVALS_PAGE: usize = 500;
+
 /// Record, at the graph's current index, every stream item that has no arrival yet. The daemon
 /// calls it after the shard admits items; a reader that finds an item without one calls it too.
-/// Returns how many items it recorded. Each takes its shown time here, once, in store order.
+/// Returns how many items it recorded. Each takes its shown time here, once, in store order, a
+/// page of [`ARRIVALS_PAGE`] items per transaction.
+///
+/// The graph's index is read while this holds the shard's writer, so an item recorded later
+/// never takes an earlier graph index than one recorded before it: arrivals rise with store
+/// order, which lets an arrival read start from the first item past its graph index.
 pub fn record_arrivals(graph: &super::super::Store) -> anyhow::Result<usize> {
     let Some(shard) = shard(graph) else {
         return Ok(0);
     };
-    let at = graph.index()?;
+    let mut recorded = 0;
+    let mut after = 0_i64;
+    loop {
+        let (page, last) = record_arrivals_page(graph, &shard, after)?;
+        recorded += page;
+        match last {
+            Some(last) if page == ARRIVALS_PAGE => after = last,
+            _ => return Ok(recorded),
+        }
+    }
+}
+
+/// One page of [`record_arrivals`]: up to [`ARRIVALS_PAGE`] items past both the newest arrival
+/// and `after`, the last item the previous page took. Answers how many it took, and the store
+/// index of the last.
+fn record_arrivals_page(
+    graph: &super::super::Store,
+    shard: &GraphStore,
+    after: i64,
+) -> anyhow::Result<(usize, Option<i64>)> {
     let mut connection = shard.connection.write();
+    let at = graph.index()?;
     let transaction = connection.transaction()?;
     let unrecorded = transaction
         .prepare_cached(
             "SELECT stream_messages.subject, stream_messages.store_index, claims.accepted_at_unix_ms
              FROM stream_messages JOIN claims ON claims.store_index=stream_messages.store_index
-             WHERE stream_messages.store_index > COALESCE((SELECT MAX(store_index) FROM stream_arrivals), 0)
-             ORDER BY stream_messages.store_index",
+             WHERE stream_messages.store_index > MAX(?1, COALESCE((SELECT MAX(store_index) FROM stream_arrivals), 0))
+             ORDER BY stream_messages.store_index LIMIT ?2",
         )?
-        .query_map([], |row| {
+        .query_map(rusqlite::params![after, ARRIVALS_PAGE as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -66,7 +94,7 @@ pub fn record_arrivals(graph: &super::super::Store) -> anyhow::Result<usize> {
         shown = Some(at_ms);
     }
     transaction.commit()?;
-    Ok(unrecorded.len())
+    Ok((unrecorded.len(), unrecorded.last().map(|(_, store_index, _)| *store_index)))
 }
 
 /// The graph index at which `subject`, a stream item, arrived on this member, as recorded. It
@@ -211,7 +239,19 @@ pub fn conversation_items(
     };
     let (position, arrival) = match after {
         StreamAfter::Position(position) => (position.max(floor), 0),
-        StreamAfter::Arrival(arrival) => (floor, arrival),
+        // Only items that arrived after `arrival` qualify, so the first of them bounds the read
+        // from below, whatever order arrivals were recorded in. Arrivals rise with store order
+        // (`record_arrivals`), so few items past the bound fail the arrival test. Without one,
+        // nothing arrived since.
+        StreamAfter::Arrival(arrival) => {
+            let first: Option<u64> = connection
+                .prepare_cached("SELECT MIN(store_index) FROM stream_arrivals WHERE graph_index>?1")?
+                .query_row(/* sqlite-large-value: allow-for-now lv-hf8935dc60b94 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ [arrival], |row| row.get(0))?;
+            let Some(first) = first else {
+                return Ok(Vec::new());
+            };
+            (floor.max(first.saturating_sub(1)), arrival)
+        }
     };
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf2c0f457d435 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ &format!(
         "WITH selected AS (
@@ -290,3 +330,7 @@ pub fn timeline_base(graph: &super::super::Store, claim: &ClaimRecord) -> anyhow
     };
     Ok(arrived.saturating_mul(4).saturating_add(2))
 }
+
+#[cfg(test)]
+#[path = "stream_reads_tests.rs"]
+mod tests;

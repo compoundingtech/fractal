@@ -1678,6 +1678,15 @@ impl Store {
     }
 
     fn record_judgment_failure(&self, result: Result<usize>) -> Result<usize> {
+        if let Err(error) = &result
+            && migration::cancelled_by_caller(error)
+        {
+            // Its reads are refused from here on, so it cannot ask what is pending: wake the
+            // job, which finds out. A storage retry episode is neither ended nor restarted.
+            self.verdicts_due.store(true, Ordering::Release);
+            self.signature_job_wake.notify_one();
+            return result;
+        }
         self.note_signature_retry(result.as_ref().err());
         if let Err(error) = &result
             && !migration::transient_storage_error(error)
@@ -2381,6 +2390,62 @@ mod paced_verdict_tests {
         write("agent/studio.second");
         store.seal_local_batches().unwrap();
         assert_eq!(wakes(), start + 2);
+    }
+
+    #[tokio::test]
+    async fn a_request_whose_deadline_ends_mid_judgment_leaves_the_work_to_the_job_unfaulted() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        store.judge_claims_slice(true).unwrap();
+        let claim = store.append_claim(&ClaimInput {
+            subject: "agent/studio.first".into(),
+            kind: "harness.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([("state".into(), Value::from("ready"))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        store.seal_local_batches().unwrap();
+        store.verdicts_due.store(false, Ordering::Release);
+        let woken = store.signature_job_wake.notified();
+        // The request's deadline has passed: its next read is interrupted, as SQLite's
+        // progress handler does to a read that is still running when the deadline passes.
+        let request = crate::read_budget::ReadBudget::cancellable("/v1/replication");
+        request.cancel();
+        let locked = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ));
+        store.note_signature_retry(Some(&locked));
+        let retrying = store.signature_retrying.lock().unwrap().clone();
+        let error = crate::read_budget::with(Some(request.clone()), || {
+            store.advance_signature_judgment().unwrap_err()
+        });
+        assert_eq!(*store.signature_retrying.lock().unwrap(), retrying, "the lock episode goes on");
+        assert!(
+            crate::read_budget::with(Some(request), || migration::cancelled_by_caller(&error)),
+            "{error:#}"
+        );
+        assert_eq!(store.signature_migration().unwrap().fault, None, "{error:#}");
+        assert!(store.verdicts_due.load(Ordering::Acquire));
+        tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+            .await
+            .expect("the job is woken to do the work the request could not");
+        // The job has no request budget, and judges it.
+        while store.verdicts_pending().unwrap() {
+            store.advance_signature_judgment().unwrap();
+        }
+        assert_eq!(store.claim_verdict(&claim.id).unwrap(), Verdict::Verified);
+
+        // Without an ended budget, an interrupt is not the caller's and still faults.
+        let interrupted = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+            None,
+        ));
+        assert!(!migration::cancelled_by_caller(&interrupted));
+        assert!(store.record_judgment_failure(Err(interrupted)).is_err());
+        assert!(store.signature_migration().unwrap().fault.is_some());
     }
 
     #[test]

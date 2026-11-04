@@ -106,6 +106,9 @@ pub struct Config {
     /// What this node does when an account nears its weekly limit. Off unless enabled.
     #[serde(skip_serializing_if = "LimitsConfig::is_default")]
     pub limits: LimitsConfig,
+    /// Where the daemon's own diagnostics go. Written only when it differs from the default.
+    #[serde(skip_serializing_if = "LoggingConfig::is_default")]
+    pub logging: LoggingConfig,
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
@@ -119,6 +122,12 @@ pub struct Config {
     /// without the line still loads in older builds and one with it needs the line deleted first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_work_without_asking: Option<bool>,
+    /// `true` makes this member wait after each start, before it starts, restarts, retires or
+    /// records the end of any seat, until it has caught up with a peer (docs/st3/replication.md,
+    /// "After a start"). Absent or `false` acts at once, as before. A build that does not know
+    /// the key rejects a config that has it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_for_peers_after_start: Option<bool>,
     /// `STATE/fleet/fleet.toml`, merged by `apply_fleet_file` after command-line overrides.
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
@@ -247,6 +256,22 @@ impl TrimConfig {
         );
         anyhow::ensure!(self.daily_claims != Some(0), "trim.daily_claims is at least 1");
         Ok(())
+    }
+}
+
+/// `[logging]`: `stderr_warnings = true` writes every WARN and ERROR the daemon's code logs
+/// through `tracing` to its stderr, and so to the journal, when telemetry export is off. Without
+/// export the daemon installs no subscriber and those lines are lost. Off by default while its
+/// volume is measured.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LoggingConfig {
+    pub stderr_warnings: bool,
+}
+
+impl LoggingConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -643,9 +668,11 @@ impl Default for Config {
             checkpoint: CheckpointConfig::default(),
             trim: TrimConfig::default(),
             limits: LimitsConfig::default(),
+            logging: LoggingConfig::default(),
             reconcile: ReconcileConfig::default(),
             asks: AsksConfig::default(),
             codex_work_without_asking: None,
+            wait_for_peers_after_start: None,
             fleet: None,
         }
     }
@@ -678,6 +705,10 @@ impl Config {
 
     pub fn lanes_enforced(&self) -> bool {
         self.lanes == Some(Lanes::On)
+    }
+
+    pub fn waits_for_peers_after_start(&self) -> bool {
+        self.wait_for_peers_after_start == Some(true)
     }
 
     /// Service installation writes a new config once, never upgrading a legacy missing mode.
@@ -1300,6 +1331,16 @@ mod tests {
     }
 
     #[test]
+    fn waiting_for_peers_after_start_is_off_unless_set_true() {
+        assert!(!Config::default().waits_for_peers_after_start());
+        assert!(!toml::from_str::<Config>("").unwrap().waits_for_peers_after_start());
+        assert!(!toml::from_str::<Config>("wait_for_peers_after_start = false").unwrap().waits_for_peers_after_start());
+        assert!(toml::from_str::<Config>("wait_for_peers_after_start = true").unwrap().waits_for_peers_after_start());
+        assert!(toml::from_str::<Config>("wait_for_peers_after_start = \"yes\"").is_err());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("wait_for_peers_after_start"));
+    }
+
+    #[test]
     fn seat_priority_defaults_to_background_and_accepts_normal() {
         use fractal_runtime::SeatPriority;
         assert_eq!(Config::default().active_seat_priority(), SeatPriority::Background);
@@ -1666,6 +1707,18 @@ sekrets_profile = "nathan/daemon-gh"
         let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
         assert_eq!(config.trim.daily_claims, Some(5000));
         assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
+    }
+
+    #[test]
+    fn stderr_warnings_are_off_unless_chosen_and_absent_from_a_written_default_config() {
+        let config = Config::default();
+        assert!(!config.logging.stderr_warnings);
+        // An older build refuses unknown sections, so a default config never names it.
+        assert!(!toml::to_string(&config).unwrap().contains("[logging]"));
+        let config: Config = toml::from_str("[logging]\nstderr_warnings = true\n").unwrap();
+        assert!(config.logging.stderr_warnings);
+        assert!(toml::to_string(&config).unwrap().contains("[logging]"));
+        assert!(toml::from_str::<Config>("[logging]\nlevel = \"debug\"\n").is_err());
     }
 
     #[test]

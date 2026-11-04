@@ -27,6 +27,7 @@ pub mod conversation_delivery;
 pub mod external_sessions;
 pub mod recorder_receipts;
 pub mod replication_worker_build;
+pub mod launch_contract;
 pub mod render;
 pub mod client_values;
 pub mod graph;

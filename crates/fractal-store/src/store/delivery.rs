@@ -1,12 +1,15 @@
 use super::*;
 
+/// Messages at least one day old belong to the stale mailbox band.
+pub const MAILBOX_STALE_AFTER_MS: u128 = 86_400_000;
+
 impl Store {
     /// Summarize accepted, unread messages for one recipient, without a delivery-page cap.
     ///
     /// The indexed candidate walk is bounded by this recipient's retained `message.sent`
     /// history (including aliases), not fleet message bodies. Projection work is bounded by
     /// the claim history of its unread candidate subjects. Repeated sends count only once,
-    /// using their oldest accepted timestamp. Empty states are omitted.
+    /// using their oldest accepted timestamp. Empty (state, age band) pairs are omitted.
     ///
     /// When held classification is unavailable, `include_held=false` leaves sent silent
     /// messages in pending rather than dropping them from the unread total.
@@ -14,14 +17,15 @@ impl Store {
         &self,
         recipient: &str,
         include_held: bool,
-    ) -> Result<Vec<(String, u64, u128)>> {
+        now: u128,
+    ) -> Result<Vec<(String, &'static str, u64, u128)>> {
         let connection = self.readers.get();
         let recipient = super::identities::resolve_reference_conn(
             &connection,
             &normalize_message_party(recipient),
         )?;
         smallclaims::touched::note_read(|| format!("mailbox:{recipient}"));
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h69bd7a4056c3 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ concat!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h3219948c367c owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ concat!(
             "WITH candidates AS (
                  SELECT DISTINCT subject FROM claims INDEXED BY claims_message_to_index
                  WHERE kind='message.sent' AND ", message_sent_recipient_match!(), "
@@ -33,6 +37,10 @@ impl Store {
              WHERE claims.kind='message.sent'
                AND NOT EXISTS (
                    SELECT 1 FROM claims consumed WHERE consumed.subject=claims.subject
+                     AND consumed.kind IN ('message.read','message.closed')
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM local_message_marks consumed WHERE consumed.message=claims.subject
                      AND consumed.kind IN ('message.read','message.closed')
                )"
         ))?;
@@ -56,7 +64,7 @@ impl Store {
                 .or_insert((created_index, accepted));
         }
         drop(statement);
-        let mut states = BTreeMap::<&str, (u64, u128)>::new();
+        let mut states = BTreeMap::<(&str, &str), (u64, u128)>::new();
         for (subject, (created_index, accepted)) in candidates {
             let message = self.message_view_cached(&connection, &subject, created_index)?;
             if message.to != recipient || matches!(message.status.as_str(), "read" | "closed") {
@@ -72,8 +80,13 @@ impl Store {
                 }
             };
             smallclaims::touched::note_read(|| subject.clone());
+            let band = if now.saturating_sub(accepted) >= MAILBOX_STALE_AFTER_MS {
+                "stale"
+            } else {
+                "recent"
+            };
             states
-                .entry(state)
+                .entry((state, band))
                 .and_modify(|(count, oldest)| {
                     *count += 1;
                     *oldest = (*oldest).min(accepted);
@@ -82,7 +95,7 @@ impl Store {
         }
         Ok(states
             .into_iter()
-            .map(|(state, (count, oldest))| (state.to_owned(), count, oldest))
+            .map(|((state, band), (count, oldest))| (state.to_owned(), band, count, oldest))
             .collect())
     }
 
@@ -152,34 +165,45 @@ impl Store {
         }
     }
 
-    /// The stream items a page lists after `after`, in shard order: those whose row matches
-    /// `recipients` and `senders` by any of their names (every item, for a party left out) and
-    /// that `keep` keeps, at most `limit` of them, and whether another follows them. A stream
+    /// The stream items a page lists after `after`, in shard order: those `filter` keeps and, when
+    /// given, `keep` keeps, at most `limit` of them, and whether another follows them. A stream
     /// item's index is past every graph index, so a page lists the graph's messages first, then
     /// the stream's. The shard only grows, so a page that has reached the stream misses none
-    /// that arrive.
-    pub fn stream_page_after(
+    /// that arrive. A page is full unless the stream is exhausted: it never ends early with more
+    /// to come.
+    ///
+    /// Without `keep` the shard's query decides alone: only an item the page lists is read, and
+    /// whether another follows is one EXISTS query on the same filter. A `keep` is for what the
+    /// query can't express, a title match: it reads every item the filter passes until the page is
+    /// full, so a match that hits nothing reads each one, as the graph's own title filter reads
+    /// every message its query lists.
+    pub fn stream_page_after<'keep>(
         &self,
-        recipients: Option<&[String]>,
-        senders: Option<&[String]>,
+        filter: super::messages_shard::Filter<'_>,
         after: u64,
         limit: usize,
-        mut keep: impl FnMut(&MessageView) -> bool,
+        mut keep: Option<&mut (dyn FnMut(&MessageView) -> bool + 'keep)>,
     ) -> Result<(Vec<MessageView>, bool)> {
         let mut after = after.saturating_sub(super::messages_shard::STREAM_INDEX_BASE);
-        // Filters can drop most rows, so a batch never shrinks to the page: a full graph page
-        // asks only whether one more item follows, and that must not cost a query per row.
-        let batch = limit.saturating_add(1).max(64);
         let mut output = Vec::new();
         loop {
-            let rows = super::messages_shard::page(self, recipients, senders, after, batch)?;
-            let exhausted = rows.len() < batch;
+            if keep.is_none() && output.len() == limit {
+                return Ok((output, super::messages_shard::any_after(self, filter, after)?));
+            }
+            // A `keep` can drop most rows, so its batch never shrinks to the page: asking whether
+            // one more item follows must not cost a query per row.
+            let wanted = match keep {
+                None => limit - output.len(),
+                Some(_) => limit.saturating_add(1).max(64),
+            };
+            let rows = super::messages_shard::page(self, filter, after, wanted)?;
+            let exhausted = rows.len() < wanted;
             for (subject, index) in rows {
                 after = index;
                 let Some(message) = super::messages_shard::message_view(self, &subject)? else {
                     continue;
                 };
-                if !keep(&message) {
+                if keep.as_mut().is_some_and(|keep| !keep(&message)) {
                     continue;
                 }
                 if output.len() == limit {
@@ -203,10 +227,13 @@ impl Store {
         // desired row. Unrelated graph writes must not invalidate every native mailbox.
         let mut statement = connection.prepare_cached(
             "SELECT (SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1),
-                    (SELECT claim_id FROM desired WHERE subject=?1)",
+                    (SELECT claim_id FROM desired WHERE subject=?1),
+                    (SELECT COALESCE(SUM(DISTINCT CASE kind WHEN 'message.delivered' THEN 1 WHEN 'message.read' THEN 2
+                     WHEN 'message.closed' THEN 4 ELSE 0 END), 0) FROM local_message_marks WHERE message=?1)
+                    + 8 * EXISTS(SELECT 1 FROM local_message_staged WHERE message=?1)",
         )?;
-        let (latest_claim_index, desired_claim_id) = statement.query_row(/* sqlite-large-value: allow-for-now lv-hc58709d7ae65 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ [subject], |row| {
-            Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?))
+        let (latest_claim_index, desired_claim_id, latest_mark) = statement.query_row(/* sqlite-large-value: allow-for-now lv-hbfd2a450de38 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ [subject], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, i64>(2)?))
         })?;
         drop(statement);
         self.message_view_cached_at_version(
@@ -216,6 +243,7 @@ impl Store {
             message_versions::Version {
                 latest_claim_index,
                 desired_claim_id,
+                latest_mark,
             },
         )
     }
@@ -230,6 +258,7 @@ impl Store {
         let message_versions::Version {
             latest_claim_index,
             desired_claim_id,
+            latest_mark,
         } = version;
         if let Some(view) = self.fractal
             .message_cache
@@ -239,6 +268,7 @@ impl Store {
             .filter(|entry| {
                 entry.latest_claim_index == latest_claim_index
                     && entry.desired_claim_id == desired_claim_id
+                    && entry.latest_mark == latest_mark
                     && entry.view.created_index == created_index
             })
             .map(|entry| entry.view.clone())
@@ -258,6 +288,7 @@ impl Store {
             MessageCacheEntry {
                 latest_claim_index,
                 desired_claim_id,
+                latest_mark,
                 view: view.clone(),
             },
         );
@@ -302,7 +333,7 @@ impl Store {
         let fast_recipient = recipient.as_deref();
         let bare_recipient = fast_recipient.map(message_bare_recipient);
         if let (Some(recipient), Some(bare_recipient)) = (fast_recipient, bare_recipient) {
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h06b5186b1e2e owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ if delivery {
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hb1df5e67cfcb owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ if delivery {
                 concat!("WITH candidates(subject) AS (
                      SELECT subject FROM claims INDEXED BY claims_message_to_index
                      WHERE kind='message.sent'
@@ -331,6 +362,9 @@ impl Store {
                    AND (?6 OR NOT EXISTS (
                      SELECT 1 FROM claims closed
                      WHERE closed.subject=ranked.subject AND closed.kind='message.closed'
+                   ) AND NOT EXISTS (
+                     SELECT 1 FROM local_message_marks closed
+                     WHERE closed.message=ranked.subject AND closed.kind='message.closed'
                    ))
                  ORDER BY created_index, subject LIMIT ?5")
             } else {
@@ -354,6 +388,9 @@ impl Store {
                    AND (?6 OR NOT EXISTS (
                      SELECT 1 FROM claims closed
                      WHERE closed.subject=created.subject AND closed.kind='message.closed'
+                   ) AND NOT EXISTS (
+                     SELECT 1 FROM local_message_marks closed
+                     WHERE closed.message=created.subject AND closed.kind='message.closed'
                    ))
                  ORDER BY created_index, subject LIMIT ?5")
             })?;
@@ -403,13 +440,12 @@ impl Store {
             // The graph's messages are all listed; the page goes on into the stream. A page the
             // graph filled ends at its last graph message, and the next page starts the stream.
             let names = recipient_names(&connection, recipient, bare_recipient)?;
-            let (stream, more) = self.stream_page_after(
-                Some(&names),
-                None,
-                after.unwrap_or(0),
-                limit - listed,
-                |message| message.to == recipient && (include_closed || message.status != "closed"),
-            )?;
+            let filter = super::messages_shard::Filter {
+                recipients: Some(&names),
+                senders: None,
+                open_only: !include_closed,
+            };
+            let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - listed, None)?;
             output.extend(stream);
             let next = stream_cursor(more, &output, last_listed);
             return Ok((output, next));
@@ -418,7 +454,8 @@ impl Store {
         // open messages, or all of them, without reading their lifecycle claims.
         let mut statement = connection.prepare_cached(
             "SELECT subject, created_index FROM message_index
-             WHERE (?1 OR closed=0) AND ?2 IS NULL
+             WHERE (?1 OR (closed=0 AND NOT EXISTS(SELECT 1 FROM local_message_marks
+                     WHERE message=message_index.subject AND kind='message.closed'))) AND ?2 IS NULL
                AND created_index>?3 AND created_index<=?4
              ORDER BY created_index, subject LIMIT ?5",
         )?;
@@ -456,13 +493,8 @@ impl Store {
             return Ok((output, next_after));
         }
         // Every message, as the graph's are listed: the page goes on into the whole stream.
-        let (stream, more) = self.stream_page_after(
-            None,
-            None,
-            after.unwrap_or(0),
-            limit - listed,
-            |message| include_closed || message.status != "closed",
-        )?;
+        let filter = super::messages_shard::Filter { recipients: None, senders: None, open_only: !include_closed };
+        let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - listed, None)?;
         output.extend(stream);
         let next = stream_cursor(more, &output, last_listed);
         Ok((output, next))
@@ -633,18 +665,37 @@ mod mailbox_metrics_tests {
         }
         sent(&store, "message/other", "agent/example.other", "agent/example.sender", &[]);
         assert_eq!(
-            store.mailbox_unread_summary("agent/example.worker", true).unwrap(),
+            store.mailbox_unread_summary("agent/example.worker", true, 0).unwrap(),
             vec![
-                ("delivered".into(), 1, delivered.accepted_at_unix_ms),
-                ("held".into(), 20, held_oldest),
-                ("pending".into(), 3, pending.accepted_at_unix_ms.min(staged.accepted_at_unix_ms).min(waking.accepted_at_unix_ms)),
+                ("delivered".into(), "recent", 1, delivered.accepted_at_unix_ms),
+                ("held".into(), "recent", 20, held_oldest),
+                ("pending".into(), "recent", 3, pending.accepted_at_unix_ms.min(staged.accepted_at_unix_ms).min(waking.accepted_at_unix_ms)),
             ],
         );
-        let incomplete = store.mailbox_unread_summary("example.worker", false).unwrap();
+        let incomplete = store.mailbox_unread_summary("example.worker", false, 0).unwrap();
         assert_eq!(incomplete.len(), 2);
         assert_eq!(incomplete[1].0, "pending");
-        assert_eq!(incomplete[1].1, 23);
-        assert!(store.mailbox_unread_summary("agent/example.empty", true).unwrap().is_empty());
+        assert_eq!(incomplete[1].2, 23);
+        assert!(store.mailbox_unread_summary("agent/example.empty", true, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mailbox_age_bands_keep_recent_mail_separate_at_the_exact_boundary() {
+        let store = Store::open_memory("node").unwrap();
+        for (subject, accepted) in [("message/stale", 100), ("message/recent", 101)] {
+            let claim = sent(&store, subject, "agent/example.worker", "agent/example.sender", &[]);
+            store.connection.write().execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                params![accepted.to_string(), claim.id],
+            ).unwrap();
+        }
+        assert_eq!(
+            store.mailbox_unread_summary("agent/example.worker", true, MAILBOX_STALE_AFTER_MS + 100).unwrap(),
+            vec![
+                ("pending".into(), "recent", 1, 101),
+                ("pending".into(), "stale", 1, 100),
+            ],
+        );
     }
 
     #[test]
@@ -682,12 +733,12 @@ mod mailbox_metrics_tests {
             [],
         ).unwrap();
         assert_eq!(
-            store.mailbox_unread_summary("agent/example.worker", true).unwrap(),
-            vec![("pending".into(), 1, 100)],
+            store.mailbox_unread_summary("agent/example.worker", true, MAILBOX_STALE_AFTER_MS + 100).unwrap(),
+            vec![("pending".into(), "stale", 1, 100)],
         );
         assert_eq!(
-            store.mailbox_unread_summary("agent/example.old", true).unwrap(),
-            vec![("pending".into(), 1, 100)],
+            store.mailbox_unread_summary("agent/example.old", true, MAILBOX_STALE_AFTER_MS + 100).unwrap(),
+            vec![("pending".into(), "stale", 1, 100)],
         );
     }
 }
