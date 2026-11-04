@@ -646,7 +646,7 @@ def registration_not_ready(cleanenv):
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         return False
 
-def activate(previous):
+def activate(previous, row):
     current=os.path.realpath(P/'current')
     sha=json.loads(candidate_sandbox.read_regular(P/'current/build-receipt.json'))['buildIdentity']['rev']
     cleanenv={k:v for k,v in os.environ.items() if k not in ('PTY_SESSION','ST_AGENT')}
@@ -662,16 +662,22 @@ def activate(previous):
     try:
         if previous and registration_not_ready(cleanenv):
             swap_server(cleanenv)
-        subprocess.run(['devnet','up','--replace',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
+        subprocess.run(['devnet','up','--replace',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,text=True,stderr=subprocess.PIPE,check=True)
         replacement_completed=True
         subprocess.run(['devnet','url',purpose,'--remote','--wait'],cwd=C/'apps/fractal-web',env=cleanenv,check=True,timeout=120)
         url=current_server_url(cleanenv,sha)
         if not url:
             raise RuntimeError('published edge does not serve candidate build identity')
-    except Exception:
-        # Failed replacement may already have committed; reconcile before moving the pointer.
+    except Exception as error:
+        # Exit status cannot distinguish a failed switch from failed retirement.
+        # Only the published candidate identity confirms replacement success.
         if not replacement_completed:
-            if not current_server_url(cleanenv,sha) and previous and previous!=current:
+            url=current_server_url(cleanenv,sha)
+            if url and isinstance(error,subprocess.CalledProcessError):
+                row['replaceWarning']=(error.stderr or str(error))[-4000:]
+                recovery_retain_builds(previous)
+                return url
+            if not url and previous and previous!=current:
                 rollback_sha=json.loads(candidate_sandbox.read_regular(pathlib.Path(previous)/'build-receipt.json'))['buildIdentity']['rev']
                 if current_server_url(cleanenv,rollback_sha):
                     recovery_select_build(rollback_sha)
@@ -845,7 +851,7 @@ def tick():
                 row.update(sha=old['sha'],included=old['included'],skipped=skipped,build='skipped',reason='unchanged',selectionComplete=True)
                 previous=recovery_previous()
                 recovery_select_build(row['sha'])
-                row['url']=activate(previous)
+                row['url']=activate(previous, row)
                 return
         git('checkout','-B','live-r3',base)
         overlay=C/'apps/fractal-web/private'
@@ -905,7 +911,7 @@ def tick():
             atomic_json(state,{'signature':signature,'sha':row['sha'],'included':row['included'],'skipped':row['skipped'],'pinnedBase':row['pinnedBase']})
             return
         recovery_select_build(row['sha'])
-        row['url']=activate(previous)
+        row['url']=activate(previous, row)
         row['build']='built'
         atomic_json(state,{'signature':signature,'sha':row['sha'],'included':row['included'],'skipped':row['skipped'],'pinnedBase':row['pinnedBase']})
     except SelectionDeadline as error:
