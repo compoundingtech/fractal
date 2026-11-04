@@ -11841,9 +11841,11 @@ fn render_performance(view: &Value) -> String {
     }
     if let Some(lapsed) = view["lane_bursts"]["dropped_by_lease"].as_u64() {
         let reserve = &view["lane_bursts"]["reserve"];
+        let seat = reserve["subject"].as_str().unwrap_or("a seat");
         let reserve = match (reserve["full"].as_u64(), reserve["kept"].as_u64()) {
-            (Some(full), Some(kept)) if full == kept => format!(" · {} kept from starts for a burst", show_gib(full)),
-            (Some(full), Some(kept)) => format!(" · {} kept from starts for a burst ({} while one is held)", show_gib(full), show_gib(kept)),
+            (Some(full), Some(kept)) if full == kept => format!(" · {} kept from starts for a burst (last judged for {seat})", show_gib(full)),
+            (Some(full), Some(kept)) => format!(" · {} kept from starts for a burst ({} while one is held; last judged for {seat})",
+                show_gib(full), show_gib(kept)),
             _ => String::new(),
         };
         let _ = writeln!(out, "LANE BURSTS  {} held · {} waiting · {lapsed} dropped by lease since start{reserve}",

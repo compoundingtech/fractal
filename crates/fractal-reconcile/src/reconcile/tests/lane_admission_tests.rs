@@ -186,7 +186,7 @@ fn a_start_that_would_take_the_room_kept_for_a_burst_waits_and_a_burst_may_use_i
     assert!(!reconciler.admit_seat_start(&elm, elm.member.as_ref().unwrap(), None).unwrap());
     assert_eq!(status.subject("agent/node.elm", u64::MAX).unwrap()["reason"],
         "lane 4 cores/8.0G does not fit: 4.0G free of the 54.0G this host gives lanes (other lanes hold 32.0G, seats outside lanes 2.0G, kept for a burst 16.0G)");
-    assert_eq!(status.snapshot(0)["laneBurstReserve"], json!({"full": 16 * G, "kept": 16 * G}));
+    assert_eq!(status.snapshot(0)["laneBurstReserve"], json!({"subject": "agent/node.elm", "full": 16 * G, "kept": 16 * G}));
     // A burst may use it: the run's 24G is granted.
     let now = u64::try_from(now_ms() / 1000).unwrap();
     status.burst_hold("agent/node.alder", Capacity { cores: 8, memory: 24 * G }, "st-test", now);
@@ -241,7 +241,7 @@ agent "idle" { workspace "/tmp"; command "true"; capacity cores=1 memory="2G" }
 agent "seat" { workspace "/tmp"; command "true"; capacity cores=4 memory="8G" }"#, "seats");
     let seat = store.desired_subjects().unwrap().into_iter().find(|desired| desired.subject == "agent/node.seat").unwrap();
     assert!(reconciler.admit_seat_start(&seat, seat.member.as_ref().unwrap(), None).unwrap());
-    assert_eq!(reconciler.seat_admission.status.snapshot(0)["laneBurstReserve"], json!({"full": 16 * G, "kept": 16 * G}));
+    assert_eq!(reconciler.seat_admission.status.snapshot(0)["laneBurstReserve"], json!({"subject": "agent/node.seat", "full": 16 * G, "kept": 16 * G}));
 }
 
 #[test]

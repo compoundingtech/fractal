@@ -80,6 +80,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         let room = host.room;
         let reserve = self.burst_reserve(&subject.subject, lane)?;
+        status.state().burst_reserve = Some((subject.subject.clone(), reserve.full, reserve.kept));
         let out_of_line = if lane.cores > room.cores || lane.memory > room.memory {
             Some(format!("lane {} can never fit on this host, which gives lanes {}", show_lane(lane), show_lane(room)))
         } else if lane.memory > room.memory.saturating_sub(reserve.full) {
@@ -154,9 +155,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         let full = burst_lane.memory.saturating_sub(smallest);
-        let reserve = BurstReserve { full, kept: full.saturating_sub(burst_raise) };
-        self.seat_admission.status.state().burst_reserve = Some((reserve.full, reserve.kept));
-        Ok(reserve)
+        Ok(BurstReserve { full, kept: full.saturating_sub(burst_raise) })
     }
 
     /// The memory of this host's other laned seats that run, or were admitted to start and are not

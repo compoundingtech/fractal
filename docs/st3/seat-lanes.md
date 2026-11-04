@@ -315,7 +315,8 @@ for it as it waits for room, saying so, rather than answering: the run that aske
 The live lane is the largest, in each dimension, of the seat's own lane, each step it holds and its
 burst. A burst fits as a step's raise does: the raised lane must fit the host's room for lanes
 beside the other lanes and what seats outside lanes hold, the room admission keeps from starts for a
-burst included (`st doctor --performance` shows it on its `LANE BURSTS` line). Bursts wait in the order they asked, so a
+burst included (`st doctor --performance` shows it on its `LANE BURSTS` line, as admission last judged
+it for a seat's start, naming that seat). Bursts wait in the order they asked, so a
 small one does not pass the first in line; one larger than the host can ever give is refused at
 once. A seat that has waited 15 minutes or more to start, first in line for room, is served before
 more bursts: a new burst waits behind it, so a stream of bursts cannot keep it from starting. It
