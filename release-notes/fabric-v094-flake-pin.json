@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Pin the Fabric flake input from v0.9.3 to v0.9.4 (19e7f8964ce8305aeb8c200fb717967aa03f738f) for packages.fabric-pairing only; no Fractal runtime change",
+  "summary": "Pin the Fabric flake input from 1e6e93e9 (package version 0.9.2) to v0.9.4 (19e7f8964ce8305aeb8c200fb717967aa03f738f) for packages.fabric-pairing only; no Fractal runtime change",
   "replay": {
     "status": "none",
     "detail": "No claim replay or recovery behavior changes in Fractal. This change only selects the external Fabric package revision."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The fabric flake input and lock move from Fabric v0.9.3 to v0.9.4 at 19e7f8964ce8305aeb8c200fb717967aa03f738f. Its only consumer is packages.fabric-pairing; Fractal runtime code, Cargo dependencies and deployed services are unchanged."
+    "detail": "The fabric flake input and lock move from 1e6e93e9a662a40749f91d63eeecc4e98de114bd (package version 0.9.2) to Fabric v0.9.4 at 19e7f8964ce8305aeb8c200fb717967aa03f738f. Production hosts currently run Fabric v0.9.3 (285bd482), a separate deployment baseline rather than the previous flake pin. The input's only consumer is packages.fabric-pairing; Fractal runtime code, Cargo dependencies and deployed services are unchanged."
   },
   "downtime": {
     "status": "none",
