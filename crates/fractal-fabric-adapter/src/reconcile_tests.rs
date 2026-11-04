@@ -1134,12 +1134,46 @@ fn own_metadata_and_noncurrent_members_never_authorize_overlap_or_receipts() {
 }
 
 
+fn serve_capability(root: &Path, capability: &'static str, replies: Vec<Value>)
+    -> (PathBuf, tokio::task::JoinHandle<Vec<Value>>) {
+    let socket = root.join("control.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for mut reply in replies {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut line = String::new();
+            BufReader::new(&mut stream).read_line(&mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            if request["request"]["operations"].as_array().is_some_and(|ops|
+                ops.iter().any(|op| op["op"] == "set_expiry")) {
+                reply = refusal("unsupported_operation");
+            }
+            let probing = request["type"] == "reachability_status";
+            requests.push(request);
+            if probing && capability != "old" {
+                match capability {
+                    "timeout" => tokio::time::sleep(CONTROL_TIMEOUT + Duration::from_millis(20)).await,
+                    "malformed" => stream.write_all(b"not-json\n").await.unwrap(),
+                    "truncated" => stream.write_all(b"{\"type\":\"reachability_status\"").await.unwrap(),
+                    "closed" => (),
+                    _ => unreachable!(),
+                }
+                continue;
+            }
+            let mut bytes = serde_json::to_vec(&reply).unwrap();
+            bytes.push(b'\n');
+            stream.write_all(&bytes).await.unwrap();
+        }
+        requests
+    });
+    (socket, server)
+}
+
 #[tokio::test]
 async fn fabric_without_expiry_blocks_rekey_but_applies_unrelated_changes() {
     for capability in ["old", "timeout", "malformed", "truncated", "closed"] {
         let root = tempfile::tempdir().unwrap();
-        let socket = root.path().join("control.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
         let permanent = |node| peer(node, OWNER, &["st3-client-v0", "st3/fleet/test-fleet"]);
         let replies = vec![
             json!({"type":"reachability_status","version":"0.9.3+old"}),
@@ -1147,35 +1181,7 @@ async fn fabric_without_expiry_blocks_rekey_but_applies_unrelated_changes() {
             mutation(vec![], "complete"),
             list(vec![permanent("peer-node"), permanent("new-node")], 8),
         ];
-        let server = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for mut reply in replies {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut line = String::new();
-                BufReader::new(&mut stream).read_line(&mut line).await.unwrap();
-                let request: Value = serde_json::from_str(&line).unwrap();
-                if request["request"]["operations"].as_array().is_some_and(|ops|
-                    ops.iter().any(|op| op["op"] == "set_expiry")) {
-                    reply = refusal("unsupported_operation");
-                }
-                let probing = request["type"] == "reachability_status";
-                requests.push(request);
-                if probing && capability != "old" {
-                    match capability {
-                        "timeout" => tokio::time::sleep(CONTROL_TIMEOUT + Duration::from_millis(20)).await,
-                        "malformed" => stream.write_all(b"not-json\n").await.unwrap(),
-                        "truncated" => stream.write_all(b"{\"type\":\"reachability_status\"").await.unwrap(),
-                        "closed" => (),
-                        _ => unreachable!(),
-                    }
-                    continue;
-                }
-                let mut bytes = serde_json::to_vec(&reply).unwrap();
-                bytes.push(b'\n');
-                stream.write_all(&bytes).await.unwrap();
-            }
-            requests
-        });
+        let (socket, server) = serve_capability(root.path(), capability, replies);
         let mut view = rotation_view("prepared", (now_ms() / 1000) as u64 + 300);
         view.members.push(member("new", "new-key", "new-node", "current"));
         let status = reconcile(root.path(), &socket, FLEET, "own-key", &view, &BTreeSet::new()).await.unwrap();
@@ -1189,4 +1195,51 @@ async fn fabric_without_expiry_blocks_rekey_but_applies_unrelated_changes() {
         assert!(operations.iter().any(|op| op["op"] == "add_peer" && op["node_id"] == "new-node"));
         assert!(operations.iter().all(|op| op["op"] != "set_expiry" && op["node_id"] != "next-node"));
     }
+}
+
+#[tokio::test]
+async fn committed_cutover_survives_unknown_capability_without_any_policy_write() {
+    let deadline = (now_ms() / 1000) as u64 + 300;
+    for capability in ["timeout", "malformed"] {
+        for owner in [OWNER.to_owned(), format!("{RENAMED_OWNER_PREFIX}{FLEET}")] {
+            let root = tempfile::tempdir().unwrap();
+            let services = if owner == OWNER { grants(FLEET) } else {
+                BTreeSet::from([format!("{RENAMED_OWNER_PREFIX}{FLEET}"), "fractal-client-v0".into()])
+            };
+            let services = services.iter().map(String::as_str).collect::<Vec<_>>();
+            let mut old = peer("peer-node", &owner, &services);
+            old["trust_sources"][0]["expires_at"] = json!(deadline);
+            let installed = vec![old, peer("next-node", &owner, &services)];
+            let (socket, server) = serve_capability(root.path(), capability, vec![
+                json!({"type":"reachability_status","version":"0.9.4"}), list(installed, 7),
+            ]);
+            let status = reconcile(root.path(), &socket, FLEET, "own-key",
+                &rotation_view("committed", deadline), &BTreeSet::new()).await.unwrap();
+            assert_eq!(status.state, "rekey_blocked");
+            assert!(status.message.unwrap().contains("fabric_capability_unknown"));
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0]["type"], "reachability_status");
+            assert_eq!(requests[1]["request"]["operation"], "list",
+                "no expiry write, promotion, revocation or new grant may alter the installed cutover");
+        }
+    }
+}
+
+#[tokio::test]
+async fn blocked_committed_cutover_never_replays_a_pending_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let policy = DesiredPolicy::from([("next-node".into(), grants(FLEET))]);
+    let request = json!({"operation":"batch","owner":OWNER,"request_id":"replace-next",
+        "operations":[{"op":"remove_peer","node_id":"next-node"},
+            {"op":"add_peer","node_id":"next-node"},
+            {"op":"set_grants","node_id":"next-node","grants":grants(FLEET)}]});
+    let mut journal = Journal { pending: Some(Pending {
+        request, created_unix_ms: now_ms(),
+    }), ..Journal::default() };
+    let (socket, server) = serve(root.path(), vec![Some(mutation(vec![], "complete"))]);
+    resolve_pending(root.path(), &socket, &mut journal, &policy, &Expiries::new(),
+        &BTreeSet::from(["next-node".into(), "peer-node".into()])).await.unwrap();
+    assert_eq!(server.await.unwrap()[0]["request"]["operation"], "cancellation");
+    assert!(journal.pending.is_none());
 }
