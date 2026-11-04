@@ -239,7 +239,7 @@ fn a_mailbox_page_lists_a_recipient_s_aliases_in_both_halves_as_the_views_did() 
 
 /// A subject the graph holds as a `message.sent` is the graph's: no stream page, mailbox or
 /// conversation lists the stream item under it, and a page whose remaining items are all the
-/// graph's ends there rather than with a cursor to nothing (review items 5 and 6).
+/// graph's ends there rather than with a cursor to nothing.
 #[test]
 fn a_stream_item_the_graph_also_holds_is_listed_once_as_the_graphs() {
     let (_root, graph, subjects) = store(9, 1000);
@@ -281,7 +281,7 @@ fn a_stream_item_the_graph_also_holds_is_listed_once_as_the_graphs() {
 
 /// A page whose graph rows all drop out after its query's LIMIT (the open check runs on the
 /// views) is no empty page with a cursor: the stream fills what the dropped rows left, and a page
-/// of graph rows that all drop out is read on from its cursor (review item 6). The graph's rows
+/// of graph rows that all drop out is read on from its cursor. The graph's rows
 /// here read closed by their own fields, with no close the query's filter finds.
 #[test]
 fn graph_rows_that_drop_out_after_the_limit_leave_no_empty_page_with_a_cursor() {

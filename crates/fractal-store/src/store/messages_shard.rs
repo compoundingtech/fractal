@@ -369,7 +369,7 @@ fn record_lifecycle_checked(
         return Err(St3Error::new("missing-message", format!("no stream item `{subject}`")));
     };
     // The step is decided and recorded under the shard's writer, in one transaction, so two
-    // steps at once can't both pass a check made before either was recorded (review item 8).
+    // steps at once can't both pass a check made before either was recorded.
     let mut writer = shard.connection.write();
     let transaction = writer
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -495,9 +495,9 @@ pub fn advertising_hosts(
     }
     hosts.remove(&graph.graph.origin);
     let connection = graph.graph.readers.get();
-    // A new start is what changes a member's answer, so the newest one, with the members asked,
-    // keys the answer kept from the last read: the shard's peers poll every 5–30 s (review
-    // item 10).
+    // A member's answer changes only with a new start: a start is never rewritten or trimmed,
+    // and one that replicates in later is a new row. So the newest start, with the members
+    // asked, keys the answer kept from the last read; the shard's peers poll every 5–30 s.
     let newest_start: i64 = connection
         .prepare_cached("SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE kind='daemon.started'")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h98a9e19b2202 owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
@@ -947,8 +947,8 @@ mod tests {
     }
 
     /// The answer is kept between reads while no member starts and the members asked stay the
-    /// same, so the shard's peer poll doesn't read every member's starts each time (review item
-    /// 10). A start, or another member asked about, reads them again.
+    /// same, so the shard's peer poll doesn't read every member's starts each time. A start, or
+    /// another member asked about, reads them again.
     #[test]
     fn the_advertising_answer_is_kept_until_a_member_starts() {
         let alder = Store::open_memory("alder").unwrap();
@@ -991,57 +991,55 @@ mod tests {
         assert_eq!(advertising_hosts(&alder, &more).unwrap(), birch_only, "read again after a start");
     }
 
-    /// A stream item's lifecycle step is decided and recorded under the shard's writer, in one
-    /// transaction (review item 8). Steps raced from many threads are each recorded exactly once,
-    /// in order, and none is refused: a repeat settles to what another thread recorded.
+    /// A stream item's lifecycle step is decided under the shard's writer, against what the
+    /// writer has recorded, and recorded in the same transaction. A close tried while another
+    /// thread holds the writer with the read recorded waits for it and sees the read, so it is
+    /// recorded; decided from a reader before the read committed, it would have been refused as a
+    /// close of delivered mail.
     #[test]
-    fn lifecycle_steps_raced_from_many_threads_are_each_recorded_once() {
+    fn a_lifecycle_step_is_decided_against_what_the_writer_holds() {
         let root = tempfile::tempdir().unwrap();
         let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
         let shard = open(&graph, root.path()).unwrap();
-        let subjects = (0..24).map(|index| format!("message/{:016x}", 0xd000 + index)).collect::<Vec<_>>();
-        for subject in &subjects {
-            shard
-                .append_claim(&ClaimInput {
-                    subject: subject.clone(),
-                    kind: "message.sent".into(),
-                    actor: Some("agent/birch".into()),
-                    fields: serde_json::from_value(json!({
-                        "from": "agent/birch", "to": "agent/cedar", "content": "raced", "status": "sent"
-                    }))
-                    .unwrap(),
-                    evidence: Vec::new(),
-                    expected_subject: None,
-                    idempotency_key: None,
-                })
-                .unwrap();
-        }
-        let steps = [("message.delivered", "delivered"), ("message.read", "read"), ("message.closed", "closed")];
-        let recorded = std::thread::scope(|scope| {
-            let runs = (0..8)
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut recorded = Vec::new();
-                        for subject in &subjects {
-                            for (kind, status) in steps {
-                                let fields = std::collections::BTreeMap::from([("status".to_owned(), json!(status))]);
-                                if record_lifecycle(&graph, subject, kind, Some("agent/cedar"), &fields).unwrap() {
-                                    recorded.push((subject.clone(), kind));
-                                }
-                            }
-                        }
-                        recorded
-                    })
-                })
-                .collect::<Vec<_>>();
-            runs.into_iter().flat_map(|run| run.join().unwrap()).collect::<Vec<_>>()
+        let subject = "message/000000000000d001";
+        shard
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/birch".into()),
+                fields: serde_json::from_value(json!({
+                    "from": "agent/birch", "to": "agent/cedar", "content": "held", "status": "sent"
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        let status = |status: &str| std::collections::BTreeMap::from([("status".to_owned(), json!(status))]);
+        assert!(record_lifecycle(&graph, subject, "message.delivered", Some("agent/cedar"), &status("delivered")).unwrap());
+        let (held, holding) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(|| {
+                let mut writer = shard.connection.write();
+                let transaction = writer.transaction().unwrap();
+                transaction
+                    .execute(
+                        "INSERT INTO stream_lifecycle(subject, kind, actor, fields, recorded_at_unix_ms)
+                         VALUES (?1, 'message.read', 'agent/cedar', '{\"status\":\"read\"}', 1)",
+                        [subject],
+                    )
+                    .unwrap();
+                held.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                transaction.commit().unwrap();
+            });
+            holding.recv().unwrap();
+            let closed = record_lifecycle(&graph, subject, "message.closed", Some("agent/cedar"), &status("closed"));
+            holder.join().unwrap();
+            assert!(closed.unwrap(), "the close waited for the read and was recorded");
         });
-        assert_eq!(recorded.len(), subjects.len() * steps.len(), "each step recorded by exactly one thread");
-        for subject in &subjects {
-            let kinds = lifecycle_records(&shard, subject).unwrap().into_iter().map(|(kind, _)| kind).collect::<Vec<_>>();
-            assert_eq!(kinds, ["message.delivered", "message.read", "message.closed"], "{subject}");
-            assert_eq!(message_view(&graph, subject).unwrap().unwrap().status, "closed");
-        }
+        assert_eq!(message_view(&graph, subject).unwrap().unwrap().status, "closed");
     }
 
     /// A page lists the graph's messages to a recipient, then its stream items, and a stream

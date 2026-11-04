@@ -238,7 +238,7 @@ struct MessagesPageCursor {
     /// Where the next page starts in the graph. A cursor past the graph names its position in
     /// `stream_after` instead and leaves this out: every earlier build needs it, so it refuses
     /// such a cursor as invalid, and one before the messages stream doesn't read a stream position
-    /// as a graph index and end the listing early (review item 7).
+    /// as a graph index and end the listing early.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     after: Option<u64>,
     /// Where the next page starts in the messages stream, at or past `STREAM_INDEX_BASE`.
@@ -712,7 +712,7 @@ mod page_cursor_tests {
 
     /// A cursor past the graph names its stream position apart, so an earlier build, whose cursor
     /// needs `after`, refuses it rather than misread it; this build reads both,
-    /// and a member without a shard answers a stream cursor with a cursor-gap (review item 7).
+    /// and a member without a shard answers a stream cursor with a cursor-gap.
     #[test]
     fn a_stream_cursor_is_refused_by_an_older_build_and_a_gap_without_a_shard() {
         /// The cursor as an earlier build reads it (v0.3.25 and before).

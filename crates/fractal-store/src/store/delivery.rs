@@ -306,7 +306,7 @@ impl Store {
     /// [`Self::messages_page_once`], read on past a page that lists nothing yet has a cursor. The
     /// recipient and closed checks run on the query's rows, after its LIMIT, so every row of a
     /// page can drop out; a page is then read again from its cursor, so a page is empty only at
-    /// the end (review item 6).
+    /// the end.
     #[allow(clippy::too_many_arguments)]
     fn messages_page_from(
         &self,
