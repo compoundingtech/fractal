@@ -1,9 +1,9 @@
 //! Domain ownership is discovered once, or restored from the write-ahead journal.
-use super::*;
+use anyhow::Result;
 use std::process::Output;
 
 #[derive(Debug)]
-pub(super) enum DomainError {
+pub enum DomainError {
     Inspection { domain: String, detail: String },
     LegacyDaemonNotLoaded { domains: Vec<String> },
     AmbiguousLegacyDaemonDomain { jobs: Vec<String> },
@@ -25,8 +25,8 @@ impl std::fmt::Display for DomainError {
 }
 impl std::error::Error for DomainError {}
 #[derive(Debug)]
-pub(super) enum Probe { Available(Vec<String>), Unavailable }
-pub(super) fn probe(domain: &str, output: Output) -> Result<Probe> {
+pub enum Probe { Available(Vec<String>), Unavailable }
+pub fn probe(domain: &str, output: Output) -> Result<Probe> {
     let text = String::from_utf8_lossy(&output.stdout);
     let detail = String::from_utf8_lossy(&output.stderr);
     if output.status.code() == Some(125) && detail.trim() == "Could not print domain: 125: Domain does not support specified action" {
@@ -49,7 +49,7 @@ pub(super) fn probe(domain: &str, output: Output) -> Result<Probe> {
     Err(failure().into())
 }
 
-pub(super) fn resolve(uid: u32, recorded: Option<&str>, recovery: bool, mut inspect: impl FnMut(&str) -> Result<Probe>) -> Result<String> {
+pub fn resolve(uid: u32, recorded: Option<&str>, recovery: bool, mut inspect: impl FnMut(&str) -> Result<Probe>) -> Result<String> {
     let domains = [format!("gui/{uid}"), format!("user/{uid}")];
     if recovery {
         let recorded = recorded.ok_or(DomainError::MissingJournalField)?;
