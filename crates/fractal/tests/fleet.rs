@@ -6581,6 +6581,9 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     let without_build = |records: &[Value]| {
         let mut header = records[0].clone();
         header["data"].as_object_mut().unwrap().remove("source_build");
+        // This build knows claim kinds the release does not (fleet.shard-bounds), so the registry
+        // digest differs; a restore compares what it decides only when the registries match.
+        header["data"].as_object_mut().unwrap().remove("registry_digest");
         // The end record's hash covers the header, so only its count can match.
         let end = &records[records.len() - 1];
         assert_eq!(end["record"], "end", "{end}");
