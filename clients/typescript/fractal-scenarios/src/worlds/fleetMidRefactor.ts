@@ -5,6 +5,7 @@ import type { CastAgent, CastPerson } from '../kit/cast.ts'
 import { child, type FactoryContext } from '../kit/context.ts'
 import { agent } from '../kit/factories/agent.ts'
 import { diff } from '../kit/factories/diff.ts'
+import { fleetObjectives } from '../kit/factories/objectives.ts'
 import { terminalRun } from '../kit/factories/terminalRun.ts'
 import { terminalRecord } from '../kit/factories/terminalRecord.ts'
 import { toolCall } from '../kit/factories/toolCall.ts'
@@ -21,7 +22,7 @@ const synthetic = (seed: number) => ({ _tag: 'synthetic' as const, seed })
 export const SEED = 1
 
 /** Four agents rename an API across a monorepo: blocked, waiting for review, streaming diffs, idle. */
-export const syntheticFleetMidRefactor: WorldDefinition = {
+export const syntheticFleetMidRefactor = {
   id: 'fleet-mid-refactor',
   title: 'Fleet mid-refactor',
   narrative:
@@ -47,7 +48,7 @@ export const syntheticFleetMidRefactor: WorldDefinition = {
     ],
   },
   slices: (ctx) => build(ctx),
-}
+} satisfies WorldDefinition
 
 const build = (ctx: FactoryContext): Slices => {
   const [builder, reviewer, migrator, docs] = ctx.cast.agents as [CastAgent, CastAgent, CastAgent, CastAgent]
@@ -315,7 +316,8 @@ const build = (ctx: FactoryContext): Slices => {
     timeline: [],
   }
 
-  return { roster, details, attention, conversation, terminal, sync: { ...liveSync(ctx, { conversation }), variant: 'default', source } }
+  const objectives: Slice<'objectives'> = { kind: 'objectives', variant: 'default', source, decode: 'strict', loading: false, state: fleetObjectives(ctx.cast.people), timeline: [] }
+  return { roster, details, attention, conversation, terminal, sync: { ...liveSync(ctx, { conversation }), variant: 'default', source }, objectives }
 }
 
 
