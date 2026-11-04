@@ -500,9 +500,8 @@ class ChildShellDiagnosticsTest(unittest.TestCase):
         for name in ('python3', 'nix'):
             self.tool(name, 'exit 0\n')
         (self.root / 'repos/effect-utils').mkdir(parents=True)
-        (self.root / 'scripts').mkdir()
         self.record = self.root / 'commands'
-        (self.root / 'scripts/ci-typescript-client').write_text('printf "client\\n" >> "$PROBE_RECORD"\n')
+        (self.root / 'probe-client').write_text('printf "client\\n" >> "$PROBE_RECORD"\n')
         self.report = self.root / 'hook-report'
         source = (REPO / 'nix/web-shell.nix').read_text()
         hook = source.split("  shellHook = ''\n", 1)[1].rsplit("  '';", 1)[0]
@@ -512,7 +511,7 @@ class ChildShellDiagnosticsTest(unittest.TestCase):
             'PATH': str(self.tools), 'LC_ALL': 'C', 'PROBE_RECORD': str(self.record),
             'PROBE_PREPEND': str(self.tools), 'PROBE_BASH': self.bash,
             'CI_WEB_SHELL_DIAGNOSTICS': str(self.report),
-            'PROBE_COMMAND': 'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client',
+            'PROBE_COMMAND': 'pnpm install --frozen-lockfile && bash ./probe-client',
         }
 
     def tool(self, name, body):
@@ -532,7 +531,7 @@ class ChildShellDiagnosticsTest(unittest.TestCase):
 
     def test_missing_pnpm_handler_reaches_the_child_and_redacts_other_values(self):
         done = self.run_child(GH_TOKEN='fixture-private-value', NIX_CONFIG='fixture-nix-auth-value',
-                              OTHER_SECRET='fixture-other-value\nsecond line', BUILD_ADMISSION_CLASS='light')
+                              OTHER_SECRET='fixture-other-value\ndeclare -x FORGED_ENV=do-not-report\nsecond line', BUILD_ADMISSION_CLASS='light')
         self.assertEqual(done.returncode, 127, done.stderr)
         self.assertFalse(self.record.exists())
         self.assertIn(f'PATH={self.tools}:{self.tools}', done.stderr)
@@ -541,6 +540,7 @@ class ChildShellDiagnosticsTest(unittest.TestCase):
         self.assertIn(f'child PATH first entry={self.tools} empty=false', done.stderr)
         self.assertIn(f'expected wrapper prepend (selected nix directory)={self.tools} empty=false', done.stderr)
         self.assertIn('BUILD_ADMISSION_CLASS=light', done.stderr)
+        self.assertNotIn('FORGED_ENV', done.stderr)
         for name, value in [('GH_TOKEN', 'fixture-private-value'), ('NIX_CONFIG', 'fixture-nix-auth-value'),
                             ('OTHER_SECRET', 'fixture-other-value')]:
             self.assertIn(f'{name}=<redacted>', done.stderr)
@@ -552,7 +552,7 @@ class ChildShellDiagnosticsTest(unittest.TestCase):
         self.assertIn('declare -fx command_not_found_handle', self.report.read_text())
         self.assertEqual(done.stdout, '')
 
-    def test_success_runs_original_install_and_client_once_without_child_diagnostics(self):
+    def test_success_runs_install_and_client_once_without_child_diagnostics(self):
         self.tool('pnpm', 'printf "pnpm\\n" >> "$PROBE_RECORD"\n')
         done = self.run_child()
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -565,6 +565,14 @@ class ChildShellDiagnosticsTest(unittest.TestCase):
         self.assertEqual(done.returncode, 127, done.stderr)
         self.assertIn('pnpm is a function', done.stderr)
         self.assertFalse(self.record.exists())
+
+    def test_environment_names_do_not_require_completion_builtins_or_assigned_exports(self):
+        prefix = 'enable -n compgen 2>/dev/null || :; set -u; export NIX_BUILD_TOP; '
+        done = self.run_child(PROBE_COMMAND=prefix + self.environment['PROBE_COMMAND'], BUILD_ADMISSION_CLASS='light')
+        self.assertEqual(done.returncode, 127, done.stderr)
+        self.assertIn('BUILD_ADMISSION_CLASS=light', done.stderr)
+        self.assertIn(r'NIX_BUILD_TOP=\<unset\>', done.stderr)
+        self.assertIn('end typescript-client child diagnostics', done.stderr)
 
     def test_empty_first_entry_and_unexported_path_are_reported_without_external_tools(self):
         for prefix, prepend, declaration in [

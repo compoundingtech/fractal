@@ -96,9 +96,13 @@ webPkgs.mkShell {
           printf 'wrapper argument was shifted before exec; the expected prepend is not an observed shim argument\n'
           hash -r || :
           type -a pnpm || :
-          # Bash builtins also work when the failing PATH has no env, sort or Python.
+          # The noninteractive Nix Bash has no compgen; export and read need no PATH tools.
           _fractal_names=()
-          mapfile -t _fractal_names < <(compgen -e) || :
+          while IFS= read -r _fractal_declaration; do
+            if [[ $_fractal_declaration =~ ^declare\ -[^[:space:]]*x[^[:space:]]*\ ([a-zA-Z_][a-zA-Z0-9_]*)(=|$) ]]; then
+              _fractal_names+=("''${BASH_REMATCH[1]}")
+            fi
+          done < <(export -p)
           for ((_fractal_i=1; _fractal_i<''${#_fractal_names[@]}; _fractal_i++)); do
             _fractal_key=''${_fractal_names[_fractal_i]}
             _fractal_j=$_fractal_i
@@ -112,7 +116,7 @@ webPkgs.mkShell {
           for _fractal_name in "''${_fractal_names[@]}"; do
             case "$_fractal_name" in
               PATH|BASH_ENV|ENV|SHELL|SHELLOPTS|BASHOPTS|IN_NIX_SHELL|NIX_BUILD_TOP|NIX_GCROOT|NIX_PROFILES|NIX_SSL_CERT_FILE|BUILD_ADMISSION|BUILD_ADMISSION_CLASS|BUILD_ADMISSION_HELD|BUILD_ADMISSION_BIN|BUILD_ADMISSION_STATE|BUILD_ADMISSION_CONFIG|BUILDS_SLICE_ACTIVE|ADMISSION_RUN|CI_WEB_EXPECTED_NIX_DIRECTORY)
-                printf '%s=%q\n' "$_fractal_name" "''${!_fractal_name}" ;;
+                printf '%s=%q\n' "$_fractal_name" "''${!_fractal_name-<unset>}" ;;
               *) printf '%s=<redacted>\n' "$_fractal_name" ;;
             esac
           done
