@@ -1,5 +1,5 @@
 //! Process-wide I/O includes concurrent daemon work, not just verification. Linux exposes
-//! physical I/O in /proc/self/io (cache hits are excluded); other platforms report null.
+//! kernel-accounted storage I/O in /proc/self/io; other platforms report null.
 use std::{cell::RefCell, sync::Arc, time::Instant};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -83,5 +83,29 @@ impl Drop for Phase {
             "d3_iterations": attempt.d3_iterations,
         }));
         attempt.phases.push(self.result.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn attempts_isolate_fixpoint_counts_and_retain_partial_phases() {
+        let latest = Latest::default();
+        {
+            let _scope = Scope::start(&latest, "first");
+            let _phase = Phase::start("plan", "checkpoint.plan");
+            plan_iteration();
+            plan_iteration();
+        }
+        let first = latest.lock().as_ref().unwrap().clone();
+        assert_eq!(first.lock().d3_iterations, 2);
+        assert_eq!(first.lock().phases.len(), 1);
+        {
+            let _scope = Scope::start(&latest, "second");
+            assert_eq!(latest.lock().as_ref().unwrap().lock().d3_iterations, 0);
+        }
+        plan_iteration();
+        assert_eq!(first.lock().d3_iterations, 2);
     }
 }
