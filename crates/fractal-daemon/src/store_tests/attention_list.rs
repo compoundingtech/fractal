@@ -721,7 +721,7 @@ fn human_questions_use_principals_and_invalidate_on_republication() {
         for configured in [true, false] {
             let store = Store::open_memory("node").unwrap();
             if configured {
-                store.question_principal_default.set("person/fallback".into()).unwrap();
+                store.question_principal_default.set("person/config-operator".into()).unwrap();
             }
             let workspace = tempfile::tempdir().unwrap();
             let publish = |principal: Option<&str>, key: &str| {
@@ -749,7 +749,7 @@ fn human_questions_use_principals_and_invalidate_on_republication() {
             store.start_attention_list_refresher().unwrap();
             let before = refresh_and_check(&store);
             let expected = if declared { Some("person/operator") }
-                else if configured { Some("person/fallback") } else { None };
+                else if configured { Some("person/config-operator") } else { None };
             let items = store.harness_prompt_attention_items(None, now_ms()).unwrap();
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].person, expected.unwrap_or(""));
@@ -759,9 +759,9 @@ fn human_questions_use_principals_and_invalidate_on_republication() {
                 assert!(items[0].answers.is_empty());
                 assert!(before.rows.iter().any(|row| row["attention_kind"] == "harness-prompt"));
             }
-            publish(Some("person/replacement"), "replacement");
+            publish(Some("person/operator-two"), "replacement");
             let after = refresh_and_check(&store);
-            assert!(after.rows.iter().any(|row| row["person_id"] == "person/replacement"
+            assert!(after.rows.iter().any(|row| row["person_id"] == "person/operator-two"
                 && row["attention_kind"] == "harness-prompt"));
             assert!(!after.rows.iter().any(|row| row["person_id"] == expected.unwrap_or("")));
             // An old incarnation must not acquire the new principal's attention.
