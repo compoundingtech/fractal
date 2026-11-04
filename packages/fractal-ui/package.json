@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/kit.tsx",
+    "./lazy-chunk": "./src/lazy-chunk.ts",
     "./tokens.css": "./src/tokens.css",
     "./assistant-ui": "./src/assistant-ui/index.ts",
     "./assistant-ui/shell": "./src/assistant-ui/shell.ts",
