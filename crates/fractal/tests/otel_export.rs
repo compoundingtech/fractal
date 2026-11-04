@@ -2720,7 +2720,9 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
     };
     // Deliberately old read/closed mail must affect neither count nor oldest age.
     let mut transitions = Vec::new();
+    // Write oldest first: accepted time never moves behind this writer's newest batch.
     for (id, recipient, lifecycle, silent, seconds) in [
+        ("stale-pending", BUSY, "sent", false, 90_000),
         ("read", BUSY, "read", false, 600),
         ("closed", BUSY, "closed", false, 600),
         ("remote", REMOTE, "sent", false, 600),
@@ -2791,8 +2793,9 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
                         .map(|kv: &opentelemetry::KeyValue| (kv.key.as_str(), kv.value.to_string()))
                         .collect::<BTreeMap<_, _>>();
                     assert_eq!(attributes.keys().copied().collect::<BTreeSet<_>>(),
-                        BTreeSet::from(["st.agent", "st.mailbox.state"]));
-                    (attributes["st.agent"].clone(), attributes["st.mailbox.state"].clone())
+                        BTreeSet::from(["st.agent", "st.mailbox.state", "st.mailbox.age_band"]));
+                    (attributes["st.agent"].clone(), attributes["st.mailbox.state"].clone(),
+                        attributes["st.mailbox.age_band"].clone())
                 };
                 match metric.name() {
                     "st.mailbox.unread" => {
@@ -2819,29 +2822,31 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
         (counts, ages)
     };
     let (counts, ages) = collect();
-    let expected = BTreeMap::from([
-        ((BUSY.to_owned(), "pending".into()), 2),
-        ((BUSY.to_owned(), "delivered".into()), 2),
-        ((BUSY.to_owned(), "held".into()), 1),
-        ((EMPTY.to_owned(), "pending".into()), 0),
-        ((EMPTY.to_owned(), "delivered".into()), 0),
-        ((EMPTY.to_owned(), "held".into()), 0),
-    ]);
-    assert_eq!(counts, expected, "exact agent set and mandatory zero states");
+    let expected = [BUSY, EMPTY].into_iter().flat_map(|agent| {
+        [("pending", 2), ("delivered", 2), ("held", 1)].into_iter().flat_map(move |(state, count)| {
+            ["recent", "stale"].into_iter().map(move |band| {
+                let count = if agent == EMPTY { 0 } else if band == "recent" { count }
+                    else { u64::from(state == "pending") };
+                ((agent.to_owned(), state.to_owned(), band.to_owned()), count)
+            })
+        })
+    }).collect::<BTreeMap<_, _>>();
+    assert_eq!(counts.len(), 12, "six series per agent for each gauge");
+    assert_eq!(counts, expected, "exact agent set and mandatory zero state/band pairs");
     assert_eq!(ages.keys().collect::<Vec<_>>(), expected.keys().collect::<Vec<_>>());
     let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
         .saturating_sub(now) as f64 / 1000.0;
-    for ((agent, state), age) in &ages {
-        if agent == EMPTY {
+    for ((agent, state, band), age) in &ages {
+        if expected[&(agent.clone(), state.clone(), band.clone())] == 0 {
             assert_eq!(*age, 0.0);
         } else {
-            let oldest = match state.as_str() {
+            let oldest = if band == "stale" { 90_000.0 } else { match state.as_str() {
                 "pending" => 120.0,
                 "delivered" => 90.0,
                 "held" => 60.0,
                 _ => unreachable!(),
-            };
+            }};
             assert!(*age >= oldest && *age <= oldest + elapsed + 1.0,
                 "age must use oldest accepted sent timestamp: {state}={age}");
         }
@@ -2855,21 +2860,20 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
     assert_eq!(collect().0, expected);
     *cache.write().unwrap() = mailbox_metrics::summarize(&store).unwrap();
     let (partial_counts, partial_ages) = collect();
-    let partial_keys = BTreeSet::from([
-        (BUSY.to_owned(), "pending".to_owned()),
-        (BUSY.to_owned(), "delivered".to_owned()),
-        (EMPTY.to_owned(), "pending".to_owned()),
-        (EMPTY.to_owned(), "delivered".to_owned()),
-    ]);
+    let partial_keys = expected.keys().filter(|(_, state, _)| state != "held")
+        .cloned().collect::<BTreeSet<_>>();
     assert_eq!(partial_counts.keys().cloned().collect::<BTreeSet<_>>(), partial_keys);
     assert_eq!(partial_ages.keys().cloned().collect::<BTreeSet<_>>(), partial_keys);
-    assert!(partial_counts[&(BUSY.into(), "pending".into())] >= 2);
-    assert!(partial_counts[&(BUSY.into(), "delivered".into())] >= 2);
-    assert_eq!(partial_counts.values().sum::<u64>(), 5,
+    assert_eq!(partial_counts.len(), 8, "only the two held bands per agent are omitted");
+    assert!(partial_counts[&(BUSY.into(), "pending".into(), "recent".into())] >= 2);
+    assert!(partial_counts[&(BUSY.into(), "delivered".into(), "recent".into())] >= 2);
+    assert_eq!(partial_counts.values().sum::<u64>(), 6,
         "incomplete held classification must not discard unread mail");
-    assert_eq!(partial_counts[&(EMPTY.into(), "pending".into())], 0);
-    assert_eq!(partial_counts[&(EMPTY.into(), "delivered".into())], 0);
-    assert_eq!(partial_ages[&(EMPTY.into(), "pending".into())], 0.0);
-    assert_eq!(partial_ages[&(EMPTY.into(), "delivered".into())], 0.0);
+    for band in ["recent", "stale"] {
+        for state in ["pending", "delivered"] {
+            assert_eq!(partial_counts[&(EMPTY.into(), state.into(), band.into())], 0);
+            assert_eq!(partial_ages[&(EMPTY.into(), state.into(), band.into())], 0.0);
+        }
+    }
     provider.shutdown().unwrap();
 }

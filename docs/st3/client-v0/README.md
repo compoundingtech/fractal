@@ -18,6 +18,10 @@ client files conflict in a merge, resolve the schema and template files, take ei
 generated file (`git checkout --theirs -- clients crates/fractal-client/src/contract.rs
 crates/fractal-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.
+Generated Effect string length checks count Unicode code points, matching JSON Schema
+`minLength`/`maxLength`, not UTF-16 code units. Separate admission byte limits still apply.
+URI-reference format checks validate RFC3986 syntax, including relative references,
+without URL-constructor normalization of malformed input.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
@@ -1568,6 +1572,23 @@ of a message; see [long messages](../long-messages.md#device-signatures)) are th
 All are definite refusals that wrote nothing, so a composer keeps the person's text. See
 [long messages](../long-messages.md).
 
+### A message's state from its seat's host
+
+A seat's host can keep how far its mail got (delivered, read, closed) on that host alone, and other
+hosts then ask it. A message resource whose recipient's seat runs on such a host carries
+`status_from: {host, state, reason?}`:
+- `state: "answered"`: the resource's own `state` is the further of this host's records and that
+  host's answer. A message that host closed is history (`operational.reasons: ["closed"]`).
+- Any other word, such as `unknown`: that host did not answer in time, and `state` is only this
+  host's own records, which can be behind. `reason` says why. A client shows the state as unknown.
+A view waits at most a second for a host, and does not ask a host that missed for half a minute.
+Without `status_from`, this host's own records are the whole answer, as on older daemons.
+
+A fault's `target_states` entry for such a message, and a step's `wake.acknowledged_by` in a
+mission's detail, take the host's answer the same way: the further of the two. The answer never
+feeds a resource's `revision` or `updated_at`, which stay monotonic. A client sees a change in it
+on its next read, and a subscription sends it with the next frame that something else triggers.
+
 ## Event feed and resynchronization
 
 `GET /v1/client/events?after=CURSOR&limit=N&wait_ms=M` returns at most the negotiated event and byte
@@ -2686,6 +2707,8 @@ A card with no previous value reports `"fault status unknown"` in that same fiel
 refresh retries those faults even if no claim changed. The refresher's card-faults read is
 bounded by 25 ms of query CPU time, with a one-second wall backstop for a stalled page read,
 so a scheduling pause on a loaded host does not reach its deadline.
+Direct roster and selected card folds, including pages and chunks, pin their own snapshot
+outside a request and use that same fault-read policy. Folds within a request retain its budget.
 
 ### Immutable current publications
 
