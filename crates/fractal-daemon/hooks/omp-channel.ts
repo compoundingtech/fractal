@@ -557,11 +557,7 @@ export default function (pi: ExtensionAPI) {
       );
       return Promise.resolve("");
     }
-    if (state.webAnswers && state.questionSession !== nativeSessionId) {
-      // A true native switch retires local observations, never fabricates terminal results.
-      state.questionSession = nativeSessionId;
-      state.questions = new Map();
-    }
+    bindQuestionSession(nativeSessionId);
     state.shuttingDown = false;
     if (state.reconnectTimer !== undefined) clearTimeout(state.reconnectTimer);
     state.reconnectTimer = undefined;
@@ -881,6 +877,7 @@ export default function (pi: ExtensionAPI) {
       if (!hydrate) return;
       // A branch hydration binds its observation provenance on the existing channel. It must
       // not restart delivery, discard held mail, or reset ask/approval authority.
+      bindQuestionSession(nativeSession);
       const sessionFile = ctx.sessionManager.getSessionFile?.();
       sendFrame({ type: "session", sessionId: nativeSession,
         ...(typeof sessionFile === "string" ? { sessionFile } : {}) });
@@ -1396,6 +1393,9 @@ export default function (pi: ExtensionAPI) {
     observeInventory(ctx);
     const end = event as AgentEndFrame;
     if (end.willContinue !== true) {
+      // A definitive native turn end has no remaining foreground ask execution to resolve.
+      // Retried/continuing turns keep their observations open.
+      cancelOpenQuestions();
       state.pendingAskToolCallId = undefined;
       state.pendingApproval = false;
       state.running = false;
@@ -1471,6 +1471,22 @@ export default function (pi: ExtensionAPI) {
     session: question.session,
     status,
   });
+  const cancelOpenQuestions = () => {
+    if (!state.webAnswers) return;
+    for (const question of state.questions?.values() ?? []) {
+      if (question.status) continue;
+      question.status = "cancelled";
+      sendFrame(questionClosedFrame(question, question.status));
+    }
+  };
+  const bindQuestionSession = (nativeSession: string) => {
+    if (!state.webAnswers || state.questionSession === nativeSession) return;
+    // A new native identity makes the predecessor's asks unresolvable, even when a branch
+    // rebinds provenance without replacing the delivery channel.
+    cancelOpenQuestions();
+    state.questionSession = nativeSession;
+    state.questions = new Map();
+  };
   const observeQuestion = (raw: unknown, ctx: ExtensionContext) => {
     if (!state.webAnswers || !state.questionSession || !state.questions ||
       ctx.sessionManager.getSessionId() !== state.questionSession) return;
@@ -1710,6 +1726,7 @@ export default function (pi: ExtensionAPI) {
   // Replacement is a separate session-switch lifecycle and remains handled by `open()` closing
   // the named predecessor.
   onWidened("session_shutdown", async () => {
+    cancelOpenQuestions();
     state.shuttingDown = true;
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
     clearTimeout(state.restoringAsk?.timer);
