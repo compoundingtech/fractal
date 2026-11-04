@@ -76,6 +76,7 @@ const CONTRAST_PAIRS: Record<SliceKind, readonly (readonly [string, string])[]> 
   conversation: [['default', 'empty']],
   terminal: [['default', 'none']],
   sync: [['live', 'socket-dropped']],
+  objectives: [['default', 'none']],
 }
 
 const escapeHtml = (text: string): string => text.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' })[char]!)
@@ -111,6 +112,7 @@ const markers = (world: World, kind: SliceKind, atMs: number, window?: ScenarioM
     case 'conversation': values = foldSlice(world.slices.conversation, atMs).state.threads.flatMap(({ items }) => mountedEntries(items, window).flatMap((entry) => entry.type === 'content' ? texts(entry.body) : [])); break
     case 'terminal': values = foldSlice(world.slices.terminal, atMs).state.terminals.flatMap(({ screens }) => screens.at(-1)?.screen.lines.map(({ text }) => text) ?? []); break
     case 'sync': values = []; break
+    case 'objectives': values = world.slices.objectives.state.list.rows.map(({ id }) => id); break
   }
   return values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
 }
