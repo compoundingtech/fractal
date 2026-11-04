@@ -184,10 +184,10 @@ export const decodeRecordings = (dir = RECORDINGS_DIR, nows: readonly number[] =
       }
       for (const now of nows) {
         const imported = importRecording(script, normalizeRecording(script, raw, now))
-        for (const kind of SLICE_KINDS) failures.push(...decodeSlice(world, imported.slices[kind]))
+        for (const slice of SLICE_KINDS.flatMap((kind) => imported.slices[kind] ?? [])) failures.push(...decodeSlice(world, slice))
       }
       const importedOracle = importRecording(script, oracle)
-      for (const kind of SLICE_KINDS) failures.push(...decodeSlice(world, importedOracle.slices[kind]))
+      for (const slice of SLICE_KINDS.flatMap((kind) => importedOracle.slices[kind] ?? [])) failures.push(...decodeSlice(world, slice))
     } catch (error) {
       failures.push({ world, slice: 'recording', variant: 'default', pointer: '', message: error instanceof Error ? error.message : String(error) })
     }

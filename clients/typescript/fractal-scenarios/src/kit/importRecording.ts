@@ -2,7 +2,7 @@ import clientSchema from '../../../../../docs/st3/client-v0/schemas/client-v0.sc
 import type { Agent, Machine, Resource, Runtime, Snapshot, TerminalAttachment, TerminalScreen, TimelineEntry } from '@fractal/client'
 import type { RecordedFrame, RecordedHttp, RecordedTransport } from './recording.ts'
 import type { ChangesEvent, ConversationEvent, ConversationThread, TerminalEvent, TerminalRecord } from './slice.ts'
-import type { Slices } from './world.ts'
+import type { AuthoredSlices, Slices } from './world.ts'
 import { ANCHOR, ANCHOR_MS, escapePointerToken, formatTimestamp, nowMs, parseTimestamp, rebase, type TimePointer } from './time.ts'
 import { SLICE_KINDS } from './slice.ts'
 import { wireValues } from './wire.ts'
@@ -140,7 +140,7 @@ const entries = (value: JsonValue | undefined): TimelineEntry[] => array(value).
 })
 const resourceWire = (value: unknown): value is Resource => matches(node('Resource'), json(value, '')) && legacyShape(node('Resource'), json(value, ''))
 
-export const importRecording = (script: Pick<RecordingScript, 'format_version' | 'world' | 'agent' | 'host' | 'id_map'>, rows: readonly RecordingRow[]): { slices: Slices; recording: RecordedTransport } => {
+export const importRecording = (script: Pick<RecordingScript, 'format_version' | 'world' | 'agent' | 'host' | 'id_map'>, rows: readonly RecordingRow[]): { slices: AuthoredSlices; recording: RecordedTransport } => {
   const source = { _tag: 'recorded', recording: script.format_version === 1 ? `${script.world}-proof` : script.world } as const
   const common = { variant: 'default', source, decode: 'strict', loading: false } as const
   const frames: RecordedFrame[] = []
@@ -386,7 +386,7 @@ const rebaseValue = (raw: JsonObject, value: JsonValue, shift: number): JsonValu
 }
 
 /** Effect/filesystem-free entry point for statically imported normalized recording JSON. */
-export const importNormalizedRecording = (scriptInput: unknown, rowsInput: unknown, now = ANCHOR_MS): { slices: Slices; recording: RecordedTransport } => {
+export const importNormalizedRecording = (scriptInput: unknown, rowsInput: unknown, now = ANCHOR_MS): { slices: AuthoredSlices; recording: RecordedTransport } => {
   const script = object(json(scriptInput, '/script'))
   const version = integer(script.format_version)
   if (version !== 1 && version !== 2) fail('/script/format_version', 'unsupported format')

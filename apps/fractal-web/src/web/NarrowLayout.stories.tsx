@@ -443,7 +443,7 @@ export const DrawersFlow: Story = { parameters: { scenario: { _tag: 'contract-fi
   await waitFor(() => expect(chevron).toHaveFocus())
   // Choosing an agent closes the sheet on its thread.
   await userEvent.keyboard('{Enter}')
-  await userEvent.click(within(await canvas.findByRole('dialog', { name: 'Agents' })).getByRole('row', { name: /^MissionsUi,/ }))
+  await userEvent.click(await within(await canvas.findByRole('dialog', { name: 'Agents' })).findByRole('row', { name: /^MissionsUi,/ }))
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
   await waitFor(() => expect(header.getByRole('navigation', { name: 'Breadcrumb' })).toHaveTextContent('MissionsUi'))
   // Agent details, from the right.

@@ -74,6 +74,7 @@ struct ScenarioStrictWireShape {
             "sync": object(["capabilities": ref("Capabilities"), "expected": array(object([
                 "at_ms": integer, "compare": string, "surface": string, "status": status,
             ]))]),
+            "objectives": object(["list": ref("SloList"), "histories": array(ref("SloHistory")), "usage": ref("UsagePeriod")]),
         ]
         let selector = object(["collection": enumeration(["agents", "missions", "work", "attention", "terminals", "conversation", "terminal"]), "conversation": string, "terminal": string])
         let timeline = array(object([
