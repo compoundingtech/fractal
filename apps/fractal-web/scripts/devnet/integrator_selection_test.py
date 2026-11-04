@@ -91,6 +91,7 @@ class SelectionTest(unittest.TestCase):
 
         def candidate():
             row = {'included': [{'pr': 10}], 'skipped': []}
+            self.candidate_row = row
             if self.module.build_candidate(row, 'overlay',
                     [{'sha': 'a' * 40, 'pr': None}, {'sha': 'b' * 40, 'pr': 10}]):
                 # End the tick after the real candidate path, without deployment.
@@ -122,10 +123,18 @@ class SelectionTest(unittest.TestCase):
         return row
 
     def test_capacity_helper_exit_is_retryable_without_cache_or_attribution(self):
-        with self.capacity_tick([75]), patch.object(self.module, 'first_break') as attribution:
+        with self.capacity_tick([75, 1, 75]), patch.object(self.module, 'first_break') as attribution:
             self.module.tick()
-        self.capacity_row()
-        attribution.assert_not_called()
+            self.capacity_row()
+            attribution.assert_not_called()
+            # A later refusal while rebuilding an attributed/reduced tree is also
+            # capacity, and must not persist the tentative failure or PR ejection.
+            attribution.return_value = 1
+            with patch.object(self.module, 'candidate_key', side_effect=['full', 'reduced']):
+                self.module.tick()
+            self.capacity_row()
+            self.assertEqual(self.candidate_row['included'], [{'pr': 10}])
+            self.assertEqual(self.candidate_row['skipped'], [])
 
     def test_capacity_candidate_nix_exception_is_retryable_without_cache_or_attribution(self):
         error = subprocess.CalledProcessError(75, ['/policy-bin/nix', 'build', 'bubblewrap'])

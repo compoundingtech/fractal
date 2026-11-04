@@ -422,6 +422,16 @@ def probe_revision(revision):
                 (pathlib.Path(required_input('FRACTAL_BUILD_SNAPSHOT_ROOT'))/name).rmdir()
 
 def build_candidate(row, private_hash, checkpoints):
+    included, skipped = list(row['included']), list(row['skipped'])
+    try:
+        return build_candidate_attempt(row, private_hash, checkpoints)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 75:
+            # Even a reduced-candidate refusal must not publish an ejection.
+            row.update(included=included, skipped=skipped)
+        raise
+
+def build_candidate_attempt(row, private_hash, checkpoints):
     cache=L/'live-r3-tree-cache.json'
     known=json.loads(cache.read_text()) if cache.exists() else {}
     key=candidate_key(private_hash)
@@ -449,14 +459,13 @@ def build_candidate(row, private_hash, checkpoints):
     # A refused probe must abort without poisoning the tree cache or ejecting a PR.
     failed=first_break([c['sha'] for c in checkpoints],probe_revision)
     known[key]={'outcome':'failed','sha':row['sha']}
-    atomic_json(cache,known)
     git('checkout','-B','live-r3',full)
     if failed is None:
+        atomic_json(cache,known)
         raise RuntimeError('integrated build failed; no attributable single PR; previous build retained')
     culprit=checkpoints[failed]['pr']
     row['skipped'].append({'pr':culprit,'reason':'build-break','files':[]})
     known[key]['ejected']=culprit
-    atomic_json(cache,known)
     # Reintegrate every later accepted head, rather than silently publishing a prefix.
     git('checkout','-B','live-r3',checkpoints[failed-1]['sha'])
     row['included']=[h for h in row['included'] if h['pr']!=culprit]

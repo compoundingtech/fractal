@@ -372,6 +372,8 @@ The sandbox CLI preserves 75 through the build helper; integrator-side nix
 exceptions and refused attribution probes take the same retryable error path.
 A refused candidate never enters the failed-tree cache or starts attribution;
 a refused probe aborts attribution without caching the tree or ejecting a PR.
+Failure-cache writes and tentative PR ejections are also withheld if the reduced
+candidate rebuild is refused after attribution.
 The next tick retries the same tree after capacity becomes available. No build
 pointer or served process is changed by these refusals. Observers must distinguish
 this retryable tick error from a reproducible candidate build failure.
