@@ -1413,8 +1413,9 @@ def pool_units(base):
 
 def evict_to_cap(base, limit_gb, keep=None):
     """Keep the pool directory under `limit_gb` GB in all: before a run, remove the least recently used trees and their targets whose lock
-    is free, oldest first, until it fits. A unit someone holds is never touched (`keep` is the one this run holds). Says what it removed."""
-    units = pool_units(base)
+    is free, oldest first, until it fits. A unit someone holds is never touched (`keep` is the one this run holds), nor one a live st-test
+    (runner_of) is in though its lock is free: acquire_tree leaves such a tree, and its run must keep it. Says what it removed."""
+    units, mine = pool_units(base), None
     sizes = {(repo, n): sum(du_gb(path) for path in paths) for _, repo, n, paths in units}
     total = sum(sizes.values())
     for used, repo, n, paths in units:
@@ -1430,6 +1431,13 @@ def evict_to_cap(base, limit_gb, keep=None):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             lock.close()
+            continue
+        mine = own_line() if mine is None else mine
+        live = sorted({pid for path in paths for pid in tree_users(path, execution_only=True) if runner_of(pid, mine=mine) is not None})
+        if live:
+            lock.close()
+            print(f'fractal-test: pool over {limit_gb:g} GB: not evicting {repo.name}/tree-{n}: free by its lock but a live st-test is in it '
+                  f'({described(live)})', file=sys.stderr)
             continue
         try:
             for path in paths:
@@ -1637,6 +1645,20 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
             waits.update(tree_wait_s=round(time.monotonic() - began), slot_wait_s=round(slot_waited))
         return n, lock
 
+    def clear(n, lock):
+        """Clear tree-`n` of orphans as this waiter takes it (the flock held), and only then: whether it may be taken. A tree a live st-test
+        is in is left, its flock released. A waiter that gives a free tree back, waiting for a build slot, signals nothing in it."""
+        try:
+            ok = clear_tree_orphans(root / f'tree-{n}', told=live_told)
+        except BaseException:
+            lock.close()
+            raise
+        if not ok:
+            lock.close()
+        return ok
+
+    live_told = set()
+
     try:
         while True:
             newer = follow() if follow is not None else None
@@ -1663,18 +1685,17 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                             print(f'fractal-test: tree-{n} is the only free tree; a run last in the pool (ST_TEST_POOL_RANK=last) leaves it '
                                   f'to a seat and waits for two', file=sys.stderr, flush=True)
                         break
-                    try:
-                        clear_tree_orphans(root / f'tree-{n}')
-                    except BaseException:
-                        lock.close()
-                        raise
                     if slot_ready is None:
+                        if not clear(n, lock):
+                            continue
                         return taken(n, lock)
                     ready, why = slot_ready()
                     now = time.monotonic()
                     if slot_seen is not None:
                         slot_waited += now - slot_seen
                     if ready or slot_waited >= TREE_SLOT_WAIT_LIMIT:
+                        if not clear(n, lock):
+                            continue
                         if not ready:
                             print(f'fractal-test: taking tree-{n} after {round(slot_waited)}s without a free build slot ({why}; '
                                   f'TREE_SLOT_WAIT_LIMIT): its build waits for one in the tree', file=sys.stderr, flush=True)
@@ -1701,14 +1722,12 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                         lock.close()
                         free_since.pop(n, None)
                         continue
-                    try:
-                        clear_tree_orphans(root / f'tree-{n}')
-                    except BaseException:
-                        lock.close()
-                        raise
                     now = time.monotonic()
                     seen = free_since.setdefault(n, now)
                     if now - seen >= TREE_FREE_FALLBACK_SECONDS and (slot_ready is None or slot_ready()[0]):
+                        if not clear(n, lock):
+                            free_since.pop(n, None)
+                            continue
                         print(f'fractal-test: tree-{n} has been free for {round(now - seen)}s and the {ahead} ticket(s) ahead did not take it '
                               f'(TREE_FREE_FALLBACK_SECONDS): trying it', file=sys.stderr, flush=True)
                         return taken(n, lock)
@@ -1727,15 +1746,7 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
 
 def tree_users(directory, proc='/proc', execution_only=False):
     """Same-uid tree users, excluding this process and its ancestors. Normalize path operands before testing the tree boundary."""
-    base = os.path.realpath(directory)
-    ancestors, pid = set(), os.getpid()
-    while pid > 0 and pid not in ancestors:
-        ancestors.add(pid)
-        try:
-            status = Path(proc, str(pid), 'status').read_text()
-            pid = int(next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:')))
-        except (OSError, StopIteration, ValueError, IndexError):
-            break
+    base, ancestors = os.path.realpath(directory), own_line(proc)
     found = []
     with contextlib.suppress(FileNotFoundError):
         for entry in os.scandir(proc):
@@ -1781,9 +1792,56 @@ RUNNER_NAMES = ('st-test', 'fractal-test')  # what a running runner's file is ca
 ARGV_SETTLE = 30.0  # seconds an argv-only reference may take to go away before the tree is refused for it
 
 
-def clear_tree_orphans(directory, grace=2.0, proc='/proc', settle=ARGV_SETTLE):
+def own_line(proc='/proc'):
+    """This process and its ancestors."""
+    ancestors, pid = set(), os.getpid()
+    while pid > 0 and pid not in ancestors:
+        ancestors.add(pid)
+        try:
+            status = Path(proc, str(pid), 'status').read_text()
+            pid = int(next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:')))
+        except (OSError, StopIteration, ValueError, IndexError):
+            break
+    return ancestors
+
+
+def runner_of(pid, proc='/proc', mine=frozenset()):
+    """The pid of another live st-test that `pid` is or descends from (RUNNER_NAMES in its argv), or None: an orphan's st-test is gone, and
+    a process of this one's own line (`mine`: this process and its ancestors) is not another's."""
+    seen = set()
+    while pid > 1 and pid not in seen and pid not in mine:
+        seen.add(pid)
+        try:
+            argv = Path(proc, str(pid), 'cmdline').read_text(errors='surrogateescape').split('\0')
+            if any(os.path.basename(arg) in RUNNER_NAMES for arg in argv[:2]):
+                return pid
+            status = Path(proc, str(pid), 'status').read_text()
+            pid = int(next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:')))
+        except (OSError, StopIteration, ValueError, IndexError):
+            return None
+    return None
+
+
+def described(pids, proc='/proc'):
+    """`pid (cmdline; cwd DIR)` for each of `pids`, for the log line before anything is signalled."""
+    parts = []
+    for pid in pids:
+        command, cwd = '(unavailable)', '(unavailable)'
+        with contextlib.suppress(OSError):
+            command = Path(proc, str(pid), 'cmdline').read_text(errors='replace').replace('\0', ' ').strip()[:200] or '(empty)'
+        with contextlib.suppress(OSError):
+            cwd = os.readlink(Path(proc, str(pid), 'cwd'))
+        parts.append(f'{pid} ({command}; cwd {cwd})')
+    return ', '.join(parts)
+
+
+def clear_tree_orphans(directory, grace=2.0, proc='/proc', settle=ARGV_SETTLE, told=None):
     """With the flock held, terminate only execution-backed orphans; argv-only references block reuse without authorizing a signal.
-    Another st-test sizing the tree (sibling_sizing) is no reference, and any other must still be there after `settle` seconds."""
+    Another st-test sizing the tree (sibling_sizing) is no reference, and any other must still be there after `settle` seconds.
+
+    Returns True when the tree is clear to take, and False, signalling nothing, when a live st-test (runner_of) or one of its processes is
+    in it: free by its lock but in use, it is left (2026-11-04: two seats' live runs died of SIGTERM while waiting for a tree, cause unconfirmed).
+    Each process is logged with its command and cwd before it is signalled; a tree left for a live st-test is logged once per `told` set."""
     def argv_only():
         users = tree_users(directory, proc, execution_only=True)
         return users, {pid for pid in set(tree_users(directory, proc)) - set(users) if not sibling_sizing(pid, proc)}
@@ -1801,8 +1859,19 @@ def clear_tree_orphans(directory, grace=2.0, proc='/proc', settle=ARGV_SETTLE):
                 commands[pid] = Path(proc, str(pid), 'cmdline').read_text(errors='replace').replace('\0', ' ').strip()
         raise Failure(f'pool tree {directory} has argv-only references {commands}; refusing to use it without signalling them')
     if not users:
-        return
-    print(f'fractal-test: terminating {len(users)} orphan process(es) in pool tree {directory}', file=sys.stderr, flush=True)
+        return True
+    mine = own_line(proc)
+    live = {pid: runner for pid in users if (runner := runner_of(pid, proc, mine)) is not None}
+    if live:
+        if told is not None and str(directory) in told:
+            return False
+        if told is not None:
+            told.add(str(directory))
+        print(f'fractal-test: pool tree {directory} is free by its lock but a live st-test is in it '
+              f'({", ".join(f"{pid} of st-test {runner}" for pid, runner in sorted(live.items()))}: {described(sorted(live), proc)}); '
+              f'signalling nothing and leaving the tree', file=sys.stderr, flush=True)
+        return False
+    print(f'fractal-test: terminating {len(users)} orphan process(es) in pool tree {directory}: {described(users, proc)}', file=sys.stderr, flush=True)
     handles = {}
 
     def wait_live():
@@ -1821,8 +1890,8 @@ def clear_tree_orphans(directory, grace=2.0, proc='/proc', settle=ARGV_SETTLE):
             except ProcessLookupError:
                 continue
             handles[pid] = fd
-            # Recheck after pinning: a reused PID must still belong to this tree.
-            if pid not in tree_users(directory, proc, execution_only=True):
+            # Recheck after pinning: a reused PID must still belong to this tree, and to no live st-test.
+            if pid not in tree_users(directory, proc, execution_only=True) or runner_of(pid, proc, mine) is not None:
                 del handles[pid]
                 os.close(fd)
                 continue
@@ -1839,6 +1908,7 @@ def clear_tree_orphans(directory, grace=2.0, proc='/proc', settle=ARGV_SETTLE):
     finally:
         for fd in handles.values():
             os.close(fd)
+    return True
 
 
 def clear_stale_index_lock(directory):
