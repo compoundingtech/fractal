@@ -45,6 +45,28 @@ pub(super) fn validate_cached(connection: &Connection, row: &ClaimRow) -> Result
 }
 
 pub(super) fn unavailable(connection: &Connection, claim_id: &str) -> Result<Option<String>> {
+    if let Some(reason) = own_unavailable(connection, claim_id)? {
+        return Ok(Some(reason));
+    }
+    // A grant's own inputs, such as its nonce or its candidates, are not this claim's links. Until
+    // the grant is judged again and any change queues `delegation:GRANT`, this claim's cached
+    // verdict can predate it, so it reads as held while the grant does. A claim links every
+    // grant in its chain, so one level covers the whole chain.
+    let grants = connection
+        .prepare_cached("SELECT substr(link,?2) FROM claim_verdict_links WHERE claim_id=?1 AND link>='delegation:' AND link<'delegation;' ORDER BY link")?
+        .query_map(params![claim_id, "delegation:".len() + 1], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for grant in grants {
+        if own_unavailable(connection, &grant)?.is_some() {
+            return Ok(Some(format!(
+                "signature-judgment-incomplete: {claim_id} relies on {grant}, which is held for judgment"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn own_unavailable(connection: &Connection, claim_id: &str) -> Result<Option<String>> {
     let count = candidate_count(connection, claim_id)?;
     let pending: bool=connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM claim_signature_judging WHERE claim_id=?1 AND (complete=0 OR dirty=1 OR blocked=1))")?.query_row(/* sqlite-large-value: allow-for-now lv-h6199c4573f91 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id],|row|row.get(0))?;
     if pending || (count > CANDIDATE_PAGE as u64 && !complete(connection, claim_id)?) {

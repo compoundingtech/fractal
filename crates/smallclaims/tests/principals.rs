@@ -1901,6 +1901,109 @@ fn a_revoked_delegated_key_holds_dependents_past_its_first_requeue_page() {
 }
 
 #[test]
+fn a_grant_whose_own_nonce_turns_out_reused_holds_its_dependents_at_once() {
+    use std::sync::Mutex;
+    let anchor = key();
+    let store = Arc::new(Store::open_memory("studio", Arc::new(Plain)).unwrap());
+    store.set_node_key(anchor.clone()).unwrap();
+    store.set_write_clock_at(100).unwrap();
+    let notes = (0..3)
+        .map(|i| note(&store, Some("person/ada"), &format!("signed through the device {i}")))
+        .collect::<Vec<_>>();
+    seal(&store);
+    store.judge_claims(true).unwrap();
+    for note in &notes {
+        assert_eq!(verdict(&store, note), Verdict::Verified);
+    }
+    // The device grant the notes are signed through, and the nonce of its own signature.
+    let grant_id: String = store
+        .readers
+        .get()
+        .query_row(
+            "SELECT substr(link,12) FROM claim_verdict_links WHERE claim_id=?1 AND link LIKE 'delegation:%'",
+            [&notes[0].id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let grant = store.claim_by_id(&grant_id).unwrap().unwrap();
+    assert_eq!(grant.kind, KEY_GRANTED);
+    assert_eq!(verdict(&store, &grant), Verdict::Verified);
+    let signature = store.claim_signature(&grant.id).unwrap().unwrap();
+    // A claim with the grant's content that sorts before it, carrying the grant's own signature:
+    // the grant's nonce was used before, so the grant goes invalid. The notes do not link it.
+    let earlier = append(
+        &store,
+        KEY_GRANTED,
+        &grant.subject,
+        grant.actor.as_deref(),
+        grant.body["fields"].clone(),
+    );
+    let content = |claim: &ClaimRecord| {
+        content_digest(&claim.subject, &claim.kind, claim.actor.as_deref(), &claim.body)
+    };
+    assert_eq!(content(&earlier), content(&grant));
+    // This writer's clock never runs back, so stand in for a claim accepted earlier elsewhere.
+    store
+        .connection
+        .write()
+        .execute(
+            "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+            rusqlite::params![(grant.accepted_at_unix_ms - 1).to_string(), earlier.id],
+        )
+        .unwrap();
+    attach(&store, &earlier, &signature);
+    // The reused nonce dirtied the grant; its dependents read held from that commit on, before
+    // the grant is judged again and queues them.
+    assert!(matches!(verdict(&store, &grant), Verdict::Held(_)));
+    for note in &notes {
+        assert!(
+            matches!(verdict(&store, note), Verdict::Held(reason) if reason.contains(&grant.id)),
+            "{} read {:?} while its grant is held",
+            note.id,
+            verdict(&store, note)
+        );
+    }
+    let counts = store.claim_verdict_counts().unwrap();
+    assert!(counts.get("held").copied().unwrap_or(0) >= 4, "{counts:?}");
+    // No commit of the judgment lets a note read verified while its grant does not.
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let record = reads.clone();
+    let weak = Arc::downgrade(&store);
+    let (grant_seen, ids) = (grant.id.clone(), notes.iter().map(|note| note.id.clone()).collect::<Vec<_>>());
+    let observer = store.observe_commits(move |_| {
+        let store = weak.upgrade().unwrap();
+        let grant = store.claim_verdict(&grant_seen).unwrap();
+        for id in &ids {
+            record
+                .lock()
+                .unwrap()
+                .push((id.clone(), store.claim_verdict(id).unwrap(), grant.clone()));
+        }
+    });
+    store.judge_claims(true).unwrap();
+    drop(observer);
+    let reads = reads.lock().unwrap();
+    assert!(!reads.is_empty());
+    for (id, read, grant) in reads.iter() {
+        assert!(
+            *read != Verdict::Verified || *grant == Verdict::Verified,
+            "{id} read verified while its grant read {grant:?}"
+        );
+    }
+    assert!(
+        matches!(verdict(&store, &grant), Verdict::Invalid(_)),
+        "grant {:?} earlier {:?} notes {:?}",
+        verdict(&store, &grant),
+        verdict(&store, &earlier),
+        notes.iter().map(|note| verdict(&store, note)).collect::<Vec<_>>()
+    );
+    for note in &notes {
+        assert!(matches!(verdict(&store, note), Verdict::Invalid(_)), "{:?}", verdict(&store, note));
+    }
+    assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+}
+
+#[test]
 fn migration_commits_claim_offsets_inside_a_large_authenticated_envelope() {
     use smallclaims::replication::ReplicationInventory;
     use smallclaims::store::append_claim_record_tx;
