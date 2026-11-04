@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Include the declarations codegen template in the TypeScript client evidence key and the declarations package scripts in its lane definition",
+  "replay": {"status": "none", "detail": "No daemon replay change."},
+  "schema": {"status": "none", "detail": "No daemon claim or portable record change."},
+  "rules": {"status": "changed", "detail": "typescript-client now includes crates/fractal-client-codegen/templates/declarations.ts.in in both its evidence policy inputs and lane tree_inputs. clients/typescript already covers all declarations package files; its package.json is now also a definition_path because the lane executes its test and typecheck scripts. Regression coverage checks that changing declarations source, tests, package scripts or the template changes the evidence key. The lane still requires successful genie-freshness and does not bypass a failed prerequisite."},
+  "compatibility": {"status": "changed", "detail": "Existing TypeScript client evidence keys and lane-definition digests must be refreshed once the updated policy becomes the accepted base."},
+  "downtime": {"status": "none", "detail": "No daemon downtime required."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the lane and policy input changes to restore the previous evidence key."}
+}

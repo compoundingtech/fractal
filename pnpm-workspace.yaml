@@ -5,6 +5,7 @@ packages:
   - apps/fractal-web
   - apps/ios
   - clients/typescript/fractal-client
+  - clients/typescript/fractal-declarations
   - clients/typescript/fractal-scenarios
   - clients/typescript/fractal-views
   - packages/fractal-sdk
