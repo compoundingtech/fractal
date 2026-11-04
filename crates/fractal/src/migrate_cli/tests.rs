@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 
 struct FakeManager {
     services: Services,
+    domain: Option<String>,
+    registrations: Option<[Vec<String>; 2]>,
     events: Vec<String>,
     idle_calls: usize,
     idle_failure: Option<usize>,
@@ -15,6 +17,7 @@ struct FakeManager {
 
 impl FakeManager {
     fn unit_mut(&mut self, name: &str) -> Result<&mut Unit> {
+        if let Some(domain) = &self.domain { self.events.push(format!("domain-operation:{domain}")); }
         self.services.legacy.iter_mut().chain(&mut self.services.target)
             .find(|unit| unit.name == name).context("unknown test service")
     }
@@ -27,6 +30,15 @@ impl FakeManager {
 
 impl Manager for FakeManager {
     fn kind(&self) -> &'static str { "fake" }
+    fn domain(&self) -> Option<&str> { self.domain.as_deref() }
+    fn bind_domain(&mut self, recorded: Option<&str>, recovery: bool) -> Result<()> {
+        if let Some(jobs) = &self.registrations {
+            self.domain = Some(launchd::resolve(501, recorded, recovery, |domain| {
+                Ok(launchd::Probe::Available(jobs[usize::from(domain.starts_with("user/"))].clone()))
+            })?);
+        }
+        Ok(())
+    }
 
     fn inspect(&mut self) -> Result<Services> {
         self.events.push("inspect".into());
@@ -158,7 +170,7 @@ impl Fixture {
         let services = Services { legacy, target };
         Ok(Self {
             root, layout,
-            manager: FakeManager { services, events: Vec::new(), idle_calls: 0,
+            manager: FakeManager { services, domain: None, registrations: None, events: Vec::new(), idle_calls: 0,
                 idle_failure: None, probe_failure: false, target_protection: None,
                 fail_target_enable_once: false, omit_missing: false, fail_legacy_start_once: false },
         })
@@ -635,7 +647,7 @@ async fn explicit_rollback_recovers_an_interrupted_uncommitted_swap() -> Result<
         fs::write(new.join(RECEIPT_FILE), format!("{MIGRATION_ID}\n"))?;
         symlink(new, old)?;
     }
-    let journal = Journal { migration: MIGRATION_ID.into(), services, moves: (0..pairs.len()).collect(),
+    let journal = Journal { migration: MIGRATION_ID.into(), launchd_domain: None, services, moves: (0..pairs.len()).collect(),
         pairs, emptied: Vec::new(), receipts: vec![0, 1], links: vec![0, 1], config_fence: false, committed: false,
         before: memory_protection(), after: None, gap_ms: 0 };
     save(&fixture.layout, &journal)?;
@@ -695,7 +707,7 @@ fn home_manager_launchd_labels_map_to_target_dropin_directories() -> Result<()> 
 
 fn interrupted_journal(fixture: &Fixture) -> Journal {
     Journal {
-        migration: MIGRATION_ID.into(), services: fixture.manager.services.clone(),
+        migration: MIGRATION_ID.into(), launchd_domain: None, services: fixture.manager.services.clone(),
         pairs: fixture.layout.pairs(&fixture.manager.services).unwrap(), moves: Vec::new(),
         emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), config_fence: false,
         committed: false, before: memory_protection(), after: None, gap_ms: 0,
@@ -956,3 +968,59 @@ fn retained_generation_array_mutations_refuse_with_generation_number() -> Result
 }
 
 mod worker_control;
+
+#[tokio::test]
+async fn launchd_domain_is_durable_and_recovery_ignores_later_login() -> Result<()> {
+    for selected in ["gui/501", "user/501"] {
+        let mut fixture = Fixture::new()?;
+        let daemon = "com.compoundingtech.st3".to_owned();
+        let index = usize::from(selected.starts_with("user/"));
+        let mut jobs = [Vec::new(), Vec::new()];
+        jobs[index].push(daemon.clone());
+        fixture.manager.registrations = Some(jobs);
+        let before = fixture.snapshot()?;
+        assert_eq!(fixture.run(true, false).await?.launchd_domain.as_deref(), Some(selected));
+        assert_eq!(fixture.snapshot()?, before);
+        assert!(!fixture.manager.changed_services());
+        let mut journal = interrupted_journal(&fixture);
+        journal.launchd_domain = Some(selected.into());
+        save(&fixture.layout, &journal)?;
+        // A later login now exposes the job in the other domain. Recovery is
+        // bound to its durable plan, not a new discovery of legacy ownership.
+        fixture.manager.registrations = Some([vec![daemon.clone()], vec![daemon]]);
+        fixture.manager.domain = None;
+        assert_eq!(fixture.run(false, true).await?.launchd_domain.as_deref(), Some(selected));
+        assert!(fixture.manager.events.iter().any(|event| event == &format!("domain-operation:{selected}")));
+        assert!(!fixture.manager.events.iter().any(|event| event.starts_with("domain-operation:") && event != &format!("domain-operation:{selected}")));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn launchd_missing_journal_domain_refuses_before_inspection() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    fixture.manager.registrations = Some([Vec::new(), Vec::new()]);
+    let mut bytes = serde_json::to_value(interrupted_journal(&fixture))?;
+    bytes.as_object_mut().unwrap().remove("launchd_domain");
+    fs::write(&fixture.layout.journal, serde_json::to_vec(&bytes)?)?;
+    let before = fs::read(&fixture.layout.journal)?;
+    let error = fixture.run(false, true).await.unwrap_err();
+    assert!(matches!(error.downcast_ref::<launchd::DomainError>(), Some(launchd::DomainError::MissingJournalField)));
+    assert!(!fixture.manager.events.iter().any(|event| event == "inspect"));
+    assert_eq!(fs::read(&fixture.layout.journal)?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn launchd_cutover_saves_selected_domain() -> Result<()> {
+    for (index, domain) in ["gui/501", "user/501"].into_iter().enumerate() {
+        let mut fixture = Fixture::new()?;
+        let mut jobs = [Vec::new(), Vec::new()];
+        jobs[index].push("com.compoundingtech.st3".into());
+        fixture.manager.registrations = Some(jobs);
+        assert_eq!(fixture.run(false, false).await?.launchd_domain.as_deref(), Some(domain));
+        let journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
+        assert_eq!(journal.launchd_domain.as_deref(), Some(domain));
+    }
+    Ok(())
+}
