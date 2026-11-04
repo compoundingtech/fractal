@@ -54,6 +54,9 @@ webPkgs.mkShell {
         {
           printf 'shellHook=%s status=%s\nPATH=%q\nBASH_ENV=%q\n' \
             "$phase" "$result" "$PATH" "''${BASH_ENV-<unset>}"
+          printf 'ENV=%q\nshell=%q pid=%s bashpid=%s ppid=%s\n' \
+            "''${ENV-<unset>}" "$BASH" "$$" "$BASHPID" "$PPID"
+          declare -p PATH || :
           printf 'command -v pnpm: '
           command -v pnpm || printf '<not found>\n'
         } >> "$CI_WEB_SHELL_DIAGNOSTICS" || :

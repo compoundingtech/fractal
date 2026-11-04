@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The local TypeScript check captures the failing child's shell and environment when pnpm is missing, adding evidence for the still-open #4659.",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored or wire schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The exact local wrapper command and its lane inputs now bind the diagnostic guard and sourced helper. Required checks, skip trust, retry and deadline rules are unchanged. A failed pnpm lookup still exits 127 and does not run install or the client check."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The same child Bash now checks pnpm resolution before installing. On failure it prints PATH and its export flag, shell identity, the first PATH component and expected wrapper prepend with empty flags, and sorted environment names. Only explicitly selected PATH, shell, Nix and admission values are shown; other values, including NIX_CONFIG, are redacted. Diagnostics use Bash builtins even when PATH has no diagnostic tools. Hook snapshots also include shell IDs and PATH's export flag. This captures evidence without claiming the underlying incident is fixed."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No daemon downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No action required. Child diagnostics appear only after a failed pnpm lookup."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting removes the additional diagnostics. No application data is changed or deleted."
+  }
+}

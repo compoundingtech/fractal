@@ -608,6 +608,7 @@
         "packages/fractal-ui/package.json",
         "pnpm-lock.yaml",
         "pnpm-workspace.yaml",
+        "scripts/ci-typescript-child-diagnostics",
         "scripts/ci-typescript-client"
       ],
       "kinds": {
@@ -653,7 +654,7 @@
                 "-c",
                 "bash",
                 "-c",
-                "pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
+                "command -v pnpm >/dev/null 2>&1 || { source scripts/ci-typescript-child-diagnostics || :; exit 127; }; pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
@@ -678,7 +679,7 @@
                 "-c",
                 "bash",
                 "-c",
-                "pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
+                "command -v pnpm >/dev/null 2>&1 || { source scripts/ci-typescript-child-diagnostics || :; exit 127; }; pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
@@ -704,7 +705,7 @@
                 "-c",
                 "bash",
                 "-c",
-                "pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
+                "command -v pnpm >/dev/null 2>&1 || { source scripts/ci-typescript-child-diagnostics || :; exit 127; }; pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
               ],
               "required_inputs": [
                 "flake_lock_sha256",

@@ -392,7 +392,7 @@
         "-c",
         "bash",
         "-c",
-        "pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
+        "command -v pnpm >/dev/null 2>&1 || { source scripts/ci-typescript-child-diagnostics || :; exit 127; }; pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
       ],
       "definition_paths": [
         "apps/ios/package.json",
@@ -408,6 +408,7 @@
         "pnpm-source-inputs.json",
         "pnpm-workspace.yaml",
         "scripts/ci-nix-fixed-outputs",
+        "scripts/ci-typescript-child-diagnostics",
         "scripts/ci-typescript-client",
         "scripts/prepare-pnpm-source-inputs.py"
       ],
@@ -426,6 +427,7 @@
         "packages/fractal-ui/package.json",
         "pnpm-lock.yaml",
         "pnpm-workspace.yaml",
+        "scripts/ci-typescript-child-diagnostics",
         "scripts/ci-typescript-client"
       ],
       "absent_paths": [

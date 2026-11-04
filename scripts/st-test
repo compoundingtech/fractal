@@ -109,13 +109,17 @@ import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
 
+# Keep this in the requested Bash child: a hook snapshot precedes the host wrapper's
+# sh/exec hop. Diagnostics never repair PATH or retry a failed command lookup.
+TYPESCRIPT_CHILD_PROBE = 'command -v pnpm >/dev/null 2>&1 || { source scripts/ci-typescript-child-diagnostics || :; exit 127; }; '
+
 # The local command of each check: exactly the argv the wrapper records and a policy's `wrapper` kind pins.
 # A check without an entry cannot be signed from a checkout; it is not listed, and nothing pretends otherwise.
 # In the order they run: typescript-client first, because it is signed for nearly every tree (genie-freshness is refused for every
 # tree that edits its lane, and a cold genie dev shell takes minutes), so the pre-push hook's wait covers it first.
 LOCAL = {
     'typescript-client': ['nix', 'develop', '.#web', '-c', 'bash', '-c',
-                          'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client'],
+                          TYPESCRIPT_CHILD_PROBE + 'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client'],
     'genie-freshness': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-genie-freshness'],
     'ci-script-tests': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-script-tests'],
     # The stages a linux-gate skip covers (the tests, clippy and fleet compatibility), in one run, as their CI jobs run them but
@@ -3308,6 +3312,12 @@ def run_main(argv, cleanup):
                     shell_report = Path(scratch) / f'typescript-shell-{round_number}.log' if name == 'typescript-client' else None
                     if shell_report is not None:
                         environment['CI_WEB_SHELL_DIAGNOSTICS'] = str(shell_report)
+                        # Resolve relative PATH entries against the check's cwd, without
+                        # changing this process's cwd while other lanes are running.
+                        lookup_path = os.pathsep.join(str((Path(directory) / part).resolve())
+                                                      for part in environment.get('PATH', os.defpath).split(os.pathsep))
+                        selected_nix = shutil.which('nix', path=lookup_path)
+                        environment['CI_TYPESCRIPT_NIX_DIRECTORY'] = str(Path(selected_nix).parent.resolve()) if selected_nix else ''
                     environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                     if target and name in BUILDS:
                         environment['CARGO_TARGET_DIR'] = str(target)

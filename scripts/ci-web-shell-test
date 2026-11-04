@@ -299,6 +299,8 @@ class WebShellKeyTest(unittest.TestCase):
                     self.assertIn(f'shellHook=finished status={status}', snapshot)
                     self.assertIn(f'PATH={tools}', snapshot)
                     self.assertIn(f'BASH_ENV={startup}', snapshot)
+                    self.assertIn(f'declare -x PATH="{tools}"', snapshot)
+                    self.assertRegex(snapshot, r'shell=.* pid=\d+ bashpid=\d+ ppid=\d+')
                     resolution = str(tools / 'pnpm') if has_pnpm else '<not found>'
                     self.assertIn(f'command -v pnpm: {resolution}', snapshot)
 
