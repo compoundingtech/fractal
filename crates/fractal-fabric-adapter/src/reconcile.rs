@@ -190,6 +190,24 @@ async fn send(socket: &Path, request: &Value) -> Result<Reply> {
     })
 }
 
+async fn supports_expiry(socket: &Path) -> Result<bool> {
+    let reply: Value = tokio::time::timeout(CONTROL_TIMEOUT, async {
+        let mut stream = tokio::net::UnixStream::connect(socket).await?;
+        stream.write_all(b"{\"type\":\"reachability_status\"}\n").await?;
+        let mut bytes = Vec::new();
+        BufReader::new(stream).take(RESPONSE_LIMIT + 1).read_until(b'\n', &mut bytes).await?;
+        ensure!(bytes.len() as u64 <= RESPONSE_LIMIT && bytes.last() == Some(&b'\n'),
+            "Fabric version probe returned an incomplete or oversized response");
+        serde_json::from_slice::<Value>(&bytes).context("invalid Fabric version probe response")
+    }).await??;
+    let mut version = reply["version"].as_str().unwrap_or_default().split(['.', '+', '-']);
+    let parsed = (version.next().and_then(|v| v.parse::<u64>().ok()),
+        version.next().and_then(|v| v.parse::<u64>().ok()),
+        version.next().and_then(|v| v.parse::<u64>().ok()));
+    Ok(reply["type"] == "reachability_status"
+        && matches!(parsed, (Some(major), Some(minor), Some(patch)) if (major, minor, patch) >= (0, 9, 4)))
+}
+
 async fn snapshot(socket: &Path) -> Result<Snapshot> {
     let mut first: Option<Snapshot> = None;
     let mut cursor = None;
@@ -319,7 +337,64 @@ fn desired(
 
 type DesiredPolicy = BTreeMap<String, BTreeSet<String>>;
 
+#[derive(Debug, Deserialize, Serialize)]
+struct Rotation {
+    old_node: String,
+    next_node: String,
+    deadline: u64,
+    state: String,
+}
+
 type Expiries = BTreeMap<String, u64>;
+
+fn rotations(
+    view: &FleetView,
+    own_key: &str,
+    desired: &mut DesiredPolicy,
+    now: u64,
+) -> Result<(Expiries, Vec<(String, Rotation)>)> {
+    let mut expiries = Expiries::new();
+    let mut receipts = Vec::new();
+    if !view.members.iter().any(|member| member.member_key == own_key && member.state == "current") {
+        return Ok((expiries, receipts));
+    }
+    for member in view.members.iter().filter(|member| member.member_key != own_key && member.state == "current") {
+        let entries = member.endpoints.iter().filter(|entry| entry["transport"] == "fabric-rekey").collect::<Vec<_>>();
+        ensure!(entries.len() <= 1, "member has multiple Fabric rekey transitions");
+        let Some(entry) = entries.first() else { continue };
+        let rotation: Rotation = serde_json::from_value((*entry).clone()).context("invalid signed Fabric rekey transition")?;
+        ensure!(!rotation.old_node.is_empty() && !rotation.next_node.is_empty() && rotation.old_node != rotation.next_node, "invalid Fabric rekey identities");
+        ensure!(rotation.deadline <= i64::MAX as u64 && rotation.deadline > 0, "invalid Fabric rekey deadline");
+        ensure!(matches!(rotation.state.as_str(), "prepared" | "committed" | "aborted"), "invalid Fabric rekey state");
+        let advertised = if rotation.state == "committed" { &rotation.next_node } else { &rotation.old_node };
+        let services = desired.get(advertised).cloned().context("Fabric rekey does not match signed routing endpoint")?;
+        desired.remove(&rotation.old_node);
+        desired.remove(&rotation.next_node);
+        let live = rotation.deadline > now;
+        match rotation.state.as_str() {
+            "prepared" => {
+                desired.insert(rotation.old_node.clone(), services.clone());
+                if live {
+                    desired.insert(rotation.next_node.clone(), services);
+                    expiries.insert(rotation.next_node.clone(), rotation.deadline);
+                }
+            }
+            "committed" => {
+                desired.insert(rotation.next_node.clone(), services.clone());
+                if live {
+                    desired.insert(rotation.old_node.clone(), services);
+                    expiries.insert(rotation.old_node.clone(), rotation.deadline);
+                }
+            }
+            "aborted" => { desired.insert(rotation.old_node.clone(), services); }
+            _ => unreachable!(),
+        }
+        if live && rotation.state != "aborted" {
+            receipts.push((member.member_key.clone(), rotation));
+        }
+    }
+    Ok((expiries, receipts))
+}
 
 fn plan(snapshot: &Snapshot, owner: &str, desired: &DesiredPolicy, expiries: &Expiries) -> Vec<Value> {
     let owned = snapshot
@@ -714,7 +789,7 @@ pub async fn reconcile(
         .members
         .iter()
         .any(|member| member.member_key == own_key && member.state == "current");
-    let desired: DesiredPolicy = desired
+    let mut desired: DesiredPolicy = desired
         .into_iter()
         .map(|node| {
             let peer_current = view.members.iter().any(|member| {
@@ -731,7 +806,20 @@ pub async fn reconcile(
             (node, services)
         })
         .collect();
-    let expiries = Expiries::new();
+    let (mut expiries, rotations) = rotations(view, own_key, &mut desired, (now_ms() / 1000) as u64)?;
+    let blocked_reason = if expiries.is_empty() { None } else {
+        match supports_expiry(socket).await {
+            Ok(true) => None,
+            Ok(false) => Some("fabric_without_expiry: upgrade every participating Fabric daemon to v0.9.4 before rekey".to_owned()),
+            Err(error) => Some(format!("fabric_capability_unknown: {error:#}")),
+        }
+    };
+    if blocked_reason.is_some() {
+        // Never turn expiring overlap into permanent authorization on an older daemon.
+        // Keep the old route; ordinary peer additions and revocations still reconcile.
+        for (_, rotation) in rotations { desired.remove(&rotation.next_node); }
+        expiries.clear();
+    }
     let ended = view
         .members
         .iter()
@@ -741,6 +829,10 @@ pub async fn reconcile(
         .filter_map(|endpoint| endpoint["node"].as_str().map(str::to_owned))
         .collect();
     let mut status = apply(state_dir, socket, fleet_id, desired, expiries, ended, false).await?;
+    if let Some(reason) = blocked_reason.filter(|_| status.state == "applied") {
+        status.state = "rekey_blocked".into();
+        status.message = Some(reason);
+    }
     if status.state == "applied"
         && view.members.iter().any(|member| {
             member.state == "ended"
