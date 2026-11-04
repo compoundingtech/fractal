@@ -669,7 +669,7 @@ pub(crate) fn resolve_executable(binary: &str) -> Result<PathBuf> {
 /// Fingerprint the executable, script runtime and installation metadata without traversing
 /// package assets. Bundled code belongs to the executable; package manifests and lockfiles
 /// identify dependency releases. This is build identity, not an integrity scan of every asset.
-fn executable_identity(path: &Path) -> Result<String> {
+pub fn executable_identity(path: &Path) -> Result<String> {
     let mut hash = Sha256::new();
     // Changing the identity policy invalidates both old measurements and old exceptions.
     hash.update(b"st.installed-producer.executable-runtime-metadata.v2");
