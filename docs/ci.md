@@ -825,13 +825,13 @@ the UI owners' choice. `KIT_PLAY_SET=critical` selects only stories tagged `crit
 empty selection fails). `commit` narrows the critical stories to fit about 60 seconds
 on the 4-vCPU runner (the critical set took about 185 s): each story runs in one case, dark at
 440 or light at 1440 chosen by a hash of its id, so both schemes and both widths stay covered
-across the set; the layout stories in `BOTH_WIDTHS` run dark at 440 and 1440; the stories in
-`MERGE_ONLY` do not run per commit. The lists live in
-`packages/fractal-ui/scripts/kit-play-commit-set.mjs`, name only critical stories (a rename fails
-the gate), and the receipt records what the run omitted. Per commit this leaves out the
-other three cases of every story (the other scheme and width pairs; the `BOTH_WIDTHS` stories
-lose their light cases) and the two `MERGE_ONLY` stories (`transcript--no-green-all-states`,
-`sidebar-roster--hundred-agent-render`); merge groups run all of them.
+across the set; stories tagged `both-widths` run dark at 440 and 1440; stories tagged
+`merge-only` do not run per commit. These tags live beside `critical` on the stories and
+are read from the built Storybook index. Either policy tag without `critical`, or both
+policy tags on one story, fails the gate before tag selection or sharding. The receipt
+records omitted coverage; merge groups retain the full matrix. App stories under
+`apps/fractal-web/src/**/*.stories.tsx` are discovered and owned by the kit lane, so
+adding a story folder or assigning these tags requires no lane-definition edits.
 `KIT_PLAY_A11Y=off` sets addon-a11y's own `a11y.manual` global so axe does not run, and
 each case must then carry no a11y report, while with a11y on each case must carry exactly
 one passed a11y report; `KIT_PLAY_MAX_SECONDS` is the set's wall-time budget: every case

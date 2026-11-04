@@ -50,8 +50,7 @@ const iframe = (report, probes = [], navigation) => `<!doctype html><meta charse
   }
 </script>`
 
-// These untagged stories satisfy the complete-index policy without satisfying the per-commit
-// critical inventory: that test must still fail at its own missing-critical-story check.
+// These untagged stories satisfy the complete-index case-override policy.
 const policyFixtureIds = [
   'fractal-ui-transcript--no-green-all-states-light',
   'fractal-ui-transcript--no-green-all-states',
@@ -65,16 +64,16 @@ const policyFixtureIds = [
   'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed',
 ]
 
-const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false, retainWebStorage = false } = {}) => {
+const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false, retainWebStorage = false, criticalTags = ['dev', 'critical'], policyTags = ['dev'], criticalImportPath = './Kit.stories.tsx' } = {}) => {
   const directory = await mkdtemp(join(tmpdir(), 'kit-play-gate-test-'))
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
     await mkdir(build)
     await writeFile(join(build, 'index.json'), JSON.stringify({ entries: {
-      critical: { type: 'story', id: 'kit--critical', importPath: './Kit.stories.tsx', tags: ['dev', 'critical'] },
+      critical: { type: 'story', id: 'kit--critical', importPath: criticalImportPath, tags: criticalTags },
       other: { type: 'story', id: 'kit--other', importPath: './Kit.stories.tsx', tags: ['dev'] },
       ...Object.fromEntries(policyFixtureIds.map(id => [id, {
-        type: 'story', id, importPath: './Kit.stories.tsx', tags: ['dev'],
+        type: 'story', id, importPath: './Kit.stories.tsx', tags: policyTags,
       }])),
     } }))
     await writeFile(join(build, 'iframe.html'), iframe(report, probes, navigation))
@@ -281,12 +280,20 @@ test('critical set without a11y selects tagged stories and asks addon-a11y not t
   assert.ok(receipt.rows.every(row => row.timings.a11yMilliseconds === 0))
 })
 
-test('the per-commit set refuses a build whose critical stories are not the ones it names', { timeout: 60000 }, async () => {
-  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: 'commit', KIT_PLAY_A11Y: 'off' } })
-  assert.equal(code, 1)
-  assert.equal(receipt.pass, false)
-  assert.equal(receipt.cases, 0)
-  assert.match(receipt.fatalError, /names fractal-ui-.*, which is not a critical story/)
+test('the per-commit set refuses policy-tagged stories that are not critical before browser execution', { timeout: 60000 }, async () => {
+  for (const tag of ['both-widths', 'merge-only']) {
+    const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: 'commit', KIT_PLAY_A11Y: 'off' }, policyTags: [tag] })
+    assert.equal(code, 1)
+    assert.equal(receipt.pass, false)
+    assert.equal(receipt.cases, 0)
+    assert.match(receipt.fatalError, /names fractal-ui-.*, which is not a critical story/)
+  }
+})
+
+test('a new-folder critical story tagged both-widths runs both browser widths without lane edits', { timeout: 60000 }, async () => {
+  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: 'commit', KIT_PLAY_A11Y: 'off' }, criticalTags: ['critical', 'both-widths'], criticalImportPath: './new-folder/Kit.stories.tsx' })
+  assert.equal(code, 0)
+  assert.deepEqual(receipt.rows.map(({ scheme, width }) => [scheme, width]), [['dark', 440], ['dark', 1440]])
 })
 
 test('a11y off rejects a case where axe still ran', { timeout: 60000 }, async () => {
