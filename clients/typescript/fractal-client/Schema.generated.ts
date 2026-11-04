@@ -2901,6 +2901,16 @@ export const Machine = /*#__PURE__*/ (() => Schema.Struct({
 export type Machine = typeof Machine.Type
 export type MachineEncoded = typeof Machine.Encoded
 
+export const MessageStatusFrom = /*#__PURE__*/ (() => Schema.Struct({
+  "host": Schema.String,
+  /** Why that host's answer is unknown, with unknown. */
+  "reason": optionalKey(Schema.String).annotate({ description: "Why that host's answer is unknown, with unknown." }),
+  /** answered: state is the further of this host's records and that host's answer. unknown: that host did not answer, and state is only this host's own records. A client treats any other word as unknown. */
+  "state": Schema.String.annotate({ description: "answered: state is the further of this host's records and that host's answer. unknown: that host did not answer, and state is only this host's own records. A client treats any other word as unknown." })
+}).annotate({ identifier: "MessageStatusFrom" }))()
+export type MessageStatusFrom = typeof MessageStatusFrom.Type
+export type MessageStatusFromEncoded = typeof MessageStatusFrom.Encoded
+
 export const Message = /*#__PURE__*/ (() => Schema.Struct({
   "attachments": optionalKey(Schema.Array(Attachment)),
   /** The length in UTF-8 bytes of the whole text, with body_ref. */
@@ -2917,6 +2927,8 @@ export const Message = /*#__PURE__*/ (() => Schema.Struct({
   "sent_at": Timestamp,
   "session_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
   "state": Schema.Literals(["sent","delivered","read","closed"]),
+  /** Present when the recipient's seat runs on another host that keeps its receipts: whether that host answered. Absent when this host's own records are the whole answer. */
+  "status_from": optionalKey(MessageStatusFrom),
   "tags": optionalKey(Schema.Array(Schema.String).check(Schema.isUnique())),
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "to": Id,

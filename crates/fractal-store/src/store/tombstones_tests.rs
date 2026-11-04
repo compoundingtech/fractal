@@ -765,23 +765,14 @@ fn production_history_has_bounded_journal_writes() {
 /// of the bodies, and its hold split into the steps and the commit; a faster chunk logs nothing.
 #[test]
 fn a_slow_trim_chunk_logs_what_it_deleted_and_where_its_hold_went() {
-    #[derive(Clone, Default)]
-    struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for Lines {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let slow_chunks = |lines: &Lines| -> Vec<String> {
-        String::from_utf8(lines.0.lock().unwrap().clone())
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let slow_chunks = |lines: &std::sync::Mutex<Vec<String>>| -> Vec<serde_json::Value> {
+        lines
+            .lock()
             .unwrap()
-            .lines()
-            .filter(|line| line.contains("a trim chunk held"))
-            .map(str::to_owned)
+            .iter()
+            .filter_map(|line| line.strip_prefix("st3: a trim chunk held the store's writer over 1 s "))
+            .map(|fields| serde_json::from_str(fields).unwrap())
             .collect()
     };
     let store = Store::open_memory("alder").unwrap();
@@ -789,42 +780,29 @@ fn a_slow_trim_chunk_logs_what_it_deleted_and_where_its_hold_went() {
     write_diagnostics(&store, "daemon/alder", 5);
     let cut = now_ms() + 1_000;
     let plan = plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
-    let lines = Lines::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer({
-            let lines = lines.clone();
-            move || lines.clone()
-        })
-        .with_ansi(false)
-        .finish();
-    tracing::subscriber::with_default(subscriber, || {
-        // Recorded in one transaction, so only the first deletion chunk pays the cost.
-        store.set_trim_row_cost(smallclaims::store::checkpoint_trim::LOGGED_TRIM_CHUNK);
-        store.set_trim_pause(std::time::Duration::ZERO);
-        store.set_trim_fault(Some(TrimFault::AfterChunk(1)));
-        let mut actions = Vec::new();
-        assert!(
-            store
-                .trim_checkpoint(CHECKPOINT, cut, &plan.drop_digest, &plan.envelopes, &plan.claims, true, &mut actions)
-                .is_err()
-        );
-        let logged = slow_chunks(&lines);
-        assert_eq!(logged.len(), 1, "{logged:?}");
-        let line = &logged[0];
-        for field in ["phase=\"envelopes\"", "envelopes=1", "claims=1"] {
-            assert!(line.contains(field), "{field} in {line}");
-        }
-        let field = |name: &str| -> u64 {
-            let start = line.find(&format!(" {name}=")).unwrap() + name.len() + 2;
-            line[start..].split(' ').next().unwrap().parse().unwrap()
-        };
-        assert!(field("body_bytes") > 0, "{line}");
-        assert!(field("step_ms") >= 1_000, "{line}");
-        assert!(field("held_ms") >= field("step_ms"), "{line}");
-        store.set_trim_row_cost(std::time::Duration::ZERO);
-        store.finish_trim(CHECKPOINT, &mut actions).unwrap();
-        assert_eq!(slow_chunks(&lines).len(), 1, "a chunk under a second logs nothing");
-    });
+    let seen = std::sync::Arc::clone(&lines);
+    *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
+    // Recorded in one transaction, so only the first deletion chunk pays the cost.
+    store.set_trim_row_cost(smallclaims::store::checkpoint_trim::LOGGED_TRIM_CHUNK);
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_fault(Some(TrimFault::AfterChunk(1)));
+    let mut actions = Vec::new();
+    assert!(
+        store
+            .trim_checkpoint(CHECKPOINT, cut, &plan.drop_digest, &plan.envelopes, &plan.claims, true, &mut actions)
+            .is_err()
+    );
+    let logged = slow_chunks(&lines);
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    let line = &logged[0];
+    assert_eq!((line["phase"].as_str(), line["envelopes"].as_u64(), line["claims"].as_u64()), (Some("envelopes"), Some(1), Some(1)), "{line}");
+    let field = |name: &str| line[name].as_u64().unwrap();
+    assert!(field("body_bytes") > 0, "{line}");
+    assert!(field("step_ms") >= 1_000, "{line}");
+    assert!(field("held_ms") >= field("step_ms"), "{line}");
+    store.set_trim_row_cost(std::time::Duration::ZERO);
+    store.finish_trim(CHECKPOINT, &mut actions).unwrap();
+    assert_eq!(slow_chunks(&lines).len(), 1, "a chunk under a second logs nothing");
 }
 
 /// How long a write waits behind a trim is wall time, which a loaded builder stretches (a
@@ -878,7 +856,7 @@ fn a_trim_never_makes_a_write_wait_long() {
     store.bind_fleet(FLEET).unwrap();
     // This test times how long the trim holds the writer. Every commit waits for the disk with
     // `synchronous=FULL`, and a shared disk makes that wait the whole measurement: a chunk
-    // held 13 ms of CPU and its commit waited 259 ms on hetz2. Without the sync, a write waits
+    // held 13 ms of CPU and its commit waited 259 ms on a build host. Without the sync, a write waits
     // only for the trim's own work. The 500 ms bound is unchanged.
     store
         .connection

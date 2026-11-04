@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A trim no longer resets every published list after each chunk it deletes, so the agents roster keeps publishing and the WAL can restart while a local cut runs",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No table or claim schema change."},
+  "rules": {"status": "none", "detail": "The same claims are deleted in the same chunks. The rules version and digest are unchanged."},
+  "compatibility": {"status": "none", "detail": "Local to each member, with no wire or stored format change, so members on older builds are unaffected. Each chunk still bumps the replication inventory generation, so sync sees every chunk as before. Only when the views are told changes: a trim's run refolds the roster and the mission, work and runtime lists at most once a minute, keeping their generation, and forgets every view once when the run stops (at the day's cap, at the final mark, or on any stop). Before, every chunk forgot every view, so the roster's fold from nothing never finished and readers kept a snapshot open on the WAL. Members that trim locally ([trim] local) get the fix with this release."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step. A member paused with [trim] daily_claims = 1 can return to its usual cap once it runs this release."},
+  "recovery": {"status": "none", "detail": "Revert the build. A running trim keeps its cursor and goes on."}
+}

@@ -315,26 +315,18 @@ async fn summary_socket_tiny_snapshot_count_delta_silence_and_person_refusal() {
         ))
         .await
         .unwrap();
-    let raw = tokio::time::timeout(Duration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(raw.to_text().unwrap().len() < 1024);
-    let first: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+    let raw = super::super::tests::data_text_within(&mut socket, Duration::from_secs(5)).await.expect("a data frame within 5 s");
+    assert!(raw.len() < 1024);
+    let first: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(first["kind"], "snapshot");
     assert_eq!(first["order"], json!(["summary/current"]));
     assert_eq!(first["has_more"], false);
     assert_eq!(first["items"][0]["active_missions"], 0);
     writer.store.set_step_state(&step, "working", None).unwrap();
     signal_changed(&writer);
-    let raw = tokio::time::timeout(Duration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(raw.to_text().unwrap().len() < 1024);
-    let changed: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+    let raw = super::super::tests::data_text_within(&mut socket, Duration::from_secs(5)).await.expect("a data frame within 5 s");
+    assert!(raw.len() < 1024);
+    let changed: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(changed["kind"], "changes");
     assert_eq!(changed["upserts"][0]["active_missions"], 1);
     assert_eq!(changed["removes"], json!([]));
@@ -367,12 +359,8 @@ async fn summary_socket_tiny_snapshot_count_delta_silence_and_person_refusal() {
         "equal counts must stay silent"
     );
     socket.send(Message::Text(json!({"kind":"subscribe","id":"foreign","collection":"summary","person":"person/other"}).to_string().into())).await.unwrap();
-    let raw = tokio::time::timeout(Duration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let refusal: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+    let raw = super::super::tests::data_text_within(&mut socket, Duration::from_secs(5)).await.expect("a data frame within 5 s");
+    let refusal: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(refusal["kind"], "error");
     assert_eq!(refusal["id"], "foreign");
     assert_eq!(refusal["retryable"], false);

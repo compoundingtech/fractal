@@ -1,7 +1,7 @@
 === Now ===
  ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  ◆ Inbox                                                                    +
+ / Filter:                          +New│  ◆1 Inbox                                                                   +
  ▾ Everything else 7                    │   somebody is stopped on you  │ ╭─ UNPLACED · WAITING 1M ─────────────────╮
  ▾ Agents 4                             │ ▌ ? unplaced Worker typech…   │ │                                         │
    Atlas Builder                        │ ▌   waited 1m                 │ │ Worker typecheck fails after the rename │
