@@ -229,7 +229,7 @@ publication cut, not an estimated finish timestamp. Completed samples match the 
 definition hash and step path; person-held time is excluded, but queueing and agent waits
 count. Remaining steps sum along declared dependency critical paths (`critical-path`),
 or sequentially when no dependencies are declared (`per-step`). `samples` is the smallest
-sample count among remaining steps, including one or two prior runs. A missing sample or
+sample count among remaining steps, including one or two prior runs; zero means no remaining steps and zero remaining duration. A missing sample or
 a finished run yields null; older daemons omit the field. ETA remains available while a
 person holds a run, allowing a client to show “waiting on you” instead.
 

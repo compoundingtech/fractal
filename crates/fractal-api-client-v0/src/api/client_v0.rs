@@ -16374,6 +16374,14 @@ mission "example/looped" state="ready" {
         assert_eq!(detail[0]["run_details"][0].get("eta"), Some(&Value::Null));
         state.store.set_step_state(&first.steps[0].subject, "working", None).unwrap();
         state.store.set_step_state(&first.steps[0].subject, "completed", None).unwrap();
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        assert!(cards[0]["run_details"][0]["completed_at"].is_null());
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        for run in [&cards[0]["run_details"][0], &detail[0]["run_details"][0]] {
+            assert_eq!(run["eta"], json!({"remaining_low_ms":0,"remaining_high_ms":0,"basis":{"method":"per-step","samples":0},"as_of":run["eta"]["as_of"]}));
+            let schema: Value = serde_json::from_str(include_str!("../../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+            assert!(jsonschema::options().with_draft(jsonschema::Draft::Draft202012).build(&schema["$defs"]["MissionRunSummary"]["properties"]["eta"]).unwrap().is_valid(&run["eta"]));
+        }
         state.store.set_mission_run_state(&first.id, "completed", "terminal", Some("done")).unwrap();
         let second = start("eta-second");
         let cut = client_now_ms();

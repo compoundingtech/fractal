@@ -1534,7 +1534,7 @@
                   "required": ["method", "samples"],
                   "properties": {
                     "method": { "enum": ["per-step", "critical-path"] },
-                    "samples": { "type": "integer", "minimum": 1, "description": "Smallest completed sample count among remaining steps." }
+                    "samples": { "type": "integer", "minimum": 0, "description": "Smallest completed sample count among remaining steps; zero means no remaining steps and zero remaining duration." }
                   }
                 },
                 "as_of": { "type": "integer", "minimum": 0, "description": "Publication cut in Unix milliseconds, not an absolute estimated finish time." }
