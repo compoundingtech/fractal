@@ -6,10 +6,16 @@ import { selectionParts } from '../folders/client.ts'
 
 export type PinsGateway = Pick<FractalClient, 'discover' | 'arrangementsGet' | 'arrangementsMemberships' | 'arrangementEdit' | 'arrangementMembershipEdit' | 'collectionStream'>
 type EditIdentity = Pick<ActionOf<'arrangement.membership.edit'>, 'id' | 'idempotency_key' | 'fence'>
+export interface PinsFollow {
+  close(): void
+  refresh(): void
+  edit(identity: EditIdentity, operations: OrderedMembershipOperation[], createIdentity?: EditIdentity): Promise<void>
+}
 export interface PinsState {
   readonly phase: 'connecting' | 'synced' | 'pending' | 'unavailable'
   readonly members: readonly OrderedMembership[]
   readonly detail?: string
+  readonly editable?: boolean
 }
 const isArrangement = Schema.is(Schema.toEncoded(ArrangementSchema))
 const isPage = Schema.is(Schema.toEncoded(OrderedMembershipPage))
@@ -28,7 +34,7 @@ export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
   readonly onState: (state: PinsState) => void
   /** The owner must coordinate all arrangement readers before enabling v2 creation. */
   readonly v2ReadersReady?: boolean
-}): Promise<{ close(): void; refresh(): void; edit(identity: EditIdentity, operations: OrderedMembershipOperation[], createIdentity?: EditIdentity): Promise<void> }> => {
+}): Promise<PinsFollow> => {
   const discovery = (await gateway.discover()).value
   const selection = pinsSelection(discovery.session_actor)
   const { person, uuid } = selectionParts(selection)
@@ -88,7 +94,7 @@ export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
         }
         if (!closed && !dirty && !interrupted) {
           ready = !retired
-          publish({ phase: retired ? 'unavailable' : busy ? 'pending' : 'synced', members, ...(retired ? { detail: 'Restoring removed Pins is not available.' } : {}) })
+          publish({ phase: retired ? 'unavailable' : busy ? 'pending' : 'synced', members, editable: writable && (next !== undefined || v2ReadersReady), ...(retired ? { detail: 'Restoring removed Pins is not available.' } : {}) })
         }
       } while (dirty && !closed)
     } catch (error) { if (!closed) fail(error) } finally { reading = false }

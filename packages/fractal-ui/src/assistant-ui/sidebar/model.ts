@@ -86,6 +86,8 @@ export interface SidebarActions {
   readonly split?: (ref: string, placement: 'right' | 'below') => void
   /** Host-owned canonical declaration view for an agent or mission ref; the row offers it only when set. */
   readonly declaration?: (ref: string) => void
+  /** Present only when the host can edit Pins; rows offer Pin/Unpin for the stable agent ref and its attached mission, never subagents. */
+  readonly pins?: { readonly has: (ref: string) => boolean; readonly toggle: (ref: string) => void }
 }
 
 export interface SidebarSubagent { readonly id: string; readonly subagent_type?: string; readonly work_id?: string; readonly session_id?: string; readonly started_at?: string; readonly lease_expires_at: string }

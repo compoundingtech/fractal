@@ -14,6 +14,7 @@ export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sid
 export { MilestoneAgentRow, openAgentRowMenu, type MilestoneAgentRowProps } from './sidebar/MilestoneAgentRow.tsx'
 export { AgentRowActions, type AgentRowActionsProps } from './sidebar/SidebarAgentRow.tsx'
 export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
+export { PinsSection, type PinsSectionProps } from './sidebar/PinsSection.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
 export { usageScopeLabel } from './sidebar/model.ts'
 export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, SidebarMissionContext, SidebarMissionInfo, SidebarMissionProgress, SidebarMissionStep, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'

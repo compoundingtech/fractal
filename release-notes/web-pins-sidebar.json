@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show the person's existing ordered Pins and editable row pin actions in the web sidebar",
+  "replay": {"status": "none", "detail": "Existing arrangement membership claims are reused."},
+  "schema": {"status": "none", "detail": "No wire or storage change."},
+  "rules": {"status": "none", "detail": "Existing membership lifecycle and ordering rules apply."},
+  "compatibility": {"status": "none", "detail": "Pins edits require granted control and a synced follow. Creating a version-2 Pins arrangement remains disabled by default."},
+  "downtime": {"status": "none", "detail": "No daemon restart is required."},
+  "manual": {"status": "none", "detail": "No arrangement is automatically created or migrated."},
+  "recovery": {"status": "none", "detail": "Reverting the UI preserves stored memberships and Sidebar folders."}
+}

@@ -632,6 +632,11 @@ cannot restore synced or editable state on an interrupted follow. Failed reads
 retain the last complete members with an unavailable phase. Sidebar rendering is
 independent of this data API.
 
+The live sidebar renders returned Pins in membership order above the roster and
+hides an empty section. Pin/unpin menus appear only with a synced writable follow.
+Retired or unavailable subjects remain hidden by membership reads; these defaults
+are reversible presentation choices. The UI does not opt into Pins creation.
+
 ## Focused local checks
 
 From the repository root, batch both web/UI typechecks and explicitly selected app
