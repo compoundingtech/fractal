@@ -6,6 +6,7 @@ import type { Components, ExtraProps } from 'react-markdown'
 import type { Root } from 'hast'
 import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
+import { createLazyChunk } from '../../lazy-chunk'
 import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
@@ -145,6 +146,17 @@ const syntaxKinds: Readonly<Record<string, string>> = {
   '#000005': 'function', '#000006': 'deleted', '#000007': 'boolean', '#000008': 'constant', '#000009': 'inserted',
 }
 let highlightsModule: typeof Highlights | undefined
+const highlightsChunk = createLazyChunk({
+  load: () => {
+    const { promise, resolve, reject } = Promise.withResolvers<typeof Highlights>()
+    // The published entry compiles embedded WASM at import. Defer that work
+    // until after the pane's plain-text first paint, never during render.
+    requestAnimationFrame(() => setTimeout(() => {
+      import('@pierre/highlights').then(resolve, reject)
+    }, 0))
+    return promise
+  },
+})
 let highlightsRequest: Promise<void> | undefined
 const highlightsListeners = new Set<() => void>()
 const highlightsSnapshot = () => highlightsModule
@@ -153,18 +165,11 @@ const unsubscribePlainSource = () => {}
 const subscribePlainSource = () => unsubscribePlainSource
 const subscribeHighlights = (notify: () => void) => {
   highlightsListeners.add(notify)
-  highlightsRequest ??= new Promise<typeof Highlights>((resolve, reject) => {
-    // The published entry compiles embedded WASM at import. Defer that work
-    // until after the pane's plain-text first paint, never during render.
-    requestAnimationFrame(() => setTimeout(() => {
-      import('@pierre/highlights').then(resolve, reject)
-    }, 0))
-  }).then(module => {
+  highlightsRequest ??= highlightsChunk.load().then(module => {
     highlightsModule = module
     for (const listener of highlightsListeners) listener()
   }, () => {
-    // Do not notify on failure: plain text stays mounted, and only a later subscription retries.
-    highlightsRequest = undefined
+    // Sticky plain source for this session: highlighting never retries or reloads.
   })
   return () => { highlightsListeners.delete(notify) }
 }
