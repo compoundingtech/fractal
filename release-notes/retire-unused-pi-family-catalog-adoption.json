@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Removes the uncalled workspace-internal OMP catalog adopt API and its private resolver. Current callers retain the explicit-path native adoption APIs, which already omit legacy presence transport."
+    "detail": "Removes the uncalled workspace-internal OMP catalog adopt API and its private resolver. Current callers retain the explicit-path native adoption APIs, which already omit legacy presence transport. The Clippy baseline is tightened by the one too-many-arguments warning removed with the unused resolver."
   },
   "downtime": {
     "status": "none",
