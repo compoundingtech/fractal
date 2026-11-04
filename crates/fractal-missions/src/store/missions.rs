@@ -206,10 +206,10 @@ fn step_timestamps(events: &[(String, Value, u128)], attempt: u32) -> (Option<u1
     let mut current_attempt = 1;
     for (kind, body, at) in events {
         let fields = body.get("fields").unwrap_or(body);
-        if matches!(kind.as_str(), "step-run.state" | "step-run.carried") {
-            if let Some(value) = fields["attempt"].as_u64() {
-                current_attempt = value;
-            }
+        if matches!(kind.as_str(), "step-run.state" | "step-run.carried")
+            && let Some(value) = fields["attempt"].as_u64()
+        {
+            current_attempt = value;
         }
         let event_attempt = fields["attempt"].as_u64().unwrap_or(current_attempt);
         if event_attempt != u64::from(attempt) {
