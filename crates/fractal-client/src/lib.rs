@@ -157,9 +157,7 @@ pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf 
     } else {
         published.to_path_buf()
     };
-    let answers = |socket: &Path| {
-        unix_socket_path_fits(socket) && std::os::unix::net::UnixStream::connect(socket).is_ok()
-    };
+    let answers = |socket: &Path| unix_socket_path_fits(socket) && unix_socket_answers(socket);
     if !answers(runtime) && answers(&target) {
         target
     } else {
@@ -172,6 +170,63 @@ pub fn unix_socket_path_fits(socket: &Path) -> bool {
     std::os::unix::net::SocketAddr::from_pathname(socket).is_ok()
 }
 
+fn unix_socket_answers(socket: &Path) -> bool {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if !unix_socket_path_fits(socket) {
+        return false;
+    }
+    // Discovery runs before async transport deadlines: a full backlog must never block it.
+    #[cfg(target_os = "linux")]
+    let flags = libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::SOCK_STREAM;
+    // SAFETY: socket returns a new descriptor, owned here until every return path drops it.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, flags, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: fd is a valid, uniquely owned descriptor from socket.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SAFETY: these commands set flags on our valid descriptor without pointer arguments.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0
+            || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+        {
+            return false;
+        }
+    }
+    // SAFETY: an all-zero sockaddr_un is valid to initialize before setting its fields.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let path = socket.as_os_str().as_bytes();
+    for (destination, source) in address.sun_path.iter_mut().zip(path) {
+        *destination = *source as libc::c_char;
+    }
+    let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = length as u8;
+    }
+    // SAFETY: address contains a validated, NUL-terminated path and length fits sockaddr_un.
+    let result = unsafe {
+        libc::connect(
+            fd.as_raw_fd(),
+            std::ptr::from_ref(&address).cast(),
+            length as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        return true;
+    }
+    let error = std::io::Error::last_os_error().raw_os_error();
+    error == Some(libc::EAGAIN)
+        || error == Some(libc::EWOULDBLOCK)
+        || error == Some(libc::EINPROGRESS)
+}
+
 /// Resolve default socket names without changing explicit configured endpoints.
 pub fn default_unix_socket(runtime: &Path, published: &Path) -> PathBuf {
     let primary = runtime_or_published_socket(runtime, published);
@@ -182,14 +237,12 @@ pub fn default_unix_socket(runtime: &Path, published: &Path) -> PathBuf {
         _ => return primary,
     };
     let primary_fits = unix_socket_path_fits(&primary);
-    if !primary_fits || std::os::unix::net::UnixStream::connect(&primary).is_err() {
+    if !primary_fits || !unix_socket_answers(&primary) {
         let legacy = runtime_or_published_socket(
             &runtime.with_file_name(legacy_name),
             &published.with_file_name(legacy_name),
         );
-        if unix_socket_path_fits(&legacy)
-            && (!primary_fits || std::os::unix::net::UnixStream::connect(&legacy).is_ok())
-        {
+        if unix_socket_path_fits(&legacy) && (!primary_fits || unix_socket_answers(&legacy)) {
             return legacy;
         }
     }
@@ -5789,6 +5842,78 @@ mod tests {
         );
         assert_eq!(configured_socket("node = 'local'\n").unwrap(), None);
         assert!(configured_socket("socket = 7\n").is_err());
+    }
+
+    #[test]
+    fn socket_probe_never_blocks_on_a_full_backlog_and_rejects_stale_sockets() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::time::Instant;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("fractal.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        // SAFETY: listener owns a valid listening socket; reduce its queue to the minimum.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        // SAFETY: zero initialization is valid before populating the Unix address.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let path = socket.as_os_str().as_bytes();
+        assert!(unix_socket_path_fits(&socket));
+        for (destination, source) in address.sun_path.iter_mut().zip(path) {
+            *destination = *source as libc::c_char;
+        }
+        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = length as u8;
+        }
+        let mut clients = Vec::new();
+        let mut full = false;
+        for _ in 0..16 {
+            // SAFETY: socket creates a descriptor that is immediately given a unique owner.
+            let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+            assert!(fd >= 0);
+            // SAFETY: fd is valid and has no other owner.
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+            // SAFETY: set nonblocking mode before connecting, even when the queue is full.
+            assert_eq!(
+                unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+                0
+            );
+            // SAFETY: address and length describe the validated socket path.
+            let result = unsafe {
+                libc::connect(
+                    fd.as_raw_fd(),
+                    std::ptr::from_ref(&address).cast(),
+                    length as libc::socklen_t,
+                )
+            };
+            let error = std::io::Error::last_os_error().raw_os_error();
+            clients.push(fd);
+            if result < 0 {
+                assert!(
+                    error == Some(libc::EAGAIN)
+                        || error == Some(libc::EWOULDBLOCK)
+                        || error == Some(libc::EINPROGRESS),
+                    "{error:?}"
+                );
+                full = true;
+                break;
+            }
+        }
+        assert!(full, "the listener backlog must be full before probing");
+        let start = Instant::now();
+        assert!(unix_socket_answers(&socket));
+        assert_eq!(
+            default_unix_socket(&socket, &socket),
+            socket.canonicalize().unwrap()
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+        drop(clients);
+        drop(listener);
+        assert!(socket.exists());
+        assert!(!unix_socket_answers(&socket));
     }
 
     #[test]
