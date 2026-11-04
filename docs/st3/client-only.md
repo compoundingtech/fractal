@@ -12,10 +12,10 @@ A phone can reach the same paired gateway over Fabric instead of a tailnet; see
 
 ## Pair once
 
-First publish the member's **paired-only** `st3-client.sock` through an existing LAN or tailnet
+First publish the member's **paired-only** `fractal-client.sock` through an existing LAN or tailnet
 carrier. Use the [client gateway setup](client-v0/README.md#tailnet-carrier), including the
 check that an unauthenticated `GET /v1/client/agents` answers `403`. Never forward the
-privileged `st3.sock`. Use HTTPS, or HTTP over an encrypted tailnet; HTTP on a shared LAN
+privileged `fractal.sock`. Use HTTPS, or HTTP over an encrypted tailnet; HTTP on a shared LAN
 exposes the bearer credential to observers.
 
 On the member, create a short-lived, single-use challenge for the intended person:

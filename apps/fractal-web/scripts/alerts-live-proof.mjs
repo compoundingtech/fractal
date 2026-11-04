@@ -50,7 +50,14 @@ const unit = 'webproof-fractal-up'
 const home = join(root, 'home')
 const tools = join(root, 'tools')
 const runDir = join(home, '.st-instance', instance, 'run')
-const gateway = join(runDir, 'st3-client.sock')
+const gateway = () => {
+  const socket = join(runDir, 'fractal-client.sock')
+  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+  const legacy = join(runDir, 'st3-client.sock')
+  if (!existsSync(socket) && existsSync(legacy)) return legacy
+  // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+  return socket
+}
 const authorizationFile = join(root, 'authorization')
 const BUDGET_MS = 2000
 
@@ -67,12 +74,12 @@ const st = (args, { check = true } = {}) => {
   return result
 }
 const stJson = (args) => JSON.parse(st(['--json', ...args]).stdout)
-const alive = () => existsSync(gateway) && st(['--daemon-wait', '0', 'agents', 'ls'], { check: false }).status === 0
+const alive = () => existsSync(gateway()) && st(['--daemon-wait', '0', 'agents', 'ls'], { check: false }).status === 0
 
 /** One unauthenticated request to the paired gateway socket (pairing completion). */
 const gatewayPost = (path, body) => new Promise((resolve, reject) => {
   const payload = JSON.stringify(body)
-  const req = request({ socketPath: gateway, path, method: 'POST', headers: { host: '127.0.0.1', 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (res) => {
+  const req = request({ socketPath: gateway(), path, method: 'POST', headers: { host: '127.0.0.1', 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (res) => {
     let text = ''
     res.on('data', (chunk) => { text += chunk })
     res.on('end', () => res.statusCode === 200 ? resolve(JSON.parse(text)) : reject(new Error(`POST ${path}: ${res.statusCode} ${text}`)))
@@ -184,7 +191,7 @@ async function proof() {
   const yesStep = ask(yesTitle, ['--reason', 'Answer yes or no.'])
   const alertIds = new Map(stJson(['alerts', 'ls', '--as', person]).value.items.map((item) => [item.title, item.id]))
 
-  process.env.WF_ST_GATEWAY = gateway
+  process.env.WF_ST_GATEWAY = gateway()
   process.env.WF_ST_AUTHORIZATION = readFileSync(authorizationFile, 'utf8').trim()
   const { createServer, loadConfigFromFile } = await import('vite')
   const loaded = await loadConfigFromFile({ command: 'serve', mode: 'development' }, `${app}/vite.config.ts`, app)
@@ -295,7 +302,7 @@ async function proof() {
 }
 
 const command = process.argv[2] ?? 'run'
-if (command === 'up') { await up(); console.log(`up: WF_ST_GATEWAY=${gateway} WF_ST_AUTHORIZATION=$(cat ${authorizationFile})`) }
+if (command === 'up') { await up(); console.log(`up: WF_ST_GATEWAY=${gateway()} WF_ST_AUTHORIZATION=$(cat ${authorizationFile})`) }
 else if (command === 'down') down()
 else if (command === 'run') await proof()
 else throw new Error('usage: alerts-live-proof.mjs [run|up|down]')
