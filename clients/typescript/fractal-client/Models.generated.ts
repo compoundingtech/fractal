@@ -2196,6 +2196,7 @@ export type Message = ResourceHeader & {
   sent_at: Timestamp;
   session_id?: (Id | null);
   state: "sent" | "delivered" | "read" | "closed";
+  status_from?: MessageStatusFrom;
   tags?: Array<string>;
   title?: string | null;
   to: Id;
@@ -2227,6 +2228,12 @@ export type MessageSendRefusal = ({
   recipient: Id;
   variant: "LifecycleUnavailable";
 });
+
+export type MessageStatusFrom = {
+  host: string;
+  reason?: string;
+  state: string;
+};
 
 export type Mission = ResourceHeader & {
   active_runs?: number;
