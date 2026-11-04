@@ -1352,6 +1352,87 @@ class StTest(unittest.TestCase):
             code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '60'})
         self.assertEqual(code, 0, out[-300:] + err[-300:])
 
+    def test_the_member_step_s_limit_counts_its_own_running_not_its_build_admission_waits(self):
+        now = [0.0]
+        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
+        limit.observe(True)  # 20 minutes in the gate
+        now[0] = 1200
+        limit.observe(True)
+        now[0] = 1201
+        limit.observe(False)  # admitted: the gate execs the command
+        self.assertAlmostEqual(limit.waiting(), 1201)
+        now[0] = 1231
+        self.assertAlmostEqual(limit.remaining(), 20)  # 30 s of its own running
+        now[0] = 1252
+        self.assertLess(limit.remaining(), 0)  # a slow member step is still over its 50 s
+        # The waits have a limit of their own.
+        now[0] = 0.0
+        limit = st_test.MembersLimit(50, 600, clock=lambda: now[0])
+        limit.observe(True)
+        now[0] = 600
+        self.assertLessEqual(limit.remaining(), 0)
+
+    def test_a_member_step_waits_for_admission_exactly_while_its_process_is_the_gate_s_start(self):
+        proc = Path(self.tmp.name) / 'proc'
+        for pid, argv in ((1, ['python3', '/opt/admission/bin/build-admission', 'start', 'heavy', 'nix:run', '--', '/nix/bin/nix', 'run']),
+                          (2, ['/nix/bin/nix', 'run', 'github:x/y#megarepo', '--', 'apply']),             # admitted: the gate exec'd nix
+                          (3, ['python3', '/opt/admission/bin/build-admission', 'run', 'heavy', 'nix:build', '--', 'nix']),  # run: it stays the parent
+                          (4, ['sh', '-c', 'echo build-admission start'])):
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / 'cmdline').write_bytes(b'\0'.join(arg.encode() for arg in argv) + b'\0')
+        self.assertEqual([st_test.admission_waiting(pid, proc) for pid in (1, 2, 3, 4, 5)], [True, False, False, False, False])
+
+    @contextlib.contextmanager
+    def members_clock(self, seconds, waiting):
+        """The member step's clock moves `seconds` on the first time it is seen waiting for admission (`waiting` True) or running (False):
+        simulated, so no wall clock decides the outcome."""
+        init, observe = st_test.MembersLimit.__init__, st_test.MembersLimit.observe
+        offset, moved = [0.0], []
+
+        def begin(limit, *args, **kwargs):
+            init(limit, *args, **kwargs)
+            limit.clock = lambda: time.monotonic() + offset[0]
+
+        def seen(limit, now_waiting):
+            observe(limit, now_waiting)
+            if now_waiting == waiting and not moved:
+                moved.append(True)
+                offset[0] += seconds
+
+        with mock.patch.object(st_test.MembersLimit, '__init__', begin), mock.patch.object(st_test.MembersLimit, 'observe', seen):
+            yield
+
+    def test_a_member_step_s_build_admission_wait_does_not_count_against_its_limit_and_a_slow_one_still_does(self):
+        self.commit('.gitignore', '/repos/\n')
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        bin_dir = Path(self.tmp.name) / 'admission-bin'
+        bin_dir.mkdir()
+        gate = bin_dir / 'build-admission'  # as the host's gate does in `start`: wait, then exec the command
+        gate.write_text('#!/bin/sh\nshift 4\nsleep "${GATE_WAIT:-3}"\nexec "$@"\n')
+        gate.chmod(0o755)
+
+        def through_gate(script):
+            return lambda directory: [str(gate), 'start', 'heavy', 'nix:run', '--', 'sh', '-c', script]
+
+        # 80 s in the host's build admission, then a quick run: within a 50 s limit. Waits counted as running would stop it (#5068).
+        with self.members_clock(80, True), mock.patch.object(st_test, 'members_command', through_gate('mkdir -p repos/x')):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50'}, command=['test', '-d', 'repos/x'])
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(err, r'megarepo members materialized; waited (8\d|9\d)s for build admission \(not counted against ST_TEST_MEMBERS_LIMIT\)')
+        # 80 s of the member step's own running, once admitted, is over the same limit.
+        self.commit('b.txt', 'two')
+        with self.members_clock(80, False), mock.patch.object(st_test, 'members_command', lambda directory: ['sh', '-c', 'sleep 30']):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('materializing the megarepo members timed out after 50s (ST_TEST_MEMBERS_LIMIT)', out)
+        # And a wait past --queue-limit is stopped.
+        self.commit('c.txt', 'three')
+        with self.members_clock(80, True), mock.patch.object(st_test, 'members_command', through_gate('true')):
+            code, out, err = self.run_st_test('--check', 'demo', '--queue-limit', '60', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_WAIT': '30'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('materializing the megarepo members waited 60s for build admission (--queue-limit)', out)
+        self.assertEqual(len(self.statements()), 1, 'only the first run signed')
+
     def test_the_members_limit_comes_from_the_environment_and_a_bad_value_is_the_default(self):
         for value, expected in (('30', 30), ('0', 1), ('x', st_test.MEMBERS_LIMIT), ('', st_test.MEMBERS_LIMIT)):
             with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_MEMBERS_LIMIT': value}):
@@ -3574,8 +3655,11 @@ finally:
         self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'top_up', 'checks',
                                                  'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages', 'tree_wait_s', 'tree_slot_wait_s',
                                                  'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s', 'burst', 'burst_wait_s']))
-        # Its tree: free at once, and nothing that waited in it (no check here runs scripts/ci-local).
-        self.assertEqual((record['tree_wait_s'], record['tree_slot_wait_s'], record['tree_blocked_s']), (0, 0, 0))
+        # This private pool has no contention, but acquisition includes ticket work and /proc orphan scans before taking the tree.
+        # Rounded elapsed time can be nonzero on a loaded host; no build slot or ci-local stage actually waits in this fixture.
+        self.assertIsInstance(record['tree_wait_s'], int)
+        self.assertGreaterEqual(record['tree_wait_s'], 0)
+        self.assertEqual((record['tree_slot_wait_s'], record['tree_blocked_s']), (0, 0))
         self.assertLessEqual(record['tree_held_s'], record['total_s'])
         for field in ('started', 'ended'):
             self.assertRegex(record[field], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
@@ -4169,37 +4253,25 @@ class PoolQueue(unittest.TestCase):
 
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)
-        free, asked, waits, got = [False], [], {}, []
-        # Its third look, not a fixed 0.6 s: a waiter thread scheduled late on a loaded host had looked only twice by then (#4807).
-        third = threading.Event()
+        free, asked, waits = [False], [], {}
 
         def slot_ready():
             asked.append(time.monotonic())
-            if len(asked) >= 3:
-                third.set()
             return free[0], 'test: 1 of 1 heavy slots busy'
 
-        said = io.StringIO()
-        with contextlib.redirect_stderr(said):
-            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)))
-            waiter.start()
-            self.assertTrue(third.wait(30), f'the waiter looked {len(asked)} time(s) in 30 s')
-            self.assertEqual(got, [])                                           # both trees are free, but its build would wait for a slot
-            for n in range(2):                                                  # and it holds neither while it waits (only for its look)
+        def next_pass(seconds):
+            self.assertEqual(seconds, st_test.POOL_WAIT_SECONDS)
+            self.assertLessEqual(len(asked), 3, 'the next pass takes a tree once the slot is free')
+            for n in range(2):
                 with open(self.root / f'tree-{n}.lock', 'w') as probe:
-                    for _ in range(100):
-                        try:
-                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            time.sleep(0.01)
-                    else:
-                        self.fail(f'tree-{n} stayed held while its waiter waited for a slot')
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     fcntl.flock(probe, fcntl.LOCK_UN)
-            self.assertGreater(len(asked), 2, 'it looks again on every pass')
-            free[0] = True
-            waiter.join(5)
-        n, lock = got[0]
+            free[0] = len(asked) == 3
+
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said), mock.patch.object(st_test.time, 'sleep', side_effect=next_pass):
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)
+        self.assertEqual(len(asked), 4, 'three passes leave both trees free; the fourth takes one')
         lock.close()
         self.assertEqual(n, 0)
         self.assertGreaterEqual(waits['slot_wait_s'], 0)

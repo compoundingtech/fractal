@@ -272,6 +272,18 @@ impl Store {
             .map(Option::flatten)
     }
 
+    /// Human-question authority is declaration metadata, not credential or graph ownership.
+    pub fn question_principal(&self, agent: &str) -> Result<Option<String>> {
+        let desired = self.desired_subject_with_writer(agent)?;
+        let declared = desired.as_ref().and_then(|(desired, _)| {
+            desired.desired.get("children")?.as_array()?.iter()
+                .find(|child| child["name"] == "principal")?
+                .get("arguments")?.get(0)?.as_str()
+        });
+        Ok(declared.map(str::to_owned)
+            .or_else(|| self.question_principal_default.get().cloned()))
+    }
+
     /// Prefer a bound account person, then follow declaration authors and mission requesters.
     /// Missing or cyclic ownership remains unknown; it never selects a global operator.
     pub fn agent_person(&self, agent: &str) -> Result<Option<String>> {

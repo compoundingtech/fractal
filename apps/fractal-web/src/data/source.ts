@@ -47,6 +47,7 @@ import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
 import type { NativeDetailsSource } from './nativeDetailsSource.ts'
+import type { ObjectivesSource } from './objectivesSource.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
 /**
  * One followed projection as a feature sees it. Fixtures can produce every case (what `AllStates`
@@ -314,6 +315,8 @@ export interface DataSource {
   readonly subjectReads: SubjectReads
   /** Visible Details uses shared native getter facts; no private harness decoding. */
   readonly nativeDetails?: NativeDetailsSource
+  /** Objectives, budgets and their history from this member's native served model. */
+  readonly objectives?: ObjectivesSource
   readonly connection: Atom.Atom<ConnectionState>
   /** Browser reachability is a local signal, not a claim about the gateway's host. */
   readonly network?: Atom.Atom<NetworkReachability>
