@@ -1774,7 +1774,7 @@ mod tests {
         let constants = contract_constants(&operations)?;
         let uuid = operations["constants"]["pins_arrangement_uuid"]["value"].as_str().unwrap();
         assert_eq!(uuid, "00000000-0000-7000-8000-000000000002");
-        assert_eq!(fixture["subject"], format!("arrangement/person/alice/{uuid}"));
+        assert_eq!(fixture["subject"], format!("arrangement/person/example/{uuid}"));
         assert_eq!(fixture["create"]["version"], 2);
         assert!(fixture["pin"]["operations"][0]["bucket"].is_null());
         assert_eq!(fixture["unpin"]["operations"][0]["op"], "remove");
