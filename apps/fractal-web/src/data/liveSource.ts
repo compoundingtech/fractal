@@ -14,8 +14,9 @@ import {
   type FractalOptions,
   type SyncStatus,
   syncStatusFromFailure,
-  openPtySession,
-} from '@fractal/sdk/effect'
+} from '@fractal/sdk/read'
+import { openPtySession } from '@fractal/sdk/pty'
+import { makeMutations } from '@fractal/sdk/mutations'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -765,7 +766,7 @@ export const liveSource = ({
             freshest = decoded.value
         }
         if (freshest !== undefined) return { _tag: 'Success' as const, value: freshest.id }
-        return yield* fractal.snapshot.pipe(
+        return yield* makeMutations({ ...options, fetch }).snapshot.pipe(
           Effect.map((value): ConversationPortResult<string> => ({ _tag: 'Success', value })),
           Effect.catch((failure) => Effect.succeed<ConversationPortResult<string>>({
             _tag: 'Refused', reason: 'snapshot-unavailable',

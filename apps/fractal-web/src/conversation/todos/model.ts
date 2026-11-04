@@ -1,5 +1,5 @@
 import type { AgentTodo, HarnessPhase } from '@fractal/client/schema'
-import type { DecodedAgent, Open } from '@fractal/sdk/effect'
+import type { DecodedAgent, Open } from '@fractal/sdk/read'
 import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 

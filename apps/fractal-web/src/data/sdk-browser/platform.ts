@@ -1,4 +1,4 @@
-import { FractalPlatform } from '@fractal/sdk/effect'
+import { FractalPlatform } from '@fractal/sdk/read'
 import { makeAdmission } from '@fractal/sdk/admission'
 import { Layer } from 'effect'
 

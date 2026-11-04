@@ -1,6 +1,6 @@
 import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
 import { ArrangementEditParameters, ErrorCode, decodeUnknownSync } from '@fractal/client/schema'
-import type { ActionFailure, ArrangementActionPort } from '@fractal/sdk/effect'
+import type { ActionFailure, ArrangementActionPort } from '@fractal/sdk/mutations'
 import { Effect, Schema } from 'effect'
 import { reservedSidebarSubject, sidebarCandidates, sidebarWinner, type ArrangementInventory } from '../data/arrangements.ts'
 

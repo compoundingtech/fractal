@@ -7,7 +7,7 @@
 
 import { useAtomValue } from '@effect/atom-react'
 import type { TerminalModes, TerminalScreen } from '@fractal/client/schema'
-import type { PtyMode, PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@fractal/sdk/effect'
+import type { PtyMode, PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@fractal/sdk/pty'
 import * as stylex from '@stylexjs/stylex'
 import { Cause, Effect, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as AsyncResult from 'effect/reactivity/AsyncResult'

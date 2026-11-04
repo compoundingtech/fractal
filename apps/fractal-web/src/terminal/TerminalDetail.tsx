@@ -1,4 +1,4 @@
-import type { PtySize, PtyTarget } from '@fractal/sdk/effect'
+import type { PtySize, PtyTarget } from '@fractal/sdk/pty'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 

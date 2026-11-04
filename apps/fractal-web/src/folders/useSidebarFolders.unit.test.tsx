@@ -2,7 +2,7 @@
 import { RegistryContext } from '@effect/atom-react'
 import type { ActionOf, Arrangement, ArrangementBodyV1, ArrangementPage, CollectionStreamOptions, EnvelopeOf } from '@fractal/client'
 import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
-import { ActionRefused } from '@fractal/sdk/effect'
+import { ActionRefused } from '@fractal/sdk/mutations'
 import { Effect } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'

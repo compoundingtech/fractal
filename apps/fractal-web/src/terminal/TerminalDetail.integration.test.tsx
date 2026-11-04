@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { FractalClient } from '@fractal/client'
 import { Agent, decodeUnknownSync, type TerminalScreen } from '@fractal/client/schema'
-import type { PtyMode, PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@fractal/sdk/effect'
+import type { PtyMode, PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@fractal/sdk/pty'
 import { Effect, SubscriptionRef } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { readFile } from 'node:fs/promises'

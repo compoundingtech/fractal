@@ -1,5 +1,5 @@
 import { Agent, Attention, decodeUnknownSync } from '@fractal/client/schema'
-import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import { describe, expect, it } from 'vitest'
 
 import { askingAgentRefs } from './asking.ts'
