@@ -78,8 +78,10 @@ pub struct Queue {
     draining: AtomicBool,
 }
 
-/// Queue the closes among `closes` that this member has not recorded, and start a background
-/// writer when none is draining. A read only takes the queue's lock: it never waits for the writer,
+/// Queue the closes among `closes` that this member would record (of a message it holds open and
+/// has not recorded or closed), and start a background writer when none is draining. A close of
+/// mail not yet here is left for a read after it arrives, so it never takes a place in the queue
+/// the writer would only drop. A read only takes the queue's lock: it never waits for the writer,
 /// and a close past [`QUEUED`] is dropped for a later read to queue again. Without a runtime to
 /// start the writer on, the closes wait for the next read that has one.
 pub fn queue(store: &Arc<Store>, closes: Vec<RelayedClose>) -> Result<()> {
@@ -90,7 +92,7 @@ pub fn queue(store: &Arc<Store>, closes: Vec<RelayedClose>) -> Result<()> {
         let connection = store.readers.get();
         let mut known = connection.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM local_relayed_message_closes WHERE message=?1)
-                 OR EXISTS(SELECT 1 FROM message_index WHERE subject=?1 AND closed!=0)
+                 OR NOT EXISTS(SELECT 1 FROM message_index WHERE subject=?1 AND closed=0)
                  OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=?1 AND kind='message.closed')",
         )?;
         let mut fresh = Vec::new();

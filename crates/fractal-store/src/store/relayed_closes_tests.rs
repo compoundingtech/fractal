@@ -141,9 +141,8 @@ fn a_relayed_close_folds_into_a_rebuilt_selector() {
     assert_eq!(current(&reopened), ["message/r1"]);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_read_queues_a_close_without_waiting_for_a_held_writer_and_the_queue_stays_bounded() {
-    let store = reminders();
+/// Hold `store`'s writer on a thread until the returned sender is sent to, or dropped.
+fn hold_writer(store: &Arc<Store>) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
     let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
     let holder = {
         let store = store.clone();
@@ -151,26 +150,26 @@ async fn a_read_queues_a_close_without_waiting_for_a_held_writer_and_the_queue_s
         std::thread::spawn(move || {
             let _writer = store.connection.write();
             held.send(()).unwrap();
-            release.recv().unwrap();
+            let _ = release.recv();
         })
     };
     held.1.recv().unwrap();
+    (release.0, holder)
+}
 
-    // Each queue returns while the writer is held, and the queue keeps at most QUEUED.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_queues_a_close_without_waiting_for_a_held_writer() {
+    let store = reminders();
+    let (release, holder) = hold_writer(&store);
+
     let started = std::time::Instant::now();
-    relayed_closes::queue(&store, vec![close("message/r2")]).unwrap();
-    let many = (0..QUEUED + BATCH + 10).map(|index| close(&format!("message/absent-{index:04}"))).collect();
-    relayed_closes::queue(&store, many).unwrap();
+    relayed_closes::queue(&store, vec![close("message/r2"), close("message/unknown")]).unwrap();
     assert!(started.elapsed() < Duration::from_millis(500), "a read waited for the writer: {:?}", started.elapsed());
+    assert_eq!(relayed_closes::queued(&store), 1, "mail this member does not hold is never queued");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        relayed_closes::queued(&store) <= QUEUED,
-        "the queue grew past its bound: {}",
-        relayed_closes::queued(&store)
-    );
     assert_eq!(current(&store), ["message/r2"], "nothing recorded while the writer is held");
 
-    release.0.send(()).unwrap();
+    release.send(()).unwrap();
     holder.join().unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while relayed_closes::queued(&store) > 0 || !relayed_closes::closed(&store.readers.get(), "message/r2").unwrap() {
@@ -185,4 +184,40 @@ async fn a_read_queues_a_close_without_waiting_for_a_held_writer_and_the_queue_s
     // A close already recorded is not queued again.
     relayed_closes::queue(&store, vec![close("message/r2")]).unwrap();
     assert_eq!(relayed_closes::queued(&store), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_queue_keeps_at_most_its_bound_and_drops_the_rest_for_a_later_read() {
+    let store = Arc::new(Store::open_memory("relayed-closes").unwrap());
+    let subjects: Vec<String> = (0..QUEUED + BATCH + 10).map(|index| format!("message/held-{index:04}")).collect();
+    for (version, subject) in subjects.iter().enumerate() {
+        sent(&store, subject, version as u64);
+    }
+    let (release, holder) = hold_writer(&store);
+
+    let started = std::time::Instant::now();
+    relayed_closes::queue(&store, subjects.iter().map(|subject| close(subject)).collect()).unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500), "a read waited for the writer: {:?}", started.elapsed());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The writer may already hold one batch it took before it reached the held lock.
+    let queued = relayed_closes::queued(&store);
+    assert!(queued <= QUEUED, "the queue grew past its bound: {queued}");
+    assert!(queued >= QUEUED - BATCH, "the queue filled to its bound: {queued}");
+
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while relayed_closes::queued(&store) > 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let recorded = subjects.iter().filter(|subject| relayed_closes::closed(&store.readers.get(), subject).unwrap()).count();
+    assert!(recorded <= QUEUED && recorded >= QUEUED - BATCH, "only what the queue kept was recorded: {recorded}");
+
+    // A later read queues the dropped ones again.
+    relayed_closes::queue(&store, subjects.iter().map(|subject| close(subject)).collect()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while relayed_closes::queued(&store) > 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(subjects.iter().all(|subject| relayed_closes::closed(&store.readers.get(), subject).unwrap()));
 }
