@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Publish the Fabric adapter Nix package as fractal-fabric-adapter with a one-release legacy bridge",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No stored-state changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "packages.fractal-fabric-adapter is primary; packages.st-fabric-adapter names the same derivation. bin/st-fabric-adapter is a relative symlink to fractal-fabric-adapter for one release. Both Cargo binary targets remain available."},
+  "downtime": {"status": "none", "detail": "No service activation or state migration."},
+  "manual": {"status": "none", "detail": "Existing Nix consumers continue to work; new consumers can select the new package and executable names."},
+  "recovery": {"status": "none", "detail": "Identity and adapter journals are unchanged."}
+}
