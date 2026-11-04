@@ -755,6 +755,49 @@ fn render_wait_lease(
     output
 }
 
+/// This machine's host documents, which a claim prints because they describe where the claimed
+/// work runs. A lookup that fails prints nothing: the claim itself has already succeeded.
+async fn host_facts(client: &Client) -> Option<(String, Vec<(String, String)>)> {
+    let health: Value = client.get("/v1/health").await.ok()?;
+    let node = health.get("node")?.as_str()?.to_owned();
+    let status: StatusResponse = client
+        .get(&format!(
+            "/v1/status?subject={}",
+            urlencoding::encode(&format!("host/{node}"))
+        ))
+        .await
+        .ok()?;
+    let desired = status.subjects.first()?.desired.clone()?;
+    let mut documents = Vec::new();
+    for reference in desired
+        .get("children")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|child| child.get("name").and_then(Value::as_str) == Some("document"))
+        .filter_map(|child| child.pointer("/arguments/0").and_then(Value::as_str))
+    {
+        let (name, hash) = reference.rsplit_once('@')?;
+        let bytes = document_bytes(client, name, hash).await.ok()?;
+        documents.push((reference.to_owned(), String::from_utf8(bytes).ok()?));
+    }
+    Some((node, documents))
+}
+
+fn mission_revision_intent(
+    run: &str,
+    operation_id: &str,
+    mission_id: &str,
+    revision: &str,
+    from_generation: &str,
+    reason: &str,
+) -> String {
+    format!(
+        "version 2\nmission-run {run:?} {{\n  revision {operation_id:?} {{\n    mission {:?}\n    from {from_generation:?}\n    reason {reason:?}\n  }}\n}}\n",
+        format!("mission/{mission_id}@{revision}")
+    )
+}
+
 #[cfg(test)]
 mod wait_lease_tests {
     use super::*;
@@ -825,47 +868,4 @@ mod wait_lease_tests {
         assert!(requests.iter().any(|path| path.starts_with("/v1/client/")));
         assert!(!requests.iter().any(|path| path.starts_with("/v1/work-items/")));
     }
-}
-
-/// This machine's host documents, which a claim prints because they describe where the claimed
-/// work runs. A lookup that fails prints nothing: the claim itself has already succeeded.
-async fn host_facts(client: &Client) -> Option<(String, Vec<(String, String)>)> {
-    let health: Value = client.get("/v1/health").await.ok()?;
-    let node = health.get("node")?.as_str()?.to_owned();
-    let status: StatusResponse = client
-        .get(&format!(
-            "/v1/status?subject={}",
-            urlencoding::encode(&format!("host/{node}"))
-        ))
-        .await
-        .ok()?;
-    let desired = status.subjects.first()?.desired.clone()?;
-    let mut documents = Vec::new();
-    for reference in desired
-        .get("children")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|child| child.get("name").and_then(Value::as_str) == Some("document"))
-        .filter_map(|child| child.pointer("/arguments/0").and_then(Value::as_str))
-    {
-        let (name, hash) = reference.rsplit_once('@')?;
-        let bytes = document_bytes(client, name, hash).await.ok()?;
-        documents.push((reference.to_owned(), String::from_utf8(bytes).ok()?));
-    }
-    Some((node, documents))
-}
-
-fn mission_revision_intent(
-    run: &str,
-    operation_id: &str,
-    mission_id: &str,
-    revision: &str,
-    from_generation: &str,
-    reason: &str,
-) -> String {
-    format!(
-        "version 2\nmission-run {run:?} {{\n  revision {operation_id:?} {{\n    mission {:?}\n    from {from_generation:?}\n    reason {reason:?}\n  }}\n}}\n",
-        format!("mission/{mission_id}@{revision}")
-    )
 }
