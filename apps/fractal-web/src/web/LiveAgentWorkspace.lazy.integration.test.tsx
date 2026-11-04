@@ -17,6 +17,8 @@ import { openAgent } from '@fractal/sdk/effect'
 import { fleetFromAgents } from '../data/projections.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
+const changelogPrefetch = vi.hoisted(() => vi.fn())
+vi.mock('../changelog/load.ts', () => ({ prefetchChangelog: changelogPrefetch }))
 // Header actions read resources from a data source; they are outside this import boundary.
 vi.mock('./ConversationHeaderActions.tsx', () => ({ ConversationHeaderActions: () => null }))
 let fallbackRenders = 0
@@ -72,6 +74,7 @@ const paintTasks: (() => void)[] = []
 beforeEach(async () => {
   vi.resetModules()
   requested.mockClear()
+  changelogPrefetch.mockClear()
   terminalRequested.mockClear()
   terminalPrefetch.mockClear()
   prepareTerminal.mockClear()
@@ -203,11 +206,13 @@ describe('terminal import intent', () => {
     terminalRoster()
     await renderShell()
     expect(terminalRequested).not.toHaveBeenCalled()
+    expect(changelogPrefetch).not.toHaveBeenCalled()
     await paintShellFrame()
     await act(async () => { for (const task of paintTasks.splice(0)) task() })
     expect(terminalRequested).not.toHaveBeenCalled()
-    expect(idle).toHaveLength(1)
-    await act(async () => idle[0]?.())
+    expect(idle).toHaveLength(2)
+    await act(async () => { for (const task of idle) task() })
+    expect(changelogPrefetch).toHaveBeenCalledTimes(1)
     expect(terminalRequested).toHaveBeenCalledTimes(1)
     expect(terminalPrefetch).not.toHaveBeenCalled()
     await act(async () => resolveTerminal())

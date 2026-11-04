@@ -1,5 +1,6 @@
 import { selectedFaviconState, tabTitle, useTabMetadata } from './useTabMetadata.ts'
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
+import { prefetchChangelog } from '../changelog/load.ts'
 import { sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
@@ -378,7 +379,17 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     if (node === null || !rosterObserved) return
     const cancelTiming = measureEnd('sidebar_interactive')
     const cancelCapture = ux?.rosterCommitted()
-    return () => { cancelTiming(); cancelCapture?.() }
+    let cancelIdle: (() => void) | undefined
+    const cancelPaint = afterNextPaint(() => {
+      if (typeof window.requestIdleCallback === 'function') {
+        const idle = window.requestIdleCallback(prefetchChangelog)
+        cancelIdle = () => window.cancelIdleCallback(idle)
+      } else {
+        const timer = window.setTimeout(prefetchChangelog, 0)
+        cancelIdle = () => window.clearTimeout(timer)
+      }
+    })
+    return () => { cancelTiming(); cancelCapture?.(); cancelPaint(); cancelIdle?.() }
   }, [ux, rosterObserved])
   const current = initialAgentFromUrl(location) ?? (storedAgent || agents[0]?.ref || '')
   const agent = agents.find((row) => row.ref === current)
