@@ -63,6 +63,10 @@ function fitLine1(scopes: Set<HTMLElement>) {
     cohorts.push({ scope, rows, widest: 0, widestSignals: 0 })
   }
   for (const cohort of cohorts) for (const row of cohort.rows) for (const drop of row.drops) writeStyle(drop, 'display', '')
+  for (const cohort of cohorts) for (const row of cohort.rows) {
+    const unread = row.trailing?.querySelector<HTMLElement>('[data-row-signal="X-unread"]')
+    if (unread) writeStyle(unread, 'display', '')
+  }
   // Row geometry is read after the restore writes, inside the first shared read phase.
   for (const cohort of cohorts) for (const row of cohort.rows) {
     row.floor = row.row.clientWidth * 0.6
@@ -83,6 +87,25 @@ function fitLine1(scopes: Set<HTMLElement>) {
     for (const drop of drops) writeStyle(drop, 'display', 'none')
     measureAndApplyTracks(cohorts)
   }
+  // Unread counts yield before a stronger attention glyph or the title floor.
+  const unreadDrops: HTMLElement[] = []
+  for (const cohort of cohorts) {
+    let ceiling = Number.POSITIVE_INFINITY
+    for (const row of cohort.rows) if (row.trailing) ceiling = Math.min(ceiling, row.trailing.clientWidth + row.title.clientWidth - row.floor)
+    for (const row of cohort.rows) {
+      const unread = row.trailing?.querySelector<HTMLElement>('[data-row-signal="X-unread"]')
+      if (!unread || !row.trailing) continue
+      const gap = Number.parseFloat(getComputedStyle(row.trailing).columnGap) || 0
+      let width = 0, count = 0
+      for (const signal of row.trailing.children) {
+        const natural = signal.getBoundingClientRect().width
+        if (natural > 0) { width += natural + (count++ > 0 ? gap : 0) }
+      }
+      if (width > ceiling) unreadDrops.push(unread)
+    }
+  }
+  for (const unread of unreadDrops) writeStyle(unread, 'display', 'none')
+  if (unreadDrops.length > 0) measureAndApplyTracks(cohorts)
   restoreLine1Fields(cohorts)
 }
 
