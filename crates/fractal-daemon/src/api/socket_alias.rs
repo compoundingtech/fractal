@@ -33,6 +33,17 @@ impl Drop for SocketAlias {
     }
 }
 
+fn check_alias_parent(parent: &Path, expected: (u64, u64)) -> Result<()> {
+    let metadata = fs::metadata(parent)
+        .with_context(|| format!("verify legacy Unix socket parent {}", parent.display()))?;
+    anyhow::ensure!(
+        (metadata.dev(), metadata.ino()) == expected,
+        "legacy Unix socket parent {} changed during reservation; refusing to replace its alias",
+        parent.display(),
+    );
+    Ok(())
+}
+
 async fn reserve_alias(socket: &Path, existing: Option<&SocketAlias>, bound_socket: &Path) -> Result<Option<SocketAlias>> {
     let (primary, legacy) = match socket.file_name().and_then(|name| name.to_str()) {
         Some("fractal.sock") => ("fractal.sock", "st3.sock"),
@@ -41,7 +52,10 @@ async fn reserve_alias(socket: &Path, existing: Option<&SocketAlias>, bound_sock
     };
     let parent = socket.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let path = fs::canonicalize(parent)?.join(legacy);
+    let canonical_parent = fs::canonicalize(parent)?;
+    let metadata = fs::metadata(&canonical_parent)?;
+    let parent_identity = (metadata.dev(), metadata.ino());
+    let path = canonical_parent.join(legacy);
     let is_bound_address = bound_socket.file_name() == path.file_name()
         && bound_socket.parent().is_some_and(|parent| {
             fs::canonicalize(parent).is_ok_and(|parent| Some(parent.as_path()) == path.parent())
@@ -59,7 +73,11 @@ async fn reserve_alias(socket: &Path, existing: Option<&SocketAlias>, bound_sock
     reservation.try_lock().with_context(|| format!("reserve legacy Unix socket {}", path.display()))?;
     // Canonical paths fence identity; only the supplied spelling may fit sun_path.
     let probe_path = parent.join(legacy);
-    match tokio::net::UnixStream::connect(&probe_path).await {
+    // A retargeted parent must not turn another directory's refusal into permission to unlink here.
+    check_alias_parent(parent, parent_identity)?;
+    let probe = tokio::net::UnixStream::connect(&probe_path).await;
+    check_alias_parent(parent, parent_identity)?;
+    match probe {
         Ok(_) => anyhow::bail!("refusing to replace live Unix socket listener at {}", path.display()),
         Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {}
         Err(error) => return Err(error).with_context(|| format!("probe legacy Unix socket {}", path.display())),

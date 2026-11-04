@@ -207,4 +207,35 @@ async fn short_parent_symlinks_keep_alias_probes_addressable() {
     }
 }
 
+#[tokio::test]
+async fn retargeted_alias_parent_rejects_another_directorys_stale_probe() {
+    let root = tempfile::tempdir().unwrap();
+    let original = root.path().join("original");
+    let replacement = root.path().join("replacement");
+    let supplied = root.path().join("run");
+    fs::create_dir_all(&original).unwrap();
+    fs::create_dir_all(&replacement).unwrap();
+    symlink(&original, &supplied).unwrap();
+    let socket = original.join("st3.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let metadata = fs::metadata(fs::canonicalize(&supplied).unwrap()).unwrap();
+    let expected = (metadata.dev(), metadata.ino());
+    check_alias_parent(&supplied, expected).unwrap();
+
+    // Exercise the post-probe guard directly, deterministically retargeting between the two checks.
+    fs::remove_file(&supplied).unwrap();
+    symlink(&replacement, &supplied).unwrap();
+    assert_eq!(
+        tokio::net::UnixStream::connect(supplied.join("st3.sock")).await.unwrap_err().kind(),
+        std::io::ErrorKind::NotFound,
+    );
+    let error = check_alias_parent(&supplied, expected).unwrap_err();
+    assert!(error.to_string().contains("changed during reservation"));
+    assert!(fs::symlink_metadata(&socket).unwrap().file_type().is_socket());
+    let _client = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let _accepted = listener.accept().await.unwrap();
+    fs::remove_file(&supplied).unwrap();
+    assert!(check_alias_parent(&supplied, expected).is_err());
+}
+
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
