@@ -344,7 +344,7 @@ for pattern in ("crates/fractal-client*/**", "crates/fractal-schema/**", "docs/s
     assert f'"{pattern}"' not in changes, f"generated detector retains broad input {pattern}"
 for block in (changes, execution, gate_job):
     assert "runs-on: ubuntu-latest" in block
-assert "timeout-minutes: 1" in changes and "timeout-minutes: 1" in gate_job and "timeout-minutes: 25" in execution
+assert "timeout-minutes: 3" in changes and "timeout-minutes: 3" in gate_job and "timeout-minutes: 25" in execution
 assert "github.event.pull_request.base.sha || github.event.merge_group.base_sha" in changes
 assert "github.event.pull_request.head.sha || github.event.merge_group.head_sha" in changes
 assert "github.event.merge_group.base_sha || github.event.before" in changes
