@@ -448,7 +448,7 @@ describe('ConversationPane composition activation', () => {
     expect(source.composerProps.every(props => props.readingColumn === true)).toBe(true)
     expect(source.composerProps.every(props => props.placeholder === undefined)).toBe(true)
     expect(source.composerProps.every(props => props.conversationLabel === 'Example Agent')).toBe(true)
-    expect(container.querySelector('form')?.getAttribute('aria-label')).toBe('Message composer, Example Agent')
+    expect(container.querySelector('form')?.parentElement?.getAttribute('aria-label')).toBe('Message composer, Example Agent')
   })
 
   it('keeps the source-owned scroll command stable through settlement, echo and Retry until a new Send', async () => {
@@ -914,7 +914,7 @@ describe('ConversationPane composition activation', () => {
     await mount(undefined, strictMode)
     const stop = container.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')!
     const message = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!
-    const composer = container.querySelector<HTMLFormElement>('form[aria-label="Message composer, Example Agent"]')!
+    const composer = container.querySelector<HTMLFormElement>('[role="group"][aria-label="Message composer, Example Agent"] form')!
     expect(message.disabled).toBe(!sendGranted)
     stop.focus()
     expect(document.activeElement).toBe(stop)
