@@ -14,6 +14,7 @@
 // a slow channel starts the session
 // without restored context rather than hanging it.
 import childProcess from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type {
   ExtensionAPI,
@@ -52,6 +53,7 @@ const SESSION = "ST_OMP_CHANNEL_SESSION";
 const SEQ = "ST_OMP_CHANNEL_SEQ";
 const EXPECTED_NATIVE_SESSION = "ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION";
 const RESUME_GENERATION = "ST_OMP_CHANNEL_RESUME_GENERATION";
+const WEB_ANSWERS = "ST_OMP_WEB_ANSWERS";
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 const PENDING_ASK = "ST3_OMP_PENDING_ASK";
 const PENDING_ASK_TIMEOUT_MS = 120_000;
@@ -110,6 +112,10 @@ type Stash = {
   seq?: string;
   expectedNativeSession?: string;
   resumeGeneration?: string;
+  webAnswers?: boolean;
+  questionSession?: string;
+  /** Retain even closed entries: pipe writes are not persistence acknowledgements. */
+  questions?: Map<string, ObservedQuestion>;
   // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
   restoringAsk?: {
     toolCallId: string;
@@ -162,6 +168,15 @@ type Stash = {
   subagents?: Map<string, OpenSubagent>;
   /** Reports each busy subagent while any runs, so st ends only one that stopped running. */
   subagentHeartbeat?: NodeJS.Timeout;
+};
+
+type QuestionDescriptor = { id: string; options: number; multi: boolean; required: boolean };
+type QuestionStatus = "answered_elsewhere" | "expired" | "cancelled";
+type ObservedQuestion = {
+  nativeId: string;
+  session: string;
+  questions: QuestionDescriptor[];
+  status?: QuestionStatus;
 };
 
 type OpenSubagent = {
@@ -422,6 +437,7 @@ const stash = (): Stash => {
       seq: readEnv(SEQ, true),
       expectedNativeSession: readEnv(EXPECTED_NATIVE_SESSION, true),
       resumeGeneration: readEnv(RESUME_GENERATION, true),
+      webAnswers: process.env[WEB_ANSWERS] === "1",
     };
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
     // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -445,6 +461,7 @@ const stash = (): Stash => {
   removeEnv(SEQ);
   removeEnv(EXPECTED_NATIVE_SESSION);
   removeEnv(RESUME_GENERATION);
+  removeEnv(WEB_ANSWERS);
   return globals.__stOmpChannel;
 };
 
@@ -540,6 +557,11 @@ export default function (pi: ExtensionAPI) {
       );
       return Promise.resolve("");
     }
+    if (state.webAnswers && state.questionSession !== nativeSessionId) {
+      // A true native switch retires local observations, never fabricates terminal results.
+      state.questionSession = nativeSessionId;
+      state.questions = new Map();
+    }
     state.shuttingDown = false;
     if (state.reconnectTimer !== undefined) clearTimeout(state.reconnectTimer);
     state.reconnectTimer = undefined;
@@ -572,6 +594,7 @@ export default function (pi: ExtensionAPI) {
     writeEnv(channelEnv, SEQ, seq);
     writeEnv(channelEnv, EXPECTED_NATIVE_SESSION, expectedNativeSession);
     writeEnv(channelEnv, RESUME_GENERATION, resumeGeneration);
+    if (state.webAnswers) channelEnv[WEB_ANSWERS] = "1";
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
     // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     if (state.restoringAsk) writeEnv(channelEnv, PENDING_ASK, state.restoringAsk.toolCallId);
@@ -685,6 +708,14 @@ export default function (pi: ExtensionAPI) {
             if (accepted.read) send({ type: "read", meta: accepted.meta });
           }
           send({ type: "ready", ...sessionBinding });
+          // The driver requires ready before accepting observations. Replay before other
+          // producers; each retained close follows its original open with the same identity.
+          if (state.webAnswers) {
+            for (const question of state.questions?.values() ?? []) {
+              send(questionOpenFrame(question));
+              if (question.status) send(questionClosedFrame(question, question.status));
+            }
+          }
           state.todoReady = true;
           observeTodoBranch(ctx, true);
           observeInventory(ctx, true);
@@ -1428,6 +1459,69 @@ export default function (pi: ExtensionAPI) {
     input?: unknown;
   };
   type ToolResultFrame = { toolCallId?: unknown };
+  const questionOpenFrame = (question: ObservedQuestion) => ({
+    type: "question.open",
+    native_id: question.nativeId,
+    session: question.session,
+    questions: question.questions,
+  });
+  const questionClosedFrame = (question: ObservedQuestion, status: QuestionStatus) => ({
+    type: "question.closed",
+    native_id: question.nativeId,
+    session: question.session,
+    status,
+  });
+  const observeQuestion = (raw: unknown, ctx: ExtensionContext) => {
+    if (!state.webAnswers || !state.questionSession || !state.questions ||
+      ctx.sessionManager.getSessionId() !== state.questionSession) return;
+    const event = record(raw);
+    if (event?.toolName !== "ask" || typeof event.toolCallId !== "string" ||
+      !event.toolCallId.trim()) return;
+    const nativeId = `sha256:${createHash("sha256").update(event.toolCallId, "utf8").digest("hex")}`;
+    if (state.questions.has(nativeId) || state.questions.size >= 256) return;
+    // Execution-start args are finalized; tool_call input can still be revised or blocked.
+    const input = record(event.args);
+    if (!Array.isArray(input?.questions) ||
+      input.questions.length < 1 || input.questions.length > 16) return;
+    const questions: QuestionDescriptor[] = [];
+    const ids = new Set<string>();
+    for (const [index, value] of input.questions.entries()) {
+      const question = record(value);
+      if (!question || typeof question.id !== "string" || !question.id.trim() ||
+        ids.has(question.id.replace(/\r+/gu, "\n")) ||
+        typeof question.question !== "string" || !question.question.trim() ||
+        (question.multi !== undefined && typeof question.multi !== "boolean") ||
+        !Array.isArray(question.options) || question.options.length > 64 ||
+        !question.options.every(option => {
+          const value = record(option);
+          return value && typeof value.label === "string" &&
+            (value.description === undefined || typeof value.description === "string") &&
+            (value.preview === undefined || typeof value.preview === "string");
+        })) return;
+      ids.add(question.id.replace(/\r+/gu, "\n"));
+      const multi = question.multi === true;
+      questions.push({ id: `q${index}`, options: question.options.length, multi, required: !multi });
+    }
+    const question: ObservedQuestion = { nativeId, session: state.questionSession, questions };
+    state.questions.set(nativeId, question);
+    if (state.todoReady) sendFrame(questionOpenFrame(question));
+  };
+  const closeQuestion = (raw: unknown, ctx: ExtensionContext) => {
+    if (!state.webAnswers || !state.questions ||
+      ctx.sessionManager.getSessionId() !== state.questionSession) return;
+    const event = record(raw);
+    if (!event || typeof event.toolCallId !== "string") return;
+    const nativeId = `sha256:${createHash("sha256").update(event.toolCallId, "utf8").digest("hex")}`;
+    const question = state.questions.get(nativeId);
+    if (!question || question.status) return;
+    const result = record(event.result);
+    const details = record(event.details) ?? record(result?.details);
+    const timedOut = details?.timedOut === true ||
+      (Array.isArray(details?.results) && details.results.some(value => record(value)?.timedOut === true));
+    question.status = event.isError === true || result?.isError === true
+      ? "cancelled" : timedOut ? "expired" : "answered_elsewhere";
+    if (state.todoReady) sendFrame(questionClosedFrame(question, question.status));
+  };
   const firstAskQuestion = (event: ToolCallFrame): string | undefined => {
     if (
       event.toolName !== "ask" ||
@@ -1473,12 +1567,14 @@ export default function (pi: ExtensionAPI) {
       reason: question,
     });
   });
-  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-  onWidened("tool_execution_start", async (rawEvent) => {
+  onWidened("tool_execution_start", async (rawEvent, ctx) => {
+    observeQuestion(rawEvent, ctx);
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
     observePendingAsk(rawEvent as ToolCallFrame);
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
   });
-  // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
   onWidened("tool_result", async (rawEvent, ctx) => {
+    closeQuestion(rawEvent, ctx);
     const event = rawEvent as ToolResultFrame;
     sendTimeline("tool_result", rawEvent);
     const answeredAsk = typeof event.toolCallId === "string" &&
@@ -1503,6 +1599,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   onWidened("tool_execution_end", async (rawEvent, ctx) => {
+    closeQuestion(rawEvent, ctx);
     const event = record(rawEvent);
     if (event?.toolName !== "todo") {
       // Eval's native bridge persists successful nested todo calls as user_todo_edit entries.
