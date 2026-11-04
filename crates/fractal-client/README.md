@@ -4,7 +4,7 @@ Reusable typed Rust client for `st3.client.v0`. It consumes versioned JSON proje
 it never parses Fractal CLI output, KDL, Markdown, raw claim envelopes, or harness transcripts.
 
 ```rust
-let client = fractal_client::Client::unix("/path/to/st3.sock");
+let client = fractal_client::Client::unix("/path/to/fractal.sock");
 let capabilities = client.capabilities().await?;
 let work = client.work_list(None, Some(100), false).await?;
 ```

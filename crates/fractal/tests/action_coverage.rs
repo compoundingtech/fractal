@@ -7013,7 +7013,7 @@ fn cli_devices_fabric_enable_status_and_disable_touch_only_st_peers() {
     );
     let expose = recorded();
     assert!(
-        expose.starts_with("expose st3-client-v0 --socket ") && expose.ends_with("st3-client.sock\n"),
+        expose.starts_with("expose st3-client-v0 --socket ") && expose.ends_with("fractal-client.sock\n"),
         "{expose}"
     );
     assert!(root.path().join("state/st3/fabric-gateway.toml").exists());
@@ -7032,4 +7032,19 @@ fn cli_devices_fabric_enable_status_and_disable_touch_only_st_peers() {
         "the peer added by hand stays"
     );
     assert!(!root.path().join("state/st3/fabric-gateway.toml").exists());
+
+    // An old daemon, or a long-path host, serves only the legacy gateway name.
+    let runtime = root.path().join("run");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let legacy = runtime.join("st3-client.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+    let previous = recorded();
+    assert_eq!(
+        st(&["enable"]),
+        json!({"service": "st3-client-v0", "enabled": true})
+    );
+    assert_eq!(
+        recorded().strip_prefix(&previous).unwrap(),
+        format!("expose st3-client-v0 --socket {}\n", legacy.canonicalize().unwrap().display())
+    );
 }

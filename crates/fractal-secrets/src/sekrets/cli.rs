@@ -388,9 +388,9 @@ fn daemon_client(endpoint: Option<&str>) -> Result<crate::client::Client> {
         endpoint.map(str::to_owned),
         fractal_drivers::contracts::env("ST3_ENDPOINT"),
         || {
-            Ok(crate::config::Config::load_client_unvalidated(None)?
-                .0
-                .client_socket())
+            Ok(crate::client::Endpoint::DiscoveredUnix(
+                crate::config::Config::load_client_unvalidated(None)?.0.client_discovery(),
+            ))
         },
     )?;
     Ok(crate::client::Client::new(endpoint))
@@ -399,7 +399,7 @@ fn daemon_client(endpoint: Option<&str>) -> Result<crate::client::Client> {
 fn daemon_endpoint(
     flag: Option<String>,
     environment: Option<String>,
-    configured: impl FnOnce() -> Result<PathBuf>,
+    configured: impl FnOnce() -> Result<crate::client::Endpoint>,
 ) -> Result<crate::client::Endpoint> {
     match flag.or(environment).filter(|value| !value.is_empty()) {
         // The value is not echoed: a URL can carry a password or a token.
@@ -410,7 +410,7 @@ fn daemon_endpoint(
             ),
             unix => Ok(unix),
         },
-        None => Ok(crate::client::Endpoint::Unix(configured()?)),
+        None => configured(),
     }
 }
 
@@ -775,7 +775,7 @@ mod tests {
 
     #[test]
     fn a_seat_asks_the_daemon_its_driver_names_to_vouch() {
-        let configured = || Ok(PathBuf::from("/run/user/1000/st3.sock"));
+        let configured = || Ok(crate::client::Endpoint::Unix(PathBuf::from("/run/user/1000/st3.sock")));
         let unix = |endpoint: crate::client::Endpoint| match endpoint {
             crate::client::Endpoint::Unix(path) => path,
             other => panic!("expected a socket, got {other:?}"),
