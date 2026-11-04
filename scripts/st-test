@@ -1941,23 +1941,76 @@ def members_limit():
         return MEMBERS_LIMIT
 
 
-def materialize_members(directory):
+MEMBERS_POLL = 0.5  # how often the member step's limit, and whether it waits for build admission, are read while it runs
+
+
+def admission_waiting(pid, proc='/proc'):
+    """Whether process `pid` is the host's build admission gate holding a command until it may start. The nix shim runs `nix run` as
+    `exec build-admission start CLASS LABEL -- COMMAND`, and the gate execs COMMAND once it is admitted: the step's own process is the gate
+    exactly while it waits. A process that is gone, or unreadable, is not waiting."""
+    try:
+        argv = Path(proc, str(pid), 'cmdline').read_bytes().split(b'\0')
+    except OSError:
+        return False
+    return any(Path(os.fsdecode(arg)).name == 'build-admission' and argv[i + 1:i + 2] == [b'start'] for i, arg in enumerate(argv))
+
+
+class MembersLimit:
+    """ST_TEST_MEMBERS_LIMIT for the member step: `seconds` of its own running, not counting its wait in the host's build admission (the
+    gate held one `nix run` for the whole 1200 s on a crowded host before it ran anything, #5068). observe() is told, each time the step is
+    read, whether it is waiting now (admission_waiting); the waits have a limit of their own, `queue_limit`."""
+
+    def __init__(self, seconds, queue_limit, clock=time.monotonic):
+        self.seconds, self.queue_limit, self.clock = seconds, queue_limit, clock
+        self.started, self.waited, self.since = clock(), 0.0, None
+
+    def observe(self, waiting):
+        now = self.clock()
+        if waiting and self.since is None:
+            self.since = now
+        elif not waiting and self.since is not None:
+            self.waited, self.since = self.waited + now - self.since, None
+
+    def waiting(self):
+        """Seconds spent waiting for admission so far."""
+        return self.waited + (self.clock() - self.since if self.since is not None else 0.0)
+
+    def remaining(self):
+        """Seconds left before the step is over its limit (0 or less once it is): running time or waiting time, whichever ends first."""
+        waited = self.waiting()
+        return min(self.seconds - (self.clock() - self.started - waited), self.queue_limit - waited)
+
+
+def materialize_members(directory, queue_limit=None):
     """Fill repos/ from the tree's megarepo.lock, as CI does before every lane that reads it; a tree without one needs nothing.
 
     Returns None, or why the members could not be materialized (then no check runs and nothing is signed). The command's output goes to a
-    file, not a pipe this process would have to read, and a run past the limit is killed with everything it started."""
+    file, not a pipe this process would have to read, and a run past its limit (MembersLimit: ST_TEST_MEMBERS_LIMIT of running, `queue_limit`
+    of waiting for build admission) is killed with everything it started."""
     if not (directory / 'megarepo.lock').is_file():
         return None
     try:
         command = members_command(directory)
     except (OSError, ValueError, KeyError, TypeError) as error:
         return f'cannot read the effect-utils pin from flake.lock: {error}'
-    limit = members_limit()
+    limit = MembersLimit(members_limit(), QUEUE_LIMIT if queue_limit is None else queue_limit)
     with tempfile.TemporaryFile() as output:
         process = subprocess.Popen(command, cwd=directory, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-        try:
-            code = process.wait(timeout=limit)
-        except subprocess.TimeoutExpired:
+        while True:
+            limit.observe(admission_waiting(process.pid))
+            left = limit.remaining()
+            if left <= 0:
+                code, waited_out = None, limit.queue_limit - limit.waiting() <= 0
+                break
+            try:
+                code = process.wait(timeout=min(left, MEMBERS_POLL))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        limit.observe(False)
+        waited = round(limit.waiting())
+        note = f'; waited {waited}s for build admission (not counted against ST_TEST_MEMBERS_LIMIT)' if waited else ''
+        if code is None:
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
                     os.killpg(process.pid, sig)
@@ -1971,12 +2024,16 @@ def materialize_members(directory):
             output.seek(0, os.SEEK_END)
             output.seek(max(0, output.tell() - 4000))
             sys.stderr.write(output.read().decode(errors='replace'))
-            return f'materializing the megarepo members timed out after {limit}s (ST_TEST_MEMBERS_LIMIT)'
+            if waited_out:
+                return f'materializing the megarepo members waited {limit.queue_limit:g}s for build admission (--queue-limit)'
+            return f'materializing the megarepo members timed out after {limit.seconds}s (ST_TEST_MEMBERS_LIMIT){note}'
         if code != 0:
             output.seek(0, os.SEEK_END)
             output.seek(max(0, output.tell() - 4000))
             sys.stderr.write(output.read().decode(errors='replace'))
-            return f'materializing the megarepo members failed ({code})'
+            return f'materializing the megarepo members failed ({code}){note}'
+    if note:
+        print(f'fractal-test: megarepo members materialized{note}', file=sys.stderr, flush=True)
     return None
 
 
@@ -3256,7 +3313,7 @@ def run_main(argv, cleanup):
                 def members():
                     with members_lock:
                         if not members_state:
-                            members_state.append(materialize_members(directory))
+                            members_state.append(materialize_members(directory, args.queue_limit))
                         return members_state[0]
 
                 setup_seconds = round(time.monotonic() - (round_started if round_number else main_started))  # fetch and the clean tree (the members are fetched when a check first needs them)
