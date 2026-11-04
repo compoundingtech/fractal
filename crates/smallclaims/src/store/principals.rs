@@ -1078,7 +1078,8 @@ fn requeue_pending(connection: &Connection) -> Result<bool> {
 /// Verdict counts with held claims counted as held, while no requeue is pending. Each verdict
 /// is counted from its index, and only the held claims, found through the pending index and
 /// the claims with many candidates, are looked up: a per-claim probe over every verdict took
-/// half a minute on a store of millions of claims.
+/// half a minute on a store of millions of claims. A claim that relies on a held grant is held
+/// too, found through the grant's `delegation:` link.
 fn held_verdict_counts(connection: &Connection) -> Result<BTreeMap<String, u64>> {
     let mut counts = connection
         .prepare_cached("SELECT verdict, COUNT(*) FROM claim_verdicts GROUP BY verdict")?
@@ -1086,13 +1087,18 @@ fn held_verdict_counts(connection: &Connection) -> Result<BTreeMap<String, u64>>
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
     let held = connection
         .prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-hc03851889cc8 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ "WITH held(claim_id) AS (
+            /* sqlite-large-value: allow-for-now lv-h29bcd67aa5d0 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ "WITH own(claim_id) AS (
                  SELECT claim_id FROM claim_signature_judging WHERE complete=0 OR dirty=1 OR blocked=1
                  UNION
                  SELECT c.claim_id FROM claim_signature_counts c INDEXED BY claim_signature_counts_held_index
                  WHERE c.candidates>32 AND NOT EXISTS(
                      SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=c.claim_id
-                     AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates))
+                     AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)),
+             held(claim_id) AS (
+                 SELECT claim_id FROM own
+                 UNION
+                 SELECT l.claim_id FROM own CROSS JOIN claim_verdict_links l
+                 ON l.link='delegation:'||own.claim_id)
              SELECT v.verdict, COUNT(*) FROM held CROSS JOIN claim_verdicts v ON v.claim_id=held.claim_id
              GROUP BY 1",
         )?
@@ -1105,6 +1111,27 @@ fn held_verdict_counts(connection: &Connection) -> Result<BTreeMap<String, u64>>
     }
     counts.retain(|_, count| *count != 0);
     Ok(counts)
+}
+
+/// Verdict counts with each verdict probed as a read of it judges it: held while it or a grant
+/// it relies on is pending, has more candidates than it was judged on, or, with `requeuing`,
+/// waits for a requeue cursor that has not reached it.
+fn probed_verdict_counts(
+    connection: &Connection,
+    requeuing: bool,
+) -> Result<BTreeMap<String, u64>> {
+    // The second branch is the first one asked of each grant the claim links.
+    Ok(connection
+        .prepare(
+            "SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR EXISTS(SELECT 1 FROM claim_signature_counts c WHERE c.claim_id=v.claim_id AND c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=c.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id))
+             OR EXISTS(SELECT 1 FROM claim_verdict_links g WHERE g.claim_id=v.claim_id AND g.link>='delegation:' AND g.link<'delegation;' AND (EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=substr(g.link,?5) AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR EXISTS(SELECT 1 FROM claim_signature_counts c WHERE c.claim_id=substr(g.link,?5) AND c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=c.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=substr(g.link,?5) WHERE m.key>=?1 AND m.key<?2 AND m.value<substr(g.link,?5)))))
+             THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v GROUP BY 1",
+        )?
+        .query_map(
+            params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, requeuing, "delegation:".len() + 1],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
+        )?
+        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?)
 }
 
 /// Where a claim relies on a link whose requeue cursor has not reached it yet, that link: the
@@ -1886,12 +1913,7 @@ impl Store {
         } else {
             // A claim an unfinished requeue has not reached counts as held, as it reads. The
             // per-row probe runs only while a requeue is pending.
-            connection
-            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
-            .query_map(params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, true], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
-            })?
-            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
+            probed_verdict_counts(&connection, true)?
         };
         let pending_uncached: u64 = if serving_legacy {
             0
@@ -2522,13 +2544,7 @@ mod paced_verdict_tests {
         fn probed(store: &Store) -> BTreeMap<String, u64> {
             let connection = store.readers.get();
             let requeuing = requeue_pending(&connection).unwrap();
-            connection
-                .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")
-                .unwrap()
-                .query_map(params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, requeuing], |row| Ok((row.get(0)?, row.get(1)?)))
-                .unwrap()
-                .collect::<rusqlite::Result<_>>()
-                .unwrap()
+            probed_verdict_counts(&connection, requeuing).unwrap()
         }
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
         {
@@ -2604,6 +2620,76 @@ mod paced_verdict_tests {
         assert_eq!(started.get("held"), Some(&9));
         assert_eq!(started.get("verified"), Some(&1));
         assert_eq!(started.get("rejected"), None);
+    }
+
+    #[test]
+    fn a_held_grant_holds_what_relies_on_it_in_reads_and_both_count_forms() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for claim in ["claim/grant", "claim/00001", "claim/00002", "claim/00003", "claim/00004"] {
+                tx.execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES (?1,'verified','host/studio')", [claim]).unwrap();
+            }
+            // The grant is dirty: something only it links changed, such as its own nonce.
+            tx.execute("INSERT INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,complete,dirty,blocked) VALUES ('claim/grant',1,'','','',1,1,0)", []).unwrap();
+            for (link, claim) in [
+                ("delegation:claim/grant", "claim/00001"),
+                ("delegation:claim/grant", "claim/00002"),
+                ("root", "claim/00002"),
+                // A grant with no pending judgment holds nothing.
+                ("delegation:claim/other", "claim/00003"),
+                ("nonce:device-key|nonce-1", "claim/grant"),
+            ] {
+                tx.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES (?1,?2)", [link, claim]).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let read = |claim: &str| store.claim_verdict(claim).unwrap();
+        for claim in ["claim/grant", "claim/00001", "claim/00002"] {
+            assert!(matches!(read(claim), Verdict::Held(_)), "{claim}");
+        }
+        assert!(
+            matches!(read("claim/00001"), Verdict::Held(reason) if reason.contains("relies on claim/grant"))
+        );
+        assert!(store.claim_signature("claim/00001").is_err());
+        assert_eq!(read("claim/00003"), Verdict::Verified);
+        assert_eq!(read("claim/00004"), Verdict::Verified);
+        let counts = |store: &Store| {
+            let mut counts = store.claim_verdict_counts().unwrap();
+            counts.remove("unsigned");
+            counts
+        };
+        let probed = |store: &Store| {
+            let connection = store.readers.get();
+            probed_verdict_counts(&connection, requeue_pending(&connection).unwrap()).unwrap()
+        };
+        let expected = BTreeMap::from([("held".into(), 3), ("verified".into(), 2)]);
+        assert_eq!(counts(&store), expected);
+        assert_eq!(probed(&store), expected);
+        // While a requeue runs, the per-claim form counts the same, and a grant still waiting for
+        // that requeue holds its dependents too.
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            tx.execute("UPDATE claim_signature_judging SET dirty=0 WHERE claim_id='claim/grant'", []).unwrap();
+            set_meta_tx(&tx, &format!("{REQUEUE}nonce:device-key|nonce-1"), "").unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(counts(&store), expected);
+        assert_eq!(probed(&store), expected);
+        assert!(matches!(read("claim/00001"), Verdict::Held(_)));
+        // Once the grant is judged and clean, its dependents read their own verdicts again.
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            tx.execute("DELETE FROM meta WHERE key=?1", [format!("{REQUEUE}nonce:device-key|nonce-1")]).unwrap();
+            tx.commit().unwrap();
+        }
+        let clean = BTreeMap::from([("verified".into(), 5)]);
+        assert_eq!(counts(&store), clean);
+        assert_eq!(probed(&store), clean);
+        assert_eq!(read("claim/00001"), Verdict::Verified);
     }
 
     #[test]
