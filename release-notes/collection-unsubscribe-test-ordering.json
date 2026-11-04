@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Wait for the collection server to process unsubscribe before checking silence",
+  "replay": {
+    "status": "none",
+    "detail": "Test ordering only; no replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema or migration changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule, checkpoint or digest changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The conversation transport test uses a subsequent work snapshot on the same socket to prove its unsubscribe was processed before appending another message. Existing silence bounds and conversation assertions are preserved; no product or wire change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No production restart change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No installation action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or recovery change."
+  }
+}
