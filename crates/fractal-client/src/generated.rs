@@ -1131,6 +1131,16 @@ pub struct PublicationDefinition {
     pub token: String,
 }
 
+/// Canonical redacted KDL from one immutable published mission revision.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionDeclaration {
+    pub mission: String,
+    pub revision: String,
+    pub published_at: u64,
+    pub text: String,
+    pub legacy: bool,
+}
+
 /// Applied desired state, not the original declaration file or a proposed mission revision.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SubjectDefinition {
