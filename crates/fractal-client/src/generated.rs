@@ -2638,6 +2638,7 @@ pub enum Resource {
     Lane(Lane),
     Machine(Machine),
     Device(Device),
+    DeviceCommand(DeviceCommand),
     Operation(Operation),
     History(History),
     Session(Session),
@@ -2672,6 +2673,7 @@ pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
     "lane",
     "machine",
     "device",
+    "device-command",
     "operation",
     "history",
     "session",
@@ -2740,6 +2742,7 @@ impl Resource {
             Self::Lane(v) => &v.header,
             Self::Machine(v) => &v.header,
             Self::Device(v) => &v.header,
+            Self::DeviceCommand(v) => &v.header,
             Self::Operation(v) => &v.header,
             Self::History(v) => &v.header,
             Self::Session(v) => &v.header,
@@ -5820,4 +5823,176 @@ pub struct PushRegistrationResponse {
     pub api_version: String,
     pub request_id: String,
     pub value: PushRegistrationStatus,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PhoneInspectArgs {}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PhoneMessageReadArgs {
+    pub message_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PhoneIdParams {
+    pub id: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PhoneConversationParams {
+    pub target: String,
+    #[serde(rename = "sessionId", default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PhoneTerminalParams {
+    #[serde(rename = "terminalId")]
+    pub terminal_id: String,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PhoneDocumentsParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PhoneDocumentParams {
+    pub reference: String,
+    pub trail: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "screen", content = "params", deny_unknown_fields)]
+pub enum PhoneNavigateArgs {
+    NowRoot,
+    Agents,
+    Missions,
+    Usage,
+    History,
+    Mission(PhoneIdParams),
+    Attention(PhoneIdParams),
+    Launch(PhoneIdParams),
+    Conversation(PhoneConversationParams),
+    Terminal(PhoneTerminalParams),
+    Documents(Option<PhoneDocumentsParams>),
+    Document(PhoneDocumentParams),
+}
+impl Serialize for PhoneNavigateArgs {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut map = serializer.serialize_map(None)?;
+        let screen = match self {
+            Self::NowRoot => "NowRoot",
+            Self::Agents => "Agents",
+            Self::Missions => "Missions",
+            Self::Usage => "Usage",
+            Self::History => "History",
+            Self::Mission(_) => "Mission",
+            Self::Attention(_) => "Attention",
+            Self::Launch(_) => "Launch",
+            Self::Conversation(_) => "Conversation",
+            Self::Terminal(_) => "Terminal",
+            Self::Documents(_) => "Documents",
+            Self::Document(_) => "Document",
+        };
+        map.serialize_entry("screen", screen)?;
+        match self {
+            Self::Mission(params) | Self::Attention(params) | Self::Launch(params) => {
+                map.serialize_entry("params", params)?
+            }
+            Self::Conversation(params) => map.serialize_entry("params", params)?,
+            Self::Terminal(params) => map.serialize_entry("params", params)?,
+            Self::Documents(Some(params)) => map.serialize_entry("params", params)?,
+            Self::Document(params) => map.serialize_entry("params", params)?,
+            Self::NowRoot
+            | Self::Agents
+            | Self::Missions
+            | Self::Usage
+            | Self::History
+            | Self::Documents(None) => {}
+        }
+        map.end()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "args")]
+pub enum PhoneCommand {
+    #[serde(rename = "phone.inspect")]
+    Inspect(PhoneInspectArgs),
+    #[serde(rename = "phone.navigate")]
+    Navigate(PhoneNavigateArgs),
+    #[serde(rename = "phone.message.read")]
+    MessageRead(PhoneMessageReadArgs),
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeviceCommandRequest {
+    pub api_version: String,
+    pub device: String,
+    #[serde(flatten)]
+    pub command: PhoneCommand,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "command_kind", content = "args")]
+pub enum DeviceCommandBody {
+    #[serde(rename = "phone.inspect")]
+    Inspect(PhoneInspectArgs),
+    #[serde(rename = "phone.navigate")]
+    Navigate(PhoneNavigateArgs),
+    #[serde(rename = "phone.message.read")]
+    MessageRead(PhoneMessageReadArgs),
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceCommandOutcome {
+    Completed,
+    NotForeground,
+    Expired,
+    Refused,
+    Failed,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceCommandState {
+    Pending,
+    Delivered,
+    Completed,
+    NotForeground,
+    Expired,
+    Refused,
+    Failed,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceResult {
+    pub command_id: String,
+    pub outcome: DeviceCommandOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct DeviceCommand {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    #[serde(flatten)]
+    pub command: DeviceCommandBody,
+    pub device_id: String,
+    pub session_actor: String,
+    pub issued_by: String,
+    pub issued_at: String,
+    pub expires_at: String,
+    pub state: DeviceCommandState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }

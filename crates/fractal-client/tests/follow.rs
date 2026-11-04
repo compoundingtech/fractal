@@ -96,6 +96,42 @@ async fn state<T: Send + Sync + 'static>(
 }
 
 #[tokio::test]
+async fn collection_subscribe_omits_absent_filters_and_matches_schema() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("commands.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        accept(stream).await
+    });
+    let mut stream = Client::unix(&path).collection_stream().await.unwrap();
+    let mut socket = server.await.unwrap();
+    let contract: Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+    ))
+    .unwrap();
+    let schema = json!({"$ref": "#/$defs/CollectionCommand", "$defs": contract["$defs"]});
+    let validator = jsonschema::validator_for(&schema).unwrap();
+
+    for collection in [
+        "commands", "clients", "usage", "machines", "devices", "sessions", "terminals",
+        "missions", "attention", "work", "glasses", "summary", "agents",
+    ] {
+        stream.subscribe("test", collection, 10, None, None).await.unwrap();
+        let value = command(&mut socket).await;
+        assert!(validator.is_valid(&value), "{collection}: {value}");
+        assert!(value.get("actor").is_none());
+        assert!(value.get("status").is_none());
+    }
+
+    stream.subscribe("filtered", "missions", 10, Some("agent/test"), Some("active")).await.unwrap();
+    let value = command(&mut socket).await;
+    assert!(validator.is_valid(&value), "{value}");
+    assert_eq!(value["actor"], "agent/test");
+    assert_eq!(value["status"], "active");
+}
+
+#[tokio::test]
 async fn ordered_snapshot_changes_removes_and_missing_row() {
     let (_root, client, mut socket) = connection().await;
     let mut rows = client.watch(Agents, 10).await.unwrap();

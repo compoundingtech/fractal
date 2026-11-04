@@ -650,7 +650,14 @@ impl CollectionStream {
         actor: Option<&str>,
         status: Option<&str>,
     ) -> Result<(), ClientError> {
-        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":collection, "limit":limit, "actor":actor, "status":status})).await
+        let mut command = serde_json::json!({"kind":"subscribe", "id":id, "collection":collection, "limit":limit});
+        if let Some(actor) = actor {
+            command["actor"] = serde_json::json!(actor);
+        }
+        if let Some(status) = status {
+            command["status"] = serde_json::json!(status);
+        }
+        self.send(&command).await
     }
     /// Follow a usage report for a named period; an omitted end follows current usage.
     pub async fn subscribe_usage(
@@ -2345,6 +2352,17 @@ impl Client {
     }
     pub async fn capabilities(&self) -> Result<Envelope<Capabilities>, ClientError> {
         self.capabilities_internal().await
+    }
+    pub async fn device_command_get(
+        &self,
+        id: &str,
+        wait: bool,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.get(&format!(
+            "/v1/client/device-commands/{}?wait={wait}",
+            percent_encode(id)
+        ))
+        .await
     }
     pub async fn document_get(&self, name: &str) -> Result<Envelope<DocumentContent>, ClientError> {
         self.get(&format!(
@@ -5300,6 +5318,21 @@ fn percent_encode_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn phone_documents_without_params_matches_the_schema() {
+        let value = serde_json::to_value(PhoneNavigateArgs::Documents(None)).unwrap();
+        assert_eq!(value, serde_json::json!({"screen": "Documents"}));
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))
+        .unwrap();
+        let schema =
+            serde_json::json!({"$ref": "#/$defs/PhoneNavigateArgs", "$defs": contract["$defs"]});
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&value));
+        assert!(!validator.is_valid(&serde_json::json!({"screen": "Documents", "params": null})));
+    }
+
     #[test]
     fn agents_publication_subscribe_has_only_the_opt_in_grammar() {
         let expected: serde_json::Value = serde_json::from_str(include_str!(
