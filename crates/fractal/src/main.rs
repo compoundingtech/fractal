@@ -21008,6 +21008,21 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
                 0
             }
         };
+        // A seat's host's relayed closes this member's own records now cover (relayed_closes.rs).
+        let relayed_store = store.clone();
+        let relayed = match relayed_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("relayed_closes.trim", || {
+            fractal_daemon::store::relayed_closes::trim(&relayed_store, LOCAL_OBSERVATION_TRIM_CHUNK)
+        })).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => {
+                stderr_message("st3", format_args!("relayed close trim failed: {error:#}"));
+                0
+            }
+            Err(error) => {
+                stderr_message("st3", format_args!("relayed close trim stopped: {error}"));
+                0
+            }
+        };
         let trim = match trimmed {
             Ok(Ok(trim)) => Some(trim),
             Ok(Err(error)) => {
@@ -21041,7 +21056,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         // One line a pass, so a slow one shows without a blocked checkpoint to name it.
         if let Some(trim) = trim {
             stderr_message("st3", format_args!(
-                "local observation trim: deleted {} rows and {marks} message marks, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
+                "local observation trim: deleted {} rows, {marks} message marks and {relayed} relayed closes, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
                 trim.deleted,
                 trim.longest_writer_hold.as_millis(),
                 pass_started.elapsed().as_millis(),
