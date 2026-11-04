@@ -705,6 +705,31 @@ editing it loses nothing. When two clients create the reserved subject at once, 
 terminal UI (`crates/fractal-tui/src/ui/resource_sidebar.rs`), the phone (`apps/ios/sidebarEdits.ts`)
 and Fractal (`apps/fractal-web/src/data/arrangements.ts`) follow this rule.
 
+### Pins identity
+
+Each person has one Pins arrangement at
+`arrangement/person/NAME/00000000-0000-7000-8000-000000000002`.
+The generated clients expose `PINS_ARRANGEMENT_UUID` (Swift:
+`st3PinsArrangementUuid`) from `constants` in `operations.json`.
+Clients select only this identity, regardless of its display name; there is no
+name-based fallback and no copy from Sidebar folders or placements.
+
+The first pin creates this arrangement named "Pins" with `version: 2`.
+Pins use the existing ordered memberships contract: `arrangement.membership.edit`
+places a stable member subject at `{bucket: null, key}` or removes that member.
+Clients read and follow `ordered-memberships`, including pagination and whole-container
+invalidation. They never write v1 placements or mutate Sidebar folders to pin a subject.
+Membership admission, permitted subject families, lifecycle visibility, ordering,
+limits and canonical conflict resolution are the existing version-2 rules.
+
+Before creating Pins, coordinate the version-2-aware reader rollout described in
+the [client contract](../st3/client-v0/README.md#ordered-memberships-and-new-version-2-layouts).
+A create refused with `arrangement-exists` adopts the reserved live v2 arrangement.
+A v1 body at that identity is incompatible, not silently migrated. Retirement is
+permanent: `arrangement-retired` reports restoration unavailable and never selects
+another identity. Hidden or retired members retain the server's membership winner;
+clients do not unpin them as a side effect of a read.
+
 ### Conversation stream
 
 The conversation follow (`stream conversation`, `GET /v1/client/sessions/{*id}` and
