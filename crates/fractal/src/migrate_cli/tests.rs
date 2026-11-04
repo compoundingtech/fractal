@@ -1061,3 +1061,28 @@ async fn launchd_ownership_refusals_do_not_mutate_host() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn launchd_query_is_read_only_and_uses_recorded_domain_after_cutover() -> Result<()> {
+    for (index, domain) in ["gui/501", "user/501"].into_iter().enumerate() {
+        let mut fixture = Fixture::new()?;
+        let before = fixture.snapshot()?;
+        assert_eq!(queried_launchd_domain(&fixture.layout, 501, |candidate| Ok(launchd::Probe::Available(
+            if candidate == domain { vec!["com.compoundingtech.st3".into()] } else { vec![] }
+        )))?, domain);
+        assert_eq!(fixture.snapshot()?, before);
+        let mut jobs = [vec![], vec![]];
+        jobs[index].push("com.compoundingtech.st3".into());
+        fixture.manager.registrations = Some(jobs);
+        fixture.run(false, false).await?;
+        let before = fixture.snapshot()?;
+        assert_eq!(queried_launchd_domain(&fixture.layout, 501, |_| panic!("journal must prevent rediscovery"))?, domain);
+        assert_eq!(fixture.snapshot()?, before);
+        let mut journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
+        journal.launchd_domain = None;
+        save(&fixture.layout, &journal)?;
+        assert!(matches!(queried_launchd_domain(&fixture.layout, 501, |_| panic!("missing field must fail closed"))
+            .unwrap_err().downcast_ref(), Some(launchd::DomainError::MissingJournalField)));
+    }
+    Ok(())
+}

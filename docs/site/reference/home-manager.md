@@ -22,6 +22,16 @@ The module maintains a stable user-state executable location so running integrat
 
 If another deployment mechanism owns the binary, use the module's external-binary setting rather than having both mechanisms replace it.
 
+During a staged macOS rename, Home Manager and `fractal service install --stage-fractal`
+discover the domain where the recognized legacy daemon is loaded (`gui/<uid>` or
+`user/<uid>`). Missing, duplicate or split-domain jobs fail closed before staging
+changes. Home Manager's agent domains must match; staged user-domain plists retain
+their background-session properties. After cutover, guards use the journal's recorded
+domain rather than rediscovering a retired legacy job. Fresh installs without a
+migration journal keep their existing guard behavior. General service lifecycle and
+app-installer staging on headless hosts are not covered by this rename support.
+
+
 ## Memory and startup
 
 On Linux, size the module's daemon memory limit above measured peak usage, including replication catch-up after downtime. An out-of-memory kill followed by the same catch-up can become a restart loop. Use the module's high and maximum memory options deliberately rather than masking the failure with repeated restarts.

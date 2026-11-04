@@ -123,6 +123,23 @@ let
       if [ -e "$legacy" ] && [ ! -L "$legacy" ]; then exit 1; fi
     done
   '';
+  hmDomain = config.launchd.agents.${if completed then "fractal" else "smalltalk"}.domain or "gui";
+  domainQuery = "${if externallyManaged then cfg.binary.path else "${effectivePackage}/bin/fractal"} migrate launchd-domain";
+  resolveDomain = ''
+    domain=$(${domainQuery}) || exit 1
+    [ "$domain" = "${hmDomain}/$(id -u)" ] || {
+      echo "Refusing launchd domain change: loaded/journal domain $domain, Home Manager domain ${hmDomain}" >&2
+      exit 1
+    }
+    ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) ''
+      [ "$domain" = "${config.launchd.agents.${if completed then "fractal-apply" else "smalltalk-apply"}.domain or "gui"}/$(id -u)" ] || exit 1
+    ''}
+  '';
+  stageSession = agent:
+    let session = config.launchd.agents.${agent}.config.LimitLoadToSessionType or null;
+    in lib.optionalAttrs (!completed && (session != null || hmDomain == "user")) {
+      LimitLoadToSessionType = if session != null then session else "Background";
+    };
   targetGuard = pkgs.writeShellScript "fractal-migration-ready" (''
     set -eu
   '' + migrationReady + (if pkgs.stdenv.hostPlatform.isLinux then ''
@@ -133,8 +150,14 @@ let
       printf '%s\n' "$status" | ${pkgs.gnugrep}/bin/grep -Eq '^ActiveState=(inactive|failed)$' || exit 1
     done
   '' else ''
+    if [ -e ${lib.escapeShellArg "${config.xdg.configHome}/.fractal-host-cutover.json"} ]; then
+      ${resolveDomain}
+    else
+      # Fresh completed installs have no migration journal; preserve their existing guard.
+      domain="gui/$(id -u)"
+    fi
     for label in org.nix-community.home.smalltalk com.compoundingtech.st3; do
-      if /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then exit 1
+      if /bin/launchctl print "$domain/$label" >/dev/null 2>&1; then exit 1
       elif [ "$?" -ne 113 ]; then exit 1
       fi
     done
@@ -162,12 +185,12 @@ let
     SoftResourceLimits.NumberOfFiles = 8192;
     StandardOutPath = "${targetDaemonState}/logs/st3.stdout.log";
     StandardErrorPath = "${targetDaemonState}/logs/st3.stderr.log";
-  };
+  } // stageSession "smalltalk";
   targetApplyPlist = {
     Label = "com.compoundingtech.fractal-apply";
     ProgramArguments = [ (toString targetApplyScript) ];
     EnvironmentVariables = targetEnvironment;
-  };
+  } // stageSession "smalltalk-apply";
   # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal
 in
 {
@@ -326,20 +349,24 @@ in
               exit 1
             fi
           done
+          ${lib.optionalString (staging && pkgs.stdenv.hostPlatform.isDarwin) resolveDomain}
         ''}
       '';
     home.activation.fractalStageDisabled = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin)
       (lib.hm.dag.entryBetween [ "linkGeneration" ] [ "writeBoundary" ] ''
         if [[ -z "''${DRY_RUN_CMD:-}" ]]; then
+          ${resolveDomain}
           for label in com.compoundingtech.fractal ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) "com.compoundingtech.fractal-apply"}; do
-            if /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+            if /bin/launchctl print "$domain/$label" >/dev/null 2>&1; then
               echo "Refusing to stage an already loaded Fractal launchd job: $label" >&2
               exit 1
             elif [ "$?" -ne 113 ]; then
               echo "Cannot establish launchd staging state for $label" >&2
               exit 1
             fi
-            /bin/launchctl disable "gui/$(id -u)/$label"
+          done
+          for label in com.compoundingtech.fractal ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) "com.compoundingtech.fractal-apply"}; do
+            /bin/launchctl disable "$domain/$label"
           done
         fi
       '');

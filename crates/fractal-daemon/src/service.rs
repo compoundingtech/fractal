@@ -25,6 +25,8 @@ pub use lookup::ConflictingServices;
 mod stage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use stage::stage_fractal;
+#[cfg(unix)]
+pub mod launchd_domain;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn stage_fractal(_config: Config, _config_path: Option<&Path>) -> Result<()> {
