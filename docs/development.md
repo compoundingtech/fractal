@@ -22,11 +22,11 @@ test compares the contract body. The printed `actor_semantics` reminder comes
 first: actor: none means no --as syntax.
 
 Operational reads accept optional leading `--as ACTOR` immediately after these
-leaf paths: `actor-contract`, `agents lane`, `agents rename-id proof export`,
+leaf paths: `actor-contract`, `agents lane`,
 `agents rename-id proof verify`, `changes list`, `changes show`, `conversations export`,
 `fleet anchor show`, `gate ci-passed`, `gate merged`,
-`missions blocked`, `missions waiting-on`, `missions rename-id proof export`,
-`missions rename-id proof verify`, `recorder report`, `replication checkpoint plan`,
+`missions blocked`, `missions waiting-on`,
+`missions rename-id proof verify`, `recorder report`,
 `subject history`, `terminals peek`, `trace show`, and `validate`.
 The CLI emits a stderr read-attribution record with the actor and canonical command
 path; stdout, queried subjects, filters, and daemon authorization are unchanged.

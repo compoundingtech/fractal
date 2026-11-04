@@ -5,7 +5,6 @@ use clap::{Arg, ArgMatches, Command};
 const PATHS: &[&[&str]] = &[
     &["actor-contract"],
     &["agents", "lane"],
-    &["agents", "rename-id", "proof", "export"],
     &["agents", "rename-id", "proof", "verify"],
     &["changes", "list"],
     &["changes", "show"],
@@ -15,10 +14,8 @@ const PATHS: &[&[&str]] = &[
     &["gate", "merged"],
     &["missions", "blocked"],
     &["missions", "waiting-on"],
-    &["missions", "rename-id", "proof", "export"],
     &["missions", "rename-id", "proof", "verify"],
     &["recorder", "report"],
-    &["replication", "checkpoint", "plan"],
     &["subject", "history"],
     &["terminals", "peek"],
     &["trace", "show"],
@@ -82,13 +79,13 @@ mod tests {
     #[test]
     fn operational_reads_parse_leading_actor_without_changing_query_arguments() {
         let inputs: &[&[&str]] = &[
-            &[], &["agent/subject"], &["agent/subject"],
+            &[], &["agent/subject"],
             &["proof.json", "--fleet-anchor", "anchor"],
             &["--repository", "demo"], &["change", "--repository", "demo"],
             &["mailbox"], &[], &["check", "--repo", "example/demo", "--ref", "main"],
             &["example/demo#1"], &[], &["mission-run/demo"],
-            &["mission/demo"], &["proof.json", "--fleet-anchor", "anchor"],
-            &[], &[], &["agent/subject"], &["terminal/demo"], &["agent/subject"], &["input.kdl"],
+            &["proof.json", "--fleet-anchor", "anchor"],
+            &[], &["agent/subject"], &["terminal/demo"], &["agent/subject"], &["input.kdl"],
         ];
         assert_eq!(inputs.len(), PATHS.len());
         let contract = super::super::actor_contract::generate(super::super::command_graph());
@@ -132,6 +129,8 @@ mod tests {
             &["fleet", "anchor"][..], &["replication", "checkpoint", "status"],
             &["subject", "basis"], &["agents", "ls"],
             &["launch", "preview"],
+            &["agents", "rename-id", "proof", "export"], &["missions", "rename-id", "proof", "export"],
+            &["replication", "checkpoint", "plan"],
         ] {
             let mut argv = vec!["fractal"];
             argv.extend_from_slice(path);
