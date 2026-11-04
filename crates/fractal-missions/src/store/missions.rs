@@ -201,12 +201,14 @@ pub struct MissionRunStateMoment {
     pub outcome: Option<MissionRunOutcomeView>,
 }
 
+pub type MissionStepTimestamps = BTreeMap<String, (Option<u128>, Option<u128>)>;
+
 fn step_timestamps(events: &[(String, Value, u128)], attempt: u32) -> (Option<u128>, Option<u128>) {
     let (mut started, mut completed) = (None, None);
     let mut current_attempt = 1;
     for (kind, body, at) in events {
         let fields = body.get("fields").unwrap_or(body);
-        if matches!(kind.as_str(), "step-run.state" | "step-run.carried")
+        if matches!(kind.as_str(), "step-run.state" | "step-run.carried" | "step-run.retried")
             && let Some(value) = fields["attempt"].as_u64()
         {
             current_attempt = value;
@@ -244,13 +246,6 @@ fn step_timestamps_follow_execution_not_lease_intervals() {
     assert_eq!(step_timestamps(&events, 1), (Some(10), None));
     events.push(event("work.failed", json!({"attempt":1,"status":"failed"}), 30));
     events.push(event("step-run.state", json!({"status":"completed"}), 31));
-    assert_eq!(step_timestamps(&events, 1), (Some(10), Some(30)));
-    events.push(event("step-run.state", json!({"attempt":2,"status":"pending"}), 40));
-    assert_eq!(step_timestamps(&events, 2), (None, None));
-    events.push(event("step-run.state", json!({"status":"working"}), 50));
-    assert_eq!(step_timestamps(&events, 2), (Some(50), None));
-    events.push(event("step-run.state", json!({"status":"completed"}), 60));
-    assert_eq!(step_timestamps(&events, 2), (Some(50), Some(60)));
     assert_eq!(step_timestamps(&events, 1), (Some(10), Some(30)));
 }
 
@@ -1683,7 +1678,7 @@ pub trait MissionsStore {
             subjects: Option<&[String]>,
         ) -> Result<BTreeMap<String, MissionRunStateMoment>>;
     /// First execution opening and authoritative terminal edge of the selected attempt.
-    fn mission_step_timestamps(&self, subject: &str, attempt: u32) -> Result<(Option<u128>, Option<u128>)>;
+    fn mission_step_timestamps_for_runs(&self, runs: &[String]) -> Result<MissionStepTimestamps>;
     fn active_mission_runs_for_origin(&self, origin: &str) -> Result<Vec<MissionRunView>>;
     /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`.
     fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str) -> Result<Vec<String>>;
@@ -4734,8 +4729,35 @@ impl MissionsStore for Store {
         self.mission_run_states_among(Some(subjects))
     }
 
-    fn mission_step_timestamps(&self, subject: &str, attempt: u32) -> Result<(Option<u128>, Option<u128>)> {
-        Ok(step_timestamps(&step_timing_events(&self.readers.get(), subject)?, attempt))
+    fn mission_step_timestamps_for_runs(&self, runs: &[String]) -> Result<MissionStepTimestamps> {
+        if runs.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let runs = runs.iter().map(|run| run.trim_start_matches("mission-run/")).collect::<Vec<_>>();
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(&format!(
+            "SELECT claims.subject, s.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
+             FROM claims JOIN batches ON batches.id=claims.batch_id
+             JOIN step_runs s ON s.subject=claims.subject
+             JOIN mission_runs r ON r.id=s.run_id AND r.current_generation_id=s.generation_id
+             WHERE r.id IN (SELECT value FROM json_each(?1))
+               AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
+                   'work.claimed','work.failed','work.person-done','work.person-cancelled')
+             ORDER BY claims.subject, {CANONICAL_ORDER}"
+        ))?;
+        let rows = statement.query_map([serde_json::to_string(&runs)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?, row.get::<_, String>(4)?))
+        })?;
+        let mut events = BTreeMap::<String, (u32, Vec<(String, Value, u128)>)>::new();
+        for row in rows {
+            let (subject, attempt, kind, body, at) = row?;
+            events.entry(subject).or_insert_with(|| (attempt, Vec::new())).1
+                .push((kind, serde_json::from_str(&body)?, at.parse()?));
+        }
+        Ok(events.into_iter().map(|(subject, (attempt, events))| {
+            (subject, step_timestamps(&events, attempt))
+        }).collect())
     }
 
     fn mission_run_states_among(

@@ -216,7 +216,8 @@ and completes at its first terminal transition; later outcome edits do not move 
 A step starts at the first execution opening of its selected attempt, including agentless
 execution, and completes only at an authoritative terminal state. Release, lease expiry,
 and submission awaiting verification do not complete it. Reclaim keeps the first opening;
-retry selects a new attempt. Unknown edges are null. Step timing enrichment is bounded to
+retry (including reviewer feedback) selects a new attempt. Unknown edges are null.
+Step timing events are read in one batch for the selected runs, not once per step, bounded to
 open runs and the latest finished run, including published cards; older detail steps retain
 null timing. These are lifecycle timestamps, not elapsed execution time or an ETA.
 

@@ -3233,6 +3233,11 @@ fn mission_resources_filtered(
             let latest_finished = runs.iter().rev().find(|run| {
                 matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
             });
+            let timing_runs = runs.iter().filter(|run|
+                !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
+                    || latest_finished.is_some_and(|latest| latest.subject == run.subject))
+                .map(|run| run.subject.clone()).collect::<Vec<_>>();
+            let timing = store.mission_step_timestamps_for_runs(&timing_runs)?;
             let run_details = runs
                 .iter()
                 .map(|header| {
@@ -3332,11 +3337,6 @@ fn mission_resources_filtered(
                     let shows_steps = selected_id.is_some()
                         || !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
                         || latest.is_some_and(|latest| latest.subject == run.subject);
-                    let enrich_timing = !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
-                        || latest_finished.is_some_and(|latest| latest.subject == run.subject);
-                    let timing = run.steps.iter().filter(|_| shows_steps && enrich_timing)
-                        .map(|step| Ok((step.subject.as_str(), store.mission_step_timestamps(&step.subject, step.attempt)?)))
-                        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
                     let steps = shows_steps.then(|| {
                         run.steps
                             .iter()

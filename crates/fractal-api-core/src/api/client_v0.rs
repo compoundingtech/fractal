@@ -998,6 +998,11 @@ pub fn mission_list_cards_with(
         let run_subjects = newest.iter().filter_map(|run| run["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
         let run_states = store.mission_run_states_for_runs(&run_subjects)?;
         let latest_finished = newest.iter().find(|run| matches!(run["status"].as_str(), Some("completed" | "failed" | "cancelled")));
+        let timing_runs = newest.iter().filter(|run|
+            !matches!(run["status"].as_str(), Some("completed" | "failed" | "cancelled"))
+                || latest_finished.is_some_and(|latest| latest["id"] == run["id"]))
+            .filter_map(|run| run["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let timing = store.mission_step_timestamps_for_runs(&timing_runs)?;
         let details = newest.iter().rev().map(|run| {
             let run_id=run["id"].as_str().expect("run header id");
             let (total,done,steps)=crate::performance::task("mission_collection/steps", || store.mission_step_preview_at(run_id, at_unix_ms))?;
@@ -1008,9 +1013,6 @@ pub fn mission_list_cards_with(
                 else if steps.iter().any(|s| matches!(s.status.as_str(),"ready"|"claimed"|"working")
                     && (s.assigned_to.is_some() || s.claimant.is_some() || !s.available_to.is_empty())) {"agent"}
                 else if steps.iter().any(|s| s.status=="blocked") {"blocked"} else {"system"};
-            let timing = steps.iter().filter(|_| !terminal || latest_finished.is_some_and(|latest| latest["id"] == run["id"]))
-                .map(|step| Ok((step.subject.as_str(), store.mission_step_timestamps(&step.subject, step.attempt)?)))
-                .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
             let shown=steps.iter().map(|step| json!({
                 "id":step.subject,"path":step.step,"title":step.title,"state":client_work_state(&step.status),
                 "attempt":step.attempt,"assignee":step.assigned_to,"claimant":step.claimant,
