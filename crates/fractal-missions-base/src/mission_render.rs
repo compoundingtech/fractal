@@ -27,7 +27,7 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, St3Error> {
     if let Some(ms) = mission.stalled_after_ms { property(&mut root, "stalled-after", format!("{ms}ms")); }
     property(&mut root, "report-stalls", mission.report_stalls);
     property(&mut root, "report-completed", mission.report_completed);
-    annotations(&mut root, mission.declarations_kdl.as_deref(), &mission.revision_owners, &mission.agent_constraints)?;
+    annotations(&mut root, mission.declarations_kdl.as_deref(), &mission.revision_owners, &mission.agent_constraints);
     Ok(block(root, mission_body(mission, None)?))
 }
 
@@ -98,7 +98,7 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
     }
     if parent.is_some() {
         if let Some(first) = children.first_mut() {
-            annotations(first, mission.declarations_kdl.as_deref(), &mission.revision_owners, &mission.agent_constraints)?;
+            annotations(first, mission.declarations_kdl.as_deref(), &mission.revision_owners, &mission.agent_constraints);
         }
     }
     Ok(children)
@@ -112,7 +112,7 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, St3Error> {
         gates, nested_mission, loop_spec: _, definition_hash: _ } = step;
     let mut root = text("step", id);
     protection(&mut root, *revisions_human_only, revision_reviewer.as_deref(), *timeout_ms);
-    annotations(&mut root, declarations_kdl.as_deref(), revision_owners, agent_constraints)?;
+    annotations(&mut root, declarations_kdl.as_deref(), revision_owners, agent_constraints);
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
     for (name, value) in [("fresh-context", fresh_context), ("keep-open", keep_open)] {
         if *value { children.push(node(name, [])); }
@@ -238,5 +238,20 @@ mod tests {
         let mut spec = parse(&source);
         spec.display_order.clear();
         assert!(render_mission_kdl(&spec).is_err());
+    }
+
+    #[test]
+    fn canonical_legacy_flag_and_unicode_annotation_are_safe() {
+        let mut mission = parse(r#"mission "test" state="ready" { goal "test"; loop "old" { max-rounds 1; round { completion { when "all-steps-exhausted"; }; }; }; }"#);
+        mission.agent_constraints.insert("agent/test".into(), vec!["keep\u{2028}step \"injected\"".into()]);
+        mission.steps.get_mut("old").unwrap().loop_spec.as_mut().unwrap().for_each =
+            Some(crate::model::LoopForEachSpec { resource: "resource/items".into(), field: "values".into(), max_parallel: 2 });
+        let rendered = render_mission_kdl(&mission).unwrap();
+        assert!(rendered.legacy);
+        assert!(rendered.text.contains("// legacy loop shape; the current parser rejects it"));
+        assert!(!rendered.text.contains('\u{2028}'));
+        let document: KdlDocument = rendered.text.parse().unwrap();
+        assert_eq!(document.nodes().len(), 2);
+        assert_eq!(crate::mission::parse_missions(&document, "node").unwrap_err().code, "removed-loop-shape");
     }
 }
