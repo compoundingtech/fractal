@@ -24693,8 +24693,8 @@ mission "self-assigned" state="ready" {
         };
         for kind in ["agent-review", "unknown-review"] {
             for body in ["reviewer \"agent/reviewer\"", "exec \"true\""] {
-                let error = parse(&format!("gate \"review\" type=\"{kind}\" {{ {body}; }}"))
-                    .unwrap_err();
+                let error =
+                    parse(&format!("gate \"review\" type=\"{kind}\" {{ {body}; }}")).unwrap_err();
                 assert_eq!(error.code, "invalid-gate-type", "{kind}: {body}");
             }
         }
@@ -24719,8 +24719,10 @@ mission "self-assigned" state="ready" {
         assert_eq!(serde_json::to_string(&gate).unwrap(), explicit);
         for kind in ["agent-review", "unknown-review"] {
             assert!(
-                serde_json::from_str::<GateSpec>(&historical.replace("\"human\"", &format!("\"{kind}\"")))
-                    .is_err()
+                serde_json::from_str::<GateSpec>(
+                    &historical.replace("\"human\"", &format!("\"{kind}\""))
+                )
+                .is_err()
             );
         }
     }
@@ -24775,7 +24777,10 @@ mission "self-assigned" state="ready" {
         assert_eq!(request.subject, operation);
         assert_eq!(request.actor, None);
         let mut fields = request.body["fields"].as_object().unwrap().clone();
-        assert_eq!(fields.remove("operation"), Some(Value::String(operation.into())));
+        assert_eq!(
+            fields.remove("operation"),
+            Some(Value::String(operation.into()))
+        );
         let golden = r#"{"attempt":1,"decisions":["approved","rejected"],"mission_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mode":"approve","owner":"step-run/golden.approval","question":"Is the candidate ready?","review_targets":["resource/candidate"],"reviewer":"person/alex","step_definition":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#;
         let fields: BTreeMap<_, _> = fields.into_iter().collect();
         assert_eq!(serde_json::to_string(&fields).unwrap(), golden);
