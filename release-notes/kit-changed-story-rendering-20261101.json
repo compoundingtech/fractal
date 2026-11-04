@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The PR kit lane also plays changed story files at 440 and 1440 pixels in dark and light. This separate rendering and interaction check records no CPU measurements.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "The CPU gate still measures only the fixed commit set, with its 413.1-second anchor and 454.41-second ceiling. The PR detector selects at most 20 changed story files in repository-path order and reports the cap. Deleted or unindexed files have no plays. If the diff is unavailable, the runner selects the first 20 files in the built index. Merge groups still play all stories in four shards." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "required", "detail": "Nathan must give Factory sign-off and a window before this protected workflow change can merge." },
+  "recovery": { "status": "none", "detail": "Revert this PR and regenerate workflows with nix develop .#genie -c genie. This removes changed-story playback and retains the fixed commit CPU gate." }
+}

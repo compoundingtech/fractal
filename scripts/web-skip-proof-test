@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,16 @@ import tempfile
 root = Path(__file__).resolve().parent.parent
 tool = root / "scripts/web-skip-proof"
 clean = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+# The PR detector keeps a deterministic file cap, not a story-count cap.
+detect = runpy.run_path(str(root / "scripts/ci-fractal-web-changes"))
+stories = [f"packages/fractal-ui/src/{number:02}.stories.tsx" for number in range(25)]
+assert detect["changed_stories"]([]) == []
+assert detect["changed_stories"](["src/not-a-story.tsx", stories[0], stories[0]]) == stories[:1]
+assert detect["changed_stories"](list(reversed(stories))) == stories[:20]
+assert detect["changed_stories"](stories[:20]) == stories[:20]
+assert detect["changed_stories"](["apps/fractal-web/src/web/New.stories.tsx"]) == ["apps/fractal-web/src/web/New.stories.tsx"]
+print("passed: changed-story detection ignores non-stories, deduplicates and caps 25 files to the first 20")
 
 
 def git(repo, *args):

@@ -8,6 +8,25 @@ import { fileURLToPath } from 'node:url'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
 import { commitSetCases, diagonalCase, fullCases, BOTH_WIDTHS, MERGE_ONLY, KIT_CASE_OVERRIDES, APP_CASE_OVERRIDES, APP_MODULE_SUITE_IDS, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { aggregateShards, shardStories } from './kit-play-shards.mjs'
+import { changedStoryIds } from './kit-play-gate-runner.mjs'
+
+test('changed files select all indexed exports, including noncritical and override-omitted stories', () => {
+  const entries = {
+    first: { type: 'story', id: 'kit--first', importPath: './src/Test.stories.tsx' },
+    second: { type: 'story', id: 'kit--second', importPath: './src/Test.stories.tsx' },
+    app: { type: 'story', id: 'app--story', importPath: '../../apps/fractal-web/src/App.stories.tsx' },
+    docs: { type: 'docs', id: 'kit--docs', importPath: './src/Test.stories.tsx' },
+  }
+  assert.deepEqual(changedStoryIds({ entries }, ['packages/fractal-ui/src/Test.stories.tsx']), ['kit--first', 'kit--second'])
+  assert.deepEqual(changedStoryIds({ entries }, ['apps/fractal-web/src/App.stories.tsx']), ['app--story'])
+  assert.deepEqual(changedStoryIds({ entries }, ['packages/fractal-ui/src/Deleted.stories.tsx']), [])
+  assert.equal(fullCases(changedStoryIds({ entries }, null), new Map()).length, 12)
+  const many = Object.fromEntries(Array.from({ length: 25 }, (_, n) => [n, {
+    type: 'story', id: `story-${n}`, importPath: `./src/${String(n).padStart(2, '0')}.stories.tsx`,
+  }]))
+  assert.equal(changedStoryIds({ entries: many }, null).length, 20)
+  assert.ok(!changedStoryIds({ entries: many }, null).includes('story-20'))
+})
 
 const story = { type: 'story', id: 'kit--sample', importPath: './Sample.stories.tsx' }
 const docs = { type: 'docs', id: 'kit--docs', importPath: './Sample.mdx' }
