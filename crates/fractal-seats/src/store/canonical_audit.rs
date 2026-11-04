@@ -110,6 +110,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_message_marks",
         "local_message_staged",
         "local_message_mark_events",
+        // Member-local messages a graph write queued for the messages shard.
+        "local_message_outbox",
         "coordination_sends",
         "local_coordination_backfill",
         "stop_deferral_claims",

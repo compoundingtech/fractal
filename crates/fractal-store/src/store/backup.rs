@@ -131,6 +131,14 @@ impl Store {
                 }
             }
         }
+        // A message in the outbox is pending mail, and the archive has no place for it: the outbox
+        // is not a ledger, and a build before it refuses an archive that names one. So the export
+        // drains it first and refuses while any remains; in this build nothing enqueues, so none
+        // does. Only a store with its shard drains here: a copy opened without one would write the
+        // mail to the copy's graph instead of the member's.
+        if super::messages_shard::shard(self).is_some() {
+            super::message_outbox::drain(self)?;
+        }
         loop {
             self.seal_local_batches()?;
             // Capture before pinning: another sealer may advance this atomic after our reader
@@ -145,6 +153,10 @@ impl Store {
                 // Admission and projection commit separately. Only a snapshot whose persisted
                 // projection frontier covers its log can promise the same graph on restore.
                 self.check_backup_projection()?;
+                anyhow::ensure!(
+                    !super::message_outbox::pending(&self.readers.get())?,
+                    "backup waits for the messages in the outbox to drain; retry once the daemon has written them"
+                );
                 let mut header = self.backup_header()?;
                 if super::backup_ledgers::MARK_LEDGERS.iter().any(|table| header.ledgers.contains_key(*table)) {
                     header.version = super::backup_format::VERSION_WITH_MARKS;
