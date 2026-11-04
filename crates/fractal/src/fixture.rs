@@ -1,3 +1,6 @@
-// A separate, non-installed test executable shares the CLI implementation. The binary name is
-// a compile-time Cargo value; renaming st3 or setting an environment variable cannot enable it.
-/* sqlite-large-value: allow-for-now lv-h97d9944f6757 owner=fractal::fixture TODO=trace-statement-and-value-representation */ include!("main.rs");
+// A separate, non-installed test executable runs the same CLI as fractal. Only it calls `fixture_main`, which
+// exists only with test-support: renaming fractal or setting an environment variable cannot enable it. It
+// bakes no build identity, so its version is the package's with an unknown revision.
+fn main() -> std::process::ExitCode {
+    fractal::fixture_main()
+}

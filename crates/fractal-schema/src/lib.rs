@@ -2178,6 +2178,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "member.admission-override",
+            &["host"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            Some("fleet"),
+            true,
+            &[],
+        ),
+        (
             "agent.queue.moved",
             &["agent"],
             WritePolicy::AuthorizedRequester,
@@ -3801,6 +3810,11 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("desired_token", required_string()),
             ("destination", required_string()),
             ("sources", required_array()),
+        ],
+        "member.admission-override" => &[
+            ("start", required_string()),
+            ("peers", required_array()),
+            ("reason", required_string()),
         ],
         "delivery.hold" => &[
             ("held", required_boolean()),

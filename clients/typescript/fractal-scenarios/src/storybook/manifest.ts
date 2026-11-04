@@ -116,6 +116,7 @@ export const defaultVariants: Readonly<Record<SliceKind, readonly string[]>> = {
     "empty",
     "loading",
     "one-agent",
+    "sidebar-tabs",
     "all-states",
     "huge"
   ],
@@ -130,7 +131,8 @@ export const defaultVariants: Readonly<Record<SliceKind, readonly string[]>> = {
     "default",
     "none",
     "one-of-each-kind",
-    "many"
+    "many",
+    "sidebar-tabs"
   ],
   "conversation": [
     "default",

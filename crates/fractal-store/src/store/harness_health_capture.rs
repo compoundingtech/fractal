@@ -63,7 +63,11 @@ const PENDING_SQL: &str = "WITH candidates AS MATERIALIZED (
                 EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                        WHERE subject=candidates.subject AND kind IN
                            ('message.staged','message.delivered','message.read','message.closed')
-                         AND store_index<=?2),
+                         AND store_index<=?2)
+                -- A seat this member hosts records its lifecycle as local marks (message_marks.rs),
+                -- which have no graph index.
+                OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=candidates.subject)
+                OR EXISTS(SELECT 1 FROM local_message_staged WHERE message=candidates.subject),
                 EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                        WHERE subject=candidates.subject AND kind='message.sent'
                          AND store_index<candidates.store_index)
@@ -681,7 +685,9 @@ mod tests {
                 actor TEXT,store_index INTEGER PRIMARY KEY,accepted_at_unix_ms TEXT,body TEXT);
              CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
              CREATE INDEX claims_message_to_order_index ON claims(json_extract(body,'$.fields.to'),store_index)
-                WHERE kind='message.sent';",
+                WHERE kind='message.sent';
+             CREATE TABLE local_message_marks(message TEXT,kind TEXT,consumer TEXT,PRIMARY KEY(message,kind,consumer));
+             CREATE TABLE local_message_staged(message TEXT,consumer TEXT,PRIMARY KEY(message,consumer));",
         ).unwrap();
         insert(
             &connection,
@@ -1190,7 +1196,9 @@ mod tests {
             origin TEXT,actor TEXT,store_index INTEGER PRIMARY KEY,accepted_at_unix_ms TEXT,body TEXT);
             CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
             CREATE INDEX claims_message_to_order_index ON claims(json_extract(body,'$.fields.to'),store_index)
-                WHERE kind='message.sent';").unwrap();
+                WHERE kind='message.sent';
+            CREATE TABLE local_message_marks(message TEXT,kind TEXT,consumer TEXT,PRIMARY KEY(message,kind,consumer));
+            CREATE TABLE local_message_staged(message TEXT,consumer TEXT,PRIMARY KEY(message,consumer));").unwrap();
         insert(
             &writer,
             "runtime-a",

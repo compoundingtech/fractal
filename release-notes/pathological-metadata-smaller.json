@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The pathological-metadata conversation-blocks test uses 6,000 long keys instead of 200,000 short ones. The entry still exceeds the transport budget once its values are bounded, and the test runs in about 2 s instead of 24 s, so it no longer hits nextest's 60 s timeout under load",
+  "replay": {"status": "none", "detail": "Test-only change; no claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "No runtime, client, wire or harness change; only a test fixture in crates/fractal-api-client-v0/src/api/client_v0/conversation_blocks.rs."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}

@@ -9,6 +9,7 @@ pub use crate::store::conversation_reads_shared_seats::{BEFORE_MESSAGE_DECODE, B
 use super::*;
 pub use fractal_store::store::conversation_reads::*;
 pub use fractal_store::store::conversation_reads::{Owner, Owners};
+pub use fractal_store::store::messages_shard::stream_reads::{self, StreamAfter};
 
 // Keep the existing physical owner window before selecting the kinds the fallback renders.
 // Filtering kinds before LIMIT would incorrectly bring old entries back into the view.
@@ -75,6 +76,19 @@ static IDENTITY_FIELD_READS: std::sync::LazyLock<[String; 2]> = std::sync::LazyL
     })
 });
 
+/// The names a conversation's endpoint goes by, as the graph's reads match them: each name the
+/// identity had, and the identity itself.
+fn conversation_names(connection: &Connection, owner: &str) -> Result<Vec<String>> {
+    let mut names = connection
+        .prepare_cached("SELECT name FROM identity_names WHERE identity=?1")?
+        .query_map([owner], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    names.push(owner.to_owned());
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 /// Both exact-subject and fleet-map routing share these bounded identity seeks.
 fn conversation_owner_from_connection(
     connection: &Connection,
@@ -124,8 +138,10 @@ pub trait ConversationReadsStore {
     fn conversation_local_position(&self) -> Result<u64>;
     /// Whether a fixed graph/local frontier contains a relevant change. No payload leaves SQL,
     /// and no retained snapshot spans native reads, display preparation, or a long-poll wait.
+    /// `stream` is the messages stream's range, after and through, in shard indexes.
     fn conversation_changed_at(
             &self, owner: &str, after: u64, through: u64, local_after: u64, local_through: u64,
+            stream: (u64, u64),
         ) -> Result<bool>;
     /// One subject at the captured logical frontier, without building the fleet owner map.
     /// Sparse identity fields use partial accepted-time indexes, not scans over heartbeats.
@@ -136,12 +152,14 @@ pub trait ConversationReadsStore {
     fn conversation_owners_at(&self, through: u64) -> Result<Arc<Owners>>;
     /// Preserve the existing newest-10,000 fleet-send window, but read payloads only for the
     /// selected endpoint and (for replay) after its cursor. Wrapped sends use existing endpoint
-    /// indexes; partial indexes cover legacy root bodies.
+    /// indexes; partial indexes cover legacy root bodies. `stream` also takes the messages
+    /// stream's items to or from the endpoint, as `stream_reads::conversation_items` selects them.
     fn conversation_messages_at(
             &self,
             owner: &str,
             before: Option<u64>,
             after: u64,
+            stream: Option<StreamAfter>,
         ) -> Result<Vec<ClaimRecord>>;
     /// Bounded indexed post-snapshot sends for native/graph read reconciliation.
     fn conversation_message_delta_at(
@@ -150,13 +168,17 @@ pub trait ConversationReadsStore {
             before: Option<u64>,
             after: u64,
             limit: usize,
+            stream: Option<StreamAfter>,
         ) -> Result<Vec<ClaimRecord>>;
+    /// Graph sends and, with `stream`, stream items, newest first in this member's timeline
+    /// order (`stream_reads::timeline_base`). With `limit`, at most that many of both together.
     fn conversation_messages_window(
             &self,
             owner: &str,
             before: Option<u64>,
             after: u64,
             limit: Option<usize>,
+            stream: Option<StreamAfter>,
         ) -> Result<Vec<ClaimRecord>>;
     /// The owner records the stored-history fallback actually renders, selected inside the
     /// same latest-10,000 physical-row window as the previous claims_page read. Timeline
@@ -207,14 +229,23 @@ impl ConversationReadsStore for Store {
 
     fn conversation_changed_at(
             &self, owner: &str, after: u64, through: u64, local_after: u64, local_through: u64,
+            stream: (u64, u64),
         ) -> Result<bool> {
-        let connection = self.readers.get();
-        let owner = fractal_store::store::identities::resolve_reference_conn(&connection, owner)?;
-        if after == through && local_after == local_through {
-            return Ok(false);
-        }
-        Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3794736069fe owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-hdcbe3463817e owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, after, through, local_after, local_through], |row| row.get(0))?)
+        let names = {
+            let connection = self.readers.get();
+            let owner = fractal_store::store::identities::resolve_reference_conn(&connection, owner)?;
+            if after == through && local_after == local_through && stream.0 == stream.1 {
+                return Ok(false);
+            }
+            let changed = (after != through || local_after != local_through)
+                && connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3794736069fe owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
+                    .query_row(/* sqlite-large-value: allow-for-now lv-hdcbe3463817e owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, after, through, local_after, local_through], |row| row.get(0))?;
+            if changed || stream.0 == stream.1 {
+                return Ok(changed);
+            }
+            conversation_names(&connection, &owner)?
+        };
+        stream_reads::conversation_changed(self, &names, stream.0, stream.1)
     }
 
     fn conversation_owner_at(&self, subject: &str, through: u64) -> Result<Option<Owner>> {
@@ -358,8 +389,9 @@ impl ConversationReadsStore for Store {
             owner: &str,
             before: Option<u64>,
             after: u64,
+            stream: Option<StreamAfter>,
         ) -> Result<Vec<ClaimRecord>> {
-        self.conversation_messages_window(owner, before, after, None)
+        self.conversation_messages_window(owner, before, after, None, stream)
     }
 
     fn conversation_message_delta_at(
@@ -368,8 +400,9 @@ impl ConversationReadsStore for Store {
             before: Option<u64>,
             after: u64,
             limit: usize,
+            stream: Option<StreamAfter>,
         ) -> Result<Vec<ClaimRecord>> {
-        self.conversation_messages_window(owner, before, after, Some(limit))
+        self.conversation_messages_window(owner, before, after, Some(limit), stream)
     }
 
     fn conversation_messages_window(
@@ -378,11 +411,13 @@ impl ConversationReadsStore for Store {
             before: Option<u64>,
             after: u64,
             limit: Option<usize>,
+            stream: Option<StreamAfter>,
         ) -> Result<Vec<ClaimRecord>> {
         let before = before.unwrap_or(i64::MAX as u64);
-        let ids = {
+        let (ids, names) = {
             let connection = self.readers.get();
             let owner = fractal_store::store::identities::resolve_reference_conn(&connection, owner)?;
+            let names = stream.map(|_| conversation_names(&connection, &owner)).transpose()?;
             let floor = if limit.is_some() {
                 after.saturating_add(1)
             } else {
@@ -396,7 +431,7 @@ impl ConversationReadsStore for Store {
                     .unwrap_or(0)
                     .max(after.saturating_add(1))
             };
-            connection
+            let ids = connection
                 .prepare_cached(
                     /* sqlite-large-value: allow-for-now lv-h53448c5c25f2 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
                     SELECT store_index FROM claims INDEXED BY claims_message_to_order_index
@@ -418,9 +453,29 @@ impl ConversationReadsStore for Store {
                    ORDER BY claims.store_index DESC LIMIT ?4",
                 )?
                 .query_map(params![owner, floor, before, limit.map_or(-1, |limit| i64::try_from(limit).unwrap_or(i64::MAX))], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            (ids, names)
         };
-        self.conversation_claims_by_ids(&ids)
+        let graph = self.conversation_claims_by_ids(&ids)?;
+        let (Some(stream), Some(names)) = (stream, names) else {
+            return Ok(graph);
+        };
+        // A stream item sorts at its arrival in this member's graph order, two past the claim
+        // it arrived behind, so both stores read newest first as one timeline.
+        let mut merged = graph
+            .into_iter()
+            .map(|claim| (claim.store_index.saturating_mul(4), claim))
+            .chain(
+                stream_reads::conversation_items(self, &names, stream, limit)?
+                    .into_iter()
+                    .map(|(claim, arrived)| (arrived.saturating_mul(4).saturating_add(2), claim)),
+            )
+            .collect::<Vec<_>>();
+        merged.sort_by(|(left, a), (right, b)| right.cmp(left).then_with(|| b.id.cmp(&a.id)));
+        if let Some(limit) = limit {
+            merged.truncate(limit);
+        }
+        Ok(merged.into_iter().map(|(_, claim)| claim).collect())
     }
 
     fn conversation_timeline_owner_claims_at(
@@ -848,25 +903,25 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
         assert!(costs[0] > 0 && costs[1] <= costs[0] * 2 && costs[1] < 250,
             "wake work must not scale with unrelated payloads: {costs:?}");
         let through = store.index().unwrap();
-        assert!(!store.conversation_changed_at(owner, after, through, 0, 0).unwrap());
+        assert!(!store.conversation_changed_at(owner, after, through, 0, 0, (0, 0)).unwrap());
         // Boundaries exclude changes beyond the captured frontier, including legacy endpoints.
         store.connection.batched(|tx| -> Result<()> {
             append_claim_tx(tx, "node", "message/legacy", "message.sent", None,
                 &json!({"from":owner, "to":"person/other", "content":"original legacy body", "status":"sent"}), &[], None)?;
             Ok(())
         }).unwrap().unwrap();
-        assert!(!store.conversation_changed_at(owner, after, through, 0, 0).unwrap());
-        assert!(store.conversation_changed_at(owner, through, store.index().unwrap(), 0, 0).unwrap());
+        assert!(!store.conversation_changed_at(owner, after, through, 0, 0, (0, 0)).unwrap());
+        assert!(store.conversation_changed_at(owner, through, store.index().unwrap(), 0, 0, (0, 0)).unwrap());
         for side in ["from", "to"] {
             let before = store.index().unwrap();
             let mut fields = json!({"from":"person/other", "to":"agent/other", "content":"hello", "status":"sent"});
             fields[side] = json!(owner);
             append(&store, &format!("message/wrapped-{side}"), "message.sent", fields);
-            assert!(store.conversation_changed_at(owner, before, store.index().unwrap(), 0, 0).unwrap());
+            assert!(store.conversation_changed_at(owner, before, store.index().unwrap(), 0, 0, (0, 0)).unwrap());
         }
         let before = store.index().unwrap();
         append(&store, owner, "runtime.observed", json!({"status":"idle"}));
-        assert!(store.conversation_changed_at(owner, before, store.index().unwrap(), 0, 0).unwrap());
+        assert!(store.conversation_changed_at(owner, before, store.index().unwrap(), 0, 0, (0, 0)).unwrap());
         assert_eq!(store.conversation_local_position().unwrap(), 0);
         let index = store.index().unwrap();
         store.connection.batched(|tx| -> Result<()> {
@@ -878,9 +933,9 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
             Ok(())
         }).unwrap().unwrap();
         assert_eq!(store.conversation_local_position().unwrap(), 2);
-        assert!(!store.conversation_changed_at(owner, index, index, 0, 1).unwrap());
-        assert!(store.conversation_changed_at(owner, index, index, 1, 2).unwrap());
-        assert!(!store.conversation_changed_at(owner, index, index, 2, 2).unwrap());
+        assert!(!store.conversation_changed_at(owner, index, index, 0, 1, (0, 0)).unwrap());
+        assert!(store.conversation_changed_at(owner, index, index, 1, 2, (0, 0)).unwrap());
+        assert!(!store.conversation_changed_at(owner, index, index, 2, 2, (0, 0)).unwrap());
     }
 
     #[test]
@@ -925,10 +980,78 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
                 .map(|c| c.id)
                 .collect::<Vec<_>>();
             let new = store
-                .conversation_messages_at("agent/alder", Some(before), after)
+                .conversation_messages_at("agent/alder", Some(before), after, None)
                 .unwrap();
             assert_eq!(new.into_iter().map(|c| c.id).collect::<Vec<_>>(), old);
         }
+    }
+
+    /// A conversation reads the messages stream beside the graph: a stream item to or from its
+    /// endpoint, or a name the endpoint had, sorts where it arrived in this member's graph order,
+    /// two past the claim it arrived behind. A delta takes only the items past its stream
+    /// position, or that arrived after its graph index, and the change check sees an item that
+    /// arrives while the graph stands still.
+    #[test]
+    fn conversation_reads_take_stream_items_in_arrival_order() {
+        use fractal_store::store::messages_shard::{self, STREAM_INDEX_BASE};
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+        let shard = messages_shard::open(&store, root.path()).unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            tx.execute("INSERT INTO identity_names(name,identity) VALUES('agent/alder.old','agent/alder')", [])?;
+            Ok(())
+        }).unwrap().unwrap();
+        let stream = |subject: &str, from: &str, to: &str| {
+            let claim = shard.append_claim(&smallclaims::claim::ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some(from.into()),
+                fields: serde_json::from_value(json!({"from":from, "to":to, "content":subject, "status":"sent"})).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            stream_reads::record_arrivals(&store).unwrap();
+            claim.store_index
+        };
+        let graph = |number: u64| append(&store, &format!("message/{number:016x}"), "message.sent",
+            json!({"from":"agent/birch","to":"agent/alder","content":"graph","status":"sent"}));
+        let first = graph(1);
+        let to_old_name = stream("message/00000000000000b1", "agent/birch", "agent/alder.old");
+        stream("message/00000000000000b2", "agent/birch", "agent/cedar");
+        let second = graph(2);
+        let cursor = stream_reads::conversation_position(&store).unwrap();
+        let from_alder = stream("message/00000000000000b3", "agent/alder", "agent/birch");
+        let ids = |claims: Vec<ClaimRecord>| claims.into_iter().map(|claim| claim.subject).collect::<Vec<_>>();
+
+        let all = store.conversation_messages_at("agent/alder", None, 0, Some(StreamAfter::Position(0))).unwrap();
+        assert_eq!(ids(all.clone()), [
+            "message/00000000000000b3", second.subject.as_str(), "message/00000000000000b1", first.subject.as_str(),
+        ]);
+        assert_eq!(all[0].store_index, STREAM_INDEX_BASE + from_alder, "a stream item's index is its created_index");
+        assert_eq!(stream_reads::timeline_base(&store, &all[2]).unwrap(), first.store_index * 4 + 2);
+        assert_eq!(stream_reads::timeline_base(&store, &all[1]).unwrap(), second.store_index * 4);
+        assert_eq!(stream_reads::timeline_base(&store, &all[0]).unwrap(), second.store_index * 4 + 2);
+        assert_eq!(ids(store.conversation_messages_at("agent/alder", None, 0, None).unwrap()),
+            [second.subject.as_str(), first.subject.as_str()], "a graph-only read is unchanged");
+
+        // The delta past the cursor's stream position: the graph has not moved, the stream has.
+        let delta = store.conversation_messages_at(
+            "agent/alder", None, second.store_index, Some(StreamAfter::Position(cursor)),
+        ).unwrap();
+        assert_eq!(ids(delta), ["message/00000000000000b3"]);
+        let arrived = store.conversation_message_delta_at(
+            "agent/alder", None, first.store_index, 2, Some(StreamAfter::Arrival(first.store_index)),
+        ).unwrap();
+        assert_eq!(ids(arrived), ["message/00000000000000b3", second.subject.as_str()], "newest two");
+        let through = store.index().unwrap();
+        let latest = stream_reads::conversation_position(&store).unwrap();
+        assert!(store.conversation_changed_at("agent/alder", through, through, 0, 0, (cursor, latest)).unwrap());
+        assert!(!store.conversation_changed_at("agent/alder", through, through, 0, 0, (latest, latest)).unwrap());
+        assert!(!store.conversation_changed_at("agent/cedar", through, through, 0, 0, (cursor, latest)).unwrap(),
+            "another endpoint's stream item is no change");
+        assert!(store.conversation_changed_at("agent/alder", through, through, 0, 0, (to_old_name - 1, to_old_name)).unwrap(),
+            "an item to a name the endpoint had is a change");
     }
 
     #[test]
@@ -1001,7 +1124,7 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
                 }))
             });
             reader
-                .conversation_messages_at("agent/alder", None, 0)
+                .conversation_messages_at("agent/alder", None, 0, None)
                 .unwrap()
         });
         ready
@@ -1054,13 +1177,13 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
             Ok(())
         }).unwrap().unwrap();
         let claims = store
-            .conversation_messages_at("agent/alder", None, 0)
+            .conversation_messages_at("agent/alder", None, 0, None)
             .unwrap();
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].body["content"], "Legacy root body");
         assert_eq!(
             store
-                .conversation_messages_at("agent/alder", Some(before), 0)
+                .conversation_messages_at("agent/alder", Some(before), 0, None)
                 .unwrap()[0]
                 .subject,
             "message/old"
@@ -1082,7 +1205,7 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
             .unwrap()
             .claims;
         let new = store
-            .conversation_messages_at("agent/alder", None, 0)
+            .conversation_messages_at("agent/alder", None, 0, None)
             .unwrap();
         assert_eq!(new.len(), 70);
         for (old, new) in old.iter().zip(&new) {

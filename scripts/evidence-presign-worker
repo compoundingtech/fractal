@@ -274,10 +274,11 @@ def stop(group):
     group.wait()
 
 
-def run(st_test, repo, checks, kind, rules, log, extra=()):
-    """fractal-test on the checked-out head (and `extra`, more runner arguments), watched; (rows, stopped_reason, seconds, io60_peak)."""
+def run(st_test, repo, checks, kind, rules, log, extra=(), environment=None):
+    """fractal-test on the checked-out head (and `extra`, more runner arguments; `environment`, more variables), watched; (rows,
+    stopped_reason, seconds, io60_peak)."""
     global CHILD
-    env = dict(os.environ)
+    env = dict(os.environ, **(environment or {}))
     scratch = None
     if kind == 'heavy':
         if Path('/dev/shm').is_dir():

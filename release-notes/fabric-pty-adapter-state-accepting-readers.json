@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read renamed PTY advertisements and existing Fabric adapter state without changing exposures",
+  "replay": {"status": "none", "detail": "No replay, state rewrite or backfill."},
+  "schema": {"status": "none", "detail": "Gateway settings, route handshakes and adapter state retain their existing formats."},
+  "rules": {"status": "none", "detail": "Terminal capability checks, owner and node selection, and runtime incarnation handshakes remain unchanged. The adapter still grants no PTY access."},
+  "compatibility": {"status": "changed", "detail": "CLI and TUI direct terminal readers select an exact st3/pty/<fleet> or fractal/pty/<fleet> advertisement from the current selected owner and node. Without such an advertisement they retain st3/pty/<fleet>. Gateway settings already accept both client service names; a fixture now locks in that behavior. Adapter default state discovery reads an existing ~/.local/state/st-fabric-adapter or ~/.local/state/fractal-fabric-adapter home and refuses two populated homes rather than merging authority. Explicit --state-dir bypasses discovery. Fresh installs retain the legacy default; no producer or exposure changes."},
+  "downtime": {"status": "none", "detail": "No host actions or migration are required."},
+  "manual": {"status": "none", "detail": "Only conflicting populated adapter homes require choosing the authoritative directory explicitly with --state-dir."},
+  "recovery": {"status": "none", "detail": "No stored paths or services are rewritten. Older binaries still require their existing spellings. Retain accepting readers until the rename ledger's admitted-site inventory proves old advertisements and state homes absent."}
+}

@@ -871,7 +871,7 @@ pub async fn client_attention(
         return attention_history::page(state, snapshot, effective_query, "attention").await;
     }
     let history = query.history;
-    client_snapshot_page(
+    let (snapshot, Json(mut page)) = client_snapshot_page(
         &state,
         snapshot,
         "attention",
@@ -882,7 +882,12 @@ pub async fn client_attention(
             Ok(items)
         },
     )
-    .await
+    .await?;
+    // After the page's cache and digest: a seat's host's answer is never part of either.
+    relay_attention_target_states(&state, &mut page.items)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok((snapshot, Json(page)))
 }
 
 pub async fn client_attention_detail(
@@ -901,7 +906,13 @@ pub async fn client_attention_detail(
         client_attention_resources_with_previews(&state, person.as_deref(), query.history)
             .map_err(ApiError::internal)?;
     client_attention_compatibility(&mut items, session.custom_forms);
-    client_detail(items, "attention", &id).map(IntoResponse::into_response)
+    let Json(item) = client_detail(items, "attention", &id)?;
+    let mut items = [item];
+    relay_attention_target_states(&state, &mut items)
+        .await
+        .map_err(ApiError::internal)?;
+    let [item] = items;
+    Ok(Json(item).into_response())
 }
 
 pub async fn client_messages(
@@ -973,6 +984,11 @@ pub async fn client_messages(
     .await
     .map(|(Extension(snapshot), page)| (snapshot, page))?;
     page.replicated = replicated;
+    // A page of current messages leaves out those a seat's host closed, so it can come back
+    // shorter; its cursor still counts the collection it was cut from.
+    relay_client_message_items(&state, &mut page.items, client_now_ms(), !history)
+        .await
+        .map_err(ApiError::internal)?;
     Ok((Extension(snapshot), Json(page)))
 }
 
@@ -997,6 +1013,19 @@ pub(super) async fn client_messages_sql_page_at(
 ) -> Result<ClientPageResponse, ApiError> {
     client_messages_sql_page_with_envelope(
         state, snapshot, query, request_time, &format!("request/{}", new_request_id()), None,
+    ).await
+}
+
+/// A paging client's message page as `GET /v1/client/messages` serves it, for the tests of the
+/// crates above this one.
+#[cfg(feature = "test-support")]
+pub async fn client_messages_sql_page_for_tests(
+    state: &AppState,
+    snapshot: ClientSnapshot,
+    query: &ClientListQuery,
+) -> Result<ClientPageResponse, ApiError> {
+    client_messages_sql_page_with_envelope(
+        state, snapshot, query, client_now_ms(), &format!("request/{}", new_request_id()), None,
     ).await
 }
 
@@ -1070,15 +1099,17 @@ pub(super) async fn client_messages_sql_page_with_envelope(
             rows.truncate(limit);
             // Delivery enrichment reads the store too: keep it on the blocking
             // worker and inside the same read snapshot as selector/body folding.
+            let mut views = Vec::with_capacity(rows.len());
             let resources = rows.into_iter().map(|(message, metadata, current)| {
                 let key = (
                     metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?,
                     message.subject.clone(),
                 );
+                views.push((message.clone(), key.0));
                 let resource = client_message_resource(&reader.store, message, &metadata, current, now)?;
                 Ok((key, resource))
             }).collect::<anyhow::Result<Vec<_>>>()?;
-            Ok((cut_epoch, Some((snapshot, through, selected_more, resources))))
+            Ok((cut_epoch, Some((snapshot, through, selected_more, resources, views))))
         })
     }).await?;
     // Retire every affected receipt for this store, not just the cursor that
@@ -1089,9 +1120,30 @@ pub(super) async fn client_messages_sql_page_with_envelope(
             !cut.store.ptr_eq(&store) || cut.cut_epoch >= cut_epoch
         });
     }
-    let Some((snapshot, through, selected_more, resources)) = read else {
+    let Some((snapshot, through, selected_more, mut resources, views)) = read else {
         return Err(client_page_expired("the message page cut was invalidated; restart pagination"));
     };
+    // Mail to a seat on another host that keeps its receipts reads that host's answer. A page of
+    // current messages leaves out those the host closed, and goes on after the last row it
+    // selected, so a page the host closed entirely is empty with a cursor, never a dead end.
+    let last_selected = resources.last().map(|(key, _)| key.clone());
+    let closed = relay_client_messages(state, resources.iter_mut().map(|(_, resource)| resource), views, now)
+        .await
+        .map_err(ApiError::internal)?;
+    let selected = resources.len();
+    // Each kept row's position among the rows selected, so the cursor's offset counts them all.
+    let mut positions = Vec::with_capacity(selected);
+    let mut position = 0;
+    resources.retain(|(_, resource)| {
+        position += 1;
+        let keep = history
+            || !resource.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id));
+        if keep {
+            positions.push(position);
+        }
+        keep
+    });
+    let dropped = selected - resources.len();
     let mut keys = Vec::with_capacity(resources.len());
     let mut item_sizes = Vec::with_capacity(resources.len());
     let mut items = Vec::with_capacity(resources.len());
@@ -1115,15 +1167,23 @@ pub(super) async fn client_messages_sql_page_with_envelope(
     let receipt = format!("message-cut/{}", uuid::Uuid::now_v7());
     loop {
         let has_more = selected_more || page.items.len() < keys.len();
-        let cursor = if has_more && !page.items.is_empty() {
+        // Every row kept: go on after the last row selected, past any the host closed.
+        let whole = page.items.len() == keys.len();
+        let after_key = if whole {
+            last_selected.clone()
+        } else {
+            Some(keys[page.items.len() - 1].clone())
+        };
+        let cursor = if has_more && (!page.items.is_empty() || (whole && dropped > 0)) {
             Some(ClientPageCursor {
                 snapshot: snapshot.clone(), collection: "messages".into(),
-                offset: offset.saturating_add(page.items.len()), limit, history,
+                offset: offset.saturating_add(if whole { selected } else { positions[page.items.len() - 1] }),
+                limit, history,
                 person: query.person.clone(), actor: query.actor.clone(),
                 owner_run: query.owner_run.clone(), status: query.status.clone(),
                 owner: query.owner.clone(), state: query.state.clone(), native_only: query.native_only,
                 items_digest: receipt.clone(), before_index: Some(through),
-                after_key: Some(keys[page.items.len() - 1].clone()), expires_at_unix_ms: expires_at,
+                after_key, expires_at_unix_ms: expires_at,
             })
         } else { None };
         page.page.has_more = has_more;
@@ -1136,7 +1196,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
         let encoded_bytes = framing_bytes.saturating_add(items_bytes)
             .saturating_add(page.items.len().saturating_sub(1));
         if encoded_bytes <= CLIENT_MAX_RESPONSE_BYTES {
-            if has_more && page.items.is_empty() {
+            if has_more && cursor.is_none() {
                 return Err(client_message_page_too_large());
             }
             if let Some(cursor) = cursor {
@@ -1273,12 +1333,17 @@ pub async fn client_messages_detail(
     Query(query): Query<ClientListQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let person = client_v0::person_filter(&session, query.person.as_deref())?;
-    client_detail(
+    let Json(item) = client_detail(
         client_message_resources(&state.store, person.as_deref(), query.history, None)
             .map_err(ApiError::internal)?,
         "message",
         &id,
-    )
+    )?;
+    let mut items = vec![item];
+    relay_client_message_items(&state, &mut items, client_now_ms(), false)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(items.remove(0)))
 }
 
 pub async fn client_launches(

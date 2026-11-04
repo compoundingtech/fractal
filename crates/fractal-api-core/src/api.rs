@@ -122,6 +122,7 @@ pub use harness_questions::{
 };
 pub mod mailbox;
 pub mod mail_backlog;
+pub mod message_reads;
 pub mod delivery_metrics;
 pub mod mailbox_metrics;
 pub mod mission_eligibility_doctor;
@@ -569,6 +570,29 @@ pub fn router(state: AppState) -> Router {
 /// routes listed here. `router` without them is the route table this crate alone answers.
 pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
 
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestMessageMark {
+    message: String,
+    kind: String,
+    consumer: String,
+}
+
+/// Test support: record a consumer's local mark of a graph message, as 4b-2's consumers will.
+#[cfg(feature = "test-support")]
+async fn test_record_message_mark(
+    State(state): State<AppState>,
+    Json(mark): Json<TestMessageMark>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    let store = state.store.clone();
+    let (receipt, _) = blocking_action(move || {
+        crate::store::message_marks::record(&store, &mark.message, &mark.kind, &mark.consumer)
+    })
+    .await?;
+    signal_visible_change(&state);
+    Ok(Json(receipt))
+}
+
 /// [`router`] with the route families of the crates above.
 pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
@@ -694,9 +718,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/agents/rollout", post(agents::rollout_agent))
         .route("/v1/agents/start", post(agents::start_mission_seat))
         .route("/v1/agents/source-offline", post(agents::override_placement_source))
+        .route("/v1/fleet/admission-override", post(fleet::admission_override))
         .route("/v1/agents/suspend", post(agents::suspend_agent))
         .route("/v1/agents/resume", post(agents::resume_agent))
         .route("/v1/agents/lane", get(agents::agent_lane))
+        .route("/v1/agents/lane/burst", post(agents::hold_lane_burst).delete(agents::release_lane_burst))
         .route("/v1/internal/seat-snapshot", post(agents::seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(agents::report_native_session))
         .route("/v1/missions/{id}", get(launches::get_mission))
@@ -829,6 +855,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         // crate::peer::SEAT_FRESHNESS_INTERNAL_PATH; the cost inventory reads route literals.
         .route("/v1/internal/seat-freshness", post(seat_freshness::seat_freshness))
+        // crate::peer::SEAT_FRESHNESS_READS_INTERNAL_PATH, written out for the same reason.
+        .route("/v1/internal/seat-freshness/reads", post(seat_freshness::seat_freshness_read))
         .route(
             "/v1/internal/replication/answers-check",
             post(replication::replication_answers_check),
@@ -993,7 +1021,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(replication::test_shard_items).post(replication::test_shard_append),
         )
         // The worker-only peers route refuses a test caller; this reads the same answer.
-        .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers));
+        .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
+        // Nothing records a message mark until consumers switch (4b-2); tests record one here.
+        .route("/v1/internal/test/message-marks", post(test_record_message_mark));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
@@ -3193,11 +3223,13 @@ pub fn client_agent_cards_selected(
         add_agent_todos(store, &mut cards, index)?;
         Ok(cards)
     };
-    if chunk {
-        store.cached_agent_resources_chunk(index, history, selected, build)
-    } else {
-        store.cached_agent_resources_for(index, history, Some(selected), build)
-    }
+    pinned_unless_enclosed(store, || {
+        if chunk {
+            store.cached_agent_resources_chunk(index, history, selected, build)
+        } else {
+            store.cached_agent_resources_for(index, history, Some(selected), build)
+        }
+    })
 }
 
 fn client_agent_cards_from_cached(
@@ -3575,14 +3607,16 @@ fn client_agent_resources_selected(
     snapshot_index: u64,
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
-        changed.map(|(subjects, _)| subjects), snapshot_index, history,
-    ))?;
-    client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+    pinned_unless_enclosed(store, || {
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
+            changed.map(|(subjects, _)| subjects), snapshot_index, history,
+        ))?;
+        client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+    })
 }
 
-/// Every agent card at `snapshot_index` of a quiet store, folded as the roster folds them but
-/// outside a read snapshot: on a store just opened, nothing is kept yet, as at a daemon start.
+/// Every agent card at `snapshot_index` of a quiet store, with no enclosing read snapshot
+/// and no retained cards, as at a daemon start. The selected fold pins its own snapshot.
 /// For load measurements; it returns how many cards it folded.
 #[doc(hidden)]
 pub fn cold_agent_roster_rebuild(store: &Store, snapshot_index: u64) -> anyhow::Result<usize> {
@@ -4435,6 +4469,55 @@ fn insert_attention_target_states(
     Ok(())
 }
 
+/// Raise the `target_states` of messages whose seat's host keeps their receipts by what that
+/// host says, within a second, as a message view does: a fault about mail another host delivered,
+/// read or closed shows it so. Patched at serve time, after any cached or stored row, and never
+/// part of a revision: a client sees the host's answer on its next read.
+pub async fn relay_attention_target_states(state: &AppState, items: &mut [Value]) -> anyhow::Result<()> {
+    let messages = items
+        .iter()
+        .flat_map(|item| item["target_states"].as_array().into_iter().flatten())
+        .filter_map(|target| target["id"].as_str().filter(|id| id.starts_with("message/")).map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    if messages.is_empty() {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let messages = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<crate::model::MessageView>> {
+        let mut views = Vec::new();
+        for message in messages {
+            views.extend(store.message(&message)?);
+        }
+        Ok(views)
+    })
+    .await??;
+    let relayed = message_reads::read_for_views(state, &messages).await?;
+    for target in items
+        .iter_mut()
+        .flat_map(|item| item["target_states"].as_array_mut().into_iter().flatten())
+    {
+        let Some(message_reads::Relayed::Answered { status: Some(status), latest, .. }) =
+            target["id"].as_str().and_then(|id| relayed.get(id))
+        else {
+            continue;
+        };
+        if crate::store::message_marks::rank(status)
+            > crate::store::message_marks::rank(target["state"].as_str().unwrap_or_default())
+        {
+            target["state"] = json!(status);
+            match latest {
+                Some((_, at)) => target["since"] = json!(client_timestamp(u128::from(*at))),
+                None => {
+                    if let Some(target) = target.as_object_mut() {
+                        target.remove("since");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn client_attention_resources(
     store: &Store,
     person: Option<&str>,
@@ -4662,7 +4745,7 @@ fn client_message_resource(
         "title": message.title,
         "content": message.content,
         "state": message.status,
-        "delivery": message_delivery_for(store, &message, sent_at, now)?,
+        "delivery": message_delivery_for(store, &message, sent_at, now, None)?,
         "sent_at": client_timestamp(sent_at),
         "session_id": metadata["session_id"],
         "in_reply_to": message.in_reply_to,
@@ -4676,6 +4759,99 @@ fn client_message_resource(
         resource["body_bytes"] = json!(bytes);
     }
     Ok(resource)
+}
+
+/// Take the answers of the hosts that keep these messages' receipts into their client resources
+/// (db break-up step 4b). `state` is the further of this member's records and the host's
+/// answer, `status_from` names the host and whether it answered, `delivery` reads what it said,
+/// and a message its host closed is history, as a message this member closed is. The answer never
+/// feeds `revision` or `updated_at`: a client takes a revision as monotonic, and a host that falls
+/// silent would move it back. A client sees the host's answer on its next read.
+/// `views` are the messages, each with its sent time. Answers the messages the host closed: a
+/// list of current messages leaves them out, as it leaves out those this member closed.
+pub async fn relay_client_messages<'a>(
+    state: &AppState,
+    items: impl IntoIterator<Item = &'a mut Value>,
+    views: Vec<(crate::model::MessageView, u128)>,
+    now: u128,
+) -> anyhow::Result<BTreeSet<String>> {
+    let messages = views.iter().map(|(message, _)| message.clone()).collect::<Vec<_>>();
+    let relayed = message_reads::read_for_views(state, &messages).await?;
+    let mut closed = BTreeSet::new();
+    if relayed.is_empty() {
+        return Ok(closed);
+    }
+    let store = state.store.clone();
+    let patches = tokio::task::spawn_blocking(move || -> anyhow::Result<BTreeMap<String, Value>> {
+        let mut patches = BTreeMap::new();
+        for (mut message, sent_at) in views {
+            let Some(answer) = relayed.get(&message.subject) else {
+                continue;
+            };
+            message_reads::take_in(&mut message, answer);
+            let delivery = message_delivery_for(&store, &message, sent_at, now, Some(answer))?;
+            let patch = json!({
+                "state": message.status, "status_from": message.status_from, "delivery": delivery,
+            });
+            patches.insert(message.subject.clone(), patch);
+        }
+        Ok(patches)
+    })
+    .await??;
+    for item in items {
+        let Some(patch) = item.get("id").and_then(Value::as_str).and_then(|id| patches.get(id)) else {
+            continue;
+        };
+        for field in ["state", "status_from", "delivery"] {
+            if let Some(value) = patch.get(field) {
+                item[field] = value.clone();
+            }
+        }
+        if patch["state"] == "closed" {
+            item["operational"] = json!({ "layer": "history", "actionable": false, "reasons": ["closed"] });
+            closed.extend(item.get("id").and_then(Value::as_str).map(str::to_owned));
+        }
+    }
+    Ok(closed)
+}
+
+/// [`relay_client_messages`] for resources read without their messages, such as a detail or a
+/// page cut from a materialized collection: each message and its sent time are read again. With
+/// `drop_closed`, the messages the host closed leave `items`.
+pub async fn relay_client_message_items(
+    state: &AppState,
+    items: &mut Vec<Value>,
+    now: u128,
+    drop_closed: bool,
+) -> anyhow::Result<()> {
+    let ids = items
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let views = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<_>> {
+        let mut views = Vec::new();
+        for id in ids {
+            let Some(message) = store.message(&id)? else {
+                continue;
+            };
+            let sent_at = store
+                .latest_claim(&id, Some("message.sent"))?
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or_default();
+            views.push((message, sent_at));
+        }
+        Ok(views)
+    })
+    .await??;
+    let closed = relay_client_messages(state, items.iter_mut(), views, now).await?;
+    if drop_closed {
+        items.retain(|item| !item.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id)));
+    }
+    Ok(())
 }
 
 pub fn client_message_resources(
@@ -4715,9 +4891,16 @@ fn client_message_resources_at(
         let sent_at = first
             .map(|claim| claim.accepted_at_unix_ms)
             .unwrap_or_default();
-        let updated_at = last
+        let mut updated_at = last
             .map(|claim| claim.accepted_at_unix_ms)
             .unwrap_or(sent_at);
+        let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
+        // A seat this member hosts moves its message by a local mark, which no claim records.
+        if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
+            && at >= updated_at
+        {
+            (revision, updated_at) = (receipt, at);
+        }
         let session_id = first
             .and_then(|claim| {
                 claim
@@ -4738,14 +4921,14 @@ fn client_message_resources_at(
         let mut resource = json!({
             "id": message.subject,
             "kind": "message",
-            "revision": last.map(|claim| claim.id.as_str()).unwrap_or("message/unknown"),
+            "revision": revision,
             "updated_at": client_timestamp(updated_at),
             "from": message.from,
             "to": message.to,
             "title": message.title,
             "content": message.content,
             "state": message.status,
-            "delivery": message_delivery_for(store, &message, sent_at, now)?,
+            "delivery": message_delivery_for(store, &message, sent_at, now, None)?,
             "sent_at": client_timestamp(sent_at),
             "session_id": session_id,
             "in_reply_to": message.in_reply_to,
@@ -4825,18 +5008,44 @@ fn stream_item_recipient_elsewhere(store: &Store, message: &MessageView) -> anyh
 
 /// A stream item's status is this member's own lifecycle for it, so for a seat on this host it
 /// is labelled as graph mail is. For a seat on another host it is `unknown`: that host keeps
-/// the receipts, and claiming sent or delivered here would be a guess.
-fn message_delivery_for(store: &Store, message: &MessageView, sent_at: u128, now: u128) -> anyhow::Result<Value> {
-    if let Some(host) = stream_item_recipient_elsewhere(store, message)? {
-        return Ok(json!({
-            "state": "unknown", "phase": "unknown",
-            "reason": format!("the recipient's seat runs on {host}, which keeps this message's receipts"),
+/// the receipts, and claiming sent or delivered here would be a guess. When that host answers
+/// reads (`message_reads::relay_host`), `relayed` is what it said, if this member asked it: the
+/// message is as far as the further of this member's own state and the host's answer.
+fn message_delivery_for(
+    store: &Store, message: &MessageView, sent_at: u128, now: u128, relayed: Option<&message_reads::Relayed>,
+) -> anyhow::Result<Value> {
+    let unknown = |reason: String| {
+        json!({
+            "state": "unknown", "phase": "unknown", "reason": reason,
             "age_ms": now.saturating_sub(sent_at),
             "recipient_delivery": delivery_presence::known(&message.to).map(|path| path.to_value()),
-        }));
+        })
+    };
+    let mut status = message.status.clone();
+    if let Some(host) = message_reads::relay_host(store, message)? {
+        match relayed {
+            Some(message_reads::Relayed::Answered { status: Some(relayed), .. }) => {
+                if crate::store::message_marks::rank(relayed) > crate::store::message_marks::rank(&status) {
+                    status = (*relayed).to_owned();
+                }
+            }
+            Some(message_reads::Relayed::Answered { status: None, .. }) => {}
+            Some(message_reads::Relayed::Unknown { reason, .. }) => {
+                return Ok(unknown(reason.clone()));
+            }
+            None => {
+                return Ok(unknown(format!(
+                    "the recipient's seat runs on {host}, which keeps this message's receipts; `st conversations status` asks it"
+                )));
+            }
+        }
+    } else if let Some(host) = stream_item_recipient_elsewhere(store, message)? {
+        return Ok(unknown(format!(
+            "the recipient's seat runs on {host}, which keeps this message's receipts"
+        )));
     }
-    let mut delivery = message_delivery_value(store, &message.to, &message.status, sent_at, now)?;
-    if !matches!(message.status.as_str(), "sent" | "staged") { return Ok(delivery); }
+    let mut delivery = message_delivery_value(store, &message.to, &status, sent_at, now)?;
+    if !matches!(status.as_str(), "sent" | "staged") { return Ok(delivery); }
     let Some(runtime) = store.latest_claim(&message.to, Some("runtime.observed"))? else {
         return Ok(delivery);
     };
@@ -7167,9 +7376,11 @@ pub async fn guard_bound_request(
         "/v1/agents/rollout",
         "/v1/agents/start",
         "/v1/agents/source-offline",
+        "/v1/fleet/admission-override",
         "/v1/agents/suspend",
         "/v1/agents/resume",
         "/v1/agents/native-session",
+        "/v1/agents/lane/burst",
         "/v1/delivery/hold",
         "/v1/lane-changes",
         "/v1/work/",
@@ -7253,7 +7464,7 @@ pub fn overlay_seat_admission(state: &AppState, items: &mut [Value], history: bo
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({
+    let mut health = json!({
         "status": "ready",
         "node": state.node,
         "version": env!("CARGO_PKG_VERSION"),
@@ -7262,7 +7473,15 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
-    })))
+    });
+    // How far this member's messages stream has come. Absent when it holds no shard, so a
+    // client that waits on both indexes knows there is only the graph to wait on.
+    if let Some(index) = crate::store::messages_shard::stream_reads::stream_index(&state.store)
+        .map_err(ApiError::internal)?
+    {
+        health["messages_store_index"] = json!(index);
+    }
+    Ok(Json(health))
 }
 
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {
@@ -7726,8 +7945,106 @@ fn publication_evidence_check(store: &Store) -> DoctorCheck {
     }
 }
 
-/// Held silent mail is never lost: unread past a day, it is listed for its seat.
-fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
+/// `seats` (seat, count, oldest), with each seat whose host keeps its receipts counted from what
+/// that host answers about its held mail sent before `before`: read or closed mail goes, and mail
+/// the host did not answer for stays, as this member cannot say it was read. A seat with more held
+/// mail than one read asks of a host keeps this member's own count, which can only be higher.
+fn relayed_held_mail(
+    state: &AppState,
+    seats: Vec<(String, u64, u128)>,
+    before: u128,
+    runtime: Option<&tokio::runtime::Handle>,
+) -> anyhow::Result<Vec<(String, u64, u128)>> {
+    let hosts = message_reads::relay_hosts(&state.store)?;
+    if hosts.is_empty() {
+        return Ok(seats);
+    }
+    let host_of = hosts
+        .iter()
+        .flat_map(|(host, on)| on.iter().map(move |seat| (seat.clone(), host.clone())))
+        .collect::<BTreeMap<_, _>>();
+    let mut asks = BTreeMap::<String, Vec<String>>::new();
+    let mut sent = BTreeMap::<String, (String, u128)>::new();
+    let mut past_bound = BTreeSet::<String>::new();
+    for (seat, _, _) in seats
+        .iter()
+        .filter(|(seat, _, _)| host_of.contains_key(seat))
+    {
+        let held = state
+            .store
+            .readers
+            .get()
+            .prepare_cached(
+                "SELECT held.subject, held.sent_ms FROM coordination_sends held
+                 JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
+                 WHERE held.held=1 AND held.sent_ms < ?1 AND json_extract(sent.body,'$.fields.to')=?2
+                 LIMIT ?3",
+            )?
+            .query_map(
+                rusqlite::params![i64::try_from(before).unwrap_or(i64::MAX), seat, message_reads::MAX_MESSAGES_PER_HOST as i64 + 1],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if held.len() > message_reads::MAX_MESSAGES_PER_HOST {
+            past_bound.insert(seat.clone());
+            continue;
+        }
+        for (subject, at) in held {
+            asks.entry(host_of[seat].clone())
+                .or_default()
+                .push(subject.clone());
+            sent.insert(subject, (seat.clone(), at));
+        }
+    }
+    let relayed = message_reads::read_blocking(runtime, state, asks, message_reads::CHECK_DEADLINE);
+    let mut counted = BTreeMap::<String, (u64, u128)>::new();
+    for (subject, (seat, at)) in sent {
+        if relayed
+            .get(&subject)
+            .is_some_and(|answer| matches!(answer.status(), Some("read" | "closed")))
+        {
+            continue;
+        }
+        let entry = counted.entry(seat).or_insert((0, at));
+        entry.0 += 1;
+        entry.1 = entry.1.min(at);
+    }
+    Ok(seats
+        .into_iter()
+        .filter_map(|(seat, count, oldest)| {
+            if !host_of.contains_key(&seat) || past_bound.contains(&seat) {
+                return Some((seat, count, oldest));
+            }
+            counted
+                .remove(&seat)
+                .map(|(count, oldest)| (seat, count, oldest))
+        })
+        .collect())
+}
+
+/// Whether this member records its seats' lifecycle as local marks (store/marks_switch.rs), and,
+/// while it does not, which members keep it writing claims. Either is healthy: the check informs.
+fn message_marks_check(state: &AppState) -> DoctorCheck {
+    let switched = state.store.marks_switched();
+    let blockers = crate::store::marks_switch::blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
+    let message = match (switched, blockers) {
+        (Ok(true), _) => "on: this member records its own seats' delivery, read and close as local marks".to_owned(),
+        (Ok(false), Ok(blockers)) if blockers.is_empty() => "off: every member is ready; marks turn on at the next check".to_owned(),
+        (Ok(false), Ok(blockers)) => format!(
+            "off: lifecycle claims until every other member advertises {}=1, whose message view and lists ask a seat's host for its marks ({})",
+            crate::store::marks_switch::FEATURE, blockers.join("; ")),
+        (Err(error), _) | (_, Err(error)) => {
+            return DoctorCheck { name: "message-marks".into(), status: "warn".into(), message: format!("{error:#}") };
+        }
+    };
+    DoctorCheck { name: "message-marks".into(), status: "pass".into(), message }
+}
+
+/// Held silent mail is never lost: unread past a day, it is listed for its seat. A seat whose
+/// host keeps its receipts (`message_reads`) is listed by what that host answers: this member's
+/// held flags for it never clear.
+fn held_mail_check(state: &AppState, now: u128, runtime: Option<&tokio::runtime::Handle>) -> DoctorCheck {
+    let store = &state.store;
     match store.coordination_backfill_status() {
         Ok((cursor, ceiling, false, progress))
             if now.saturating_sub(u128::from(progress)) > 15 * 60 * 1000 =>
@@ -7749,7 +8066,10 @@ fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
         }
         _ => {}
     }
-    match store.held_mail_before(now.saturating_sub(crate::silent::HELD_TOO_LONG_MS)) {
+    let held = store
+        .held_mail_before(now.saturating_sub(crate::silent::HELD_TOO_LONG_MS))
+        .and_then(|seats| relayed_held_mail(state, seats, now.saturating_sub(crate::silent::HELD_TOO_LONG_MS), runtime));
+    match held {
         Ok(seats) if seats.is_empty() => DoctorCheck {
             name: "held-mail".into(),
             status: "pass".into(),
@@ -7785,42 +8105,240 @@ fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
     }
 }
 
-fn unread_current_seat_counts(
-    store: &Store,
-    recipients: &BTreeSet<&str>,
-    messages: &[MessageView],
-    now: u128,
-) -> anyhow::Result<(usize, usize)> {
-    let mut pending = 0;
-    let mut accepted = 0;
-    for message in messages.iter().filter(|message| {
-        recipients.contains(message.to.as_str())
-            && !matches!(message.status.as_str(), "read" | "closed")
-            // Held mail is not late: it waits for the seat's next turn.
-            && !crate::silent::waits_for_turn(message)
-    }) {
-        let owners = store.desired_subjects_named(std::slice::from_ref(&message.to))?;
-        if let Some(host) = owners
-            .first()
-            .and_then(|owner| owner.member.as_ref())
-            .map(|member| member.host.as_str())
-            && host != store.origin()
-            && !store.replication_peer_up(host)?.0
-        {
-            continue;
+/// Agents whose delivery path is stale or refused, and current-seat mail that is late. Mail to a
+/// seat whose host keeps its receipts is read from that host, through `runtime`.
+fn message_delivery_check(state: &AppState, runtime: Option<&tokio::runtime::Handle>) -> anyhow::Result<DoctorCheck> {
+    let now = client_now_ms();
+    let Some(agents) = doctor_agents(&state.store, now)? else {
+        return Ok(DoctorCheck {
+            name: "message-delivery".into(),
+            status: "warn".into(),
+            message: "the agents roster is not published yet, so delivery was not checked; run doctor again shortly".into(),
+        });
+    };
+    let current_recipients = agents
+        .iter()
+        .filter_map(|agent| agent["id"].as_str())
+        .collect::<BTreeSet<_>>();
+    let mut blocked = agents
+        .iter()
+        .filter(|agent| {
+            matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
+                || agent.pointer("/delivery/reason").and_then(Value::as_str)
+                    .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
+                        || reason.starts_with("ownership proof unavailable"))
+        })
+        .map(|agent| {
+            format!(
+                "{}: {}",
+                agent["id"].as_str().unwrap_or("agent"),
+                agent
+                    .pointer("/delivery/reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("delivery is stale")
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut notes = Vec::new();
+    if state.store.coordination_backfill_status()?.2 {
+        let (pending, accepted, unknown) = unread_current_seat_counts(state, &current_recipients, now, runtime)?;
+        if pending > 0 {
+            blocked.push(format!("{pending} current-seat messages older than 10s lack a recipient graph read receipt ({accepted} accepted native handoffs); this does not prove that a legacy channel failed to consume them. Inspect `st conversations status MESSAGE`"));
         }
-        let claims = store.claims_for(&message.subject, Some("message.sent"))?;
-        let sent_at = claims
-            .first()
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or_default();
-        if now.saturating_sub(sent_at) > 10_000 {
-            pending += 1;
-            accepted += usize::from(message.status == "delivered");
+        if !unknown.is_empty() {
+            blocked.push(format!(
+                "unknown whether {} current-seat messages were read: their recipients' hosts keep the receipts and did not answer ({})",
+                unknown.values().sum::<usize>(),
+                unknown.iter().map(|(host, count)| format!("{host}: {count}")).collect::<Vec<_>>().join(", ")
+            ));
+        }
+    } else {
+        // Held mail waits for its seat's turn, and which mail is held is still being indexed.
+        notes.push("overdue mail was not counted while held mail is still being indexed");
+    }
+    Ok(DoctorCheck {
+        name: "message-delivery".into(),
+        status: if blocked.is_empty() { "pass" } else { "warn" }.into(),
+        message: if blocked.is_empty() {
+            std::iter::once("no stalled local delivery paths or overdue agent messages were observed")
+                .chain(notes)
+                .collect::<Vec<_>>()
+                .join("; ")
+        } else {
+            blocked.into_iter().chain(notes.into_iter().map(str::to_owned)).collect::<Vec<_>>().join("; ")
+        },
+    })
+}
+
+/// The agents doctor checks delivery for, with their delivery presence. A daemon reads its newest
+/// published roster and never folds one; with no refresher running, as in a tool or a test,
+/// the cached fold serves. `None` while a running refresher has published no roster yet.
+fn doctor_agents(store: &Store, now: u128) -> anyhow::Result<Option<Vec<Value>>> {
+    let index = store.index()?;
+    let mut agents = if store.agent_roster_refresher_running() {
+        let Some((cut, cards, _)) = store.published_agent_roster(index, false) else {
+            store.request_agent_roster_refresh();
+            return Ok(None);
+        };
+        if cut < index {
+            store.request_agent_roster_refresh();
+        }
+        (*cards).clone()
+    } else {
+        client_agent_resources_cached(store, false, index)?
+    };
+    overlay_agent_resources(store, &mut agents, &client_timestamp(now))?;
+    Ok(Some(agents))
+}
+
+/// Current-seat mail older than ten seconds that its recipient has not read: how many, how
+/// many of those a native harness accepted, and, by host, how many a host that keeps its seats'
+/// receipts did not answer for. It counts from the unread and idle-mail indexes, never loading a
+/// message: a read or closed claim or local mark makes a message read. Mail to a seat whose host
+/// keeps its receipts (`message_reads`) is counted by what that host answers. Otherwise mail to a
+/// seat whose owning host is unreachable is not late here.
+pub fn unread_current_seat_counts(
+    state: &AppState,
+    recipients: &BTreeSet<&str>,
+    now: u128,
+    runtime: Option<&tokio::runtime::Handle>,
+) -> anyhow::Result<(u64, u64, BTreeMap<String, usize>)> {
+    let store = &state.store;
+    let before = now.saturating_sub(10_000);
+    let connection = store.readers.get();
+    let overdue = crate::store::unread_mail::overdue_by_recipient(&connection, before)?;
+    if overdue.is_empty() {
+        return Ok((0, 0, BTreeMap::new()));
+    }
+    // A message names its recipient by any of its identity's names.
+    let mut seats = BTreeMap::<String, &str>::new();
+    for recipient in recipients {
+        for name in crate::store::delivery::recipient_names(
+            &connection,
+            recipient,
+            crate::store::message_bare_recipient(recipient),
+        )? {
+            seats.insert(name, recipient);
         }
     }
-    Ok((pending, accepted))
+    drop(connection);
+    // Each raw recipient's seat, by any of its names.
+    let seat_of = |to: &str| {
+        seats
+            .get(to)
+            .or_else(|| seats.get(&crate::store::normalize_message_party(to)))
+            .copied()
+    };
+    let addressed = overdue
+        .iter()
+        .filter_map(|(to, _, _)| seat_of(to).map(|seat| (to.as_str(), seat)))
+        .collect::<Vec<_>>();
+    let (relayed_names, relayed) = relayed_overdue_mail(state, &addressed, before, runtime)?;
+    let mut reachable = BTreeMap::<&str, bool>::new();
+    let (mut pending, mut accepted) = (0, 0);
+    let mut unknown = BTreeMap::<String, usize>::new();
+    for (to, count, delivered) in overdue {
+        // Counted below, from what its host answered.
+        if relayed_names.contains(&to) {
+            continue;
+        }
+        let Some(recipient) = seat_of(&to) else {
+            continue;
+        };
+        if !match reachable.get(recipient) {
+            Some(reachable) => *reachable,
+            None => {
+                let owners = store.desired_subjects_named(&[recipient.to_owned()])?;
+                let up = match owners.first().and_then(|owner| owner.member.as_ref()).map(|member| member.host.as_str()) {
+                    Some(host) if host != store.origin() => store.replication_peer_up(host)?.0,
+                    _ => true,
+                };
+                *reachable.entry(recipient).or_insert(up)
+            }
+        } {
+            continue;
+        }
+        pending += count;
+        accepted += delivered;
+    }
+    for (delivered_here, answer) in relayed {
+        match answer {
+            Some(message_reads::Relayed::Unknown { host, .. }) => *unknown.entry(host).or_default() += 1,
+            answer => match answer.as_ref().and_then(message_reads::Relayed::status) {
+                Some("read" | "closed") => {}
+                status => {
+                    pending += 1;
+                    accepted += u64::from(delivered_here || status == Some("delivered"));
+                }
+            },
+        }
+    }
+    Ok((pending, accepted, unknown))
 }
+
+/// Whether a native harness accepted a message here, and what its host said about it.
+type RelayedMail = (bool, Option<message_reads::Relayed>);
+
+/// Overdue current-seat mail to seats whose host keeps their receipts, read from those hosts.
+/// `addressed` is each raw recipient name with its seat. It returns the names asked for, and for
+/// each message asked, whether a native harness accepted it here and what its host said (`None`
+/// when the host's reply left it out). A host with more of this mail than one read asks of a host
+/// is not asked, and its seats keep this member's own count. Nothing is asked while no host keeps
+/// its seats' receipts.
+fn relayed_overdue_mail(
+    state: &AppState,
+    addressed: &[(&str, &str)],
+    before: u128,
+    runtime: Option<&tokio::runtime::Handle>,
+) -> anyhow::Result<(BTreeSet<String>, Vec<RelayedMail>)> {
+    let hosts = message_reads::relay_hosts(&state.store)?;
+    if hosts.is_empty() {
+        return Ok((BTreeSet::new(), Vec::new()));
+    }
+    let host_of = addressed
+        .iter()
+        .filter_map(|(name, seat)| {
+            hosts
+                .iter()
+                .find(|(_, on)| on.contains(*seat))
+                .map(|(host, _)| (*name, host.as_str()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if host_of.is_empty() {
+        return Ok((BTreeSet::new(), Vec::new()));
+    }
+    let names = host_of.keys().copied().collect::<Vec<_>>();
+    let mail = crate::store::unread_mail::overdue_to(&state.store.readers.get(), before, &names)?;
+    let mut on_host = BTreeMap::<&str, Vec<(String, bool)>>::new();
+    for (subject, to, delivered_here) in mail {
+        if let Some(host) = host_of.get(to.as_str()) {
+            on_host.entry(host).or_default().push((subject, delivered_here));
+        }
+    }
+    let mut asks = BTreeMap::<String, Vec<String>>::new();
+    let mut delivered = Vec::new();
+    for (host, mail) in on_host {
+        if mail.len() > message_reads::MAX_MESSAGES_PER_HOST {
+            continue;
+        }
+        asks.insert(host.to_owned(), mail.iter().map(|(subject, _)| subject.clone()).collect());
+        delivered.extend(mail);
+    }
+    let asked = host_of
+        .iter()
+        .filter(|(_, host)| asks.contains_key(**host))
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+    let mut answers = message_reads::read_blocking(runtime, state, asks, message_reads::CHECK_DEADLINE);
+    Ok((
+        asked,
+        delivered
+            .into_iter()
+            .map(|(subject, delivered_here)| (delivered_here, answers.remove(&subject)))
+            .collect(),
+    ))
+}
+
 fn terminal_exec_gates_check(store: &Store) -> anyhow::Result<DoctorCheck> {
     fn has_exit_code_gate(mission: &crate::model::MissionSpec) -> bool {
         let has_gate = |gates: &[crate::model::GateSpec]| {
@@ -7934,6 +8452,119 @@ pub(crate) fn doctor_timeout(name: &str, elapsed: Duration) -> DoctorCheck {
     }
 }
 
+/// How many of doctor's checks read at once: a third of the read admission limit, at most 4, so
+/// a doctor run never takes the readers a busy daemon's requests need.
+pub(crate) fn doctor_workers(read_limit: usize) -> usize {
+    (read_limit / 3).clamp(1, 4)
+}
+
+type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
+
+/// Doctor's checks in report order. Store checks run together on up to `doctor_workers`
+/// threads, each under its own deadline from the clock, so a slow check costs its own time and
+/// not the time of the checks after it. A worker past the first reads on a reader it is
+/// admitted for, and when the pool admits none the checks run on the caller's thread. A check
+/// therefore must not need the Tokio runtime or the caller's thread-locals beyond its read budget.
+#[derive(Default)]
+pub(crate) struct DoctorChecks<'a> {
+    slots: Vec<DoctorSlot<'a>>,
+}
+
+enum DoctorSlot<'a> {
+    Done(Vec<DoctorCheck>),
+    Due(&'static str, DoctorWork<'a>),
+    Alone(&'static str, DoctorWork<'a>),
+}
+
+impl<'a> DoctorChecks<'a> {
+    /// A check whose answer needs no store read.
+    pub(crate) fn push(&mut self, check: DoctorCheck) {
+        self.slots.push(DoctorSlot::Done(vec![check]));
+    }
+
+    /// A store check, run under its own deadline.
+    pub(crate) fn check(
+        &mut self,
+        name: &'static str,
+        work: impl FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a,
+    ) {
+        self.slots.push(DoctorSlot::Due(name, Box::new(work)));
+    }
+
+    /// A store check that can take the writer, such as one that seeds the sealed replication
+    /// snapshot: it runs by itself on the caller's thread once the others are done, so no other
+    /// check reads beside its write.
+    pub(crate) fn check_alone(
+        &mut self,
+        name: &'static str,
+        work: impl FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a,
+    ) {
+        self.slots.push(DoctorSlot::Alone(name, Box::new(work)));
+    }
+
+    pub(crate) fn run(
+        self,
+        clock: &DoctorClock,
+        readers: &smallclaims::sqlite::ReadPool,
+        workers: usize,
+    ) -> Vec<DoctorCheck> {
+        let mut done = Vec::with_capacity(self.slots.len());
+        let mut due = std::collections::VecDeque::new();
+        let mut alone = Vec::new();
+        for (position, slot) in self.slots.into_iter().enumerate() {
+            match slot {
+                DoctorSlot::Done(checks) => done.push(Some(checks)),
+                DoctorSlot::Due(name, work) => {
+                    done.push(None);
+                    due.push_back((position, name, work));
+                }
+                DoctorSlot::Alone(name, work) => {
+                    done.push(None);
+                    alone.push((position, name, work));
+                }
+            }
+        }
+        let extra = workers.saturating_sub(1).min(due.len().saturating_sub(1));
+        let due = std::sync::Mutex::new(due);
+        let done = std::sync::Mutex::new(done);
+        let drain = &|| loop {
+            let Some((position, name, work)) =
+                due.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop_front()
+            else {
+                return;
+            };
+            let checks = clock.checks(name, work);
+            done.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[position] = Some(checks);
+        };
+        // Workers enter the request's profile operation, so their SQL counts as doctor's.
+        let profile = crate::profile::current();
+        std::thread::scope(|scope| {
+            for _ in 0..extra {
+                let Some(permit) = readers.try_admit_read() else { break };
+                let total = clock.total.clone();
+                let profile = profile.clone();
+                scope.spawn(move || {
+                    let _entered = crate::profile::enter(profile.as_ref());
+                    smallclaims::read_budget::with(Some(total), || {
+                        // A refused loan leaves this worker's checks to the others.
+                        let _ = readers.request_read_with_permit(permit, drain);
+                    })
+                });
+            }
+            drain();
+        });
+        let mut done = done.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (position, name, work) in alone {
+            done[position] = Some(clock.checks(name, work));
+        }
+        done
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect()
+    }
+}
+
 /// A timed-out check could not say the daemon is healthy, so it fails the report as a failed
 /// check does.
 pub(crate) fn doctor_status(checks: &[DoctorCheck]) -> &'static str {
@@ -7947,23 +8578,124 @@ pub(crate) fn doctor_status(checks: &[DoctorCheck]) -> &'static str {
 }
 
 pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
-    doctor_report_within(state, &DoctorClock::new(DOCTOR_TOTAL, DOCTOR_CHECK), None)
+    doctor_report_within(state, &DoctorClock::new(DOCTOR_TOTAL, DOCTOR_CHECK))
 }
 
-/// The report with an operation drift the caller already scanned for.
-fn doctor_report_with_operation_drift(
-    state: &AppState,
-    drift: &anyhow::Result<Vec<String>>,
-) -> Result<Json<DoctorReport>, ApiError> {
-    doctor_report_within(state, &DoctorClock::new(DOCTOR_TOTAL, DOCTOR_CHECK), Some(drift))
+/// What the daemon's last operation audit found. Doctor never audits inline: a full audit reads
+/// every operation, about 14 s on a 56 GB store. The daemon audits at startup and then every
+/// [`crate::store::OPERATION_AUDIT_PERIOD`]; a result older than two periods is stale.
+pub(crate) fn operation_projection_check(
+    audit: Option<crate::store::OperationAuditRecord>,
+    now_ms: u128,
+) -> DoctorCheck {
+    let period = crate::store::OPERATION_AUDIT_PERIOD;
+    let check = |status: &str, message: String| DoctorCheck {
+        name: "operation-projection".into(),
+        status: status.into(),
+        message,
+    };
+    let Some(audit) = audit else {
+        return check("warn", format!(
+            "no operation audit has finished since the daemon started; it audits at startup and then every {} min",
+            period.as_secs() / 60
+        ));
+    };
+    let age_ms = now_ms.saturating_sub(audit.finished_at_unix_ms);
+    let when = format!(
+        "the audit that finished {} min ago ({:.1} s)",
+        age_ms / 60_000,
+        audit.took.as_secs_f64()
+    );
+    match audit.result {
+        Ok(drift) if !drift.is_empty() => check(
+            "fail",
+            format!("operation projection drift: {}; found by {when}", drift.join(", ")),
+        ),
+        Err(error) => check("fail", format!("the last operation audit failed: {error}; {when}")),
+        Ok(_) if age_ms > 2 * period.as_millis() => check(
+            "warn",
+            format!("the operation projection matched the claim log at {when}, but audits run every {} min", period.as_secs() / 60),
+        ),
+        Ok(_) => check("pass", format!("the operation projection matched the claim log at {when}")),
+    }
+}
+
+/// What waits for a writer's signature and what is fenced, both live, and the envelopes this node
+/// admitted before it knew better. Those are historical, since admission is never revisited, so
+/// the daemon counts them off the request path, at startup and then every
+/// [`crate::store::OPERATION_AUDIT_PERIOD`]: reading every validated envelope took 46 s cold
+/// on a 56 GB store. Only a membership change adds to them, and after one doctor reports the
+/// old count as outdated and wakes the daemon to count again
+/// ([`crate::store::Store::current_fleet_residue`]).
+pub(crate) fn fleet_admission_check(
+    unsigned: u64,
+    fenced: u64,
+    residue: Option<(crate::store::FleetResidueRecord, bool)>,
+    now_ms: u128,
+) -> DoctorCheck {
+    let period = crate::store::OPERATION_AUDIT_PERIOD;
+    let mut notes = vec![format!(
+        "{unsigned} envelopes wait for their writer's signature; {fenced} are fenced"
+    )];
+    let mut status = if unsigned == 0 { "pass" } else { "warn" };
+    let why = "admitted envelopes are never readmitted, so an hour-old count is accurate";
+    match residue {
+        None => {
+            status = "warn";
+            notes.push(format!(
+                "the count of envelopes admitted before this node knew their writer's key has not finished since the daemon started; it runs at startup and then every {} min",
+                period.as_secs() / 60
+            ));
+        }
+        Some((record, moved)) => {
+            let age_ms = now_ms.saturating_sub(record.finished_at_unix_ms);
+            if moved {
+                status = "warn";
+                notes.push(
+                    "fleet membership changed since envelopes admitted before this node knew better were counted; the daemon is counting them again"
+                        .to_string(),
+                );
+            }
+            let when = format!("counted {} min ago ({:.1} s)", age_ms / 60_000, record.took.as_secs_f64());
+            match record.result {
+                Err(error) => {
+                    status = "fail";
+                    notes.push(format!("counting envelopes admitted before this node knew better failed: {error}; {when}"));
+                }
+                Ok(residue) => {
+                    if !residue.is_empty() {
+                        status = "warn";
+                    }
+                    notes.extend(residue.iter().map(|item| {
+                        format!("{} envelopes from {} were {}", item.envelopes, item.writer, item.reason.replace('-', " "))
+                    }));
+                    if age_ms > 2 * period.as_millis() {
+                        status = "warn";
+                        notes.push(format!(
+                            "envelopes admitted before this node knew better were {when}, longer ago than the {} min the daemon counts them every; {why}",
+                            period.as_secs() / 60
+                        ));
+                    } else if !residue.is_empty() {
+                        notes.push(format!("those were {when}; {why}"));
+                    }
+                }
+            }
+        }
+    }
+    DoctorCheck {
+        name: "fleet-admission".into(),
+        status: status.into(),
+        message: notes.join("; "),
+    }
 }
 
 fn doctor_report_within(
     state: &AppState,
     clock: &DoctorClock,
-    drift: Option<&anyhow::Result<Vec<String>>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
-    let mut checks = Vec::new();
+    // Checks run on threads outside the runtime; a check that asks another member goes through it.
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    let mut checks = DoctorChecks::default();
     let admission = state.seat_admission.snapshot(admission_now());
     checks.push(DoctorCheck {
         name: "seat-admission".into(),
@@ -7973,7 +8705,7 @@ fn doctor_report_within(
             admission["reason"].as_str().unwrap_or("unknown"),
             admission["pendingCount"], admission["oldestPendingAgeSecs"]),
     });
-    checks.extend(clock.checks("harness-access-mode", || {
+    checks.check("harness-access-mode", || {
         let mut checks = Vec::new();
         let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
             .map_err(ApiError::internal)?
@@ -7984,9 +8716,9 @@ fn doctor_report_within(
             message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
         });
         Ok(checks)
-    }));
+    });
 
-    checks.extend(clock.checks("claim-store", || {
+    checks.check("claim-store", || {
         let mut checks = Vec::new();
         match state.store.index() {
             Ok(index) => checks.push(DoctorCheck {
@@ -8001,8 +8733,8 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("claim-signatures", || {
+    });
+    checks.check("claim-signatures", || {
         let mut checks = Vec::new();
         for fault in state.store.signature_state_faults().map_err(ApiError::internal)? {
             checks.push(DoctorCheck {
@@ -8020,42 +8752,16 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("operation-projection", || {
-        let mut checks = Vec::new();
-        let scanned;
-        let drift = match drift {
-            Some(drift) => drift,
-            None => {
-                scanned = state.store.operation_projection_drift();
-                &scanned
-            }
-        };
-        match drift {
-            Ok(drift) if drift.is_empty() => checks.push(DoctorCheck {
-                name: "operation-projection".into(),
-                status: "pass".into(),
-                message: "the operation projection matches the claim log".into(),
-            }),
-            Ok(drift) => checks.push(DoctorCheck {
-                name: "operation-projection".into(),
-                status: "fail".into(),
-                message: format!("operation projection drift: {}", drift.join(", ")),
-            }),
-            Err(error) => checks.push(DoctorCheck {
-                name: "operation-projection".into(),
-                status: "fail".into(),
-                message: error.to_string(),
-            }),
-        }
-        Ok(checks)
-    }));
-    checks.extend(clock.checks("operational-repair", || {
+    });
+    checks.check("operation-projection", || {
+        Ok(vec![operation_projection_check(state.store.last_operation_audit(), client_now_ms())])
+    });
+    checks.check("operational-repair", || {
         Ok(vec![operations::operational_repair_check(
             operations::owner_operational_repair_plan(state),
         )?])
-    }));
-    checks.extend(clock.checks("terminal-exec-gates", || {
+    });
+    checks.check("terminal-exec-gates", || {
         let mut checks = Vec::new();
         checks.push(
             terminal_exec_gates_check(&state.store).unwrap_or_else(|error| DoctorCheck {
@@ -8065,8 +8771,8 @@ fn doctor_report_within(
             }),
         );
         Ok(checks)
-    }));
-    checks.extend(clock.checks("account-limits", || {
+    });
+    checks.check("account-limits", || {
         let mut checks = Vec::new();
         checks.push(
             state
@@ -8079,7 +8785,7 @@ fn doctor_report_within(
                 }),
         );
         Ok(checks)
-    }));
+    });
     match tempfile::Builder::new()
         .prefix(".st3-doctor-")
         .tempfile_in(&state.state_dir)
@@ -8114,15 +8820,15 @@ fn doctor_report_within(
             ),
         },
     });
-    checks.extend(clock.checks("graph-references", || {
+    checks.check("graph-references", || {
         Ok(vec![graph_references_check(
             &state
                 .store
                 .unresolved_graph_references()
                 .map_err(ApiError::bad)?,
         )])
-    }));
-    checks.extend(clock.checks("member-runtimes", || {
+    });
+    checks.check("member-runtimes", || {
         let mut checks = Vec::new();
         let desired = state.store.desired_subjects().map_err(ApiError::internal)?;
         for subject in &desired {
@@ -8383,8 +9089,8 @@ fn doctor_report_within(
             },
         });
         Ok(checks)
-    }));
-    checks.extend(clock.checks("replication", || {
+    });
+    checks.check_alone("replication", || {
         let mut checks = Vec::new();
         match state.store.replication_status_sealed(
             state.fleet_id.is_some(),
@@ -8611,17 +9317,17 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("first-readiness", || {
+    });
+    checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
-    }));
+    });
     if state.fleet_id.is_some() {
         checks.push(crate::replication_worker_build::check(
             &state.state_dir,
             fractal_drivers::version::build_commit(),
         ));
     }
-    checks.extend(clock.checks("idempotency-keys", || {
+    checks.check("idempotency-keys", || {
         let mut checks = Vec::new();
         match state.store.idempotency_conflicts(5) {
             Ok((0, _)) => checks.push(DoctorCheck {
@@ -8655,95 +9361,52 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
+    });
     let (recording, message) = crate::recorder::health(&state.state_dir);
     checks.push(DoctorCheck {
         name: "command-recorder".into(),
         status: if recording { "pass" } else { "warn" }.into(),
         message,
     });
-    checks.extend(clock.checks("message-delivery", || {
+    checks.check("message-delivery", || {
+        Ok(vec![message_delivery_check(state, runtime.as_ref()).unwrap_or_else(|error| DoctorCheck {
+            name: "message-delivery".into(),
+            status: "warn".into(),
+            message: error.to_string(),
+        })])
+    });
+    // Its count flushes the unread-mail queue under the writer; alone, it never holds a table
+    // another check reads.
+    checks.check_alone("mail-backlog", || {
         let mut checks = Vec::new();
-        match (
-            client_agent_resources(
-                &state.store,
-                false,
-                "",
-                state.store.index().map_err(ApiError::internal)?,
-            ),
-            state.store.operational_messages(None, false),
-        ) {
-            (Ok(agents), Ok(messages)) => {
-                let current_recipients = agents
-                    .iter()
-                    .filter_map(|agent| agent["id"].as_str())
-                    .collect::<BTreeSet<_>>();
-                let mut blocked = agents
-                    .iter()
-                    .filter(|agent| {
-                        matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
-                            || agent.pointer("/delivery/reason").and_then(Value::as_str)
-                                .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
-                                    || reason.starts_with("ownership proof unavailable"))
-                    })
-                    .map(|agent| {
-                        format!(
-                            "{}: {}",
-                            agent["id"].as_str().unwrap_or("agent"),
-                            agent
-                                .pointer("/delivery/reason")
-                                .and_then(Value::as_str)
-                                .unwrap_or("delivery is stale")
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let (pending, accepted) = unread_current_seat_counts(
-                    &state.store,
-                    &current_recipients,
-                    &messages,
-                    client_now_ms(),
-                )
-                .map_err(ApiError::internal)?;
-                if pending > 0 {
-                    blocked.push(format!("{pending} current-seat messages older than 10s lack a recipient graph read receipt ({accepted} accepted native handoffs); this does not prove that a legacy channel failed to consume them. Inspect `st conversations status MESSAGE`"));
-                }
-                checks.push(DoctorCheck {
-                    name: "message-delivery".into(),
-                    status: if blocked.is_empty() { "pass" } else { "warn" }.into(),
-                    message: if blocked.is_empty() {
-                        "no stalled local delivery paths or overdue agent messages were observed".into()
-                    } else {
-                        blocked.join("; ")
-                    },
-                });
-            }
-            (Err(error), _) | (_, Err(error)) => checks.push(DoctorCheck {
-                name: "message-delivery".into(),
-                status: "warn".into(),
-                message: error.to_string(),
-            }),
-        }
-        Ok(checks)
-    }));
-    checks.extend(clock.checks("mail-backlog", || {
-        let mut checks = Vec::new();
-        match mail_backlog::report(&state.store, client_now_ms()) {
-            Ok(backlog) => checks.push(DoctorCheck {
+        match mail_backlog::report_with_unknown(state, client_now_ms(), runtime.as_ref()) {
+            Ok((backlog, unknown)) => checks.push(DoctorCheck {
                 name: "mail-backlog".into(),
-                status: if backlog.count == 0 { "pass" } else { "warn" }.into(),
-                message: format!("{} unread messages older than 1h; close them with `{}`", backlog.count, backlog.cleanup_command),
+                status: if backlog.count == 0 && unknown.is_empty() { "pass" } else { "warn" }.into(),
+                message: if unknown.is_empty() {
+                    format!("{} unread messages older than 1h; close them with `{}`", backlog.count, backlog.cleanup_command)
+                } else {
+                    format!(
+                        "{} unread messages older than 1h; close them with `{}`; unknown for {} more: their recipients' hosts keep the receipts and did not answer ({})",
+                        backlog.count,
+                        backlog.cleanup_command,
+                        unknown.values().sum::<usize>(),
+                        unknown.iter().map(|(host, count)| format!("{host}: {count}")).collect::<Vec<_>>().join(", ")
+                    )
+                },
             }),
             Err(error) => checks.push(DoctorCheck { name: "mail-backlog".into(), status: "warn".into(), message: error.to_string() }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("publication-evidence", || {
+    });
+    checks.check("publication-evidence", || {
         Ok(vec![publication_evidence_check(&state.store)])
-    }));
-    checks.extend(clock.checks("held-mail", || {
-        Ok(vec![held_mail_check(&state.store, client_now_ms())])
-    }));
-    checks.extend(clock.checks("delivery-probes", || {
+    });
+    checks.check("message-marks", || Ok(vec![message_marks_check(state)]));
+    checks.check("held-mail", || {
+        Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
+    });
+    checks.check("delivery-probes", || {
         let mut checks = Vec::new();
         match delivery_probes::check(
             &state.store,
@@ -8759,58 +9422,35 @@ fn doctor_report_within(
             }),
         }
         Ok(checks)
-    }));
-    checks.extend(clock.checks("fleet-admission", || {
-        let mut checks = Vec::new();
+    });
+    // Its live counts can seed the sealed replication snapshot under the writer, as the
+    // replication check's do.
+    checks.check_alone("fleet-admission", || {
         // Once a node pins a fleet anchor, membership decides admission. Report what waits for a
         // signature, what is fenced, and what was admitted before this node knew better.
-        match state.store.fleet_anchor() {
-            Ok(None) => {}
-            Ok(Some(_)) => match (
-                state
-                    .store
-                    .replication_status_sealed(true, state.fleet_id.as_deref(), &[]),
-                state.store.fleet_admission_residue(),
-            ) {
-                (Ok(holds), Ok(residue)) => {
-                    let mut notes = vec![format!(
-                        "{} envelopes wait for their writer's signature; {} are fenced",
-                        holds.unsigned_envelopes, holds.fenced_envelopes
-                    )];
-                    notes.extend(residue.iter().map(|item| {
-                        format!(
-                            "{} envelopes from {} were {}",
-                            item.envelopes,
-                            item.writer,
-                            item.reason.replace('-', " ")
-                        )
-                    }));
-                    checks.push(DoctorCheck {
-                        name: "fleet-admission".into(),
-                        status: if residue.is_empty() && holds.unsigned_envelopes == 0 {
-                            "pass"
-                        } else {
-                            "warn"
-                        }
-                        .into(),
-                        message: notes.join("; "),
-                    });
-                }
-                (Err(error), _) | (_, Err(error)) => checks.push(DoctorCheck {
-                    name: "fleet-admission".into(),
-                    status: "fail".into(),
-                    message: error.to_string(),
-                }),
+        let check = |status: &str, message: String| DoctorCheck {
+            name: "fleet-admission".into(),
+            status: status.into(),
+            message,
+        };
+        Ok(match state.store.fleet_anchor() {
+            Ok(None) => Vec::new(),
+            Ok(Some(_)) => match state.store.replication_status_sealed(true, state.fleet_id.as_deref(), &[]) {
+                Ok(holds) => match state.store.current_fleet_residue() {
+                    Ok(residue) => vec![fleet_admission_check(
+                        holds.unsigned_envelopes,
+                        holds.fenced_envelopes,
+                        residue,
+                        client_now_ms(),
+                    )],
+                    Err(error) => vec![check("fail", error.to_string())],
+                },
+                Err(error) => vec![check("fail", error.to_string())],
             },
-            Err(error) => checks.push(DoctorCheck {
-                name: "fleet-admission".into(),
-                status: "fail".into(),
-                message: error.to_string(),
-            }),
-        }
-        Ok(checks)
-    }));
-    checks.extend(clock.checks("attention", || {
+            Err(error) => vec![check("fail", error.to_string())],
+        })
+    });
+    checks.check("attention", || {
         let mut checks = Vec::new();
         let attention_now = client_now_ms();
         let attention = doctor_attention_items(&state.store, attention_now).map_err(ApiError::internal)?;
@@ -8820,7 +9460,8 @@ fn doctor_report_within(
         );
         checks.push(stale_attention_check(&attention, attention_now));
         Ok(checks)
-    }));
+    });
+    let checks = checks.run(clock, &state.store.readers, doctor_workers(smallclaims::sqlite::max_read_workers()));
     let report_status = doctor_status(&checks);
     let mut performance = crate::performance::snapshot();
     performance["seatAdmission"] = admission;
@@ -10286,6 +10927,7 @@ pub fn accept_message_receipt_with_upload_owner(
             in_reply_to: request.in_reply_to,
             tags,
             created_index: record.store_index,
+            status_from: None,
             attachments,
             body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
             body_bytes: body.as_ref().map(|body| body.size),
@@ -10403,6 +11045,11 @@ fn message_subject(value: &str) -> String {
 pub struct EventQuery {
     #[serde(default, alias = "after_index")]
     after: u64,
+    /// The messages stream's position the client has read through. A client that sends it also
+    /// gets the stream's message events after it, in `stream_items`; one that does not gets the
+    /// graph's events alone, as before.
+    #[serde(default)]
+    messages_after: Option<u64>,
     subject: Option<String>,
     owner_run: Option<String>,
     wait: Option<bool>,
@@ -10416,6 +11063,16 @@ struct EventPage {
     next_after: Option<u64>,
     has_more: bool,
     frontier: u64,
+    /// The messages stream's message events after `messages_after`, when the client asked and
+    /// this member holds a shard. Their `store_index` is the stream's own index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_items: Option<Vec<EventRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_next_after: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_has_more: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages_frontier: Option<u64>,
 }
 
 async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPage, ApiError> {
@@ -10430,6 +11087,7 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
     let after = query.after;
     let subject = query.subject.clone();
     let owner = query.owner_run.clone();
+    let messages_after = query.messages_after;
     blocking_store(move || {
         // A commit is visible here before its writer publishes the store index that client
         // snapshots read at. A cursor past that index would let a client read a resource older
@@ -10453,11 +11111,30 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
             }
             let (items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
+            // Stream items have no run owner, so an owner-filtered page has none of them.
+            let stream = match messages_after {
+                Some(messages_after) if owner.is_none() => {
+                    crate::store::messages_shard::stream_reads::stream_events_page(&store, messages_after, limit)?
+                }
+                _ => None,
+            };
+            let stream_items = stream.as_ref().map(|stream| {
+                stream
+                    .items
+                    .iter()
+                    .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
+                    .cloned()
+                    .collect()
+            });
             Ok(Ok(EventPage {
                 items,
                 next_after,
                 has_more,
                 frontier,
+                stream_items,
+                messages_next_after: stream.as_ref().and_then(|stream| stream.next_after),
+                messages_has_more: stream.as_ref().map(|stream| stream.has_more),
+                messages_frontier: stream.as_ref().map(|stream| stream.frontier),
             }))
         })
     })
@@ -10474,8 +11151,12 @@ async fn events_page(
         + Duration::from_millis(query.timeout_ms.unwrap_or(30_000).clamp(10, 30_000));
     loop {
         let page = read_event_page(&state, &query).await?;
-        if page.next_after.is_some() || query.wait != Some(true) {
-            if query.wait == Some(true) && page.items.is_empty() {
+        // A stream event is news for a waiter that asked for them, as a graph event is.
+        if page.next_after.is_some() || page.messages_next_after.is_some() || query.wait != Some(true) {
+            if query.wait == Some(true)
+                && page.items.is_empty()
+                && page.stream_items.as_ref().is_none_or(Vec::is_empty)
+            {
                 // A filtered page can advance through nonmatching rows during migration.
                 // Keep its exact continuation, but pace wait-mode clients instead of inviting
                 // an immediate empty-page repoll. The caller's timeout still bounds the wait.
@@ -10907,17 +11588,13 @@ async fn work_action_response_viewing(
         }
         return Ok(Json(response));
     }
-    let harness = state
+    // The claim's own incarnation is judged, not the seat's newest runtime record: another
+    // host can record the end of its own old runtime for a seat that has moved (#4743).
+    if !state
         .store
-        .current_harness(&actor)
+        .work_incarnation_live(&actor, incarnation)
         .map_err(ApiError::internal)?
-        .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
-                "inactive-work-incarnation",
-                format!("`{actor}` has no current live harness incarnation"),
-            ))
-        })?;
-    if harness.incarnation_id != incarnation || harness.state == "ended" {
+    {
         return Err(ApiError::bad(St3Error::new(
             "inactive-work-incarnation",
             format!("`{incarnation}` is not the current live incarnation of `{actor}`"),

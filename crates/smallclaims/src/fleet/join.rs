@@ -532,7 +532,7 @@ impl PairingHelper {
             Some(path) => Some(path.to_path_buf()),
             None => resolve_fabric_adapter()?,
         }
-        .context("st-fabric-adapter is unavailable; install it alongside st or set ST_FABRIC_ADAPTER")?;
+        .context("fractal-fabric-adapter is unavailable; install it alongside fractal or set FRACTAL_FABRIC_ADAPTER")?;
         let mut child = tokio::process::Command::new(executable)
             .arg(command)
             .stdin(Stdio::piped())
@@ -540,7 +540,7 @@ impl PairingHelper {
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("start st-fabric-adapter {command}"))?;
+            .with_context(|| format!("start fractal-fabric-adapter {command}"))?;
         let input = child.stdin.take().context("open adapter input")?;
         let output = tokio::io::BufReader::new(child.stdout.take().context("open adapter output")?).lines();
         Ok(Self { child, input, output })
