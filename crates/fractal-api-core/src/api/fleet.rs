@@ -349,3 +349,34 @@ pub async fn fleet_admission_residue(
         .await
         .map(Json)
 }
+
+#[derive(Deserialize)]
+pub struct AdmissionOverrideRequest {
+    actor: String,
+    peers: Vec<String>,
+    reason: String,
+    idempotency_key: String,
+}
+
+/// Let this member act on its seats' placement, for its current daemon start, without the named
+/// peers it cannot reach. Only this member reads it, so it is recorded here, where it is needed.
+pub async fn admission_override(
+    State(state): State<AppState>,
+    Json(request): Json<AdmissionOverrideRequest>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    let actor = person_or_agent_actor(&request.actor, "invalid-admission-override-actor")?;
+    let store = state.store.clone();
+    let host = state.node.clone();
+    let configured = state.configured_peers.clone();
+    let (claim, appended) = blocking_action(move || {
+        let input = crate::reconcile::member_admission::override_input(
+            &store, &host, &actor, request.peers, &request.reason, &configured, request.idempotency_key,
+        )?;
+        store.append_claim_outcome(&input)
+    })
+    .await?;
+    if appended {
+        signal_claim_changed(&state, crate::reconcile::member_admission::OVERRIDE_KIND);
+    }
+    Ok(Json(claim))
+}

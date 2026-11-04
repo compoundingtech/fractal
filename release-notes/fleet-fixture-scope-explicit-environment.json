@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "summary": "Use explicit executable paths and preserve isolated daemon scope environments",
+  "replay": {
+    "status": "none",
+    "detail": "Test fixture and process guardian changes only; no runtime replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema or migration changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digest changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Linux fleet test daemons resolve their program and guardian Python from a complete explicit PATH. Per-daemon scopes preserve that isolated environment without injecting whole-test evidence variables. No product client or wire changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No production service restart change. This corrects test-fixture portability and environment handling only."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No installation action. This fragment classifies correction commit 8cd18c933d796093cfe7c39ee3bf7796d99abdfa and its own metadata change; the original fixture scope note remains unchanged."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or product recovery changes; the fixture preserves the existing state directory across upgrade and rollback."
+  },
+  "commits": [
+    "8cd18c933d796093cfe7c39ee3bf7796d99abdfa"
+  ]
+}

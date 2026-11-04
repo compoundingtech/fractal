@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Publish the web embed archive once, under the source-addressed release `embed-SHA`.
+
+Usage: scripts/release-publish-embed --source SHA --dist DIRECTORY
+Environment: GH_TOKEN and GH_REPO (as for gh). Needs contents: write.
+
+The release is made as a draft holding every archive and its SHA-256 sidecar, then published. A
+published release is a pin: nothing replaces or adds to it, so a rerun only checks that it holds
+these files and changes nothing. A draft is this step's own unfinished work, as when GitHub timed out
+partway through an earlier attempt (#4606): the step continues it, uploading the files it lacks and
+never replacing one it holds (no --clobber). An upload GitHub never finished, which it lists as not
+uploaded, is removed from the draft and uploaded again; nobody can have read it.
+"""
+import argparse
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from release_gh import gh as gh_call, missing  # noqa: E402
+
+SHA = re.compile(r'[0-9a-f]{40}')
+
+
+def say(message):
+    print(f'release-publish-embed: {message}', flush=True)
+
+
+def gh(*args, **options):
+    """A GitHub call that survives a 5xx or a timeout (scripts/release_gh.py)."""
+    return gh_call(*args, step='release-publish-embed', **options)
+
+
+def view(tag):
+    """The release `tag`, or None when there is none: whether it is a draft, and each asset's size
+    and upload state. Any other failure, after retries, ends the step."""
+    done = gh('release', 'view', tag, '--json', 'isDraft,assets', check=False)
+    if missing(done):
+        return None
+    if done.returncode != 0:
+        raise SystemExit(f'release-publish-embed: reading {tag} failed: {done.stderr.strip()}')
+    release = json.loads(done.stdout)
+    return {'draft': release['isDraft'],
+            'assets': {a['name']: (a['size'], a.get('state', 'uploaded')) for a in release['assets']}}
+
+
+def holds(release, files):
+    """Whether `release` holds exactly `files`, each uploaded at its size."""
+    return release['assets'] == {f.name: (f.stat().st_size, 'uploaded') for f in files}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    parser.add_argument('--source', required=True)
+    parser.add_argument('--dist', required=True, type=pathlib.Path)
+    args = parser.parse_args()
+    if not SHA.fullmatch(args.source):
+        raise SystemExit('release-publish-embed: --source must be a full lowercase commit hash')
+    dist = args.dist.resolve()
+    files = sorted([*dist.glob('*.tar.gz'), *dist.glob('*.sha256')])
+    archives = [f for f in files if f.name.endswith('.tar.gz')]
+    if not archives:
+        raise SystemExit(f'release-publish-embed: {dist} holds no archive')
+    unsigned = [f.name for f in archives if not f.with_name(f.name + '.sha256').is_file()]
+    if unsigned:
+        raise SystemExit(f'release-publish-embed: these archives have no SHA-256 sidecar: {unsigned}')
+    checked = subprocess.run(['sha256sum', '--check', *[f.name for f in files if f.name.endswith('.sha256')]],
+                             cwd=dist, text=True, capture_output=True, stdin=subprocess.DEVNULL)
+    if checked.returncode != 0:
+        raise SystemExit(f'release-publish-embed: the archives do not match their sidecars: {checked.stdout}{checked.stderr}')
+    tag = f'embed-{args.source}'
+    names = {f.name for f in files}
+
+    release = view(tag)
+    if release is None:
+        # A create that timed out may still have made the draft, with some of its files.
+        gh('release', 'create', tag, '--target', args.source, '--draft', '--prerelease', '--latest=false',
+           '--title', f'Fractal web embed {args.source}',
+           '--notes', f'Offline embed, four posters and provenance for source {args.source}. '
+                      'Verify the archive against its SHA-256 sidecar.',
+           *map(str, files), done=lambda: view(tag) is not None)
+        say(f'created the draft {tag}')
+        release = view(tag)
+    if not release['draft']:
+        if not holds(release, files):
+            raise SystemExit(f'release-publish-embed: {tag} is published with {sorted(release["assets"])}, '
+                             f'not these files; a published embed is never replaced')
+        say(f'{tag} is already published with these files')
+        return 0
+
+    # The draft is this step's own: continue it.
+    strangers = sorted(set(release['assets']) - names)
+    if strangers:
+        raise SystemExit(f'release-publish-embed: the draft {tag} holds files this run did not make: {strangers}')
+    for f in files:
+        size, state = release['assets'].get(f.name, (None, None))
+        if state is not None and state != 'uploaded':
+            gh('release', 'delete-asset', tag, f.name, '--yes',
+               done=lambda name=f.name: name not in (view(tag) or {'assets': {}})['assets'])
+        elif state is not None and size != f.stat().st_size:
+            raise SystemExit(f'release-publish-embed: the draft {tag} holds {f.name} at {size} bytes, '
+                             f'not {f.stat().st_size}; it is never replaced')
+    release = view(tag)
+    lacking = [f for f in files if f.name not in release['assets']]
+
+    def uploaded(name):
+        """After a failed upload: whether GitHub has the file. One it did not finish is removed, so
+        the upload can run again without replacing anything readable."""
+        state = view(tag)['assets'].get(name, (None, None))[1]
+        if state not in (None, 'uploaded'):
+            gh('release', 'delete-asset', tag, name, '--yes')
+        return state == 'uploaded'
+    for f in lacking:
+        gh('release', 'upload', tag, str(f), done=lambda name=f.name: uploaded(name))
+    if lacking:
+        say(f'uploaded {len(lacking)} files the draft lacked')
+    gh('release', 'edit', tag, '--draft=false', done=lambda: not view(tag)['draft'])
+
+    final = view(tag)
+    if final is None or final['draft'] or not holds(final, files):
+        raise SystemExit(f'release-publish-embed: {tag} ended as {final}, expected published with {sorted(names)}')
+    say(f'published {tag} with {len(files)} files')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
