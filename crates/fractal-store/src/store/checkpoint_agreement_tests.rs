@@ -354,18 +354,21 @@ fn a_late_envelope_before_the_cut_reseals_until_someone_verified() {
     step(&birch, &context);
 
     // An envelope from before the cut reaches alder late, from a writer it had not heard
-    // of. Alder seals again, now with cedar as a participant.
+    // of. Alder waits for cedar's first seal before refreshing its own.
     observe(&cedar, 1);
     sync(&[&alder, &cedar]);
+    assert!(step(&alder, &context).is_empty());
+    sync(&[&alder, &birch, &cedar]);
+    assert!(step(&birch, &context).is_empty());
+    assert_eq!(kinds(&step(&cedar, &context)), ["sealed"]);
+    sync(&[&alder, &birch, &cedar]);
     let actions = step(&alder, &context);
     let CheckpointAction::Sealed { participants, .. } = &actions[0] else {
         panic!("{actions:?}");
     };
     assert_eq!(participants, &names(&["alder", "birch", "cedar"]));
     sync(&[&alder, &birch, &cedar]);
-    for node in [&birch, &cedar] {
-        assert_eq!(kinds(&step(node, &context)), ["sealed"]);
-    }
+    assert_eq!(kinds(&step(&birch, &context)), ["sealed"]);
     sync(&[&alder, &birch, &cedar]);
     assert_eq!(kinds(&step(&alder, &context)), ["verified"]);
 
@@ -529,7 +532,7 @@ fn a_trim_that_would_change_the_graph_waits_for_a_person() {
     assert_eq!(status.trimmed, None);
     assert!(
         birch
-            .claims_for("daemon/birch", Some("daemon.diagnostic"))
+            .observations_for("daemon/birch", "daemon.diagnostic")
             .unwrap()
             .iter()
             .any(|claim| claim.body["fields"]["code"] == "checkpoint-trim-graph-changed")
@@ -590,7 +593,7 @@ fn a_repaired_original_held_by_one_node_does_not_split_the_verifications() {
     observe(&birch, 3);
     observe(&cedar, 2);
     let replacement = alder
-        .append_claim(&ClaimInput {
+        .append_as_older_build_for_test(&ClaimInput {
             subject: "daemon/alder".into(),
             kind: "daemon.diagnostic".into(),
             actor: None,
@@ -741,7 +744,7 @@ fn status_names_what_differs_between_verifications() {
         .unwrap()
         .pending
         .unwrap()
-        .terms;
+        .terms.unwrap();
     let (_, mut plan, proof) = birch
         .plan_checkpoint_through(cut, None, scratch.path())
         .unwrap();

@@ -25,8 +25,9 @@ fractal
 ```
 
 Supported platforms are Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+) and macOS Apple
-Silicon with macOS 15+. The installer needs `curl`, `tar` and a SHA256 checker; macOS
-also needs Python 3. Harness CLIs and their accounts are separate. If none is
+Silicon with macOS 15+. The installer needs `curl`, `tar` and a SHA256 checker;
+Python 3 is also required on macOS and when verifying an existing ownership receipt.
+Harness CLIs and their accounts are separate. If none is
 installed, `fractal` still opens; install a supported harness and run `fractal setup` later.
 For Claude, first complete its native welcome, account or API-key confirmation and
 permission-bypass consent as the same user and profile. Successful auth-status or
@@ -39,6 +40,14 @@ setup still need a manual rehearsal; native builds do not establish that evidenc
 `fractal web` opens an already-running web interface at `http://127.0.0.1:5173`
 (override with the `FRACTAL_WEB_URL` environment variable); it does not start a
 server. If no browser opener is available, it prints the URL instead.
+
+The legacy executable names `st` and `st3` emit a deprecation warning on stderr,
+including in JSON mode, and will be removed on 2026-11-16. Use `fractal` instead.
+Scripts that need the old names temporarily can set `FRACTAL_SUPPRESS_DEPRECATION=1`
+to suppress this warning; stdout and exit status are unchanged.
+Shell-completion callbacks stay silent. Managed background services and internal
+daemon/seat re-executions suppress the warning because they retain replaceable
+binary paths rather than choosing a human-facing command name.
 
 Read the **[Fractal documentation](https://fractal.how/docs)** or browse its
 [Introduction](docs/site/index.md),
@@ -172,4 +181,3 @@ Run `pnpm check:fractal-coverage` in
 `bun apps/fractal-web/scripts/replay-transcript.ts DIRECTORY...` to audit saved timeline pages.
 
 [Contributing](docs/development.md#contributing) covers source builds, checks, and repository layout.
-This repository also carries the previous generation; see [its guide](README.st2.md).

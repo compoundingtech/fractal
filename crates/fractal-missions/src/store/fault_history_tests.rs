@@ -14,8 +14,10 @@ fn independently_folded_faults(store: &Store, as_of: u128) -> Result<Vec<FaultVi
     items.extend(store.checkpoint_attention_items(None, as_of)?);
     items.extend(store.signature_attention_items()?);
     let fallback = store.fleet_fault_agent()?;
+    let dismissed = store.dismissed_faults()?;
     store.current_attention(items, as_of)?
         .into_iter()
+        .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
         .map(|item| {
             Ok(FaultView {
                 owner: store.fault_owner(&item, fallback.as_deref())?,
@@ -144,12 +146,18 @@ fn fault_snapshot_removes_one_history_select_and_standalone_gate_still_folds() {
     let old_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
     let expected = independently_folded_faults(&store, as_of).unwrap();
     let old_work = old_scope.finish();
+    use fractal_store::store::fault_cache::FAULT_CACHE_PARITY;
+    FAULT_CACHE_PARITY.with(|parity| parity.set(false));
     let shared_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
     let actual = store.fault_snapshot(as_of).unwrap();
     let shared_work = shared_scope.finish();
+    FAULT_CACHE_PARITY.with(|parity| parity.set(true));
     assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
     assert!(shared_work.statements > 0, "the SQL control must measure real work");
-    assert_eq!(old_work.statements, shared_work.statements + 1);
+    // The history is folded once and the failure's claim is not read again: the fault cache
+    // answers it. With one failure that saving pays exactly for the change feed's reads; that
+    // the cost stays flat however many failures there are is pinned by the dead-failure test.
+    assert_eq!(shared_work.statements, old_work.statements);
 
     let (_, failures) = store.operational_attention_items_with_failures(None, as_of).unwrap();
     // Warm both gate paths before their separate scoped comparison as well.
@@ -227,8 +235,10 @@ fn reference_fault_snapshot(store: &Store, as_of: u128) -> Result<Vec<FaultView>
     items.extend(store.checkpoint_attention_items(None, as_of)?);
     items.extend(store.signature_attention_items()?);
     let fallback = store.fleet_fault_agent()?;
+    let dismissed = store.dismissed_faults()?;
     store.current_attention(items, as_of)?
         .into_iter()
+        .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
         .map(|item| {
             Ok(FaultView {
                 owner: store.fault_owner(&item, fallback.as_deref())?,
@@ -698,4 +708,179 @@ mission "snapshot-work" state="ready" {
     append_snapshot_wake(&store, &ready, "replacement-generation");
     assert!(assert_reference_snapshot_parity(&store, now_ms())
         .iter().any(|fault| fault.item.title == "exhausted wake replacement-generation"));
+}
+
+#[test]
+fn a_fault_snapshot_reads_a_run_its_failures_share_once() {
+    let (store, run, _step) = exhausted_snapshot_fixture();
+    // The statements one snapshot runs, with the reference reading every failure's run again.
+    let statements = |as_of: u128| {
+        reference_fault_snapshot(&store, as_of).unwrap();
+        store.fault_snapshot(as_of).unwrap();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let expected = reference_fault_snapshot(&store, as_of).unwrap();
+        let reference = scope.finish().statements;
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let actual = store.fault_snapshot(as_of).unwrap();
+        let memoized = scope.finish().statements;
+        assert_eq!(serde_json::to_value(&actual).unwrap(), serde_json::to_value(expected).unwrap());
+        (reference, memoized, actual.len())
+    };
+    let mut added = 0;
+    let mut add = |count: usize| {
+        for _ in 0..count {
+            let episode = format!("shared-run-{added}");
+            append_snapshot_fixture_claim(
+                &store, &run.subject, "operational.failure",
+                json!({
+                    "episode": episode, "condition": "observed", "reviewer": "agent/node.ops",
+                    "title": episode, "reason": "a failure of the shared run", "severity": "error",
+                    "targets": [run.subject.clone()],
+                }),
+                &episode,
+            );
+            added += 1;
+        }
+    };
+    add(2);
+    let (reference_few, memoized_few, faults_few) = statements(now_ms());
+    add(8);
+    let (reference_many, memoized_many, faults_many) = statements(now_ms());
+    assert_eq!(faults_many, faults_few + 8, "each failure of the live run is a fault");
+    let (reference_each, memoized_each) = ((reference_many - reference_few) / 8, (memoized_many - memoized_few) / 8);
+    println!("statements per added failure: reference={reference_each}, memoized={memoized_each}");
+    // A failure costs its own claim and episode reads; its run's liveness is read once.
+    // A ratchet on the reads per failure: a change here is a change in what each failure
+    // reads, not lost parity, which the comparison above checks.
+    assert_eq!(reference_each, 6, "the reference walks the run for each failure, twice");
+    assert_eq!(memoized_each, 2, "only the failure's own reads; its run is read once per snapshot");
+}
+
+fn fail_run(store: &Store, run: &MissionRunView, count: usize, prefix: &str) {
+    for index in 0..count {
+        let episode = format!("{prefix}-{index}");
+        append_snapshot_fixture_claim(
+            store, &run.subject, "operational.failure",
+            json!({
+                "episode": episode, "condition": "observed", "reviewer": "agent/node.ops",
+                "title": episode, "reason": "a failure of this run", "severity": "error",
+                "targets": [run.subject.clone()],
+            }),
+            &episode,
+        );
+    }
+}
+
+/// What one snapshot costs with the cache alone: its statements and the failures it read again.
+fn cached_snapshot_cost(store: &Store, as_of: u128) -> (u64, usize) {
+    use fractal_store::store::fault_cache::{FAULT_CACHE_PARITY, FAULT_CACHE_READS};
+    FAULT_CACHE_PARITY.with(|parity| parity.set(false));
+    FAULT_CACHE_READS.with(|reads| reads.set(0));
+    let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    store.fault_snapshot(as_of).unwrap();
+    let statements = scope.finish().statements;
+    FAULT_CACHE_PARITY.with(|parity| parity.set(true));
+    (statements, FAULT_CACHE_READS.with(std::cell::Cell::get))
+}
+
+#[test]
+fn an_unchanged_snapshot_reads_no_dead_failure_again_however_many_there_are() {
+    let mut costs = Vec::new();
+    for count in [5, 40] {
+        let (store, run, _step) = exhausted_snapshot_fixture();
+        fail_run(&store, &run, count, "dead");
+        store.set_mission_run_state(&run.id, "cancelled", "terminal", Some("ended")).unwrap();
+        let as_of = now_ms();
+        let (_, first) = cached_snapshot_cost(&store, as_of);
+        assert!(first >= count, "the first snapshot reads every failure");
+        // Warm the readers, then count a snapshot with nothing new.
+        cached_snapshot_cost(&store, as_of + 1_000);
+        // A reading of every fault whenever raised neither uses the cache nor replaces it.
+        store.fault_snapshot(u128::MAX).unwrap();
+        let (statements, reads) = cached_snapshot_cost(&store, as_of + 2_000);
+        // The fixture's exhausted wake ended with its run, so it too stays cached.
+        assert_eq!(reads, 0, "no failure is read again when nothing it read changed");
+        costs.push(statements);
+    }
+    assert_eq!(costs[0], costs[1], "a snapshot's statements do not grow with dead failures: {costs:?}");
+}
+
+#[test]
+fn a_change_to_one_run_reads_only_its_failures_again() {
+    // The fixture's thirteen failures of agent/node.worker read nothing of the run, except the
+    // exhausted wake, whose step is the run's.
+    let (store, run, _step) = exhausted_snapshot_fixture();
+    fail_run(&store, &run, 3, "touched");
+    let as_of = now_ms();
+    let faults = store.fault_snapshot(as_of).unwrap().len();
+    assert_eq!(cached_snapshot_cost(&store, as_of + 1_000).1, 1, "only the wake of a live run's open step, read every snapshot");
+    store.set_mission_run_state(&run.id, "cancelled", "terminal", Some("ended")).unwrap();
+    let (_, reads) = cached_snapshot_cost(&store, now_ms().max(as_of + 2_000));
+    assert_eq!(reads, 4, "the run's three failures and the wake on its step, not the agent's other twelve");
+    // Parity is back on: the cached answer matches a full reading, without the run's faults.
+    assert_eq!(store.fault_snapshot(now_ms().max(as_of + 3_000)).unwrap().len(), faults - 4);
+}
+
+#[test]
+fn the_cache_rebuilds_every_five_minutes_then_every_half_hour_after_a_quiet_day() {
+    const MINUTE: u128 = 60_000;
+    let (store, run, _step) = exhausted_snapshot_fixture();
+    fail_run(&store, &run, 4, "timed");
+    let start = now_ms();
+    let reads = |at: u128| cached_snapshot_cost(&store, at).1;
+    assert!(reads(start) >= 4);
+    // The fixture's exhausted wake is read every snapshot; a full rebuild reads all seventeen.
+    assert_eq!(reads(start + MINUTE), 1);
+    assert!(reads(start + 5 * MINUTE) >= 4, "a full rebuild five minutes on");
+    assert_eq!(store.fault_cache_rebuild_every(start + 5 * MINUTE), Some(5 * MINUTE));
+    // A day of rebuilds that all match: rebuilds come every half hour.
+    let (mut at, mut rebuilt) = (start + 5 * MINUTE, start + 5 * MINUTE);
+    while at < start + 24 * 60 * MINUTE + 5 * MINUTE {
+        at += 5 * MINUTE;
+        if reads(at) >= 4 {
+            rebuilt = at;
+        }
+    }
+    assert_eq!(store.fault_cache_rebuild_every(at), Some(30 * MINUTE));
+    assert_eq!(reads(rebuilt + 25 * MINUTE), 1, "no rebuild within half an hour after a quiet day");
+    // A change the feed cannot see: only a rebuild finds it, as a correction.
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h37a2a6cf390b owner=fractal_missions::store::fault_history_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='cancelled', phase='terminal' WHERE id=?1", [&run.id],
+    ).unwrap();
+    assert_eq!(reads(rebuilt + 29 * MINUTE), 1, "the cache still answers from before the change");
+    let at = rebuilt + 30 * MINUTE;
+    assert!(reads(at) >= 4, "the half-hour rebuild reads every failure again");
+    let corrections = smallclaims::performance::snapshot()["incremental_corrections"]
+        .as_array().unwrap().iter()
+        .any(|row| row["item"] == "fault-snapshot");
+    assert!(corrections, "the correction is counted for doctor --performance");
+    assert_eq!(store.fault_cache_rebuild_every(at), Some(5 * MINUTE),
+        "a correction brings rebuilds back to every five minutes");
+    assert!(store.fault_snapshot(at + MINUTE).unwrap().iter()
+        .all(|fault| !fault.item.title.starts_with("timed-")));
+}
+
+#[test]
+fn concurrent_snapshots_take_turns_at_the_cache_and_finish() {
+    // Six threads take turns at the cache's lock. Each holds its snapshot's pinned reader
+    // while it waits, and the holder reads only through its own pin, which the cache asserts:
+    // holding the lock never waits for another reader.
+    let (store, run, _step) = exhausted_snapshot_fixture();
+    fail_run(&store, &run, 8, "concurrent");
+    let store = std::sync::Arc::new(store);
+    let (done, finished) = std::sync::mpsc::channel();
+    for _ in 0..6 {
+        let store = store.clone();
+        let done = done.clone();
+        std::thread::spawn(move || {
+            for _ in 0..20 {
+                store.fault_snapshot(now_ms()).unwrap();
+            }
+            done.send(()).unwrap();
+        });
+    }
+    for _ in 0..6 {
+        finished.recv_timeout(std::time::Duration::from_secs(120))
+            .expect("concurrent fault snapshots stopped making progress");
+    }
 }

@@ -22,15 +22,34 @@ use crate::replication::InventoryCheckpoint;
 
 /// The kinds a member that trims locally drops, each by its audited rule in
 /// `crates/fractal-schema/retention.toml` and with a test that every reader of it answers the
-/// same from the full and the trimmed log. A kind joins only with such a test. Two audited rules
-/// stay out because a reader reads the history they drop, which no projection digest covers:
-/// `harness.observed`, where a dropped credential transition moves the `since` of a seat's
-/// needs-login state, and `resource.observed`, where a GitHub watch finds when a pull request left
-/// the merge queue by walking its observations back.
-pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed"];
+/// same from the full and the trimmed log. A kind joins only with such a test. `resource.observed`
+/// keeps what its readers walk back through, such as a pull request's observations back to the
+/// merge queue (rules version 23). `harness.observed` joined once its rule kept the credential
+/// report where a seat's needs-login run begins (see #4237).
+pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "harness.observed", "resource.observed"];
+
+/// The kinds a local cut's capture also stages, because judging a claim of `LOCAL_TRIM_KINDS`
+/// reads them: the status-history rule folds a seat's harness observations with its runtime
+/// resets and harness diagnostics, and keeps a transition a reset or a restored prompt depends
+/// on. They are staged as context and protected like every other kind, never dropped.
+pub const LOCAL_TRIM_CONTEXT_KINDS: &[&str] = &["runtime.observed", "harness.diagnostic"];
+
+/// What a local cut's capture stages: the kinds it drops and the kinds judging them reads.
+pub fn local_trim_capture_kinds() -> Vec<&'static str> {
+    LOCAL_TRIM_KINDS.iter().chain(LOCAL_TRIM_CONTEXT_KINDS).copied().collect()
+}
 
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
+
+/// The claims a member that trims locally deletes in one day unless `[trim] daily_claims` says
+/// otherwise: about 1.7 h of paced deletion at the 16.6 claims a second measured on a 53 GB
+/// member, whose first cut dropped 390,000 claims.
+pub const LOCAL_TRIM_DAILY_CLAIMS: u64 = 100_000;
+
+/// `meta`: the day a member that trims locally last deleted on, and how many claims it deleted
+/// that day, as `DAY CLAIMS`. Each chunk updates it in the transaction that deletes.
+pub const LOCAL_TRIM_DAY: &str = "local_trim_day";
 
 /// Stop starting new trim steps after this much work. A single step or COMMIT may take longer;
 /// this is not a hard bound on writer hold or foreground request latency.
@@ -42,7 +61,113 @@ pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_mil
 // (including COMMIT), capped at five seconds per rest. In the uncapped regime this reserves
 // four times the acquired-loan work for other traffic. A slow statement can still exceed the
 // chunk budget; this pacing is not a hard statement or request-latency bound.
+/// What a test runs after each chunk a trim deletes, given how many it has deleted.
+pub type TrimChunkHook = Box<dyn FnMut(usize) + Send>;
+
+/// What a test sees of each line a trim writes to the daemon's stderr.
+pub type TrimLogHook = Box<dyn FnMut(&str) + Send>;
+
+/// How often a paced trim's run lets the views refold and the replication snapshot catch up,
+/// while it goes on, unless a test sets another interval. Both are reset once when the run stops.
+pub const TRIM_VIEW_REFOLD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What a trim's run owes the views and the replication snapshot: a refold and a new snapshot at
+/// most every [`TRIM_VIEW_REFOLD_INTERVAL`] while it deletes, and when it stops, however it stops,
+/// one forget and a snapshot built from nothing.
+///
+/// A chunk deletes the payloads of envelopes the checkpoint still lists, so the inventory's
+/// identities and digests stay as they were; a snapshot from before the chunk still answers for
+/// them, and export skips a payload that is gone. Rebuilding after every chunk only made each
+/// exchange wait for an inventory build that the next chunk made stale again.
+struct TrimViews<'a> {
+    store: &'a Store,
+    interval: std::time::Duration,
+    refolded: std::time::Instant,
+    pending: bool,
+}
+
+impl<'a> TrimViews<'a> {
+    fn new(store: &'a Store) -> Self {
+        let interval = std::time::Duration::from_micros(store.trim_view_refold_micros.load(Ordering::Acquire));
+        Self { store, interval, refolded: std::time::Instant::now(), pending: false }
+    }
+
+    /// A chunk deleted rows: if the last catch-up is an interval old, replication builds its
+    /// next snapshot on from the last one and the views refold.
+    fn deleted(&mut self) {
+        self.pending = true;
+        if self.refolded.elapsed() >= self.interval {
+            self.store.replica_inventory_changed();
+            self.store.runtime.claims_trimmed();
+            self.refolded = std::time::Instant::now();
+        }
+    }
+
+    /// The run stopped: forget the views once, if it deleted anything, and build the next
+    /// replication snapshot from nothing, so which payloads it holds and its counts are exact.
+    fn stopped(&mut self) {
+        if std::mem::take(&mut self.pending) {
+            self.store.replica_rows_changed();
+            self.store.forget_replication_snapshot();
+        }
+    }
+}
+
+impl Drop for TrimViews<'_> {
+    fn drop(&mut self) {
+        self.stopped();
+    }
+}
+
 pub(super) const TRIM_MIN_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// When a trim stops deleting to restart the WAL. A trim writes nearly all the time, and a busy
+/// daemon nearly always has a reader on an older snapshot, so the idle recycle never finds the WAL
+/// fully copied and the WAL grows for as long as the trim runs.
+#[derive(Clone, Copy, Debug)]
+pub struct TrimWal {
+    /// Frames past which the trim stops deleting and restarts the WAL.
+    pub frames: i32,
+    /// How long one restart waits, under the writer, for readers on older snapshots.
+    pub busy: std::time::Duration,
+    /// How long the trim keeps trying before it stops for this run.
+    pub wait: std::time::Duration,
+    /// How often the trim looks at the WAL.
+    pub check: std::time::Duration,
+}
+
+/// 65,536 frames is 256 MiB of 4 KiB pages: about 25 s of a large member's trim. Under a daemon
+/// on a 57 GB store, a restart held the writer at most 187 ms.
+pub const TRIM_WAL: TrimWal = TrimWal {
+    frames: 65_536,
+    busy: std::time::Duration::from_millis(200),
+    wait: std::time::Duration::from_secs(30),
+    check: std::time::Duration::from_secs(1),
+};
+
+/// A trim waiting for the WAL to restart tries again after this.
+const TRIM_WAL_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A trim's run's look at the WAL: when it last looked, and the connection it checkpoints with,
+/// apart from the writer and the daemon's recycle.
+#[derive(Default)]
+struct TrimWalState {
+    checked: Option<std::time::Instant>,
+    connection: Option<Connection>,
+}
+
+/// A trim chunk that holds the writer longer than this logs one line saying what it did.
+pub const LOGGED_TRIM_CHUNK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The bytes of the bodies of `claims` that this store still holds.
+fn claim_body_bytes(transaction: &Transaction<'_>, claims: &[ClaimTombstone]) -> Result<u64> {
+    claims.iter().try_fold(0, |bytes, claim| {
+        let body: Option<i64> = transaction
+            .query_row("SELECT LENGTH(body) FROM claims WHERE id=?1", params![claim.id], |row| row.get(0))
+            .optional()?;
+        Ok(bytes + body.map_or(0, |body| u64::try_from(body).unwrap_or(0)))
+    })
+}
 
 /// A condition a test injects into a trim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +178,8 @@ pub enum TrimFault {
     AfterTombstones,
     /// This many chunks are deleted.
     AfterChunk(usize),
+    /// This many pages of a local cut's citation catch-up are committed.
+    AfterCitationPages(usize),
     /// Every row is deleted and the checkpoint is not yet marked trimmed.
     BeforeFinish,
     /// The first deletion chunk starts with its time budget already spent.
@@ -213,6 +340,11 @@ impl Tombstones for (&super::checkpoint_staging::StagedSet, &super::checkpoint_s
 
 impl Store {
     /// Set the minimum chunk rest. Tests only; zero disables both the floor and multiplier.
+    /// How long a trim's run goes between view refolds; see [`TRIM_VIEW_REFOLD_INTERVAL`].
+    pub fn set_trim_view_refold_interval(&self, interval: std::time::Duration) {
+        self.trim_view_refold_micros.store(u64::try_from(interval.as_micros()).unwrap_or(u64::MAX), Ordering::Release);
+    }
+
     pub fn set_trim_pause(&self, pause: std::time::Duration) {
         self.trim_pause_micros.store(
             u64::try_from(pause.as_micros()).unwrap_or(u64::MAX),
@@ -228,6 +360,95 @@ impl Store {
         held.saturating_mul(4)
             .max(std::time::Duration::from_micros(micros))
             .min(std::time::Duration::from_secs(5))
+    }
+
+    /// Write one line to the daemon's stderr, as its WAL checkpoint lines are: `up` sets no
+    /// stderr tracing subscriber unless telemetry export is on, so a tracing line from a trim
+    /// never reached a member's journal. A test's `trim_log_hook` sees the line too.
+    fn trim_log(&self, line: std::fmt::Arguments<'_>) {
+        let line = format!("st3: {line}");
+        if let Some(hook) = self.trim_log_hook.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+            hook(&line);
+        }
+        eprintln!("{line}");
+    }
+
+    /// Log one line for a trim chunk held over `LOGGED_TRIM_CHUNK`: its phase, the envelopes and
+    /// claims it took, the bytes of the claim bodies it deleted, and its hold split into the steps
+    /// and the commit, so a member attributes its own outliers.
+    fn log_if_slow_trim_chunk(
+        &self,
+        phase: &str,
+        held: std::time::Duration,
+        commit: std::time::Duration,
+        envelopes: usize,
+        claims: usize,
+        body_bytes: u64,
+    ) {
+        if held <= LOGGED_TRIM_CHUNK {
+            return;
+        }
+        self.trim_log(format_args!(
+            "a trim chunk held the store's writer over 1 s {}",
+            serde_json::json!({
+                "phase": phase,
+                "held_ms": held.as_millis(),
+                "step_ms": held.saturating_sub(commit).as_millis(),
+                "commit_ms": commit.as_millis(),
+                "envelopes": envelopes,
+                "claims": claims,
+                "body_bytes": body_bytes,
+            }),
+        ));
+    }
+
+    pub fn set_trim_wal(&self, limits: TrimWal) {
+        *self.trim_wal.lock().unwrap_or_else(PoisonError::into_inner) = limits;
+    }
+
+    /// Whether a trim may delete its next chunk: the WAL is under its bound, or a restart brought
+    /// it back. Past the bound the trim deletes nothing and restarts the WAL, trying again until
+    /// `TrimWal::wait`; false means it gave up, and the run stops where it is.
+    fn trim_wal_allows(
+        &self,
+        wal: &mut TrimWalState,
+        pause: &mut impl FnMut(std::time::Duration),
+    ) -> Result<bool> {
+        let limits = *self.trim_wal.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.shared_memory || wal.checked.is_some_and(|at| at.elapsed() < limits.check) {
+            return Ok(true);
+        }
+        wal.checked = Some(std::time::Instant::now());
+        if wal.connection.is_none() {
+            wal.connection = Some(Connection::open(&self.path)?);
+        }
+        let Some(connection) = wal.connection.as_mut() else { return Ok(true) };
+        let frames = crate::sqlite::checkpoint_wal_report(connection)?.frames;
+        if frames <= limits.frames {
+            return Ok(true);
+        }
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+        // Attempts that took the writer, and the longest of them.
+        let mut held = 0;
+        let mut held_ms = 0;
+        loop {
+            attempts += 1;
+            let report = self.restart_wal_report(connection, limits.busy, 0)?;
+            held += u32::from(report.truncate_ms.is_some());
+            held_ms = held_ms.max(report.truncate_ms.unwrap_or(0));
+            if report.recycled || started.elapsed() >= limits.wait {
+                let restarted = report.recycled;
+                self.trim_log(format_args!(
+                    "{} {}",
+                    if restarted { "a trim restarted the WAL" } else { "a trim could not restart the WAL and stops until the next step" },
+                    serde_json::json!({"frames": frames, "attempts": attempts, "held": held, "held_ms": held_ms, "pause_ms": started.elapsed().as_millis()}),
+                ));
+                wal.checked = Some(std::time::Instant::now());
+                return Ok(restarted);
+            }
+            pause(TRIM_WAL_RETRY);
+        }
     }
 
     fn pause_trim_chunk(&self, held: std::time::Duration) {
@@ -436,6 +657,16 @@ impl Store {
         if cut == 0 || trimmed.is_some_and(|trimmed| u128::try_from(trimmed).unwrap_or(0) >= cut) {
             return self.remove_checkpoint_staging(&context.scratch);
         }
+        // An earlier cut the daily cap stopped finishes first, and a cut that could delete
+        // nothing today waits for tomorrow rather than record its tombstones now.
+        let trimming: bool = self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM checkpoints WHERE state='trimming')",
+            [],
+            |row| row.get(0),
+        )?;
+        if trimming || self.local_trim_left_today()? == 0 {
+            return Ok(());
+        }
         let checkpoint = checkpoint_name(cut);
         // A shared checkpoint this member was still recording before it chose local trim was
         // never a deletion; its candidates must not outlive that plan.
@@ -445,8 +676,10 @@ impl Store {
             self.forget_recording_tombstones(&checkpoint)?;
         }
         let _completion = super::checkpoint_completion::Completion::outer();
-        let staged = self.checkpoint_staged_set(cut, None, &context.scratch)?;
+        // Only what judging the kinds it drops reads: the plan is the same as a full capture's.
+        let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(&local_trim_capture_kinds()))?;
         staged.protect_all_but(LOCAL_TRIM_KINDS)?;
+        staged.split_envelopes()?;
         // The in-memory reference planner tests builds compare with knows no kind restriction.
         #[cfg(any(test, feature = "test-support"))]
         let plan = super::checkpoint_staging::without_reference_plan(|| self.plan_staged_checkpoint(&staged))?;
@@ -843,6 +1076,9 @@ impl Store {
                 let mut connection = self.connection.write();
                 let transaction = connection.transaction()?;
                 mark(&transaction, "recording")?;
+                if self.trims_locally() {
+                    start_local_walk_tx(&transaction, checkpoint)?;
+                }
                 transaction.commit()?;
             }
             // Recording again changes nothing, so a restart records what is missing. The
@@ -865,6 +1101,7 @@ impl Store {
                 let held_since = std::time::Instant::now();
                 let transaction = connection.transaction()?;
                 let started = std::time::Instant::now();
+                let (envelope_before, claim_before) = (envelope, claim);
                 while started.elapsed() < TRIM_CHUNK_BUDGET
                     && (!envelope_page.is_empty() || (envelope >= envelope_count && !claim_page.is_empty()))
                 {
@@ -878,8 +1115,10 @@ impl Store {
                     self.pause_for_trim_row_cost();
                 }
 
+                let committing = std::time::Instant::now();
                 transaction.commit()?;
                 let held = held_since.elapsed();
+                self.log_if_slow_trim_chunk("record", held, committing.elapsed(), envelope - envelope_before, claim - claim_before, 0);
                 drop(connection);
                 chunks += 1;
                 self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
@@ -894,6 +1133,36 @@ impl Store {
         self.replica_rows_changed();
         self.stop_for_trim_fault(TrimFault::AfterTombstones)?;
         self.finish_trim(checkpoint, actions)
+    }
+
+    /// A member that trims locally walks only `checkpoint`'s own tombstones: from where its walk
+    /// stopped, or else from the first of them, found once on a reader outside the writer (a cut
+    /// an older build recorded). A cut with none starts past the end and is done at once.
+    fn local_walk(&self, checkpoint: &str) -> Result<Option<LocalWalk>> {
+        if !self.trims_locally() {
+            return Ok(None);
+        }
+        let connection = self.readers.get();
+        let saved: Option<String> = connection
+            .query_row("SELECT value FROM meta WHERE key=?1", [local_walk_key(checkpoint)], |row| row.get(0))
+            .optional()?;
+        let (envelope, claim) = match saved.as_deref().and_then(|saved| saved.split_once(' ')) {
+            Some((envelope, claim)) => (envelope.parse()?, claim.parse()?),
+            None => {
+                let start = |table: &str| -> Result<i64> {
+                    Ok(connection.query_row(
+                        /* sqlite-large-value: allow-for-now lv-h5fcb25afca0e owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ &format!(
+                            "SELECT COALESCE((SELECT MIN(rowid) - 1 FROM {table} WHERE checkpoint=?1),
+                                             (SELECT MAX(rowid) FROM {table}), 0)"
+                        ),
+                        [checkpoint],
+                        |row| row.get(0),
+                    )?)
+                };
+                (start("checkpoint_envelopes")?, start("checkpoint_claims")?)
+            }
+        };
+        Ok(Some(LocalWalk { checkpoint: checkpoint.to_owned(), envelope, claim }))
     }
 
     /// Delete every row a tombstone stands for, in chunks, then mark the checkpoint trimmed.
@@ -916,9 +1185,28 @@ impl Store {
         let mut chunks = 0;
         let mut deleted_envelopes = 0;
         let mut deleted_claims = 0;
-        let mut cursor = TrimCursor::default();
+        let mut cursor = TrimCursor { local: self.local_walk(checkpoint)?, ..TrimCursor::default() };
+        // A local walk deletes at most the day's claims left; a shared checkpoint's trim is not
+        // capped.
+        let day = self.trim_day.load(Ordering::Relaxed);
+        let mut left = cursor.local.is_some().then(|| self.local_trim_left_today()).transpose()?;
+        let mut views = TrimViews::new(self);
+        let mut wal = TrimWalState::default();
         let delete = crate::profile::span("trim.delete");
         loop {
+            if left == Some(0) || !self.trim_wal_allows(&mut wal, &mut pause)? {
+                // The cut stays `trimming`, and the next step goes on from here: the next day's
+                // after the day's cap, the next one after a WAL that would not restart. What its
+                // deletes deferred is rebuilt now, so a deferral outlasts no run.
+                views.stopped();
+                self.rebuild_deferred_paced()?;
+                actions.push(CheckpointAction::TrimDeferred {
+                    checkpoint: checkpoint.to_owned(),
+                    envelopes: deleted_envelopes,
+                    claims: deleted_claims,
+                });
+                return Ok(());
+            }
             let mut connection = self.connection.write_background();
             let held_since = std::time::Instant::now();
             let transaction = connection.transaction()?;
@@ -940,13 +1228,18 @@ impl Store {
             transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h4ccfc8269d7a owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ "SAVEPOINT trim_chunk")?;
             let mut envelopes = Vec::new();
             let mut claims = Vec::new();
+            let mut body_bytes = 0;
             let mut steps = 0;
             // Only an empty lookup proves exhaustion. Even if transaction setup spent the
             // budget, make one lookup so a zero-step chunk cannot falsely finish the trim.
-            while steps < most && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET) {
+            while steps < most
+                && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET)
+                && left.is_none_or(|left| (claims.len() as u64) < left)
+            {
                 let Some((envelope, envelope_claims)) = next_trim_rows(&transaction, &mut cursor)? else {
                     break;
                 };
+                body_bytes += claim_body_bytes(&transaction, &envelope_claims)?;
                 delete_dropped_rows_tx(&transaction, envelope.as_slice(), &envelope_claims)?;
                 self.pause_for_trim_row_cost();
                 envelopes.extend(envelope);
@@ -984,17 +1277,34 @@ impl Store {
                 });
                 return Ok(());
             }
+            if let Some(walk) = &cursor.local {
+                transaction
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h90aea7898bf3 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
+                    .execute(/* sqlite-large-value: allow-for-now lv-hde0878901e21 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![local_walk_key(&walk.checkpoint), format!("{} {}", walk.envelope, walk.claim)])?;
+                let today = deleted_on(&transaction, day)? + claims.len() as u64;
+                transaction
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4d909c3fd602 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
+                    .execute(/* sqlite-large-value: allow-for-now lv-h5ece9b814a1a owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![LOCAL_TRIM_DAY, format!("{day} {today}")])?;
+            }
+            let committing = std::time::Instant::now();
             transaction.commit()?;
             let held = held_since.elapsed();
+            let phase = if envelopes.is_empty() { "claims" } else { "envelopes" };
+            self.log_if_slow_trim_chunk(phase, held, committing.elapsed(), envelopes.len(), claims.len(), body_bytes);
             drop(connection);
-            // A cursor-only chunk inspected already-absent rows. All chunks that actually
-            // delete keep the original invalidation; this does not coalesce mutations.
+            // A cursor-only chunk inspected already-absent rows. A chunk that deletes tells
+            // replication at once, and leaves the views serving until a refold is due: their
+            // folds from nothing take seconds, longer than a chunk and its pause.
             if !envelopes.is_empty() || !claims.is_empty() {
-                self.replica_rows_changed();
+                views.deleted();
             }
             deleted_envelopes += envelopes.len();
             deleted_claims += claims.len();
+            left = left.map(|left| left.saturating_sub(claims.len() as u64));
             chunks += 1;
+            if let Some(hook) = self.trim_chunk_hook.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+                hook(chunks);
+            }
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
             pause(self.trim_pause_duration(held));
         }
@@ -1008,6 +1318,7 @@ impl Store {
                 /* sqlite-large-value: allow-for-now lv-ha26d7ebb680b owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoints SET state='trimmed', updated_at_unix_ms=?2 WHERE id=?1",
                 params![checkpoint, i64::try_from(now_ms())?],
             )?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h51f966c0da12 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [local_walk_key(checkpoint)])?;
             // Every snapshot and page cursor taken before the trim expires, since the claims
             // they read may be gone.
             transaction.execute(
@@ -1016,7 +1327,10 @@ impl Store {
             )?;
             transaction.commit()?;
         }
-        self.replica_rows_changed();
+        // The final mark expired every cursor: the views are forgotten once, deleted or not.
+        views.pending = true;
+        views.stopped();
+        self.rebuild_deferred_paced()?;
         actions.push(CheckpointAction::Trimmed {
             checkpoint: checkpoint.to_owned(),
             envelopes: deleted_envelopes,
@@ -1024,6 +1338,54 @@ impl Store {
         });
         Ok(())
     }
+}
+
+impl Store {
+    /// Rebuild what this member's trims deferred (the runtime's derived state of the subjects
+    /// they touched), a budget's worth per transaction with a trim's pacing, until none is left.
+    /// It runs when a trim stops and at each checkpoint step, so a crash cannot strand it.
+    pub(crate) fn rebuild_deferred_paced(&self) -> Result<()> {
+        // Most steps have nothing deferred: one read, and no writer.
+        if !self.runtime.deferred_pending(&self.readers.get())? {
+            return Ok(());
+        }
+        let _span = crate::profile::span("trim.rebuild_deferred");
+        loop {
+            let mut connection = self.connection.write_background();
+            let held_since = std::time::Instant::now();
+            let transaction = connection.transaction()?;
+            let more = self.runtime.rebuild_deferred(&transaction, TRIM_CHUNK_BUDGET)?;
+            let committing = std::time::Instant::now();
+            transaction.commit()?;
+            let held = held_since.elapsed();
+            self.log_if_slow_trim_chunk("rebuild", held, committing.elapsed(), 0, 0, 0);
+            drop(connection);
+            if !more {
+                return Ok(());
+            }
+            self.pause_trim_chunk(held);
+        }
+    }
+
+    /// The claims a local trim may still delete today (`trim_locally_at_most`).
+    pub fn local_trim_left_today(&self) -> Result<u64> {
+        let deleted = deleted_on(&self.readers.get(), self.trim_day.load(Ordering::Relaxed))?;
+        Ok(self.local_trim_daily_claims().saturating_sub(deleted))
+    }
+}
+
+/// The claims a local trim deleted on `day`, as `LOCAL_TRIM_DAY` records them.
+fn deleted_on(connection: &Connection, day: u64) -> Result<u64> {
+    let saved: Option<String> = connection
+        .prepare_cached("SELECT value FROM meta WHERE key=?1")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h70b39bb4733d owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [LOCAL_TRIM_DAY], |row| row.get(0))
+        .optional()?;
+    Ok(saved
+        .as_deref()
+        .and_then(|saved| saved.split_once(' '))
+        .filter(|(saved_day, _)| saved_day.parse() == Ok(day))
+        .and_then(|(_, claims)| claims.parse().ok())
+        .unwrap_or(0))
 }
 
 /// How far the sweep of rows earlier trims left behind has gone: `after:CLAIM_ID`, or `done`.
@@ -1101,6 +1463,33 @@ struct TrimCursor {
     envelope: (String, i64, String),
     envelopes_done: bool,
     claim: String,
+    local: Option<LocalWalk>,
+}
+
+/// Where a member that trims locally has got in its own cut's tombstones. They were recorded
+/// after every earlier checkpoint's, so the walk goes by rowid from the first of them and never
+/// visits the older ones. It is kept in `meta` with each chunk, so a restart goes on from it.
+#[derive(Debug, Default)]
+struct LocalWalk {
+    checkpoint: String,
+    envelope: i64,
+    claim: i64,
+}
+
+/// The `meta` key of a local cut's walk.
+fn local_walk_key(checkpoint: &str) -> String {
+    format!("local_trim_walk/{checkpoint}")
+}
+
+/// Record where a local cut's tombstones begin, before the first of them is recorded.
+fn start_local_walk_tx(transaction: &Transaction<'_>, checkpoint: &str) -> Result<()> {
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hd6e8a46ee987 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO meta(key, value) VALUES (?1,
+             (SELECT COALESCE(MAX(rowid), 0) FROM checkpoint_envelopes) || ' ' ||
+             (SELECT COALESCE(MAX(rowid), 0) FROM checkpoint_claims))",
+        [local_walk_key(checkpoint)],
+    )?;
+    Ok(())
 }
 
 /// Inspect one indexed tombstone, advancing even when its row is already gone. An empty pair
@@ -1112,34 +1501,42 @@ fn next_trim_rows(
     cursor: &mut TrimCursor,
 ) -> Result<Option<(Option<EnvelopeTombstone>, Vec<ClaimTombstone>)>> {
     if !cursor.envelopes_done {
-        let envelope = transaction
-            .prepare_cached(
-                "SELECT tombstone.writer, tombstone.sequence, tombstone.envelope_hash,
-                        tombstone.accepted_at_unix_ms
-                 FROM checkpoint_envelopes AS tombstone
-                 WHERE (tombstone.writer, tombstone.sequence, tombstone.envelope_hash)
-                       > (?1, ?2, ?3)
-                 ORDER BY tombstone.writer, tombstone.sequence, tombstone.envelope_hash
-                 LIMIT 1",
-            )?
-            .query_row(
-                /* sqlite-large-value: allow-for-now lv-h75e67f417bdf owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![cursor.envelope.0, cursor.envelope.1, cursor.envelope.2],
-                |row| {
-                    Ok(EnvelopeTombstone {
-                        writer: row.get(0)?,
-                        sequence: row.get(1)?,
-                        envelope_hash: row.get(2)?,
-                        accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
-                    })
-                },
-            )
-            .optional()?;
+        let envelope = match &mut cursor.local {
+            Some(walk) => next_local_envelope(transaction, walk)?,
+            None => {
+                let envelope = transaction
+                    .prepare_cached(
+                        "SELECT tombstone.writer, tombstone.sequence, tombstone.envelope_hash,
+                                tombstone.accepted_at_unix_ms
+                         FROM checkpoint_envelopes AS tombstone
+                         WHERE (tombstone.writer, tombstone.sequence, tombstone.envelope_hash)
+                               > (?1, ?2, ?3)
+                         ORDER BY tombstone.writer, tombstone.sequence, tombstone.envelope_hash
+                         LIMIT 1",
+                    )?
+                    .query_row(
+                        /* sqlite-large-value: allow-for-now lv-h75e67f417bdf owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![cursor.envelope.0, cursor.envelope.1, cursor.envelope.2],
+                        |row| {
+                            Ok(EnvelopeTombstone {
+                                writer: row.get(0)?,
+                                sequence: row.get(1)?,
+                                envelope_hash: row.get(2)?,
+                                accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                            })
+                        },
+                    )
+                    .optional()?;
+                if let Some(envelope) = &envelope {
+                    cursor.envelope = (
+                        envelope.writer.clone(),
+                        i64::try_from(envelope.sequence)?,
+                        envelope.envelope_hash.clone(),
+                    );
+                }
+                envelope
+            }
+        };
         if let Some(envelope) = envelope {
-            cursor.envelope = (
-                envelope.writer.clone(),
-                i64::try_from(envelope.sequence)?,
-                envelope.envelope_hash.clone(),
-            );
             let held: bool = transaction.prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM replica_envelopes
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)"
@@ -1163,25 +1560,71 @@ fn next_trim_rows(
         }
         cursor.envelopes_done = true;
     }
-    let claim = transaction
-        .prepare_cached(
-            "SELECT tombstone.id, tombstone.operation_id FROM checkpoint_claims AS tombstone
-             WHERE tombstone.id > ?1
-             ORDER BY tombstone.id LIMIT 1",
-        )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h0c032884ac26 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&cursor.claim], |row| {
-            Ok(deletable_claim(row.get(0)?, row.get(1)?))
-        })
-        .optional()?;
+    let claim = match &mut cursor.local {
+        Some(walk) => next_local_claim(transaction, walk)?,
+        None => {
+            let claim = transaction
+                .prepare_cached(
+                    "SELECT tombstone.id, tombstone.operation_id FROM checkpoint_claims AS tombstone
+                     WHERE tombstone.id > ?1
+                     ORDER BY tombstone.id LIMIT 1",
+                )?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h0c032884ac26 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&cursor.claim], |row| {
+                    Ok(deletable_claim(row.get(0)?, row.get(1)?))
+                })
+                .optional()?;
+            if let Some(claim) = &claim {
+                cursor.claim = claim.id.clone();
+            }
+            claim
+        }
+    };
     Ok(match claim {
         Some(claim) => {
-            cursor.claim = claim.id.clone();
             let held: bool = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?
                 .query_row(/* sqlite-large-value: allow-for-now lv-h12c2aa291add owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get(0))?;
             Some((None, if held { vec![claim] } else { Vec::new() }))
         }
         None => None,
     })
+}
+
+/// A local cut's next envelope tombstone, by rowid. Past the last, the walk stays at the end.
+fn next_local_envelope(transaction: &Transaction<'_>, walk: &mut LocalWalk) -> Result<Option<EnvelopeTombstone>> {
+    let next = transaction
+        .prepare_cached(
+            "SELECT rowid, writer, sequence, envelope_hash, accepted_at_unix_ms FROM checkpoint_envelopes
+             WHERE rowid > ?1 AND checkpoint=?2 ORDER BY rowid LIMIT 1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hbdfea6a33a89 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![walk.envelope, walk.checkpoint], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                EnvelopeTombstone {
+                    writer: row.get(1)?,
+                    sequence: row.get(2)?,
+                    envelope_hash: row.get(3)?,
+                    accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                },
+            ))
+        })
+        .optional()?;
+    walk.envelope = next.as_ref().map_or(i64::MAX, |(rowid, _)| *rowid);
+    Ok(next.map(|(_, envelope)| envelope))
+}
+
+/// A local cut's next claim tombstone, by rowid. Past the last, the walk stays at the end.
+fn next_local_claim(transaction: &Transaction<'_>, walk: &mut LocalWalk) -> Result<Option<ClaimTombstone>> {
+    let next = transaction
+        .prepare_cached(
+            "SELECT rowid, id, operation_id FROM checkpoint_claims
+             WHERE rowid > ?1 AND checkpoint=?2 ORDER BY rowid LIMIT 1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h42e6c69fa763 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![walk.claim, walk.checkpoint], |row| {
+            Ok((row.get::<_, i64>(0)?, deletable_claim(row.get(1)?, row.get(2)?)))
+        })
+        .optional()?;
+    walk.claim = next.as_ref().map_or(i64::MAX, |(rowid, _)| *rowid);
+    Ok(next.map(|(_, claim)| claim))
 }
 
 /// What `delete_dropped_rows_tx` needs of a claim it deletes.

@@ -121,7 +121,7 @@ pub use fractal_delivery::store::{current_harness_at, custom, database_size, del
 pub use fractal_delivery::store::{git_change_tables, glass_heads, glasses, harness_fold_at, harness_questions, idle_mail, insert_local_observation_tx, intent_leaves_tx, is_failed_terminal, latest_actual, latest_retention, limits};
 pub use fractal_delivery::store::{local_observation_dedupe_key, local_observation_from_row, local_retention, loop_run_views_tx, mailbox_changes, mailbox_lease, mailbox_wakes, message_bodies, message_subscriptions, migrate_local_usage_seen, mission_provenance, mission_run_header_tx};
 pub use fractal_delivery::store::{mission_run_outcome_tx, mission_run_variables, newest_claims_of_kind_query, normalize_message_party, normalize_seat, observer_actuals, observer_subscription_detail, operation_audit, owned_sets, owner_lists, pricing_identity, project_claim_isolated_tx};
-pub use fractal_delivery::store::{project_mission_run_created, project_mission_run_update, project_replicated_mission_runs, projection_digest, projection_divergence, projectors, publication, publication_facts, published_list, published_views, rebuild_planning_tx, recently_ended_since};
+pub use fractal_delivery::store::{project_mission_run_created, project_mission_run_update, project_replicated_mission_runs, projection_digest, projection_divergence, projectors, publication, publication_facts, published_list, published_views, rebuild_planning_session_tx, rebuild_planning_tx, recently_ended_since};
 pub use fractal_delivery::store::{replay_graph_from_nothing_tx, resources, retirements, revision_seats, rollouts, roster_admission, runtime, runtime_list, runtime_starts, same_declared_launch, schema_fields_for_body, seat_queue_inputs_tx};
 pub use fractal_delivery::store::{seat_queue_joins_query, seat_queue_moves_query, seat_status, seat_work_at_snapshot_query, seats, select_replicated_desired, select_replicated_mission, stale_pull_request_request_tx, step_execution_clock_at, step_labels, step_run_from_row, step_timeout_episode};
 pub use fractal_delivery::store::{step_timeout_extension_at, stop_deferral, subagents, subject_status_at, subscription_started_run_tx, summary_list, system_local_retention, trace_principal, unread_mail, usage_native_session, usage_slot, validate_claim_input};
@@ -331,6 +331,28 @@ const REPOSITORY_COLLECTIONS: [(&str, &str, &str); 2] = [
 
 /// The most mentions one item resource keeps, newest first.
 const ITEM_MENTIONS: usize = 50;
+
+/// The pull requests and issues one look at the repository resource `repository` saw, as a
+/// recording would lay each over `prior` (its known facts, if any): each item's subject, kind
+/// and facts. The GitHub plugin refills its mirror from a look it records nowhere else.
+pub fn repository_item_facts(
+    repository: &str,
+    facts: &Value,
+    prior: &mut dyn FnMut(&str) -> Option<Value>,
+) -> Vec<(String, &'static str, serde_json::Map<String, Value>)> {
+    let mut items = Vec::new();
+    for (field, segment, kind) in REPOSITORY_COLLECTIONS {
+        for item in facts.get(field).and_then(Value::as_array).into_iter().flatten() {
+            let Some(number) = item.get("number").and_then(Value::as_u64) else {
+                continue;
+            };
+            let subject = format!("{repository}/{segment}/{number}");
+            let known = prior(&subject);
+            items.push((subject, kind, item_facts(repository, field, number, known.as_ref(), item)));
+        }
+    }
+    items
+}
 
 /// What an item resource records after one sighting: its prior facts with every fact the
 /// sighting read laid over them. A listing names the head commit `head`; the resource calls it

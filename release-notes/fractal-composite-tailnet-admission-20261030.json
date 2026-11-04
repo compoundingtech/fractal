@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose composite tailnet and Devnet edge admission for deployment-owned web overlays.",
+  "replay": {"status": "none", "detail": "No event or replay changes."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "Opt-in helper reuses tailnet login and exact Origin admission while preserving a supplied legacy edge policy. Serve-shaped requests cannot fall through to the login-free edge policy."},
+  "downtime": {"status": "none", "detail": "This export does not activate or restart any deployment."},
+  "manual": {"status": "changed", "detail": "The deployment owner must wire edgeOrTailnetAdmission into the private overlay and configure the published origin plus nonempty tailnet login allowlist. Keep proxy headers intact and the app listener loopback-only."},
+  "recovery": {"status": "changed", "detail": "Omit the published origin to return the exact existing edge admission policy; roll back deployment-owned wiring independently."}
+}

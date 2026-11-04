@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Optional otel_ui_url in the slo read and [observations.otlp] ui_url in the config",
+  "replay": {"status": "none", "detail": "No claim, projection or replay changes."},
+  "schema": {"status": "none", "detail": "The store schema is unchanged."},
+  "rules": {"status": "none", "detail": "Targets, windows and statuses are unchanged."},
+  "compatibility": {"status": "changed", "detail": "client-v0 SloList gains an optional otel_ui_url, present only when the daemon is configured with one; older clients ignore it. [observations.otlp] accepts a new optional ui_url (an http or https address). A daemon from before this build rejects a config that sets it, so set it only after every member runs this build."},
+  "downtime": {"status": "none", "detail": "No data migration. The setting is read at daemon start."},
+  "manual": {"status": "changed", "detail": "To show a link to the observation history in the usage pane, set ui_url under [observations.otlp] and restart the daemon. Without it nothing changes."},
+  "recovery": {"status": "changed", "detail": "Remove ui_url from the config before running an older version: an older daemon refuses to start with the key. Nothing writes it by default (setup, the installer and doctor leave it out), so only a config that set it by hand needs the edit."}
+}

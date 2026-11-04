@@ -2,7 +2,8 @@
 """The perf slot: one performance load run at a time on a host, others wait in line.
 
 Run `scripts/ci-perf-slot --help` for what it is and how to use it. `scripts/ci-perf load` takes
-the slot by itself on hetz2 outside CI, so a builder does not have to remember to.
+the slot by itself outside CI on a host marked by ~/.config/fractal/perf-slot, so a builder does not
+have to remember to.
 """
 import argparse
 import contextlib
@@ -30,7 +31,8 @@ and for which branch.
   scripts/ci-perf-slot [--timeout 90m] [--for TEXT] -- COMMAND...   take the slot, run COMMAND
   scripts/ci-perf-slot --status                                     who holds it, who waits
 
-On hetz2, `scripts/ci-perf load` does this itself (outside CI), so measure a change with:
+On a host with the marker file ~/.config/fractal/perf-slot, `scripts/ci-perf load` does this itself
+(outside CI), so measure a change with:
 
   nix develop .#perf -c bash scripts/ci-perf load
 
@@ -269,7 +271,27 @@ def run(args):
     cwd = os.getcwd()
     purpose = args.purpose or branch_of(cwd)
     slot_fd = acquire(directory, purpose.replace('/', '_').replace('-', '_')[:60])
+    gate_read, gate_write = os.pipe()
+    result_read, result_write = os.pipe()
+    # Install handlers BEFORE the holder record is published and before fork: a signal once the record shows the slot held
+    # reaches the watchdog, which stops the run and drops the record. Before, Ctrl-C in that window raised KeyboardInterrupt
+    # and left the record behind (2026-11-01, two merge groups failed on it).
+    def stop(received, _frame):
+        with contextlib.suppress(BrokenPipeError):
+            os.write(gate_write, bytes([received]))
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, stop)
     since = time.time()
+    gate_read, gate_write = os.pipe()
+    result_read, result_write = os.pipe()
+    # Install handlers BEFORE fork, so early cancellation cannot orphan a run.
+    def stop(received, _frame):
+        with contextlib.suppress(BrokenPipeError):
+            os.write(gate_write, bytes([received]))
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, stop)
+    # Publishing holder.json makes this run observable (and cancellable). Queue
+    # cancellation before publishing, even if the watchdog has not forked yet.
     holder = {'pid': os.getpid(), 'user': os.environ.get('USER') or str(os.getuid()), 'for': purpose,
               'cwd': cwd, 'command': ' '.join(args.command), 'since': since,
               'deadline': since + args.timeout}
@@ -279,14 +301,6 @@ def run(args):
     scratch.replace(directory / 'holder.json')
     print('perf slot taken for %s; stops by %s (%s)' % (purpose, clock(holder['deadline']), age(args.timeout)),
           file=sys.stderr, flush=True)
-    gate_read, gate_write = os.pipe()
-    result_read, result_write = os.pipe()
-    # Install handlers BEFORE fork, so early cancellation cannot orphan a run.
-    def stop(received, _frame):
-        with contextlib.suppress(BrokenPipeError):
-            os.write(gate_write, bytes([received]))
-    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(number, stop)
     owner = os.getpid()
     guard = os.fork()
     if guard == 0:

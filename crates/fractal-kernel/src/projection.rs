@@ -157,6 +157,7 @@ mod tests {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 7,
+            status_from: None,
             attachments: Vec::new(),
         };
         export_messages(directory.path(), &[message.clone()]).unwrap();
@@ -201,6 +202,7 @@ mod tests {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 8,
+            status_from: None,
             attachments: Vec::new(),
         };
         export_messages(directory.path(), &[message]).unwrap();
@@ -230,6 +232,7 @@ mod tests {
             sender_class: Some("external-assistant".into()),
             assistant_grant_id: Some("assistant-grant/one".into()),
             created_index: 9,
+            status_from: None,
             attachments: Vec::new(),
         };
         export_messages(directory.path(), &[message.clone()]).unwrap();

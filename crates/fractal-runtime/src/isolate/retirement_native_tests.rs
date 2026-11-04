@@ -282,7 +282,7 @@ fn a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor() {
     let mut events =
         PopulationEvents::open(&group_path(&removed_unit, &live.control_group).unwrap()).unwrap();
     assert!(events.populated().unwrap());
-    kill_unit(&removed_unit, libc::SIGKILL).unwrap();
+    kill_unit(&removed_unit, libc::SIGKILL, ScopeSignalCaller::Retirement).unwrap();
     assert!(wait_readable(removed.as_raw_fd(), EXIT_BUDGET));
     let deadline = Instant::now() + EXIT_BUDGET;
     while observe(&removed_unit).unwrap().load_state != "not-found" {

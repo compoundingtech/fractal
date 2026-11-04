@@ -381,6 +381,57 @@ fn the_cache_covers_fold_readers_and_narrows_them_by_subject() {
     assert!(unknown.buckets.iter().all(String::is_empty));
 }
 
+/// A fold reader over the seats in `connection`, as the daemon's are: one key per subject, its
+/// answer the newest claim, and moving once the subject has a claim at or after the cut.
+fn seats(connection: &Connection, cut: u128) -> anyhow::Result<BTreeMap<String, Vec<AnswerKey>>> {
+    let keys = connection
+        .prepare(
+            "SELECT subject, MAX(id), MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
+             WHERE subject LIKE 'agent/%' GROUP BY subject ORDER BY subject",
+        )?
+        .query_map([], |row| {
+            let moving = row.get::<_, i64>(2)? as u128 >= cut;
+            Ok(AnswerKey {
+                subject: row.get(0)?,
+                origin: String::new(),
+                claim: if moving { String::new() } else { row.get(1)? },
+                moving,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(BTreeMap::from([("harness".to_owned(), keys)]))
+}
+
+#[test]
+fn members_that_kept_fold_readers_hours_apart_agree_once_a_seat_moves_past_the_cut() {
+    let store = Arc::new(node("alder"));
+    state(&store, "agent/sample.worker", "idle");
+    state(&store, "agent/sample.reviewer", "idle");
+    let cut = cut();
+    let summary = AnswersRequest { cut_unix_ms: cut, ..AnswersRequest::default() };
+    let member = || {
+        let cache = Arc::new(AnswersCache::default());
+        cache.set_readers(Arc::new(seats));
+        cache
+    };
+    // One member computes, then a seat with claims before the cut is written again after it, as
+    // a late flush of its readings is, and another member computes only then.
+    let early = member();
+    assert_eq!(settled(&early, &store, &summary).summary.unwrap().kinds["reader/harness"].keys, 2);
+    store.set_write_clock_at(cut + 1_000).unwrap();
+    state(&store, "agent/sample.worker", "busy");
+    let late = member();
+    let later = settled(&late, &store, &summary).summary.unwrap();
+    assert_eq!(later.kinds["reader/harness"].keys, 1);
+
+    let earlier = settled(&early, &store, &summary).summary.unwrap();
+    assert_eq!(earlier.kinds["reader/harness"], later.kinds["reader/harness"], "the kept reader counts the seat it moved");
+    let every = AnswersRequest { cut_unix_ms: cut, kind: Some("reader/harness".into()), buckets: (0..256).collect() };
+    let (ours, theirs) = (settled(&early, &store, &every).buckets.unwrap(), settled(&late, &store, &every).buckets.unwrap());
+    assert_eq!(ours.buckets, theirs.buckets);
+    assert!(differing_keys(&ours.keys, &theirs.keys).is_empty());
+}
+
 #[test]
 fn readers_compare_only_between_members_that_both_run_them() {
     let answers = |digest: &str| KindAnswers { keys: 1, claims: 0, digest: digest.into(), before_cut: String::new() };
@@ -395,3 +446,77 @@ fn readers_compare_only_between_members_that_both_run_them() {
     assert_eq!(differing_kinds(&newer, &other, true)[0].kind, "reader/status_history");
 }
 
+
+#[test]
+fn a_restarted_member_serves_the_summary_it_kept_until_a_claim_older_than_the_cut_arrives() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.sqlite3");
+    let store = Arc::new(Store::open(&path, "alder", Arc::new(Plain)).unwrap());
+    state(&store, "item/a", "one");
+    let summary = AnswersRequest { cut_unix_ms: cut(), ..AnswersRequest::default() };
+    let first = settled(&Arc::new(AnswersCache::default()), &store, &summary).summary.unwrap();
+    assert_eq!(first.kinds["example.state"].keys, 1);
+
+    // A restarted daemon starts with an empty cache and answers with the kept summary. Mark it,
+    // so a summary computed again would not carry the mark.
+    let kept = directory.path().join("claims.sqlite3.answers.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let mut file: serde_json::Value = serde_json::from_slice(&std::fs::read(&kept).unwrap()).unwrap();
+    file["summary"]["kinds"]["example.state"]["digest"] = "kept".into();
+    std::fs::write(&kept, serde_json::to_vec(&file).unwrap()).unwrap();
+    let cache = Arc::new(AnswersCache::default());
+    assert_eq!(settled(&cache, &store, &summary).summary.unwrap().kinds["example.state"].digest, "kept");
+
+    // A peer that was offline replays a claim its writer accepted before the cut. The kept
+    // summary lacks it, so the member computes again and counts it.
+    let birch = node("birch");
+    state(&birch, "item/b", "one");
+    let exchange = birch.export_replication_exchange(FLEET, &ReplicationInventory::default()).unwrap();
+    store.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    store.validate_replication_backlog().unwrap();
+    store.project_replication_backlog().unwrap();
+    let again = settled(&cache, &store, &summary).summary.unwrap();
+    assert_eq!(again.kinds["example.state"].keys, 2);
+    assert_ne!(again.kinds["example.state"].digest, "kept");
+
+    // A store that now trims differently counts claims differently, so it computes again, as it
+    // does at any other cut.
+    store.trim_locally(true).unwrap();
+    let trimming = settled(&Arc::new(AnswersCache::default()), &store, &summary).summary.unwrap();
+    assert!(trimming.trims_locally);
+    let tomorrow = AnswersRequest { cut_unix_ms: cut() + 86_400_000, ..AnswersRequest::default() };
+    let later = settled(&Arc::new(AnswersCache::default()), &store, &tomorrow).summary.unwrap();
+    assert_eq!(later.kinds["example.state"].keys, 2);
+}
+
+#[test]
+fn claims_compare_only_between_members_that_finished_the_same_trim() {
+    let alder = node("alder");
+    let birch = node("birch");
+    state(&alder, "item/a", "one");
+    push(&alder, &birch);
+    let day = 86_400_000;
+    let trim = |store: &Store, trimmed: u128, state: &str| {
+        store.set_checkpoint_state(&format!("checkpoint/{trimmed}"), trimmed, state).unwrap();
+        store.answers_summary(cut()).unwrap()
+    };
+    let alder_summary = trim(&alder, day, "trimmed");
+    let birch_summary = trim(&birch, day, "trimmed");
+    assert!(claims_compare(&alder_summary, &birch_summary));
+
+    // birch is part way through the next day's trim, then finishes it: until alder has too, the
+    // members hold different claims older than the cut and still answer the same.
+    let birch_summary = trim(&birch, 2 * day, "trimming");
+    assert!(birch_summary.trim_unfinished);
+    assert!(!claims_compare(&alder_summary, &birch_summary));
+    let birch_summary = trim(&birch, 2 * day, "trimmed");
+    assert_eq!(birch_summary.trimmed_cut_unix_ms, 2 * day);
+    assert!(!claims_compare(&alder_summary, &birch_summary));
+    let alder_summary = trim(&alder, 2 * day, "trimmed");
+    assert!(claims_compare(&alder_summary, &birch_summary));
+    assert!(differing_kinds(&alder_summary, &birch_summary, true).is_empty());
+}

@@ -97,6 +97,43 @@ if [ "$target" = aarch64-apple-darwin ]; then
     app=${FRACTAL_MACOS_APP_PATH-${ST_MACOS_APP_PATH:-$install_home/Applications/SmallTalk.app}}
     refuse_nix_path "$app"
 fi
+# Retained package installers treated fractal as optional. Refuse a foreign
+# canonical command here as well: never install st and then launch a collision.
+case "$bin_dir" in /*) ;; *) bin_dir=$PWD/$bin_dir ;; esac
+if [ -d "$bin_dir" ]; then bin_dir=$(cd "$bin_dir" && pwd); fi
+owned_fractal_link() {
+    [ -L "$1" ] || return 1
+    link_target=$(readlink "$1")
+    case "$link_target" in
+        st3|"$bin_dir/st3") return 0 ;;
+    esac
+    if [ "$target" = aarch64-apple-darwin ]; then
+        case "$link_target" in "$app/Contents/MacOS/fractal"|"$app/Contents/MacOS/st3") return 0 ;; esac
+    fi
+    return 1
+}
+canonical=$bin_dir/fractal
+old_ifs=$IFS
+IFS=:
+set -f
+for directory in ${PATH:-}; do
+    [ -d "${directory:-.}" ] || continue
+    directory=$(cd "${directory:-.}" && pwd)
+    [ "$directory" != "$bin_dir" ] || continue
+    candidate=$directory/fractal
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+        if [ -L "$candidate" ]; then
+            case "$(readlink "$candidate")" in "$canonical"|"$bin_dir/st3") continue ;; esac
+            if [ "$target" = aarch64-apple-darwin ]; then
+                case "$(readlink "$candidate")" in "$app/Contents/MacOS/fractal"|"$app/Contents/MacOS/st3") continue ;; esac
+            fi
+        fi
+        printf 'install: refusing to install: PATH contains a foreign fractal command: %s\n' "$candidate" >&2
+        exit 1
+    fi
+done
+set +f
+IFS=$old_ifs
 # Pin latest before downloading either asset, so the receipt and checksum name
 # the same release even when a new daily release is published during installation.
 if [ -z "$tag" ]; then
@@ -150,6 +187,82 @@ while IFS= read -r member; do
     case "/$member/" in */../*) printf 'install: archive contains a parent path\n' >&2; exit 1 ;; esac
 done < "$work/members"
 tar -xzf "$work/$archive" -C "$work"
+# Only a physical canonical payload selects fractal; retained forward aliases
+# still install their historical st3 payload without replacing an existing fractal.
+# This is an archive-format decoder, not a fallback around a foreign destination.
+command_name=fractal
+[ -x "$work/$package/bin/fractal" ] && [ ! -L "$work/$package/bin/fractal" ] || command_name=st3
+# Verify locally: retained releases predate the hidden setup receipt protocol.
+# Never execute the destination, or waive verification for an older release.
+receipt_owned=false
+for receipt in "$bin_dir/.fractal-install.json" "$bin_dir/.fractal-install.json.pending"; do
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+        command -v python3 >/dev/null 2>&1 || {
+            printf 'install: Python 3 is required to verify install receipt %s; reinstall Fractal\n' "$receipt" >&2
+            exit 1
+        }
+        python3 - "$bin_dir" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+paths = [root / '.fractal-install.json', root / '.fractal-install.json.pending']
+try:
+    values = []
+    for path in paths:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            if os.path.lexists(path):
+                raise
+            continue
+        with os.fdopen(fd, 'rb') as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise ValueError('receipt must be a regular non-symlink file')
+            value = json.load(source)
+        digest = value.get('sha256')
+        if (type(value.get('schema')) is not int or value['schema'] != 1
+                or value.get('name') != 'fractal' or not isinstance(digest, str)
+                or len(digest) != 64 or any(c not in '0123456789abcdefABCDEF' for c in digest)):
+            raise ValueError('invalid receipt fields')
+        values.append(value)
+    target = root / 'fractal'
+    if not os.path.lexists(paths[0]) and not os.path.lexists(target) and values:
+        sys.exit(0)  # Prepared fresh install, before executable publication.
+    physical = target.resolve(strict=True)
+    fd = os.open(physical, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError('executable must be a regular file')
+        digest = hashlib.sha256()
+        for block in iter(lambda: source.read(65536), b''):
+            digest.update(block)
+    if not any(value['sha256'] == digest.hexdigest() for value in values):
+        raise ValueError('receipt does not match the installed executable')
+except Exception as error:
+    sys.exit(f'invalid install receipt {paths[0]} or {paths[1]}; reinstall Fractal: {error}')
+PY
+        receipt_owned=true
+        break
+    fi
+done
+if ! "$receipt_owned" && { [ -e "$canonical" ] || [ -L "$canonical" ]; }; then
+    owned=false
+    if owned_fractal_link "$canonical"; then
+        owned=true
+    elif [ -f "$canonical" ] && [ -x "$canonical" ] && [ ! -L "$canonical" ]; then
+        owned=true
+        for name in st st3; do
+            if [ ! -L "$bin_dir/$name" ]; then owned=false; break; fi
+            case "$(readlink "$bin_dir/$name")" in fractal|"$canonical") ;; *) owned=false; break ;; esac
+        done
+    fi
+    "$owned" || { printf 'install: refusing to replace foreign fractal command: %s\n' "$canonical" >&2; exit 1; }
+fi
 # Retained releases keep their historical installer spelling.
 "$work/$package/install.sh" --bin-dir "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd)
@@ -158,18 +271,25 @@ bin_dir=$(cd "$bin_dir" && pwd)
 write_receipt() (
     receipt_stage=
     trap '[ -z "$receipt_stage" ] || rm -f "$receipt_stage"' EXIT
-    version=$("$work/$package/bin/st3" --version --json) || return 1
-    case "$version" in '{"machine_version":"'*'"}') ;; *) return 1 ;; esac
-    version=${version#'{"machine_version":"'}
-    version=${version%'"}'}
-    commit=${version##*+}
+    release_binary="$work/$package/bin/$command_name"
+    version=$("$release_binary" --version --json) || return 1
+    case "$version" in
+        *'"commit":"'*)
+            commit=${version#*'"commit":"'}
+            commit=${commit%%'"'*} ;;
+        '{"machine_version":"'*'"}')
+            version=${version#'{"machine_version":"'}
+            version=${version%'"}'}
+            commit=${version##*+} ;;
+        *) return 1 ;;
+    esac
     case "$commit" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "${#commit}" -ge 7 ] || return 1
     receipt="$bin_dir/RELEASE.json"
     platform=$(uname -s) || return 1
     if [ "$platform" = Darwin ]; then
         # Keep the receipt outside the signed application bundle.
-        receipt=$(python3 - "$bin_dir/st3" <<'PY'
+        receipt=$(python3 - "$bin_dir/$command_name" <<'PY'
 from pathlib import Path
 import sys
 binary = Path(sys.argv[1]).resolve()
@@ -191,7 +311,7 @@ trap - EXIT HUP INT TERM
 if "$run"; then
     # curl | sh leaves stdin on the script pipe; the terminal UI needs the person's terminal.
     if [ -t 1 ] && [ -r /dev/tty ]; then
-        exec "$bin_dir/st" </dev/tty
+        exec "$bin_dir/$command_name" </dev/tty
     fi
-    exec "$bin_dir/st"
+    exec "$bin_dir/$command_name"
 fi

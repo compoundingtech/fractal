@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "ci-local's stages no longer start a seat lane's sccache server, which kept the run's removed TMPDIR and failed every later build in the lane",
+  "replay": {"status": "none", "detail": "No claim, projection or replay changes."},
+  "schema": {"status": "none", "detail": "No stored data changes."},
+  "rules": {"status": "none", "detail": "ci-local unsets SCCACHE_SERVER_UDS and SCCACHE_DIR for its stages. On a host whose cargo config names an sccache wrapper, the stages' compiles go to the host's server, as before lanes named a socket; they count to builds.slice, not the lane. st-test no longer adds the lane's socket to a check it runs in a seat's lane: every check that compiles runs ci-local's stages. The daemon still names the socket (GET /v1/agents/lane), and a seat's own builds still use its lane's server."},
+  "compatibility": {"status": "none", "detail": "Nothing replicates; local script only."},
+  "downtime": {"status": "none", "detail": "Takes effect on the next ci-local run of a tree that has it."},
+  "manual": {"status": "none", "detail": "Until a seat's runs have it, a lane server started by an earlier run is stopped with sccache --stop-server on the lane socket."},
+  "recovery": {"status": "none", "detail": "Reverting lets a check in a lane start the lane's server inside the run again."}
+}

@@ -12,6 +12,9 @@
 //! A recorder observes; it does not enforce. A program called by its absolute path skips it, so a
 //! quiet log does not prove that nothing ran. A failure to record never fails, delays, or changes
 //! the command.
+//!
+//! Readers accept both `st3` and `fractal` recorder markers and v1 schemas while writers
+//! retain `st3` spellings. An existing legacy marker wins even when it cannot be decoded.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -161,7 +164,7 @@ pub fn health(state_dir: &Path) -> (bool, String) {
     let (Ok(directory), Ok(log)) = (directory(state_dir), log_path(state_dir)) else {
         return (false, "the recorder directory cannot be resolved".into());
     };
-    if !directory.join(MARKER).is_file() {
+    if !marker_path(&directory).is_file() {
         return (
             false,
             format!(
@@ -277,10 +280,28 @@ fn own_marker(program: &str, argv0: &OsStr, path: Option<&OsStr>) -> Option<Mark
         std::env::split_paths(path.unwrap_or(OsStr::new(DEFAULT_PATH)))
             .find(|entry| is_executable(&search_entry(entry).join(program)))?
     };
-    let bytes = fs::read(search_entry(&directory).join(MARKER)).ok()?;
+    let bytes = fs::read(marker_path(&search_entry(&directory))).ok()?;
     let marker = serde_json::from_slice::<Marker>(&bytes).ok()?;
-    (marker.schema == MARKER_SCHEMA).then_some(marker)
+    accepts_marker_schema(&marker.schema).then_some(marker)
 }
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+// Select the legacy marker before reading: malformed or unreadable legacy data must not
+// fall back to the renamed marker.
+fn marker_path(directory: &Path) -> PathBuf {
+    let legacy = directory.join(MARKER);
+    match fs::symlink_metadata(&legacy) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            directory.join("fractal-recorder.json")
+        }
+        _ => legacy,
+    }
+}
+
+fn accepts_marker_schema(schema: &str) -> bool {
+    matches!(schema, MARKER_SCHEMA | "fractal.recorder.v1")
+}
+// LIVE-MIGRATION END
 
 /// The first executable of this name on PATH that is neither in a recorder directory nor the
 /// running executable itself.
@@ -291,7 +312,7 @@ fn real_program(
 ) -> Option<PathBuf> {
     std::env::split_paths(path.unwrap_or(OsStr::new(DEFAULT_PATH))).find_map(|entry| {
         let entry = search_entry(&entry);
-        if entry.join(MARKER).exists() {
+        if marker_path(&entry).exists() {
             return None;
         }
         let candidate = entry.join(program);
@@ -306,16 +327,17 @@ fn real_program(
 /// Git hooks and aliases must find real tools instead of reentering the recorder. A wrapper
 /// that explicitly executes a recorder still meets the depth guard before it can spawn again.
 fn delegated_path(path: Option<&OsStr>, own: Option<&fs::Metadata>) -> OsString {
-    let entries = std::env::split_paths(path.unwrap_or(OsStr::new(DEFAULT_PATH)))
-        .filter(|entry| {
-            let directory = search_entry(entry);
-            !directory.join(MARKER).exists()
-                && !own.is_some_and(|own| PROGRAMS.iter().any(|program| {
+    let entries = std::env::split_paths(path.unwrap_or(OsStr::new(DEFAULT_PATH))).filter(|entry| {
+        let directory = search_entry(entry);
+        !marker_path(&directory).exists()
+            && !own.is_some_and(|own| {
+                PROGRAMS.iter().any(|program| {
                     fs::metadata(directory.join(program)).is_ok_and(|metadata| {
                         own.dev() == metadata.dev() && own.ino() == metadata.ino()
                     })
-                }))
-        });
+                })
+            })
+    });
     // On Unix, split_paths entries contain no colon. Reassemble them directly so preparing
     // the delegated PATH is infallible, including empty entries for the working directory.
     let mut path = OsString::new();
@@ -1019,6 +1041,95 @@ mod tests {
     }
 
     #[test]
+    fn marker_readers_accept_both_schemas_but_not_unknown_schemas() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [MARKER, "fractal-recorder.json"] {
+            for schema in [MARKER_SCHEMA, "fractal.recorder.v1", "unknown.recorder.v1"] {
+                let marker = root.path().join(name);
+                fs::write(
+                    &marker,
+                    serde_json::to_vec(&Marker {
+                        schema: schema.into(),
+                        host: "test-host".into(),
+                        log: root.path().join("commands.jsonl"),
+                        receipts: None,
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+                let result = own_marker("git", root.path().join("git").as_os_str(), None);
+                assert_eq!(
+                    result.is_some(),
+                    schema != "unknown.recorder.v1",
+                    "{name}: {schema}"
+                );
+                fs::remove_file(marker).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_marker_wins_even_when_malformed_or_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let renamed = Marker {
+            schema: "fractal.recorder.v1".into(),
+            host: "renamed".into(),
+            log: root.path().join("renamed.jsonl"),
+            receipts: None,
+        };
+        fs::write(
+            root.path().join("fractal-recorder.json"),
+            serde_json::to_vec(&renamed).unwrap(),
+        )
+        .unwrap();
+        let legacy = Marker {
+            schema: MARKER_SCHEMA.into(),
+            host: "legacy".into(),
+            log: root.path().join("legacy.jsonl"),
+            receipts: None,
+        };
+        fs::write(
+            root.path().join(MARKER),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let argv0 = root.path().join("git");
+        assert_eq!(
+            own_marker("git", argv0.as_os_str(), None).unwrap().host,
+            "legacy"
+        );
+        for bytes in [
+            b"not json".as_slice(),
+            br#"{"schema":"unknown","host":"legacy","log":"legacy.jsonl"}"#,
+        ] {
+            fs::write(root.path().join(MARKER), bytes).unwrap();
+            assert!(own_marker("git", argv0.as_os_str(), None).is_none());
+        }
+    }
+
+    #[test]
+    fn both_marker_names_guard_against_reentry_even_when_malformed() {
+        let root = tempfile::tempdir().unwrap();
+        let recorder = root.path().join("recorder");
+        let real = root.path().join("real");
+        for directory in [&recorder, &real] {
+            fs::create_dir(directory).unwrap();
+            executable(&directory.join("git"));
+        }
+        let path = std::env::join_paths([&recorder, &real]).unwrap();
+        for name in [MARKER, "fractal-recorder.json"] {
+            let marker = recorder.join(name);
+            fs::write(&marker, "not json").unwrap();
+            assert_eq!(
+                real_program("git", Some(&path), None),
+                Some(real.join("git"))
+            );
+            assert_eq!(delegated_path(Some(&path), None), real.as_os_str());
+            fs::remove_file(marker).unwrap();
+        }
+    }
+
+    #[test]
     fn the_recorder_directory_leads_path_once() {
         let path = prepend(
             Path::new("/state/recorder/bin"),
@@ -1119,6 +1230,13 @@ mod tests {
         let marker: Marker =
             serde_json::from_slice(&fs::read(installation.directory.join(MARKER)).unwrap())
                 .unwrap();
+        assert_eq!(marker.schema, MARKER_SCHEMA);
+        assert!(
+            !installation
+                .directory
+                .join("fractal-recorder.json")
+                .exists()
+        );
         assert_eq!(marker.host, "test-host");
         assert_eq!(marker.log, installation.log);
         let receipts = marker.receipts.unwrap();
@@ -1161,6 +1279,14 @@ mod tests {
             )),
             "{message}"
         );
+
+        fs::rename(
+            installation.directory.join(MARKER),
+            installation.directory.join("fractal-recorder.json"),
+        )
+        .unwrap();
+        let (recording, message) = health(&state);
+        assert!(recording, "{message}");
 
         fs::remove_file(installation.directory.join("gh")).unwrap();
         let (recording, message) = health(&state);

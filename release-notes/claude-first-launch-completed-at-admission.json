@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "When a seat's workspace is admitted for Claude, the global Claude config now also gets hasCompletedOnboarding: true and a default theme if, and only if, the hasCompletedOnboarding key is absent. A clean user's first start then skips the theme chooser and welcome screen. A present flag (true or false), a chosen theme, the login and every other field are left as they are; no login, credential or key file is read or written.",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digests change."},
+  "compatibility": {"status": "none", "detail": "No client, protocol or wire change. The two config keys were read from Claude Code 2.1.296 and have not been exercised against a running Claude."},
+  "downtime": {"status": "none", "detail": "No restart is needed beyond the usual daemon upgrade."},
+  "manual": {"status": "none", "detail": "None. Existing installations already have the flag, so nothing is rewritten for them."},
+  "recovery": {"status": "none", "detail": "Revert the change. A config already completed stays completed, which is harmless."}
+}

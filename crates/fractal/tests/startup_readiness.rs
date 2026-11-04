@@ -395,3 +395,54 @@ fi
         "a killed daemon's file is not readiness"
     );
 }
+
+#[test]
+fn a_plain_client_finds_a_daemon_started_with_socket_elsewhere_past_a_dead_default() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    for directory in ["home/.config/st3", "run", "state"] {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    // The config names no socket: the daemon gets `--socket` in its state directory, as a
+    // host's own unit file might pass it.
+    std::fs::write(root.join("home/.config/st3/config.toml"), format!(
+        "node = \"studio\"\nstate_dir = {:?}\nclient_gateway_socket = {:?}\npty_root = {:?}\n",
+        root.join("state"), root.join("run/client.sock"), root.join("pty")
+    )).unwrap();
+    // An earlier daemon's socket stays at the runtime default with nothing listening on it.
+    drop(std::os::unix::net::UnixListener::bind(root.join("run/st3.sock")).unwrap());
+    let socket = root.join("state/st3.sock");
+    let log_path = root.join("daemon.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut daemon = Daemon(
+        command(root)
+            .env_remove("ST3_ENDPOINT")
+            .args(["up", "--socket"])
+            .arg(&socket)
+            .args(["--web-listen", "off"])
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while fractal_daemon::startup::read(&socket).is_none_or(|readiness| readiness.status != "serving") {
+        assert!(daemon.0.try_wait().unwrap().is_none(), "daemon exited: {}", std::fs::read_to_string(&log_path).unwrap());
+        assert!(Instant::now() < deadline, "daemon did not serve: {}", std::fs::read_to_string(&log_path).unwrap());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let plain = command(root)
+        .env_remove("ST3_ENDPOINT")
+        .env("ST3_DAEMON_WAIT", "0")
+        .args(["agents", "ls"])
+        .output()
+        .unwrap();
+    assert!(
+        plain.status.success(),
+        "a client with no endpoint did not find the daemon: {}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+}

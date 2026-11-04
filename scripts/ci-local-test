@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""scripts/ci-local: the stages run in a home of their own, with no st, GitHub or SSH agent variable, in order, and the
+"""scripts/ci-local: the stages run in a home of their own, with no st, GitHub or SSH agent variable, with buffered parallel lanes and a separate fleet target, and the
 exit status is the first failure's. cargo and the stage scripts are stubs that record what they saw; nothing compiles."""
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,26 @@ python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": 
 '''
 
 
+def kill_tree(process):
+    """SIGKILL a test's run and everything under it (read from /proc's PPid lines), then reap it: killed alone, a run frozen
+    mid-stop leaves its lane stopped for good (20 stopped lanes after a day of failing runs of the worker test, 2026-11-03)."""
+    tree, grew = {process.pid}, True
+    while grew:
+        grew = False
+        for status in Path('/proc').glob('[0-9]*/status'):
+            try:
+                parent = int(next(line.split()[1] for line in status.read_text().splitlines() if line.startswith('PPid:')))
+            except (OSError, StopIteration, ValueError):
+                continue
+            if parent in tree and int(status.parent.name) not in tree:
+                tree.add(int(status.parent.name))
+                grew = True
+    for pid in tree:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    process.wait()
+
+
 class CiLocal(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -34,8 +55,10 @@ class CiLocal(unittest.TestCase):
         (self.bin / 'cargo').chmod(0o755)
         (self.work / 'scripts/ci-install-built-hooks').write_text(RECORD)
         # nix and the compat-binary script stand in for CI's test-build preparation (they record that they ran).
+        # A path nix has valid is what CI_LOCAL_TEST_NIX_VALID names (none unless a test says so).
         (self.bin / 'nix').write_text('#!/usr/bin/env bash\necho "nix $*" >> "$CI_LOCAL_TEST_LOG.prep"\n'
-                                      'case "$1" in eval) printf x86_64-linux ;; build) echo /nix/store/components ;; esac\n')
+                                      'case "$1 ${3:-}" in "eval "*.outPath) printf /nix/store/components ;; eval*) printf x86_64-linux ;;\n'
+                                      '  "path-info "*) [ "$2" = "${CI_LOCAL_TEST_NIX_VALID:-}" ] ;; build*) echo /nix/store/components ;; esac\n')
         (self.bin / 'nix').chmod(0o755)
         (self.work / 'scripts/messaging-compat-binary').write_text('echo compat >> "$CI_LOCAL_TEST_LOG.prep"; echo /compat/fractal\n')
         self.home = root / 'account home'
@@ -107,6 +130,23 @@ class CiLocal(unittest.TestCase):
         self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
         self.assertEqual(calls[-1]['env']['BUILD_ADMISSION_LOG'], '/elsewhere/build-admission.log')  # beside the state it names
 
+    def test_a_compile_in_the_lane_straight_after_a_check_there_succeeds(self):
+        # sccache's client starts the server its socket names when none answers there, and the server keeps the client's TMPDIR for
+        # every compile after. The stage stands in for such a compile: it starts the lane's server unless one runs, recording its TMPDIR.
+        socket = Path(self.tmp.name) / 'sccache-lane-x.sock'
+        compile_ = RECORD + 'if [ -n "${SCCACHE_SERVER_UDS:-}" ] && [ ! -e "$SCCACHE_SERVER_UDS" ]; then echo "$TMPDIR" > "$SCCACHE_SERVER_UDS"; fi\n'
+        done, calls = self.run_local('tests', ci_linux=compile_, SCCACHE_SERVER_UDS=str(socket), SCCACHE_DIR='/lane/cache')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertNotIn('SCCACHE_SERVER_UDS', call['env'])
+            self.assertNotIn('SCCACHE_DIR', call['env'])
+        # The seat's next compile in the lane: a server the run started would compile in a TMPDIR the run has removed
+        # ("Failed to create temp dir"); with none, the seat's compile starts the lane's server in its own.
+        self.assertFalse(socket.exists() and not Path(socket.read_text().strip()).is_dir(),
+                         'the lane\'s server was started inside the run and its TMPDIR is gone')
+        self.assertFalse(socket.exists(), 'no server was started inside the run')
+
     def test_the_stages_build_without_debug_info_as_ci_does(self):
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_PROFILE_TEST_DEBUG='1')
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -136,10 +176,10 @@ class CiLocal(unittest.TestCase):
             self.assertNotIn('RUSTC_WRAPPER', env)
             self.assertNotIn('CARGO_BUILD_RUSTC_WRAPPER', env)
             for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
-                         'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST3_OTELITE_BIN'):
+                         'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST2_OTELITE_BIN', 'ST3_OTELITE_BIN'):
                 self.assertNotIn(name, env)
             # The dev shell's collector for the OTLP export tests stays, as in CI; the same name pointing anywhere else does not.
-            self.assertEqual((env.get('ST2_OTELITE_BIN'), env.get('FRACTAL_OTELITE_BIN')), ('/nix/store/x-otelite/bin/otelite',) * 2)
+            self.assertEqual(env.get('FRACTAL_OTELITE_BIN'), '/nix/store/x-otelite/bin/otelite')
             # Kept: the dependency cache, the build admission's runtime directory, and the saved dev shell environment.
             # CARGO_REAL is the dev shell's cargo: not the shim first on PATH, not the cargo in the account's home.
             self.assertEqual((env['CARGO_HOME'], env['RUSTUP_HOME'], env['CARGO_REAL'], env['XDG_RUNTIME_DIR']),
@@ -184,6 +224,26 @@ class CiLocal(unittest.TestCase):
         self.assertGreaterEqual(int(seconds), 2)
         run, = logs.glob('run-*')
         self.assertIn('compiling', (run / 'tests.log').read_text())
+
+    def test_a_stage_s_wait_at_the_admission_gate_after_its_slot_is_queue_time_too(self):
+        events = Path(self.tmp.name) / 'queue-events'
+        # The cargo shim holds its slot, then waits at the admission gate, which prints no end: the build's own output ends the wait.
+        queue = ('#!/usr/bin/env bash\necho "cargo: waiting in order for a host build slot (all 6 busy)"\nsleep 1.1\n'
+                 'echo "cargo: got build slot 0 and a heavy slot"\n'
+                 'echo "build-admission: cargo:build waits to start: 2 build(s) ahead (2 ahead, waited 0 s)" >&2\nsleep 2.1\n'
+                 'echo "   Compiling fractal v0.1.0"\nsleep 1.1\necho done\n')
+        done, _ = self.run_local('tests', ci_linux=queue, CI_LOCAL_QUEUE_LOG=str(events))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        row, = [line for line in done.stdout.splitlines() if line.startswith('ci-local:   tests')]
+        waits, seconds = re.search(r'queue: (\d+) waits, (\d+)s', row).groups()
+        self.assertEqual(waits, '2')
+        self.assertGreaterEqual(int(seconds), 3)
+        self.assertLess(int(seconds), int(re.search(r'(\d+)s +exit', row).group(1)))  # the compile after it ran
+        self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] tests: waiting for build admission', done.stdout)), 1)
+        lines = [line.split(' ') for line in events.read_text().splitlines()]
+        self.assertEqual([(kind, stage) for kind, _, stage in lines], [('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests')])
+        at = [int(when) for _, when, _ in lines]
+        self.assertGreaterEqual(at[3] - at[2], 2)
 
     def test_each_wait_for_a_build_slot_is_written_as_it_starts_and_ends_to_the_queue_log(self):
         events = Path(self.tmp.name) / 'queue-events'
@@ -334,35 +394,110 @@ class CiLocal(unittest.TestCase):
         self.assertEqual((done.returncode, calls), (2, []), done.stderr)
         self.assertIn('no cargo executable of the dev shell', done.stderr)
 
-    def test_clippy_runs_alongside_the_tests_and_fleet_compat_after_them_reporting_in_the_given_order(self):
+    def test_clippy_and_fleet_compat_overlap_tests_without_replacing_its_binary_and_report_in_order(self):
         logs = Path(self.tmp.name) / 'logs'
-        # The tests stage waits until clippy has started: it really runs alongside it. Fleet compatibility relinks the fractal
-        # binaries the tests exec (#4128), so it must not start until the tests stage is done: the tests stage fails if it has.
-        said = ('#!/usr/bin/env bash\necho "out of $1"\n'
-                '[ "$1" = fleet-compat ] && touch "$CI_LOCAL_TEST_LOG.fleet"\n'
-                'if [ "$1" = tests ]; then for i in $(seq 100); do [ -e "$CI_LOCAL_TEST_LOG.clippy" ] && break; sleep 0.05; done; '
-                '[ -e "$CI_LOCAL_TEST_LOG.clippy" ] || exit 9; sleep 0.5; [ -e "$CI_LOCAL_TEST_LOG.fleet" ] && exit 8; '
-                'touch "$CI_LOCAL_TEST_LOG.tests"; fi\n'
-                '[ "$1" = clippy ] && touch "$CI_LOCAL_TEST_LOG.clippy"\n'
-                '[ "$1" = fleet-compat ] && { [ -e "$CI_LOCAL_TEST_LOG.tests" ] || exit 7; exit 4; }\n[ "$1" = clippy ] && exit 6\nexit 0\n')
-        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', ci_linux=said, CI_LOCAL_LOG_DIR=str(logs), CLIPPY_BASE_SHA='f' * 40)
-        self.assertEqual(done.returncode, 6, done.stdout + done.stderr)  # the first failure in the given order: clippy's, not fleet-compat's
-        self.assertIn('ci-local: clippy run alongside the other stages', done.stdout)
-        # The lane's output follows the foreground's, whole, never interleaved.
+        # Each stage must start before tests finish, and clippy waits for fleet-compat too. A serial lane cannot pass.
+        # Fleet-compat simulates its feature-set relink; tests must still read their own binary afterwards (#4128).
+        fixture = Path(self.tmp.name) / 'stage.py'
+        fixture.write_text("""import os, pathlib, sys, time
+stage = sys.argv[1]
+mark = pathlib.Path(os.environ['CI_LOCAL_TEST_LOG'])
+target = pathlib.Path(os.environ.get('CARGO_TARGET_DIR') or 'target')
+target.mkdir(parents=True, exist_ok=True)
+def ready(name):
+    return pathlib.Path(str(mark) + '.' + name)
+def wait(name):
+    until = time.monotonic() + 8
+    while not ready(name).exists():
+        if time.monotonic() > until:
+            raise RuntimeError('no concurrent ' + name)
+        time.sleep(.02)
+print('out of ' + stage, flush=True)
+if stage == 'tests':
+    (target / 'fractal').write_text('tests binary')
+    ready('tests').touch()
+    wait('fleet')
+    wait('clippy')
+    assert (target / 'fractal').read_text() == 'tests binary', 'compat relink replaced a running test binary'
+elif stage == 'fleet-compat':
+    wait('tests')
+    (target / 'fractal').write_text('compat binary')
+    ready('fleet').touch()
+    sys.exit(4)
+elif stage == 'clippy':
+    ready('clippy').touch()
+    wait('fleet')
+    sys.exit(6)
+""")
+        said = f'#!/usr/bin/env bash\nexec python3 {str(fixture)!r} "$1"\n'
+        target = Path(self.tmp.name) / 'kept target'
+        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', ci_linux=said, CI_LOCAL_LOG_DIR=str(logs),
+                                     CARGO_TARGET_DIR=str(target), CLIPPY_BASE_SHA='f' * 40)
+        self.assertEqual(done.returncode, 6, done.stdout + done.stderr)
         out = done.stdout
-        self.assertLess(out.index('ci-local: tests exit 0'), out.index('ci-local: fleet-compat exit 4'))
-        self.assertLess(out.index('ci-local: fleet-compat exit 4'), out.index('----- ci-local: clippy output -----'))
-        self.assertLess(out.index('----- ci-local: clippy output -----'), out.index('out of clippy'))
-        self.assertIn('ci-local: clippy exit 6', out)
+        self.assertIn('ci-local: tests exit 0', out)
+        self.assertEqual((target / 'fractal').read_text(), 'tests binary')
+        self.assertEqual(Path(str(target) + '-fleet-compat/fractal').read_text(), 'compat binary')
+        self.assertLess(out.index('ci-local: tests exit 0'), out.index('----- ci-local: clippy output -----'))
+        self.assertLess(out.index('out of clippy'), out.index('----- ci-local: fleet-compat output -----'))
+        self.assertLess(out.index('----- ci-local: fleet-compat output -----'), out.index('out of fleet-compat'))
+        self.assertIn('ci-local: fleet-compat exit 4', out)
         table = [line.split()[1] for line in out.splitlines() if line.startswith('ci-local:   ')]
         self.assertEqual(table, ['setup', 'tests', 'clippy', 'fleet-compat'])
         run, = logs.glob('run-*')
         self.assertEqual(sorted(path.name for path in run.glob('*.log')), ['clippy.log', 'fleet-compat.log', 'tests.log'])
 
-    def test_a_stopped_run_stops_the_stage_its_lane_is_running(self):
-        # clippy (in the lane) records its pid and keeps running; the tests stage ends at once, so the run waits for its lane.
+    def test_fleet_target_is_a_stable_sibling_for_default_relative_and_absolute_targets_even_in_serial_mode(self):
+        for target in (None, 'relative target', str(Path(self.tmp.name) / 'absolute target')):
+            with self.subTest(target=target):
+                self.log.unlink(missing_ok=True)
+                extra = {'CARGO_TARGET_DIR': target} if target else {}
+                done, calls = self.run_local('tests', 'fleet-compat', CI_LOCAL_SERIAL='1', **extra)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                stages = [call for call in calls if call['argv'] in (['tests'], ['fleet-compat'])]
+                self.assertEqual([call['argv'] for call in stages], [['tests'], ['fleet-compat']])
+                self.assertEqual(stages[0]['env'].get('CARGO_TARGET_DIR'), target)
+                expected = Path(target or 'target')
+                if not expected.is_absolute(): expected = self.work / expected
+                expected = str(expected) + '-fleet-compat' if target else str(self.work / 'target/fleet-compat')
+                self.assertEqual(stages[1]['env']['CARGO_TARGET_DIR'], expected)
+
+    def test_default_compat_build_outputs_are_ignored_in_a_plain_checkout(self):
+        # A plain run (or ST_EVIDENCE_TARGET=off) has no CARGO_TARGET_DIR. Cargo's normal /target ignore must cover the new
+        # stage too, including generated OUT_DIR files that the dependency-input checker excludes under root/target.
+        subprocess.run(['git', 'init', '-q', str(self.work)], check=True)
+        (self.work / '.gitignore').write_text('/target\n')
+        said = RECORD + 'mkdir -p "$CARGO_TARGET_DIR/debug/build/example/out"\n' + \
+            'echo generated > "$CARGO_TARGET_DIR/debug/build/example/out/generated.rs"\n'
+        done, calls = self.run_local('fleet-compat', ci_linux=said)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        target = Path(calls[-1]['env']['CARGO_TARGET_DIR'])
+        generated = target / 'debug/build/example/out/generated.rs'
+        self.assertTrue(generated.is_file())
+        relative = str(generated.relative_to(self.work))
+        ignored = subprocess.run(['git', 'check-ignore', '--no-index', relative], cwd=self.work, capture_output=True, text=True)
+        self.assertEqual(ignored.returncode, 0, ignored.stderr + ignored.stdout)
+        status = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=all', '--', relative],
+                                cwd=self.work, capture_output=True, text=True, check=True)
+        self.assertEqual(status.stdout, '', 'compat outputs must not dirty the checkout')
+
+    def test_a_crashed_compat_lane_cannot_pass_without_a_result(self):
+        said = """#!/usr/bin/env bash
+if [ "$1" = fleet-compat ]; then
+  parent=$(awk '/^PPid:/ {print $2}' /proc/$PPID/status)
+  kill -KILL "$parent"
+fi
+exit 0
+"""
+        done, _ = self.run_local('tests', 'fleet-compat', ci_linux=said)
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('fleet-compat exit 1', done.stdout)
+        self.assertRegex(done.stdout, r'fleet-compat +\(no result\)')
+
+    def test_a_stopped_run_stops_both_parallel_lanes_before_removing_scratch(self):
+        # Both background stages record their PIDs and stay live while the foreground finishes.
         said = ('#!/usr/bin/env bash\n'
-                'if [ "$1" = clippy ]; then echo $$ > "$CI_LOCAL_TEST_LOG.clippy"; sleep 60; fi\n'
+                'if [ "$1" = clippy ] || [ "$1" = fleet-compat ]; then echo $$ > "$CI_LOCAL_TEST_LOG.$1"; sleep 60; fi\n'
                 'if [ "$1" = tests ]; then for i in $(seq 100); do [ -s "$CI_LOCAL_TEST_LOG.clippy" ] && break; sleep 0.05; done; fi\n')
         (self.work / 'scripts/ci-linux').write_text(said)
         # Every sed the run starts is counted. Stopping the lane once ran one per process on the host for each process of the
@@ -371,23 +506,23 @@ class CiLocal(unittest.TestCase):
         (self.bin / 'sed').chmod(0o755)
         env = {'PATH': f'{self.bin}:{self.devshell}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
                'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
-        run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
+        run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat'], cwd=self.work, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
         self.addCleanup(lambda: run.poll() is None and run.kill())
-        marker = Path(f'{self.log}.clippy')
+        markers = [Path(f'{self.log}.{stage}') for stage in ('clippy', 'fleet-compat')]
         for _ in range(200):
-            if marker.exists() and marker.read_text().strip():
+            if all(marker.exists() and marker.read_text().strip() for marker in markers):
                 break
             time.sleep(0.05)
-        clippy = int(marker.read_text())
-        time.sleep(0.5)  # the tests stage is done; the run is waiting for its lane
+        pids = [int(marker.read_text()) for marker in markers]
+        time.sleep(0.5)  # foreground done; the run is waiting for its lanes
         run.terminate()
-        run.wait(timeout=20)
+        run.communicate(timeout=20)
         for _ in range(100):
-            if not Path(f'/proc/{clippy}').exists():
+            if all(not Path(f'/proc/{pid}').exists() for pid in pids):
                 break
             time.sleep(0.05)
-        self.assertFalse(Path(f'/proc/{clippy}').exists(), 'the lane\'s running stage outlived the run')
+        self.assertEqual([pid for pid in pids if Path(f'/proc/{pid}').exists()], [], 'a lane outlived the run')
         seds = Path(f'{self.log}.sed')
         self.assertLess(len(seds.read_text().splitlines()) if seds.exists() else 0, 10, 'stopping the lane reads /proc without a sed per process')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
@@ -405,16 +540,21 @@ class CiLocal(unittest.TestCase):
                'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
         run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
-        self.addCleanup(lambda: run.poll() is None and (os.kill(run.pid, signal.SIGCONT), run.kill()))
+        self.addCleanup(lambda: run.poll() is None and kill_tree(run))
         workers = Path(f'{self.log}.workers')
 
         def alive():
-            # This test's own workers only: each carries its CI_LOCAL_TEST_LOG.
+            # This test's own workers only: each carries its CI_LOCAL_TEST_LOG, or is still clippy's child. A worker in the middle of
+            # its exec has an empty environ for a moment (seen once in 800 runs, and in a merge group, 2026-11-03), so the parent counts too.
             pids = [int(line) for line in workers.read_text().split()] if workers.exists() else []
+            parent = Path(f'{self.log}.clippy').read_text().strip() if Path(f'{self.log}.clippy').exists() else None
             def ours(pid):
                 try:
-                    return f'CI_LOCAL_TEST_LOG={self.log}\0'.encode() in Path(f'/proc/{pid}/environ').read_bytes()
-                except OSError:
+                    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+                    if fields[0] == 'Z':
+                        return False
+                    return fields[1] == parent or f'CI_LOCAL_TEST_LOG={self.log}\0'.encode() in Path(f'/proc/{pid}/environ').read_bytes()
+                except (OSError, IndexError):
                     return False
             return [pid for pid in pids if ours(pid)]
         self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in alive()])
@@ -432,27 +572,50 @@ class CiLocal(unittest.TestCase):
         clippy = int(marker.read_text())
         time.sleep(0.5)  # the tests stage is done; the run is waiting for its lane
         run.terminate()
-        listed = False
-        deadline = time.monotonic() + 20
-        while not listed and run.poll() is None and time.monotonic() < deadline:
+
+        def reading_proc():
             try:
                 names = os.listdir(f'/proc/{run.pid}/fd')
             except OSError:
-                continue
+                return False
             for name in names:
                 try:
-                    target = os.readlink(f'/proc/{run.pid}/fd/{name}')
+                    if re.fullmatch(r'/proc/\d+/status', os.readlink(f'/proc/{run.pid}/fd/{name}')):
+                        return True
                 except OSError:
                     continue
-                if re.fullmatch(r'/proc/\d+/status', target):
-                    os.kill(run.pid, signal.SIGSTOP)
-                    listed = True
+            return False
+        def ran_ns(pid):
+            try:
+                return int(Path(f'/proc/{pid}/schedstat').read_text().split()[0])
+            except (OSError, ValueError, IndexError):
+                return None
+        # Frozen first, then looked at: a run seen reading /proc and frozen a moment later may have finished its listing in that
+        # moment and sent clippy its SIGTERM (a merge group, 2026-11-02, under load). Frozen with a status file open, it is inside the
+        # listing, and it signals nothing until the listing is done. Between looks the run gets 20 us on a CPU: frozen again at once,
+        # it barely ran and was still short of its listing 20 s later (6 of 15 on a loaded build host, 2026-11-03). Each look is at a new point of
+        # the stop, so the looks end inside the listing, or the listing ends and clippy with it, which fails below by name.
+        listed, looks = False, 0
+        deadline = time.monotonic() + 120
+        while run.poll() is None and state(clippy) not in (None, 'Z') and time.monotonic() < deadline:
+            os.kill(run.pid, signal.SIGSTOP)
+            for _ in range(500):
+                if state(run.pid) in ('T', None, 'Z'):
                     break
-        self.assertTrue(listed, 'the test did not catch the stopped run reading /proc')
-        for _ in range(500):
-            if state(run.pid) == 'T':
+                time.sleep(0.001)
+            looks += 1
+            if state(run.pid) == 'T' and reading_proc():
+                listed = True
                 break
-            time.sleep(0.01)
+            before = ran_ns(run.pid)
+            os.kill(run.pid, signal.SIGCONT)
+            while before is not None and (ran_ns(run.pid) or before) - before < 20_000 and run.poll() is None \
+                    and time.monotonic() < deadline:
+                time.sleep(0)
+            if before is None:
+                time.sleep(0.001)
+        self.assertTrue(listed, f'the test did not catch the stopped run reading /proc ({looks} looks; run exit {run.poll()}, '
+                                f'clippy {state(clippy)}): the stop listed /proc and stopped clippy between two looks')
         self.assertEqual(state(run.pid), 'T', 'the stopped run is frozen while its /proc listing is open')
         # Frozen with that listing open, the run has not yet stopped clippy (it stops a process only after listing /proc).
         self.assertNotIn(state(clippy), (None, 'Z'), 'the run was frozen before it stopped clippy')
@@ -463,7 +626,8 @@ class CiLocal(unittest.TestCase):
                 break
             time.sleep(0.01)
         late, frozen = alive(), state(clippy) == 'T'
-        self.assertTrue(late or frozen, 'clippy neither started its worker nor was frozen by the stop')
+        self.assertTrue(late or frozen, f'clippy neither started its worker nor was frozen by the stop (clippy {state(clippy)}, run '
+                                        f'{state(run.pid)}, workers {workers.read_text() if workers.exists() else None!r})')
         os.kill(run.pid, signal.SIGCONT)
         run.wait(timeout=20)
         for _ in range(100):
@@ -472,6 +636,27 @@ class CiLocal(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(alive(), [], 'a worker the lane started after the stop listed /proc outlived the run')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
+
+    def test_a_failing_tests_cleanup_kills_a_frozen_run_and_its_frozen_lane(self):
+        # A run, its lane and the lane's stage, all frozen as a stop leaves them: killing the run alone leaves the other two stopped.
+        run = subprocess.Popen(['bash', '-c', '( sleep 300 & echo $!; wait ) & wait'], stdout=subprocess.PIPE, text=True)
+        stage = int(run.stdout.readline())
+        lane = int(Path(f'/proc/{stage}/stat').read_text().rsplit(')', 1)[1].split()[1])
+        for pid in (run.pid, lane, stage):
+            os.kill(pid, signal.SIGSTOP)
+
+        def gone(pid):
+            try:
+                return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z'
+            except OSError:
+                return True
+        self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in (lane, stage) if not gone(pid)])
+        kill_tree(run)
+        for _ in range(200):
+            if gone(lane) and gone(stage):
+                break
+            time.sleep(0.01)
+        self.assertTrue(gone(lane) and gone(stage), 'the frozen lane outlived the cleanup of its run')
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
         self.stage_exits = [0, 3, 5]
@@ -493,22 +678,17 @@ class CiLocal(unittest.TestCase):
         if shutil.which('nice'):
             self.assertEqual(int(Path(f"{self.log}.nice").read_text()), min(os.nice(0) + 10, 19))
 
-    def test_keyed_defaults_and_explicit_values_pass_through_ci_local(self):
-        for entry, stage, variable in (('ci-clippy-keyed', 'clippy', 'CI_KEYED_CLIPPY_POLICY'),
-                                       ('ci-fleet-compat-keyed', 'fleet-compat', 'CI_KEYED_FLEET_COMPAT_POLICY')):
-            shutil.copy(ROOT / 'scripts' / entry, self.work / 'scripts' / entry)
-            for explicit in (None, '', '.st/evidence-skip-policy.json', '/custom/policy.json'):
-                with self.subTest(entry=entry, explicit=explicit):
-                    extra = {} if explicit is None else {variable: explicit}
-                    done, calls = self.run_local(entry=entry, CLIPPY_BASE_SHA='f' * 40, **extra)
-                    self.assertEqual(done.returncode, 0, done.stderr)
-                    self.assertEqual(calls[-1]['env'][variable], 'auto:.st/evidence-skip-policy.json' if explicit is None else explicit)
-                    self.assertEqual(calls[-1]['argv'], [stage])
-                    self.log.unlink()
-            done, calls = self.run_local(stage, CLIPPY_BASE_SHA='f' * 40)
-            self.assertEqual(done.returncode, 0, done.stderr)
-            self.assertNotIn(variable, calls[-1]['env'], 'ordinary linux-gate stages stay unkeyed')
-            self.log.unlink()
+    def test_ordinary_clippy_and_fleet_compat_stages_stay_unkeyed(self):
+        # Neither keyed check has a local entry of its own any more: scripts/st-test runs `ci-local clippy` / `ci-local fleet-compat` unkeyed
+        # and scripts/ci-clippy-result / ci-fleet-compat-result check the policy after the stage (docs/keyed-clippy.md). Only CI's keyed
+        # jobs name the policy.
+        for stage in ('clippy', 'fleet-compat'):
+            with self.subTest(stage=stage):
+                done, calls = self.run_local(stage, CLIPPY_BASE_SHA='f' * 40)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                for variable in ('CI_KEYED_CLIPPY_POLICY', 'CI_KEYED_FLEET_COMPAT_POLICY'):
+                    self.assertNotIn(variable, calls[-1]['env'], 'ordinary linux-gate stages stay unkeyed')
+                self.log.unlink()
 
     def test_keyed_consumer_selects_missing_only_without_running_compiles(self):
         source = (ROOT / 'scripts/ci-linux').read_text()
@@ -557,13 +737,12 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([call['argv'] for call in calls][2:], [['tests'], ['clippy'], ['fleet-compat'], ['mail-redelivery-canaries']])
         self.assertEqual(calls[-1]['env']['CLIPPY_BASE_SHA'], fetched_tip, 'main as fetched now, not the local origin/main')
-        # By default clippy runs alongside the others and fleet compatibility after the tests: every stage once.
+        # By default clippy and fleet compatibility run alongside tests: every stage once.
         self.log.unlink()
         done, calls = self.run_local('tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries')
         self.assertEqual(done.returncode, 0, done.stderr)
         ran = [' '.join(call['argv']) for call in calls][2:]
         self.assertEqual(sorted(ran), ['clippy', 'fleet-compat', 'mail-redelivery-canaries', 'tests'])
-        self.assertLess(ran.index('tests'), ran.index('fleet-compat'))
         self.assertEqual({call['env']['CLIPPY_BASE_SHA'] for call in calls[2:]}, {fetched_tip})
         self.log.unlink()
         done, calls = self.run_local('clippy', CLIPPY_BASE_SHA='f' * 40)
@@ -594,6 +773,45 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertFalse(prep.exists(), 'no tests stage: nothing is prepared')
         self.assertNotIn('ST2_GITHUB_PR_COMPONENT', calls[-1]['env'])
+
+    def test_built_provider_components_are_used_without_a_build_and_its_heavy_admission(self):
+        done, calls = self.run_local('tests', CLIPPY_BASE_SHA='f' * 40, CI_LOCAL_TEST_NIX_VALID='/nix/store/components')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(calls[-1]['env']['ST2_VISTA_COMPONENT'], '/nix/store/components/share/st2/providers/st2_vista_component.component.wasm')
+        prep = Path(f'{self.log}.prep').read_text().splitlines()
+        self.assertIn('nix eval --raw .#checks.x86_64-linux.provider-components.outPath', prep)
+        self.assertIn('nix path-info /nix/store/components', prep)
+        self.assertFalse([line for line in prep if line.startswith('nix build')], prep)
+        # A path nix does not have valid (another tree's components, or one collected) is built as before, through the heavy build.
+        Path(f'{self.log}.prep').unlink()
+        done, calls = self.run_local('tests', CLIPPY_BASE_SHA='f' * 40, CI_LOCAL_TEST_NIX_VALID='/nix/store/other')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('nix build .#checks.x86_64-linux.provider-components --no-link --print-out-paths', Path(f'{self.log}.prep').read_text())
+        self.assertEqual(calls[-1]['env']['ST2_VISTA_COMPONENT'], '/nix/store/components/share/st2/providers/st2_vista_component.component.wasm')
+
+    def test_the_setup_s_build_admission_waits_are_its_queue_and_written_to_the_queue_log(self):
+        events = Path(self.tmp.name) / 'queue-events'
+        # The hooks build waits for a slot, then at the admission gate, which prints no end: the build's own output ends it.
+        (self.bin / 'cargo').write_text('#!/usr/bin/env bash\n'
+                                        'if [ "$1" = build ]; then echo "cargo: waiting in order for a host build slot (all 6 busy)" >&2; sleep 1.1\n'
+                                        '  echo "cargo: got build slot 2 and a heavy slot" >&2\n'
+                                        '  echo "build-admission: cargo:build waits to start: 2 build(s) ahead (2 ahead, waited 0 s)" >&2; sleep 1.1\n'
+                                        '  echo "build-admission: cargo:build waits to start: ramp (0 ahead, waited 60 s)" >&2; sleep 1.1\n'
+                                        '  echo "    Finished dev profile" >&2; sleep 1.1; fi\n' + RECORD.split('\n', 1)[1])
+        done, _ = self.run_local('mail-redelivery-canaries', CI_LOCAL_QUEUE_LOG=str(events))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        row, = [line for line in done.stdout.splitlines() if line.startswith('ci-local:   setup')]
+        waits, seconds = re.search(r'queue: (\d+) waits, (\d+)s$', row).groups()
+        self.assertEqual(waits, '2')
+        # The two waits, not the second after Finished: that ran.
+        self.assertGreaterEqual(int(seconds), 3)
+        self.assertLessEqual(int(seconds), int(re.search(r'(\d+)s +queue', row).group(1)) - 1)
+        self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] setup: waiting for build admission', done.stdout)), 1)
+        self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] setup: admitted', done.stdout)), 1)
+        lines = [line.split(' ') for line in events.read_text().splitlines()]
+        self.assertEqual([(kind, stage) for kind, _, stage in lines], [('wait', 'setup'), ('slot', 'setup'), ('wait', 'setup'), ('slot', 'setup')])
+        at = [int(when) for _, when, _ in lines]
+        self.assertGreaterEqual(at[3] - at[2], 2)  # the admission wait lasted its two seconds
 
     def test_a_failed_hook_install_runs_no_stage(self):
         (self.work / 'scripts/ci-install-built-hooks').write_text('exit 9\n')

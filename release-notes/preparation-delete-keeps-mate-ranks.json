@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Deleting a claim no longer rebuilds the resource preparation of every subject in its batch: only a batch-mate whose rank can move (no stored position and no raw record, on a proof copy) is rebuilt",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "changed", "detail": "The trigger preparation_claims_dirty_DELETE is dropped at open and replaced by preparation_claims_dirty_delete_ranked, which marks a batch-mate's subject dirty only when the mate falls back to the arrival count. No table change."},
+  "rules": {"status": "none", "detail": "No rule change. Preparation answers are unchanged: stored positions (claim_positions_sibling_delete_v1) already keep every mate's rank across a delete."},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change. An older binary opening the store adds the broader trigger back; both then run, which only marks more subjects dirty, and the next open of this build drops it again."},
+  "downtime": {"status": "none", "detail": "None. One DROP TRIGGER and one CREATE TRIGGER at open."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build: its open recreates the broader trigger."}
+}

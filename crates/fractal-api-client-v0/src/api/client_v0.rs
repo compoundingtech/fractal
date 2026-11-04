@@ -23,6 +23,7 @@ use crate::SeatsStoreCore;
 use crate::EvidenceStore;
 use crate::PublishedViewsStore;
 use super::*;
+use crate::HarnessQuestionsStore;
 use crate::model::DesiredSubject;
 use axum::http::HeaderMap;
 use axum::http::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
@@ -40,6 +41,7 @@ pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
 pub mod harness_inventory;
+pub mod harness_questions;
 pub mod inventory;
 pub mod raw_terminal;
 pub mod private_notes;
@@ -80,6 +82,8 @@ mod stream_start_tests;
 mod conversation_delivery_tests;
 #[cfg(test)]
 mod conversation_participants_tests;
+#[cfg(test)]
+mod stream_timeline_tests;
 
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
@@ -88,6 +92,10 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route(
             "/v1/client/arrangements/{person_name}/{uuid}",
             get(arrangements::get),
+        )
+        .route(
+            "/v1/client/arrangements/{person_name}/{uuid}/memberships",
+            get(arrangements::memberships),
         )
         .route("/v1/client/glasses", get(glasses_list))
         .route(
@@ -126,6 +134,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/agent-queues/{*id}", get(agent_queue))
         .route("/v1/client/status-history/{*id}", get(status_history))
         .route("/v1/client/harness-inventory/{*id}", get(harness_inventory::read))
+        .route("/v1/client/harness-questions", get(harness_questions::list))
+        .route("/v1/client/harness-questions/{*id}", get(harness_questions::get))
         .route("/v1/client/lanes", get(lanes))
         .route("/v1/client/lanes/{*id}", get(lane_detail))
         .route(
@@ -515,10 +525,10 @@ async fn collection_items_with_windows(
     request: &CollectionSubscribe,
     read_permit: tokio::sync::OwnedSemaphorePermit,
     windows: Option<Arc<collection_windows::Windows>>,
-) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError> {
+) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
     if !matches!(
         request.collection.as_str(),
-        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary"
+        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships" | "summary"
             | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
     ) {
         return Err(validation("unknown collection subscription"));
@@ -532,10 +542,13 @@ async fn collection_items_with_windows(
     if request.status.is_some() && request.collection != "agents" {
         return Err(validation("status filters are supported for agents only"));
     }
-    if request.subject.is_some() && request.collection != "arrangements" {
+    if request.subject.is_some() && !matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") {
         return Err(validation(
-            "subject filters are supported for arrangements only",
+            "subject filters are supported for arrangements and ordered memberships only",
         ));
+    }
+    if request.collection == "ordered-memberships" && request.subject.is_none() {
+        return Err(validation("ordered memberships require an arrangement subject"));
     }
     validate_agent_selector(&request.collection, request.agent.as_deref())?;
     let limit = request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS);
@@ -545,13 +558,13 @@ async fn collection_items_with_windows(
     if request.collection == "glasses" && (request.person.is_some() || request.actor.is_some()) {
         return Err(validation("glasses select the session person"));
     }
-    if request.collection == "arrangements" && request.actor.is_some() {
+    if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") && request.actor.is_some() {
         return Err(validation("arrangements select an explicit person, not an actor"));
     }
     let mut gates = CollectionReadAdmission::new(read_permit);
     // Arrangement ownership and paired-window authority both read the store. Admit this
     // preliminary physical read with the same bare waits as the eventual window query.
-    let current = if request.collection == "arrangements"
+    let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships")
         || (windows.is_some() && session.transport != "unix")
     {
         Some(if state.store.readers.has_request_reader() {
@@ -581,7 +594,7 @@ async fn collection_items_with_windows(
     let current = current.as_ref().unwrap_or(session);
     let person = if request.collection == "glasses" {
         Some(glass_person(session, false)?)
-    } else if request.collection == "arrangements" {
+    } else if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") {
         let person = arrangements::person(current, request.person.as_deref(), false)?;
         if let Some(subject) = &request.subject {
             let owner = fractal_schema::arrangements::owner(subject)
@@ -609,7 +622,7 @@ async fn collection_items_with_windows(
     let status = request.status.clone();
     let collection = request.collection.clone();
     let custom_forms = session.custom_forms;
-    let arrangement_window = collection == "arrangements";
+    let arrangement_window = matches!(collection.as_str(), "arrangements" | "ordered-memberships");
     let mut admitted = collection != "agents";
     // Attribute the first frame, and any later cold root; never create a per-frame span.
     let traced = matches!(collection.as_str(), "agents" | "summary") && first_frame_current();
@@ -662,7 +675,7 @@ async fn collection_items_with_windows(
                     require_scope(&current, "read.projections")?;
                     let person = match collection.as_str() {
                         "glasses" => Some(glass_person(&current, false)?),
-                        "arrangements" => Some(arrangements::person(
+                        "arrangements" | "ordered-memberships" => Some(arrangements::person(
                             &current,
                             request.person.as_deref(),
                             false,
@@ -843,8 +856,8 @@ async fn collection_items_with_windows(
                 // Inventory invalidation is owner-scoped, independent of truncation and
                 // cached prefix equality. Read its projection counter under this same fence.
                 let owner_revision = if collection == "arrangements" && subject.is_none() {
-                    Some(store.arrangement_inventory_revision(
-                        person.as_deref().expect("explicit arrangement owner"))?)
+                    Some(CollectionRevision::Owner(store.arrangement_inventory_revision(
+                        person.as_deref().expect("explicit arrangement owner"))?))
                 } else {
                     None
                 };
@@ -894,6 +907,12 @@ async fn collection_items_with_windows(
                                 )?
                             }
                         }
+                        "ordered-memberships" => store.ordered_memberships(
+                            subject.as_deref().expect("selected arrangement subject"),
+                            index,
+                            None,
+                            limit.saturating_add(1),
+                        )?,
                         "attention" => match &published_rows {
                             Some(rows) => rows.clone(),
                             None => {
@@ -954,7 +973,20 @@ async fn collection_items_with_windows(
                     items.truncate(projection_limit);
                     Ok((items, has_more, valid_until))
                 };
-                let (mut items, mut has_more) = match windows.as_ref().filter(|_| published.is_none()) {
+                // An ordered-membership window pins its container state in the same snapshot as
+                // its rows; the shared window keeps it with the cached rows.
+                let compute_membership = || {
+                    let (items, has_more, valid_until) = compute()?;
+                    let membership = if collection == "ordered-memberships" {
+                        Some(store.ordered_membership_state(
+                            subject.as_deref().expect("selected arrangement subject"),
+                        )?)
+                    } else {
+                        None
+                    };
+                    Ok((items, has_more, valid_until, membership))
+                };
+                let (mut items, mut has_more, membership) = match windows.as_ref().filter(|_| published.is_none()) {
                     Some(windows) => windows.read(
                         &state,
                         &current,
@@ -965,11 +997,11 @@ async fn collection_items_with_windows(
                             commits: commits.expect("window commit sequence"),
                             prepared,
                         },
-                        compute,
+                        compute_membership,
                     )?,
                     None => {
-                        let (items, has_more, _) = compute()?;
-                        (items, has_more)
+                        let (items, has_more, _, membership) = compute_membership()?;
+                        (items, has_more, membership)
                     }
                 };
                 if matches!(collection.as_str(), "missions" | "attention") {
@@ -981,6 +1013,7 @@ async fn collection_items_with_windows(
                     // beside the others instead of behind them.
                     drop(admission.take());
                     overlay_agent_resources(&store, &mut items, &at)?;
+                    overlay_seat_admission(&state, &mut items, false);
                     if traced {
                         let path = match (status.is_some(), roster_path, folded.get()) {
                             (true, _, _) => "filtered_full",
@@ -996,7 +1029,8 @@ async fn collection_items_with_windows(
                     has_more |= items.len() > limit;
                     items.truncate(limit);
                 }
-                Ok(Ok(Some((snapshot, items, has_more, owner_revision))))
+                let pinned = owner_revision.or(membership.map(CollectionRevision::Membership));
+                Ok(Ok(Some((snapshot, items, has_more, pinned))))
             });
             Ok::<_, anyhow::Error>((result?, read_permit, admission))
             })??;
@@ -1052,6 +1086,7 @@ fn collection_window_label(collection: &str) -> &'static str {
         "work" => "stream collection/work",
         "glasses" => "stream collection/glasses",
         "arrangements" => "stream collection/arrangements",
+        "ordered-memberships" => "stream collection/ordered-memberships",
         "summary" => "stream collection/summary",
         "clients" => "stream collection/clients",
         "usage" => "stream collection/usage",
@@ -1137,11 +1172,11 @@ fn sync_said(sync: &Value) -> (String, Vec<String>) {
 async fn deliver_collection(
     socket: &mut WebSocket,
     subscription: &mut CollectionSubscription,
-    read: Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>,
+    read: Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>,
     sync: Option<(Value, (bool, bool))>,
 ) -> Refreshed {
     let request = &subscription.request;
-    let (snapshot, mut items, has_more, owner_revision) = match read {
+    let (snapshot, mut items, has_more, pinned) = match read {
         Ok(read) => read,
         Err(error) => {
             let retryable = client_error_retryable(error.status, Some(&error.code));
@@ -1189,6 +1224,7 @@ async fn deliver_collection(
     let sync_changed = said.is_some() && said != subscription.sync;
     let sent = if !subscription.delivered {
         let mut frame = json!({"kind":"snapshot", "id":request.id, "collection":request.collection, "snapshot":snapshot, "items":items, "order":order, "has_more":has_more});
+        add_membership(&mut frame, request, pinned);
         if let Some((sync, _)) = &sync { frame["sync"] = sync.clone(); }
         send_collection(socket, frame).await
     } else {
@@ -1207,12 +1243,13 @@ async fn deliver_collection(
             && removes.is_empty()
             && order == subscription.order
             && has_more == subscription.has_more
-            && owner_revision == subscription.owner_revision
+            && pinned == subscription.pinned
             && !sync_changed
         {
             true
         } else {
             let mut frame = json!({"kind":"changes", "id":request.id, "collection":request.collection, "snapshot":snapshot, "upserts":upserts, "removes":removes, "order":order, "has_more":has_more});
+            add_membership(&mut frame, request, pinned);
             if let Some((sync, _)) = sync.as_ref().filter(|_| sync_changed) { frame["sync"] = sync.clone(); }
             send_collection(socket, frame).await
         }
@@ -1231,12 +1268,19 @@ async fn deliver_collection(
     subscription.previous = Arc::new(current);
     subscription.order = order;
     subscription.has_more = has_more;
-    subscription.owner_revision = owner_revision;
+    subscription.pinned = pinned;
     Refreshed::Current
 }
 
+/// The container state an ordered-membership frame carries beside its rows.
+fn add_membership(frame: &mut Value, request: &CollectionSubscribe, pinned: Option<CollectionRevision>) {
+    if let Some(CollectionRevision::Membership(membership)) = pinned {
+        frame["membership"] = json!({"container":request.subject, "live_count":membership.live_count, "changed_index":membership.changed_index});
+    }
+}
+
 enum CollectionRead {
-    Legacy(Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>),
+    Legacy(Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>),
     Ivm(Box<Result<collection_ivm::Candidate, ApiError>>),
     Revisioned(Result<agents_publication_stream::Delivery, ApiError>),
 }
@@ -1341,6 +1385,7 @@ async fn open_terminal_subscription(
 struct ResolvedConversation {
     snapshot: ClientSnapshot,
     local_position: u64,
+    stream_position: u64,
     managed: Option<super::ManagedSessionOwner>,
     routing_owner: Option<super::ManagedSessionOwner>,
 }
@@ -1349,6 +1394,7 @@ fn resolve_conversation(
     state: &AppState, target: &str,
 ) -> Result<(String, ResolvedConversation), ApiError> {
     let local_position = local_latest_position(state)?;
+    let stream_position = stream_latest_position(state)?;
     let snapshot = new_client_snapshot(state);
     let (session_id, managed) = if target.starts_with("agent/") {
         let owner = state.store.conversation_owner_at(target, snapshot.store_index)
@@ -1370,7 +1416,7 @@ fn resolve_conversation(
     } else {
         managed.clone()
     };
-    Ok((session_id, ResolvedConversation { snapshot, local_position, managed, routing_owner }))
+    Ok((session_id, ResolvedConversation { snapshot, local_position, stream_position, managed, routing_owner }))
 }
 
 /// Where a conversation is read: here, or on the host that owns its session.
@@ -1423,6 +1469,40 @@ async fn open_conversation_subscription(
     })
     .await
     .map_err(ApiError::internal)?
+}
+
+/// Whether `call` waits in `seat`'s conversation on this member: among its newest page, made
+/// with no result. `None` when the seat's session is owned by another member: an answer then
+/// waits on no live read of it.
+async fn prompt_call_waits(
+    state: &AppState,
+    session: &ClientSession,
+    seat: &str,
+    call: &str,
+) -> Result<Option<bool>, ApiError> {
+    let (reader, target) = (state.clone(), seat.to_owned());
+    let (session_id, elsewhere) = super::read_deadline::store_read(&state.store, move || {
+        let (session_id, resolved) = resolve_conversation(&reader, &target)?;
+        let elsewhere = resolved
+            .routing_owner
+            .as_ref()
+            .and_then(|(_, _, origin)| origin.as_deref())
+            .is_some_and(|origin| origin != reader.store.origin());
+        Ok::<_, ApiError>((session_id, elsewhere))
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    if elsewhere {
+        return Ok(None);
+    }
+    // The entries as the conversation keeps them, whatever this session's own reads negotiate.
+    let mut entries = session.clone();
+    entries.conversation_blocks = false;
+    let page = conversation_page(state, &entries, &session_id, None, CLIENT_MAX_PAGE_ITEMS).await?;
+    Ok(Some(crate::api::prompt_card::call_waits_among(
+        page["items"].as_array().map_or(&[][..], Vec::as_slice),
+        call,
+    )))
 }
 
 /// A conversation's newest page, read here or relayed from its owner. The limit is the
@@ -1562,14 +1642,15 @@ fn conversation_open_local_marked(
         Some(resolved) => resolved,
         None => resolve_conversation(state, session_id)?.1,
     };
-    let ResolvedConversation { snapshot, local_position, managed, .. } = resolved;
+    let ResolvedConversation { snapshot, local_position, stream_position, managed, .. } = resolved;
     #[cfg(test)]
     AFTER_CONVERSATION_SNAPSHOT.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
     });
     let source = conversation_blocks::source(state, session_id, managed.as_ref());
     let mark = ConversationMark::from_resolved(
-        session_id, snapshot.store_index, local_position, managed.as_ref(), source.as_ref().ok(),
+        session_id, snapshot.store_index, local_position, stream_position, managed.as_ref(),
+        source.as_ref().ok(),
     );
     #[cfg(test)]
     BEFORE_CONVERSATION_PAGE.with(|pause| {
@@ -1595,6 +1676,7 @@ fn conversation_open_local_marked(
     let cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
         local_position,
+        stream_position,
         native_sequence: native_latest_sequence(&page).max(suppressed_sequence)
             .max(extent.native_latest()),
         source_generation,
@@ -1952,7 +2034,15 @@ async fn collection_stream_socket(
         move |state, session, request, permit| {
             let windows = windows.clone();
             async move {
-                collection_items_with_windows(&state, &session, &request, permit, windows).await
+                let mut read =
+                    collection_items_with_windows(&state, &session, &request, permit, windows).await?;
+                // After the window cache: a seat's host's answer is never part of a revision.
+                if request.collection == "attention" {
+                    fractal_api_core::api::relay_attention_target_states(&state, &mut read.1)
+                        .await
+                        .map_err(ApiError::internal)?;
+                }
+                Ok(read)
             }
         },
     )
@@ -1972,7 +2062,7 @@ async fn collection_stream_socket_with_context<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>> + Send,
 {
     collection_stream_socket_with_admission(
         socket, state, session, presence, (sources, upgrade), read, open_conversation_subscription,
@@ -1989,7 +2079,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     admit: A,
 ) where
     F: Fn(AppState, ClientSession, CollectionSubscribe, tokio::sync::OwnedSemaphorePermit) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>> + Send,
     A: Fn(AppState, ClientSession, CollectionSubscribe, ConversationAdmissionPermits) -> Admission + Clone + Send + 'static,
     Admission: Future<Output = Result<(String, Option<String>, Option<ResolvedConversation>), ApiError>> + Send + 'static,
 {
@@ -2203,7 +2293,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         let ivm = if request.agents_publication_version.is_none() {
                             sources.as_ref().and_then(|sources| sources.adapter(&request.collection))
                         } else { None };
-                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm, cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, owner_revision: None, sync: None, sync_flags: (false, false), request });
+                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm, cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, pinned: None, sync: None, sync_flags: (false, false), request });
 
                     }
                     next = futures_util::FutureExt::now_or_never(socket.recv());
@@ -2366,9 +2456,11 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     let claims = state.store.claims_page(None, None, weighed, index.checked_add(1), false, 10_000).map(|page| page.claims);
                     let glasses_changed = subscriptions.values().any(|s| s.request.collection == "glasses") && state.store.glasses_changed(weighed, index).unwrap_or(true);
                     let arrangements_changed = subscriptions.values().any(|s| s.request.collection == "arrangements") && state.store.arrangements_changed(weighed, index).unwrap_or(true);
+                    let memberships_changed = subscriptions.values().any(|s| s.request.collection == "ordered-memberships") && state.store.ordered_memberships_changed(weighed, index).unwrap_or(true);
                     affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) && (
                         (glasses_changed && s.request.collection == "glasses")
                         || (arrangements_changed && s.request.collection == "arrangements")
+                        || (memberships_changed && s.request.collection == "ordered-memberships")
                         || match &claims {
                             Err(_) => true,
                             Ok(claims) => claims.len() >= 10_000
@@ -3775,6 +3867,16 @@ fn operation_checks(
     Ok(Some(checks))
 }
 
+/// A doctor check's severity and state as an operation. A check that timed out, or carries a
+/// status this build does not know, could not say the daemon is healthy: it shows as degraded.
+fn operation_severity_and_state(status: &str) -> (&'static str, &'static str) {
+    match status {
+        "pass" | "info" => ("info", "healthy"),
+        "fail" => ("critical", "failed"),
+        _ => ("warning", "degraded"),
+    }
+}
+
 fn operation_resources(state: &AppState, at: &str) -> Result<Vec<Value>, ApiError> {
     let Some(checks) = operation_checks(state)? else {
         return Ok(vec![json!({
@@ -3800,8 +3902,8 @@ fn operation_resources(state: &AppState, at: &str) -> Result<Vec<Value>, ApiErro
                 "revision": format!("{}:{}", check.name, check.status),
                 "updated_at": at,
                 "component": match check.name.as_str() { "replication" => "transport", "runtime-drift" | "runtime-ownership" | "pty-runtime" | "driver-readiness" => "runtime", _ => "daemon" },
-                "severity": match check.status.as_str() { "fail" => "critical", "warn" => "warning", _ => "info" },
-                "state": match check.status.as_str() { "fail" => "failed", "warn" => "degraded", _ => "healthy" },
+                "severity": operation_severity_and_state(&check.status).0,
+                "state": operation_severity_and_state(&check.status).1,
                 "summary": check.message,
                 "targets": [],
                 "operational": { "layer": "current", "actionable": false, "reasons": ["diagnostic"] }
@@ -4157,7 +4259,7 @@ pub async fn mission_detail(
     let store = state.store.clone();
     let snapshot_index = snapshot.store_index;
     let selected = client_detail_id("mission", &id);
-    let items = super::blocking_store(move || {
+    let mut items = super::blocking_store(move || {
         let mut items = mission_resources(&store, snapshot_index, true, Some(&selected))?;
         // The presentation the missions list publishes for this mission; a read computes none.
         if let Some(published) = store.published_missions_list().newest()
@@ -4171,6 +4273,10 @@ pub async fn mission_detail(
         Ok(items)
     })
     .await?;
+    // A seat whose host keeps its receipts acknowledges a step's wake on that host.
+    fractal_api_core::api::message_reads::relay_client_wakes(&state, &mut items)
+        .await
+        .map_err(ApiError::internal)?;
     client_detail(items, "mission", &id)
 }
 
@@ -4438,19 +4544,22 @@ pub struct ConversationQuery {
 struct ConversationPosition {
     store_index: u64,
     local_position: u64,
+    /// How far into the messages stream the conversation was read, in shard indexes.
+    stream_position: u64,
     native_sequence: u64,
     source_generation: u64,
 }
 
 fn conversation_cursor(state: &AppState, session_id: &str, position: ConversationPosition) -> String {
     format!(
-        "conversation-cursor/{}/{}/{}.{}.{}.{}",
+        "conversation-cursor/{}/{}/{}.{}.{}.{}.{}",
         state.node,
         session_id.trim_start_matches("session/"),
         position.store_index,
         position.local_position,
         position.native_sequence,
-        position.source_generation
+        position.source_generation,
+        position.stream_position,
     )
 }
 
@@ -4468,12 +4577,17 @@ fn conversation_position(
         .strip_prefix(&prefix)
         .and_then(|part| {
             let mut parts = part.split('.');
-            let result = ConversationPosition {
+            let mut result = ConversationPosition {
                 store_index: parts.next()?.parse().ok()?,
                 local_position: parts.next()?.parse().ok()?,
                 native_sequence: parts.next()?.parse().ok()?,
                 source_generation: parts.next()?.parse().ok()?,
+                stream_position: 0,
             };
+            // A cursor from before the stream has no stream part: it has read none of the stream.
+            if let Some(stream) = parts.next() {
+                result.stream_position = stream.parse().ok()?;
+            }
             parts.next().is_none().then_some(result)
         })
         .ok_or_else(|| ApiError {
@@ -4721,6 +4835,8 @@ fn conversation_read_now_unbounded(
     session_id: &str,
     after: Option<&str>,
 ) -> Result<Value, ApiError> {
+    // Read before the page, so the next cursor never passes a stream item the page missed.
+    let stream_latest = stream_latest_position(state)?;
     let snapshot = new_client_snapshot(state);
     let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
         .map_err(ApiError::internal)?;
@@ -4746,6 +4862,7 @@ fn conversation_read_now_unbounded(
     if let Some(position) = position {
         if position.store_index > snapshot.store_index
             || position.local_position > local_latest
+            || position.stream_position > stream_latest
             || position.native_sequence > native_latest
         {
             return Err(conversation_replay_gap(
@@ -4770,7 +4887,7 @@ fn conversation_read_now_unbounded(
     let mut message_indexes = BTreeSet::new();
     let mut retention_changed = false;
     let mut scan_remaining = CONVERSATION_REPLAY_SCAN_LIMIT;
-    if let Some(ConversationPosition { store_index, local_position, .. }) = position {
+    if let Some(ConversationPosition { store_index, local_position, stream_position, .. }) = position {
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
@@ -4809,13 +4926,25 @@ fn conversation_read_now_unbounded(
             }
         }
         for claim in owner.as_deref().map(|owner| {
-            state.store.conversation_messages_at(owner, snapshot.store_index.checked_add(1), store_index)
+            state.store.conversation_messages_at(
+                owner, snapshot.store_index.checked_add(1), store_index,
+                Some(crate::store::messages_shard::stream_reads::StreamAfter::Position(stream_position)),
+            )
         }).transpose().map_err(ApiError::internal)?.unwrap_or_default() {
+            // A stream item admitted after this read's stream position is the next read's.
+            if claim.store_index.checked_sub(crate::store::messages_shard::STREAM_INDEX_BASE)
+                .is_some_and(|index| index > stream_latest)
+            {
+                continue;
+            }
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             if fields.get("session_id").and_then(Value::as_str)
                 .is_none_or(|message_session| message_session == session_id) {
                 changed_indexes.insert(claim.store_index);
-                message_indexes.insert(claim.store_index);
+                // The pair's sequences: a stream item's follow the graph index it arrived at.
+                message_indexes.insert(
+                    crate::store::messages_shard::stream_reads::timeline_base(&state.store, &claim).map_err(ApiError::internal)?,
+                );
                 // A stored timeline names a message by its claim; a native page by its digest.
                 changed_ids.extend(stored_timeline_claim_entry_ids(session_id, &claim));
                 let digest = hex::encode(Sha256::digest(claim.id.as_bytes()));
@@ -4892,11 +5021,8 @@ fn conversation_read_now_unbounded(
         .cloned()
         .collect::<Vec<_>>();
     let changed = |item: &&Value| item["id"].as_str().is_some_and(|id| changed_ids.contains(id));
-    let missing_message_pair = message_indexes.iter().any(|index| {
-        ![
-            index.saturating_mul(4),
-            index.saturating_mul(4).saturating_add(1),
-        ]
+    let missing_message_pair = message_indexes.iter().any(|base| {
+        ![*base, base.saturating_add(1)]
         .iter()
         .all(|sequence| {
             items
@@ -4929,6 +5055,7 @@ fn conversation_read_now_unbounded(
     let next_cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
         local_position: local_latest,
+        stream_position: stream_latest,
         native_sequence: native_latest,
         source_generation,
     });
@@ -4951,6 +5078,7 @@ struct ConversationMark {
     resolved_at: std::time::Instant,
     store_index: u64,
     local_position: u64,
+    stream_position: u64,
     transcript_seen: Option<(u64, std::time::SystemTime)>,
 }
 
@@ -5014,12 +5142,12 @@ impl ConversationMark {
         let source = conversation_blocks::source(state, session_id, resolved.managed.as_ref());
         Ok(Self::from_resolved(
             session_id, resolved.snapshot.store_index, resolved.local_position,
-            resolved.managed.as_ref(), source.as_ref().ok(),
+            resolved.stream_position, resolved.managed.as_ref(), source.as_ref().ok(),
         ))
     }
 
     fn from_resolved(
-        session_id: &str, store_index: u64, local_position: u64,
+        session_id: &str, store_index: u64, local_position: u64, stream_position: u64,
         managed: Option<&super::ManagedSessionOwner>,
         source: Option<&crate::external_sessions::ExternalSession>,
     ) -> Self {
@@ -5036,6 +5164,7 @@ impl ConversationMark {
             owner: managed.map(|(owner, _, _)| owner.clone()),
             store_index,
             local_position,
+            stream_position,
         }
     }
 
@@ -5048,6 +5177,7 @@ impl ConversationMark {
         super::read_deadline::query(&state.store, "/v1/client/conversations/{id}/changes", || {
             self.store_index = state.store.index().map_err(ApiError::internal)?;
             self.local_position = local_latest_position(state)?;
+            self.stream_position = stream_latest_position(state)?;
             Ok(())
         })?;
         self.transcript_seen = transcript_seen(self.transcript.as_deref());
@@ -5064,13 +5194,16 @@ impl ConversationMark {
     fn changed_unbounded(&mut self, state: &AppState) -> Result<bool, ApiError> {
         let index = state.store.index().map_err(ApiError::internal)?;
         let local = local_latest_position(state)?;
+        let stream = stream_latest_position(state)?;
         let mut changed = self.owner.as_deref().map(|owner| {
             state.store.conversation_changed_at(
                 owner, self.store_index, index, self.local_position, local,
+                (self.stream_position, stream),
             )
         }).transpose().map_err(ApiError::internal)?.unwrap_or(false);
         self.store_index = index;
         self.local_position = local;
+        self.stream_position = stream;
         let seen = transcript_seen(self.transcript.as_deref());
         if seen != self.transcript_seen {
             changed = true;
@@ -5082,6 +5215,12 @@ impl ConversationMark {
 
 fn local_latest_position(state: &AppState) -> Result<u64, ApiError> {
     state.store.conversation_local_position().map_err(ApiError::internal)
+}
+
+/// The newest stream item this member has admitted: a conversation's position in the messages
+/// stream, beside its graph and local positions.
+fn stream_latest_position(state: &AppState) -> Result<u64, ApiError> {
+    crate::store::messages_shard::stream_reads::conversation_position(&state.store).map_err(ApiError::internal)
 }
 
 async fn conversation_changes_local(
@@ -5117,12 +5256,13 @@ async fn conversation_changes_local_marked(
     let mut quiet = None;
     if let Some(cursor) = after
         && let Some(seen) = issued_transcript(cursor)
-        && let Ok(ConversationPosition { store_index, local_position, .. }) =
+        && let Ok(ConversationPosition { store_index, local_position, stream_position, .. }) =
             conversation_position(state, session_id, cursor)
     {
         let mut since = ConversationMark {
             store_index,
             local_position,
+            stream_position,
             transcript_seen: seen,
             ..mark.clone()
         };
@@ -5165,6 +5305,7 @@ async fn conversation_changes_local_marked(
                     let checked = ConversationPosition {
                         store_index: mark.store_index,
                         local_position: mark.local_position,
+                        stream_position: mark.stream_position,
                         ..conversation_position(state, session_id, cursor)?
                     };
                     let next = conversation_cursor(state, session_id, checked);
@@ -7330,17 +7471,33 @@ async fn import_external_session_action(
     Ok(vec![external.id, import.subject])
 }
 
+fn is_identity_selector(key: &str) -> bool {
+    matches!(key, "actor" | "credential" | "fleet_secret" | "shared_secret")
+}
+
 fn contains_identity_selector(value: &Value) -> bool {
     match value {
         Value::Object(object) => object.iter().any(|(key, value)| {
-            matches!(
-                key.as_str(),
-                "actor" | "credential" | "fleet_secret" | "shared_secret"
-            ) || contains_identity_selector(value)
+            is_identity_selector(key) || contains_identity_selector(value)
         }),
         Value::Array(values) => values.iter().any(contains_identity_selector),
         _ => false,
     }
+}
+
+fn action_parameters_select_identity(request: &ActionRequest) -> bool {
+    if request.action_type == "harness.answer"
+        && let Some(parameters) = request.parameters.as_object()
+    {
+        return parameters.iter().any(|(key, value)| {
+            if key == "answers" && let Some(answers) = value.as_object() {
+                // Canonical question ids are data keys, never authority selectors.
+                return answers.values().any(contains_identity_selector);
+            }
+            is_identity_selector(key) || contains_identity_selector(value)
+        });
+    }
+    contains_identity_selector(&request.parameters)
 }
 
 fn validate_work_fence(state: &AppState, target: &str, fence: &Fence) -> Result<(), ApiError> {
@@ -7504,6 +7661,10 @@ fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
             crate::external_sessions::find_fresh(state.native_session_home.as_deref(), subject)
                 .map_err(import_lookup_error)?
                 .map(|session| session.revision)
+        } else if subject.starts_with("harness-question/") {
+            state.store.harness_question(subject, client_now_ms())
+                .map_err(ApiError::internal)?
+                .map(|question| question.revision)
         } else {
             // The newest claim's id, by a seek: reading and sorting every claim of the subject
             // was 0.4 s for a busy seat (4.4 s cold) on every fenced action.
@@ -7539,6 +7700,16 @@ fn creation_string(value: &str, field: &str, max: usize) -> Result<(), ApiError>
     Ok(())
 }
 
+fn creation_tag<'a>(
+    tags: &'a BTreeMap<String, String>,
+    legacy: &str,
+    current: &str,
+) -> Option<&'a String> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    tags.get(legacy).or_else(|| tags.get(current))
+    // LIVE-MIGRATION END
+}
+
 fn existing_creation(
     state: &AppState,
     session: &ClientSession,
@@ -7550,9 +7721,18 @@ fn existing_creation(
     ));
     for desired in state.store.desired_subjects().map_err(ApiError::internal)? {
         if let Some(member) = &desired.member
-            && member.tags.get("st3.client.create-key") == Some(&key)
+            && creation_tag(
+                &member.tags,
+                "st3.client.create-key",
+                "fractal.client.create-key",
+            ) == Some(&key)
         {
-            if member.tags.get("st3.client.create-parameters") != Some(&digest) {
+            if creation_tag(
+                &member.tags,
+                "st3.client.create-parameters",
+                "fractal.client.create-parameters",
+            ) != Some(&digest)
+            {
                 return Err(ApiError {
                     status: StatusCode::CONFLICT,
                     code: "idempotency-conflict".into(),
@@ -7618,11 +7798,13 @@ async fn publish_creation(
         .into_iter()
         .find(|member| member.subject == subject)
     {
-        if existing
-            .member
-            .as_ref()
-            .and_then(|member| member.tags.get("st3.client.create-key"))
-            == Some(&key)
+        if existing.member.as_ref().and_then(|member| {
+            creation_tag(
+                &member.tags,
+                "st3.client.create-key",
+                "fractal.client.create-key",
+            )
+        }) == Some(&key)
             && existing.desired
                 == intent
                     .subjects
@@ -7858,15 +8040,39 @@ async fn dispatch_action(
                         .map_err(|_| validation("invalid delegation proof"))
                 })
                 .transpose()?;
+            let (seat, episode, answer) = (
+                parameter_string(p, "target_id")?,
+                parameter_string(p, "episode")?,
+                parameter_string(p, "answer")?,
+            );
+            // A card may have offered allow from a read before its call's result. When the seat
+            // runs on this member, whatever lets the named call through goes on only while its
+            // conversation here shows that call waiting: not once it has its result, and not when
+            // the conversation cannot be read. When it runs elsewhere the answer is recorded here
+            // with no live read of another member: the seat's hook releases only the answer to the
+            // very observation it published, while its harness is blocked on that call, so an
+            // answer to a prompt the seat has moved past releases nothing. Only the seat's person
+            // is told: anyone else is refused by the store as before.
+            let person = state.store.agent_person(&seat).map_err(ApiError::internal)?;
+            if delegation.is_none() && answer != "deny" && person.as_deref() == Some(authority_actor.as_str()) {
+                let call = state.store.native_prompt_call(&seat, &episode).map_err(ApiError::internal)?;
+                if let Some(call) = call {
+                    let refused = match prompt_call_waits(state, session, &seat, &call).await {
+                        Ok(None | Some(true)) => None,
+                        Ok(Some(false)) => Some("is no longer waiting: the call it asks about already has a result, or Fractal does not see it waiting in the seat's conversation".to_owned()),
+                        Err(error) => Some(format!("can only be answered in the seat's terminal: {}", error.message)),
+                    };
+                    if let Some(refused) = refused {
+                        return Err(ApiError::bad(St3Error::new(
+                            "stale-fence",
+                            format!("{}{refused}", fractal_client::PROMPT_REFUSAL_PREFIX),
+                        )));
+                    }
+                }
+            }
             let answered = state
                 .store
-                .respond_native_prompt(
-                    &parameter_string(p, "target_id")?,
-                    &parameter_string(p, "episode")?,
-                    &parameter_string(p, "answer")?,
-                    authority_actor,
-                    delegation.as_ref(),
-                )
+                .respond_native_prompt(&seat, &episode, &answer, authority_actor, delegation.as_ref())
                 .map_err(ApiError::bad)?;
             signal_changed(state);
             Ok(vec![answered.subject])
@@ -8468,19 +8674,18 @@ async fn dispatch_action(
                 .runtime_desired_revision
                 .as_deref()
                 .ok_or_else(|| validation("agent.retire needs fence.runtime_desired_revision"))?;
-            state
-                .store
-                .retire_agent_with_successor(
-                    &agent,
-                    authority_actor,
-                    &parameters.reason,
-                    token,
-                    request.fence.runtime_incarnation.as_deref(),
-                    &request.idempotency_key,
-                    &state.configured_peers,
-                    parameters.successor.as_deref(),
-                )
-                .map_err(ApiError::bad)?;
+            state.store.retire_agent_with_successor(
+                &agent, authority_actor, &parameters.reason, token,
+                request.fence.runtime_incarnation.as_deref(),
+                &request.idempotency_key, &state.configured_peers,
+                parameters.successor.as_deref(), parameters.expect_revision.as_deref(),
+            ).map_err(|error| {
+                if error.code == "idempotency-mismatch" {
+                    action_idempotency_conflict()
+                } else {
+                    ApiError::bad(error)
+                }
+            })?;
             signal_changed(state);
             Ok(vec![agent])
         }
@@ -8905,6 +9110,11 @@ fn action_request_digest(request: &ActionRequest) -> Result<String, ApiError> {
         .as_object_mut()
         .expect("an action is an object")
         .remove("fence");
+    if request.action_type == "agent.retire"
+        && let Some(incarnation) = request.fence.runtime_incarnation.as_deref()
+    {
+        content["fence"] = json!({"runtime_incarnation": incarnation});
+    }
     if request.action_type == "private-notes.write" {
         // The shared receipt reserves the cross-action key, not the private
         // mutation. Content matching and recovery stay in the owner-local ledger.
@@ -8917,6 +9127,64 @@ fn action_request_digest(request: &ActionRequest) -> Result<String, ApiError> {
     )))
 }
 
+/// Inspect both retained receipt families under the shared actor/key gate.
+/// Harness receipts remain solely in indefinitely retained compact resolutions.
+fn retained_action_receipt(
+    state: &AppState,
+    session: &ClientSession,
+    request: &ActionRequest,
+    request_digest: &str,
+    actor_key: &str,
+) -> Result<(String, Option<ClaimRecord>), ApiError> {
+    let receipt_digest = hex::encode(Sha256::digest(
+        format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
+    ));
+    let subject = format!("custom/client/action-{}", &receipt_digest[..32]);
+    // Legacy custom claims never prove server authorship, including null-actor ones.
+    if !state.store.claims_for(&subject, Some("custom.client.action-result"))
+        .map_err(ApiError::internal)?.is_empty()
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "legacy-action-receipt-untrusted".into(),
+            message: "this idempotency key has an unverifiable legacy receipt; inspect the original outcome before choosing a new key".into(),
+            details: Box::default(),
+        });
+    }
+    let receipt = state.store.observations_for(&subject, "client.action-result")
+        .map_err(ApiError::internal)?.into_iter()
+        .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none());
+    if receipt.as_ref().is_some_and(|receipt| {
+        receipt.body.pointer("/fields/request_digest").and_then(Value::as_str) != Some(request_digest)
+    }) {
+        return Err(action_idempotency_conflict());
+    }
+    if state.store.harness_question_receipt_conflicts(actor_key, request_digest)
+        .map_err(ApiError::internal)?
+    {
+        return Err(action_idempotency_conflict());
+    }
+    Ok((subject, receipt))
+}
+
+fn trusted_harness_receipt<'a>(
+    state: &AppState,
+    question: &'a harness_questions::HarnessQuestion,
+) -> Option<&'a fractal_schema::harness_questions::Receipt> {
+    let resolution = question.resolution.as_ref()?;
+    (resolution.origin == state.store.origin() && resolution.actor.is_none())
+        .then_some(resolution.receipt.as_ref()).flatten()
+}
+
+fn action_idempotency_conflict() -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "idempotency-conflict".into(),
+        message: "the idempotency key was already used for a different action".into(),
+        details: Box::default(),
+    }
+}
+
 fn validate_action_admission(
     session: &ClientSession,
     request: &ActionRequest,
@@ -8924,12 +9192,15 @@ fn validate_action_admission(
     if !super::wire_names::api_version(&request.api_version)
         || !request.id.starts_with("action/")
         || !(16..=256).contains(&request.idempotency_key.len())
+        || (request.action_type == "harness.answer"
+            && (request.id.len() > 256 || request.id == "action/"
+                || request.id.chars().any(char::is_whitespace)))
     {
         return Err(validation(
             "the action version, ID, or idempotency key is invalid",
         ));
     }
-    if contains_identity_selector(&request.parameters) {
+    if action_parameters_select_identity(request) {
         return Err(validation(
             "client actions cannot select an actor, credential, or fleet secret",
         ));
@@ -9070,6 +9341,9 @@ async fn action_inner(
     Json(mut request): Json<ActionRequest>,
     reserved_gate: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Json<Value>, ApiError> {
+    if request.action_type == "harness.answer" {
+        return harness_questions::answer(&state, &session, &request).await;
+    }
     // The message-send wrapper validates before reserving its gate and capacity.
     // Other actions retain their original admission order here.
     if reserved_gate.is_none() {
@@ -9087,41 +9361,10 @@ async fn action_inner(
             .map_err(|error| validation(error.to_string()))?;
     }
     let request_digest = action_request_digest(&request)?;
-    let receipt_digest = hex::encode(Sha256::digest(
-        format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
-    ));
-    let receipt_subject = format!("custom/client/action-{}", &receipt_digest[..32]);
-    // The old open custom namespace admitted client receipts with absent/null actors.
-    // Never dispatch an already-used legacy key or infer authorship from those fields.
-    if !state.store.claims_for(&receipt_subject, Some("custom.client.action-result"))
-        .map_err(ApiError::internal)?.is_empty()
-    {
-        return Err(ApiError {
-            status: StatusCode::CONFLICT,
-            code: "legacy-action-receipt-untrusted".into(),
-            message: "this idempotency key has an unverifiable legacy receipt; inspect the original outcome before choosing a new key".into(),
-            details: Box::default(),
-        });
-    }
-    if let Some(receipt) = state
-        .store
-        .observations_for(&receipt_subject, "client.action-result")
-        .map_err(ApiError::internal)?
-        .into_iter()
-        .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
-    {
-        let old_digest = receipt
-            .body
-            .pointer("/fields/request_digest")
-            .and_then(Value::as_str);
-        if old_digest != Some(request_digest.as_str()) {
-            return Err(ApiError {
-                status: StatusCode::CONFLICT,
-                code: "idempotency-conflict".into(),
-                message: "the idempotency key was already used for a different action".into(),
-                details: Box::default(),
-            });
-        }
+    let actor_key = fractal_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key);
+    let (receipt_subject, receipt) =
+        retained_action_receipt(&state, &session, &request, &request_digest, &actor_key)?;
+    if let Some(receipt) = receipt {
         if request.action_type == "private-notes.write" {
             // Never replay a private fence from the graph or bypass current
             // ownership checks and owner-local exact-request recovery.
@@ -9252,7 +9495,7 @@ async fn action_inner(
     }
     let mut reconciled_attachment = None;
     let mut checked_fence = request.fence.clone();
-    if request.action_type == "arrangement.edit" {
+    if matches!(request.action_type.as_str(), "arrangement.edit" | "arrangement.membership.edit") {
         // Layout revisions merge; fenced retirement and graph/launch identity revisions
         // are checked in the writer transaction. Attention episodes and external filesystem
         // sessions retain projected preflight checks (external state is outside SQLite).
@@ -9319,10 +9562,10 @@ async fn action_inner(
     } else {
         None
     };
-    let arrangement_claim = if request.action_type == "arrangement.edit" {
-        Some(arrangements::edit(&state, &session, &request).await?)
-    } else {
-        None
+    let arrangement_claim = match request.action_type.as_str() {
+        "arrangement.edit" => Some(arrangements::edit(&state, &session, &request).await?),
+        "arrangement.membership.edit" => Some(arrangements::edit_memberships(&state, &session, &request).await?),
+        _ => None,
     };
     if request.action_type == "private-notes.write" {
         return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
@@ -9345,7 +9588,7 @@ async fn action_inner(
         result["terminal_attachment"] = attachment;
     }
     if let Some(claim) = arrangement_claim {
-        result["arrangement_revision"] = json!(claim.id);
+        result[if request.action_type == "arrangement.membership.edit" { "membership_revision" } else { "arrangement_revision" }] = json!(claim.id);
     }
     if request.action_type == "agent.create"
         && let Some(subject) = affected.first()
@@ -9579,7 +9822,7 @@ pub async fn collection_items(
     session: &ClientSession,
     request: &CollectionSubscribe,
     read_permit: tokio::sync::OwnedSemaphorePermit,
-) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError> {
+) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
     collection_items_with_windows(state, session, request, read_permit, None).await
 }
 
@@ -9651,7 +9894,7 @@ pub async fn collection_stream_socket_with_reader<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>> + Send,
 {
     collection_stream_socket_with_context(socket, state, session, presence, None, None, read).await;
 }
@@ -9669,7 +9912,7 @@ pub async fn collection_stream_socket_with_sources<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError>> + Send,
 {
     collection_stream_socket_with_context(socket, state, session, presence, sources, None, read).await;
 }
@@ -10186,9 +10429,7 @@ mission "queue-parity" state="ready" {
         socket.send(Message::Text(json!({
             "kind":"subscribe", "id":"held", "collection":"work", "limit":2
         }).to_string().into())).await.unwrap();
-        let snapshot = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await.unwrap().unwrap().unwrap();
-        let snapshot: Value = serde_json::from_str(snapshot.to_text().unwrap()).unwrap();
+        let snapshot = next_data_frame(&mut socket).await;
         assert_eq!(snapshot["kind"], "snapshot");
         assert_eq!(observed.load(Ordering::SeqCst), 1);
 
@@ -10274,12 +10515,7 @@ mission "queue-parity" state="ready" {
                 ))
                 .await
                 .unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["id"], id);
             assert_eq!(frame["kind"], if index < 16 { "snapshot" } else { "error" });
         }
@@ -10292,12 +10528,7 @@ mission "queue-parity" state="ready" {
             ))
             .await
             .unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["id"], "window-0");
         assert_eq!(frame["kind"], "snapshot");
         socket.close(None).await.unwrap();
@@ -10350,12 +10581,7 @@ mission "queue-parity" state="ready" {
                 ))
                 .await
                 .unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["id"], id.as_str());
             assert_eq!(frame["kind"], kind);
             if kind == "error" {
@@ -10706,6 +10932,91 @@ mission "differential" state="ready" {
         exact_agent_selector_stream_fixture(true).await;
     }
 
+    /// The next data frame on a collection socket. The server pings every
+    /// COLLECTION_PING_INTERVAL (8 s), and a test that runs that long under load gets a ping
+    /// between its frames: it is answered and skipped, never read as a frame.
+    pub async fn next_data_frame<S>(socket: &mut S) -> Value
+    where
+        S: futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
+            + futures_util::Sink<tokio_tungstenite::tungstenite::Message>
+            + Unpin,
+        S::Error: std::fmt::Debug,
+    {
+        data_frame_within(socket, Duration::from_secs(5)).await.expect("a data frame within 5 s")
+    }
+
+    /// The data frame that arrives within `wait`, if one does; a keepalive ping is not one.
+    pub async fn data_frame_within<S>(socket: &mut S, wait: Duration) -> Option<Value>
+    where
+        S: futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
+            + futures_util::Sink<tokio_tungstenite::tungstenite::Message>
+            + Unpin,
+        S::Error: std::fmt::Debug,
+    {
+        data_text_within(socket, wait).await.map(|text| serde_json::from_str(&text).unwrap())
+    }
+
+    /// The text of the data frame that arrives within `wait`, for a test that checks its bytes.
+    pub async fn data_text_within<S>(socket: &mut S, wait: Duration) -> Option<String>
+    where
+        S: futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
+            + futures_util::Sink<tokio_tungstenite::tungstenite::Message>
+            + Unpin,
+        S::Error: std::fmt::Debug,
+    {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::time::timeout_at(deadline, socket.next()).await.ok()?.unwrap().unwrap() {
+                Message::Text(text) => return Some(text.to_string()),
+                Message::Ping(_) | Message::Pong(_) => socket.flush().await.unwrap(),
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+    }
+
+    /// The pong to this test's own ping, answering the server's keepalive pings on the way.
+    pub async fn next_pong<S>(socket: &mut S)
+    where
+        S: futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
+            + futures_util::Sink<tokio_tungstenite::tungstenite::Message>
+            + Unpin,
+        S::Error: std::fmt::Debug,
+    {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap() {
+                Message::Pong(_) => return,
+                Message::Ping(_) => socket.flush().await.unwrap(),
+                other => panic!("expected the pong to this test's ping, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_test_frames_skip_the_servers_keepalive_ping() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket.send(Message::Ping(Vec::new().into())).await.unwrap();
+            socket.send(Message::Text(json!({"kind":"changes"}).to_string().into())).await.unwrap();
+            socket.send(Message::Ping(Vec::new().into())).await.unwrap();
+            // Hold the socket open until the client is done.
+            while socket.next().await.is_some() {}
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/")).await.unwrap();
+        assert_eq!(next_data_frame(&mut socket).await["kind"], "changes");
+        assert_eq!(data_frame_within(&mut socket, Duration::from_millis(200)).await, None);
+        drop(socket);
+        server.await.unwrap();
+    }
+
     async fn exact_agent_selector_stream_fixture(fleet_first: bool) {
         use futures_util::{SinkExt as _, StreamExt as _};
         use tokio_tungstenite::tungstenite::Message;
@@ -10758,8 +11069,7 @@ mission "differential" state="ready" {
         let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
         socket.send(Message::Text(json!({"kind":"subscribe","id":"details",
             "collection":"agents","agent":"agent/z","limit":1}).to_string().into())).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let snapshot: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let snapshot = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&snapshot);
         assert_eq!(snapshot["kind"], "snapshot");
         assert_eq!(snapshot["order"], json!(["agent/z"]));
@@ -10776,15 +11086,14 @@ mission "differential" state="ready" {
             json!({"state":"working","driver":"codex","incarnation_id":"one"}));
         signal_changed(&writer);
         tokio::time::timeout(Duration::from_secs(5), completions.recv()).await.unwrap().unwrap();
-        assert!(tokio::time::timeout(Duration::from_millis(200), socket.next()).await.is_err(),
+        assert!(data_frame_within(&mut socket, Duration::from_millis(200)).await.is_none(),
             "an unrelated agent change must not emit a frame");
         assert_eq!(writer.store.agent_resources_refolded_cards_for_test(), folded);
         assert_eq!(writer.store.agent_resources_builds_for_test(), builds);
         agent_selector_observe(&writer, "agent/z", "harness.observed",
             json!({"state":"working","driver":"codex","incarnation_id":"one"}));
         signal_changed(&writer);
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let changes: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let changes = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&changes);
         assert_eq!(changes["kind"], "changes");
         assert_eq!(changes["upserts"].as_array().unwrap().len(), 1);
@@ -10796,8 +11105,7 @@ mission "differential" state="ready" {
         agent_selector_observe(&writer, "agent/z", "runtime.observed",
             json!({"status":"stopped","runtime_id":"agent/z","incarnation_id":"one"}));
         signal_changed(&writer);
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let removed: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let removed = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&removed);
         assert_eq!(removed["kind"], "changes");
         assert_eq!(removed["removes"], json!(["agent/z"]));
@@ -10806,8 +11114,7 @@ mission "differential" state="ready" {
         agent_selector_observe(&writer, "agent/z", "runtime.observed",
             json!({"status":"running","runtime_id":"agent/z","incarnation_id":"two"}));
         signal_changed(&writer);
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let returned: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let returned = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&returned);
         assert_eq!(returned["kind"], "changes");
         assert_eq!(returned["upserts"][0]["id"], "agent/z");
@@ -10854,14 +11161,12 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(
             json!({"kind":"subscribe","id":"lifecycle","collection":"agents","limit":2}).to_string().into(),
         )).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["kind"], "snapshot");
         assert_eq!(frame["items"][0]["lifecycle"], "standing");
         for (lifecycle, key) in [(Some("owner"), "lifecycle-owner"), (Some("bounded"), "lifecycle-bounded"), (None, "lifecycle-removed")] {
             apply(lifecycle, key);
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["kind"], "changes", "{frame}");
             assert_eq!(frame["upserts"][0]["id"], "agent/example/purpose");
             assert_eq!(frame["upserts"][0].get("lifecycle"), lifecycle.map(|value| json!(value)).as_ref());
@@ -11420,9 +11725,7 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"subscribe",
             "id":"roster", "collection":"agents", "limit":200}).to_string().into())).await.unwrap();
         let mut next = async |within: Duration| -> Value {
-            let frame = tokio::time::timeout(within, socket.next()).await
-                .expect("a roster frame").unwrap().unwrap();
-            serde_json::from_str(frame.to_text().unwrap()).unwrap()
+            data_frame_within(&mut socket, within).await.expect("a roster frame")
         };
         let snapshot = next(Duration::from_secs(1)).await;
         assert_eq!(snapshot["kind"], "snapshot", "{snapshot}");
@@ -11614,6 +11917,7 @@ mission "differential" state="ready" {
             .map_or(3000, |ms| ms.parse().unwrap()));
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            seat_admission: Default::default(),
             store: Arc::new(Store::open(&database, "bench-host").unwrap()),
             ..test_state(root.path())
         };
@@ -11818,9 +12122,7 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"subscribe",
             "id":"roster", "collection":"agents", "limit":200}).to_string().into())).await.unwrap();
         let mut next = async |within: Duration| -> Value {
-            let frame = tokio::time::timeout(within, socket.next()).await
-                .expect("a roster frame").unwrap().unwrap();
-            serde_json::from_str(frame.to_text().unwrap()).unwrap()
+            data_frame_within(&mut socket, within).await.expect("a roster frame")
         };
         let snapshot = next(Duration::from_secs(5)).await;
         assert_eq!(snapshot["kind"], "snapshot", "{snapshot}");
@@ -12164,8 +12466,7 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(
             json!({"kind":"subscribe","id":"barrier","collection":"missions","limit":2}).to_string().into(),
         )).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         // A delivered snapshot confirms all replacements and unsubscribe were drained.
         // All physical workers still own their slots; this is not a timing-only assertion.
         let available = slots.unwrap().available_permits();
@@ -12240,16 +12541,14 @@ mission "differential" state="ready" {
         }
         let mut snapshots = BTreeSet::new();
         for _ in 0..3 {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["kind"], "snapshot", "{frame}");
             snapshots.insert(frame["collection"].as_str().unwrap().to_owned());
         }
         assert_eq!(snapshots, BTreeSet::from(["agents".into(), "missions".into(), "attention".into()]));
         // The admission has remained physically blocked through all three deliveries.
         release.send(true).unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["kind"], "conversation", "{frame}");
         assert_eq!(frame["session_id"], managed_session_id("agent/admission-worker", "current"));
         socket.close(None).await.unwrap();
@@ -12323,8 +12622,7 @@ mission "differential" state="ready" {
             socket.send(tokio_tungstenite::tungstenite::Message::Text(
                 json!({"kind":"subscribe","id":visible,"collection":"missions","limit":2}).to_string().into(),
             )).await.unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["kind"], "snapshot", "{frame}");
             assert_eq!(frame["id"], visible);
             tokio::time::timeout(Duration::from_secs(5), drops.recv()).await.unwrap().unwrap();
@@ -12333,8 +12631,7 @@ mission "differential" state="ready" {
             socket.send(tokio_tungstenite::tungstenite::Message::Text(
                 json!({"kind":"subscribe","id":"barrier","collection":"work","limit":2}).to_string().into(),
             )).await.unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["id"], "barrier", "obsolete admission arrived after release: {frame}");
             assert_eq!(frame["kind"], "snapshot");
             socket.close(None).await.unwrap();
@@ -12406,8 +12703,7 @@ mission "differential" state="ready" {
             socket.send(tokio_tungstenite::tungstenite::Message::Text(
                 json!({"kind":"subscribe","id":visible,"collection":"missions","limit":2}).to_string().into(),
             )).await.unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["id"], visible);
             assert_eq!(frame["collection"], "missions");
             assert_eq!(frame["kind"], "snapshot");
@@ -12419,8 +12715,7 @@ mission "differential" state="ready" {
             socket.send(tokio_tungstenite::tungstenite::Message::Text(
                 json!({"kind":"subscribe","id":"barrier","collection":"work","limit":2}).to_string().into(),
             )).await.unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["id"], "barrier", "obsolete result arrived after release: {frame}");
             assert_eq!(frame["kind"], "snapshot");
             socket.close(None).await.unwrap();
@@ -12482,8 +12777,7 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(
             json!({"kind":"subscribe","id":"probe","collection":"work","limit":2}).to_string().into(),
         )).await.unwrap();
-        let frame = socket.next().await.unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = data_frame_within(&mut socket, Duration::from_secs(60)).await.expect("a data frame");
         assert_eq!(frame["id"], "probe");
         let source = "version 2\nmission \"during-read\" state=\"ready\" { goal \"Observed after the fence.\"; step \"check\" { agentless; goal \"Check.\" } }\n";
         let intent = crate::graph::parse_intent(source, "during-read").unwrap();
@@ -12494,8 +12788,7 @@ mission "differential" state="ready" {
         release.notify_one();
         let mut frames = Vec::new();
         while frames.len() < 2 {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             if frame["id"] == "held" { frames.push(frame); }
         }
         assert_eq!(frames[0]["kind"], "snapshot");
@@ -12571,9 +12864,7 @@ mission "differential" state="ready" {
         }
         let mut received = BTreeMap::new();
         for _ in 0..2 {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             received.insert(frame["id"].as_str().unwrap().to_owned(), frame);
         }
         assert_eq!(received["fast"]["kind"], "snapshot");
@@ -12586,9 +12877,7 @@ mission "differential" state="ready" {
             json!({"kind":"subscribe","id":"slow","collection":"agents","limit":2})
                 .to_string().into(),
         )).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["id"], "slow");
         assert_eq!(frame["kind"], "snapshot");
         release.notify_one();
@@ -12643,8 +12932,7 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(
             json!({"kind":"subscribe","id":"admission","collection":"conversation","conversation":"session/missing"}).to_string().into(),
         )).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         // Worker-owned permit signals prove capacity is exhausted independently
         // of whether the queued read happened to be polled before the outbox frame.
         let available = slots.unwrap().available_permits();
@@ -12653,8 +12941,7 @@ mission "differential" state="ready" {
         assert_eq!(frame["kind"], "error");
         assert_eq!(available, 0, "canceled awaiters released live physical read slots");
         tokio::time::timeout(Duration::from_secs(5), starts.recv()).await.unwrap().unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["id"], "replace");
         assert_eq!(frame["kind"], "snapshot");
         socket.close(None).await.unwrap();
@@ -12705,8 +12992,7 @@ mission "differential" state="ready" {
                 json!({"kind":"subscribe","id":id,"collection":collection,"limit":2}).to_string().into(),
             )).await.unwrap();
         }
-        let frame = socket.next().await.unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = data_frame_within(&mut socket, Duration::from_secs(60)).await.expect("a data frame");
         assert_eq!(frame["id"], "retry");
         assert_eq!(frame["kind"], "resync");
         // Let the immediately-ready attention tick mark the pending agents read dirty.
@@ -12714,8 +13000,7 @@ mission "differential" state="ready" {
         release.notify_one();
         let mut frames = BTreeMap::new();
         for _ in 0..2 {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             frames.insert(frame["id"].as_str().unwrap().to_owned(), frame);
         }
         assert_eq!(frames["refused"]["kind"], "error");
@@ -12776,17 +13061,11 @@ mission "differential" state="ready" {
             ))
             .await
             .unwrap();
-        let first: Value =
-            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        let first = data_frame_within(&mut socket, Duration::from_secs(60)).await.expect("a data frame");
         assert_eq!(first["kind"], "resync");
         assert_eq!(first["retryable"], true);
         assert_collection_frame_conforms(&first);
-        let next = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let recovered: Value = serde_json::from_str(next.to_text().unwrap()).unwrap();
+        let recovered = next_data_frame(&mut socket).await;
         assert_eq!(recovered["kind"], "snapshot");
         assert_eq!(recovered["id"], "agents");
         assert!(reads.load(Ordering::SeqCst) >= 2);
@@ -12798,12 +13077,7 @@ mission "differential" state="ready" {
             ))
             .await
             .unwrap();
-        let refused = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let refused: Value = serde_json::from_str(refused.to_text().unwrap()).unwrap();
+        let refused = next_data_frame(&mut socket).await;
         assert_eq!(refused["kind"], "error");
         assert_eq!(refused["retryable"], false);
         assert_collection_frame_conforms(&refused);
@@ -13352,19 +13626,25 @@ mission "differential" state="ready" {
     }
 
     pub fn test_state_named(root: &Path, node: &str) -> AppState {
-        AppState { owning_person: Some("person/operator".into()),
-        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: node.into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("unused-pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: crate::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+        AppState {
+            seat_admission: Default::default(),
+            owning_person: Some("person/operator".into()),
+            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: node.into(),
+            state_dir: root.to_path_buf(),
+            pty_root: root.join("pty"),
+            pty_binary: root.join("unused-pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: crate::model::PlannerSpec::default(),
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+            harness_question_sink: None,
+        }
     }
 
     #[tokio::test]
@@ -13777,6 +14057,29 @@ subscription "watch/source" {
         victim.kill().await.unwrap();
         victim.wait().await.unwrap();
         server.abort();
+    }
+
+    #[test]
+    fn creation_tags_select_each_spelling_independently_without_value_fallback() {
+        for (legacy, current) in [
+            ("st3.client.create-key", "fractal.client.create-key"),
+            (
+                "st3.client.create-parameters",
+                "fractal.client.create-parameters",
+            ),
+        ] {
+            let read = |tags: &BTreeMap<_, _>| creation_tag(tags, legacy, current).cloned();
+            let mut tags = BTreeMap::new();
+            assert_eq!(read(&tags), None);
+            tags.insert(format!("{current}.unknown"), "ignored".into());
+            assert_eq!(read(&tags), None);
+            tags.insert(current.into(), "current".into());
+            assert_eq!(read(&tags).as_deref(), Some("current"));
+            tags.insert(legacy.into(), "legacy".into());
+            assert_eq!(read(&tags).as_deref(), Some("legacy"));
+            tags.insert(legacy.into(), String::new());
+            assert_eq!(read(&tags).as_deref(), Some(""));
+        }
     }
 
     #[tokio::test]
@@ -14636,15 +14939,21 @@ subscription "watch/source" {
         let checks = operation_checks(&state).unwrap().unwrap();
         let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
         assert_eq!(projection.status, "fail");
-        assert_eq!(projection.message, format!("operation projection drift: {}", drift.join(", ")));
+        assert!(projection.message.starts_with(&format!("operation projection drift: {}; found by the audit that finished 0 min ago", drift.join(", "))), "{}", projection.message);
 
         assert!(state.store.repair_operation_projection_drift_from_audit(&drift).unwrap());
         let projection_status = || {
             doctor_report(&state).unwrap().0.checks.into_iter()
                 .find(|check| check.name == "operation-projection").unwrap().status
         };
+        // Doctor reports the last audit and never audits inline: it still shows the drift the
+        // startup audit found until the next audit runs.
+        assert_eq!(projection_status(), "fail");
+        assert!(state.store.operation_projection_drift().unwrap().is_empty());
         assert_eq!(projection_status(), "pass");
         corrupt();
+        assert_eq!(projection_status(), "pass");
+        assert_eq!(state.store.operation_projection_drift().unwrap().len(), 1);
         assert_eq!(projection_status(), "fail");
         refresh_operation_report(&state, key, None);
         let checks = operation_checks(&state).unwrap().unwrap();
@@ -14689,6 +14998,12 @@ subscription "watch/source" {
                 .any(|item| item["revision"] == "claim-store:pass"),
             "{report:?}"
         );
+
+        // A check doctor gave up on at its deadline is never shown as healthy.
+        assert_eq!(operation_severity_and_state("timeout"), ("warning", "degraded"));
+        assert_eq!(operation_severity_and_state("fail"), ("critical", "failed"));
+        assert_eq!(operation_severity_and_state("pass"), ("info", "healthy"));
+        assert_eq!(operation_severity_and_state("a-later-status"), ("warning", "degraded"));
 
         // A started report is made on its own thread, and a second start keeps it.
         let other = tempfile::tempdir().unwrap();
@@ -18691,6 +19006,7 @@ mission "example/zero-run" state="ready" {
         let unknown = conversation_cursor(&owner, &session_id, ConversationPosition {
             store_index: 0,
             local_position: 0,
+            stream_position: 0,
             native_sequence: 0,
             source_generation: 0,
         });
@@ -19512,6 +19828,45 @@ mission "example/zero-run" state="ready" {
         }
     }
 
+    /// A mailbox message's content entry names its message, as its header does, on the native
+    /// projection and on the stored timeline, so a client pairs the two by identity rather than by
+    /// a sequence slot another message can share.
+    #[tokio::test]
+    async fn a_mailbox_messages_content_entry_names_its_message_on_both_timelines() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "content-names");
+        let owner = "agent/content-names";
+        let incarnation = "content-names-runtime:i1";
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+            fields: serde_json::from_value(json!({"status":"running", "runtime_id":"content-names-runtime", "incarnation_id":incarnation})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session_id = managed_session_id(owner, incarnation);
+        state.store.append_claim(&ClaimInput {
+            subject: "message/content-names".into(), kind: "message.sent".into(), actor: Some("person/alex".into()),
+            fields: serde_json::from_value(json!({"from":"person/alex", "to":owner, "session_id":session_id,
+                "status":"sent", "content":"named content"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let named = |items: &[Value]| items.iter()
+            .filter(|item| item["type"] == "message" || item["type"] == "content")
+            .map(|item| (item["type"].as_str().unwrap().to_owned(), item["body"]["message_id"].clone()))
+            .collect::<Vec<_>>();
+        let expected = vec![
+            ("message".to_owned(), json!("message/content-names")),
+            ("content".to_owned(), json!("message/content-names")),
+        ];
+        let snapshot = new_client_snapshot(&state);
+        let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
+        let mut native = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap();
+        native.reverse();
+        assert_eq!(named(&native), expected, "native: {native:?}");
+        let (_, stored) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
+        assert_eq!(named(stored["items"].as_array().unwrap()), expected, "stored: {stored}");
+    }
+
     #[test]
     fn managed_native_limit_one_pages_preserve_cross_source_ties() {
         let root = tempfile::tempdir().unwrap();
@@ -19967,7 +20322,7 @@ mission "example/zero-run" state="ready" {
         let wrong_session = post_snapshot_native_sends(&state, &snapshot, "agent/cap", "session/other", None,
             &identity("message/post-snapshot-256"), &BTreeSet::new()).unwrap_err();
         assert_eq!(wrong_session.code, "cursor-gap");
-        let bounded = state.store.conversation_message_delta_at("agent/cap", None, snapshot.store_index, 2).unwrap();
+        let bounded = state.store.conversation_message_delta_at("agent/cap", None, snapshot.store_index, 2, None).unwrap();
         assert_eq!(bounded.len(), 2);
     }
 
@@ -20597,8 +20952,7 @@ mission "example/zero-run" state="ready" {
             conversation_read_now(&state, &session, &session_id, Some(baseline_cursor)).unwrap();
         assert_eq!(message_update["items"].as_array().unwrap().len(), 2);
         let message_cursor = message_update["next_cursor"].as_str().unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["value"]["items"], message_update["items"]);
         assert_eq!(frame["value"]["items"][0]["body"]["message_id"], message_id);
         let graft = frame["value"]["items"][0].clone();
@@ -20659,9 +21013,7 @@ mission "example/zero-run" state="ready" {
         // even though the harness has since persisted its correlated native echo.
         let (mut replay_socket, _) = tokio_tungstenite::connect_async(
             format!("ws://{address}/stream?after={baseline_cursor}")).await.unwrap();
-        let replay = tokio::time::timeout(Duration::from_secs(5), replay_socket.next())
-            .await.unwrap().unwrap().unwrap();
-        let replay: Value = serde_json::from_str(replay.to_text().unwrap()).unwrap();
+        let replay = next_data_frame(&mut replay_socket).await;
         let replay_graft = replay["value"]["items"].as_array().unwrap().iter()
             .find(|item| item["body"]["message_id"] == message_id).unwrap();
         assert_eq!(replay_graft["id"], graft["id"]);
@@ -20681,8 +21033,7 @@ mission "example/zero-run" state="ready" {
                 .iter()
                 .any(|item| item["body"]["text"] == "Native reply")
         );
-        let frame = tokio::time::timeout(Duration::from_secs(5), resumed_socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut resumed_socket).await;
         assert_eq!(frame["value"]["items"], native_update["items"]);
         assert!(frame["value"]["items"].as_array().unwrap().iter().all(|item| item["role"] != "user"));
         resumed_socket.close(None).await.unwrap();
@@ -21868,6 +22219,18 @@ mission "example/zero-run" state="ready" {
             ]),
             "timeline-initialization",
         );
+        // An observability code stays in this node's local observation log; the seat's own
+        // timeline still shows it, after the claim it follows.
+        append(
+            "harness.diagnostic",
+            BTreeMap::from([
+                ("severity".into(), json!("warning")),
+                ("code".into(), json!("native-delivery-degraded")),
+                ("reason".into(), json!("delivery paused")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            "timeline-delivery-degraded",
+        );
         append(
             "harness.usage",
             BTreeMap::from([
@@ -21967,6 +22330,24 @@ mission "example/zero-run" state="ready" {
         );
         assert!(!entries.iter().any(|entry| entry["body"]["code"] == "claude-channel-initialized"));
         assert!(entries.iter().any(|entry| entry["body"]["code"] == "provider-warning"));
+        let position = |code: &str| {
+            entries
+                .iter()
+                .position(|entry| entry["body"]["code"] == code)
+                .unwrap_or_else(|| panic!("{code} is missing from {entries:?}"))
+        };
+        assert!(
+            position("provider-warning") < position("native-delivery-degraded"),
+            "the local diagnostic follows the claim before it"
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry["body"]["code"] == "native-delivery-degraded")
+                .count(),
+            1,
+            "the local diagnostic appears once across pages"
+        );
         let types = entries
             .iter()
             .filter_map(|entry| entry["type"].as_str())
@@ -23722,8 +24103,11 @@ mission "example/zero-run" state="ready" {
         for subject in ["agent/cedar", "agent/birch"] {
             append(subject, "runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
         }
+        // Both reports are an hour old, on the host as everywhere.
+        smallclaims::store::set_thread_clock(Some(client_now_ms() - 3_600_000));
         append("agent/cedar", "harness.observed", json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
         append("agent/birch", "harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        smallclaims::store::set_thread_clock(None);
         let index = state.store.index().unwrap();
         let mut cards = client_agent_resources(&state.store, false, "", index).unwrap();
         for card in &mut cards {
@@ -23740,6 +24124,54 @@ mission "example/zero-run" state="ready" {
         let birch = cards.iter().find(|item| item["id"] == "agent/birch").unwrap();
         assert_eq!(birch["harness_state"], "indeterminate");
         assert_eq!(birch["state"], "waiting");
+    }
+
+    /// A re-stamp that changes nothing stays in the seat's host's local log. The host's cards hear
+    /// it, so a resting seat stays current there; another member has only the replicated report,
+    /// and its card lapses as before. A local report of another incarnation says nothing.
+    #[test]
+    fn the_seats_host_hears_its_local_re_stamps_while_another_member_reads_the_replicated_report() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-host-heard");
+        let peer_root = tempfile::tempdir().unwrap();
+        let peer = test_state_named(peer_root.path(), "status-peer");
+        let subject = "agent/cedar";
+        let append = |kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        let index = state.store.index().unwrap();
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        assert_eq!(state.store.index().unwrap(), index, "the unchanged re-stamp stayed local");
+        peer.store.import_replication("status-host-heard", &state.store.export_replication(0).unwrap()).unwrap();
+        // The replicated report is an hour old; the host heard the re-stamp just now.
+        let card = |store: &Store, incarnation: &str| {
+            let index = store.index().unwrap();
+            let mut cards = client_agent_resources(store, false, "", index).unwrap();
+            for card in &mut cards {
+                let mut harness = store.observed_harness_at(subject, index).unwrap().unwrap();
+                harness.observed_at_unix_ms = client_now_ms() - 3_600_000;
+                harness.incarnation_id = incarnation.into();
+                card["_status_source"] = json!(harness);
+            }
+            overlay_agent_resources(store, &mut cards, "").unwrap();
+            cards.into_iter().find(|item| item["id"] == subject).unwrap()
+        };
+        let host = card(&state.store, "one");
+        assert_eq!(host["observation"], "current");
+        assert_eq!(host["harness_state"], "idle");
+        assert_eq!(host["state"], "running");
+        let elsewhere = card(&peer.store, "one");
+        assert_eq!(elsewhere["observation"], "stale");
+        assert_eq!(elsewhere["harness_state"], "indeterminate");
+        assert_eq!(elsewhere["state"], "waiting");
+        let other_incarnation = card(&state.store, "zero");
+        assert_eq!(other_incarnation["observation"], "stale", "the host heard another incarnation");
     }
 
     #[test]
@@ -23836,14 +24268,22 @@ mission "example/zero-run" state="ready" {
         assert_eq!(before["observation"], "current");
         assert_eq!(before["harness_state"], "idle");
         assert!(before.get("_status_source").is_none());
+        // Another member has only the card's time; aged, the card lapses.
+        let peer_root = tempfile::tempdir().unwrap();
+        let peer = test_state_named(peer_root.path(), "status-cache-peer");
+        peer.store.import_replication("status-cache", &state.store.export_replication(0).unwrap()).unwrap();
         let mut aged = vec![before.clone()];
         let mut cached_harness = state.store.observed_harness_at(subject, index).unwrap().unwrap();
         cached_harness.observed_at_unix_ms = client_now_ms() - 91_000;
         aged[0]["_status_source"] = json!(cached_harness);
-        overlay_agent_resources(&state.store, &mut aged, "").unwrap();
+        let mut on_host = aged.clone();
+        overlay_agent_resources(&peer.store, &mut aged, "").unwrap();
         assert_eq!(aged[0]["observation"], "stale");
         assert_eq!(aged[0]["harness_state"], "indeterminate");
         assert_eq!(aged[0]["since"], before["since"]);
+        // The seat's host heard the report itself just now, in its local log.
+        overlay_agent_resources(&state.store, &mut on_host, "").unwrap();
+        assert_eq!(on_host[0]["observation"], "current");
         append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":client_now_ms() as u64}));
         assert_eq!(state.store.index().unwrap(), index, "same state stays local within the publish interval");
         let after = client_agent_resources(&state.store, false, "", index).unwrap();

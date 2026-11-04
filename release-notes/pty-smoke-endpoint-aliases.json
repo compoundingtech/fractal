@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The PTY smoke test sets both FRACTAL_* and ST3_* spellings of the endpoint and person it overrides, so release runs pass again after the TUI began refusing unequal aliases",
+  "replay": {"status": "none", "detail": "Test only; no claim replay or recovery changes."},
+  "schema": {"status": "none", "detail": "No database change."},
+  "rules": {"status": "none", "detail": "No claim rule changes."},
+  "compatibility": {"status": "none", "detail": "No product change; the TUI's alias handling is unchanged."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Test only; rolling back changes nothing installed."}
+}

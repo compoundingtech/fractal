@@ -93,6 +93,64 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
 }
 
 #[tokio::test]
+async fn scg_read_accepts_header_aliases_and_binds_presented_domain() {
+    let fixture = fixture(SCOPES, true).await;
+    let path = "/v1/client/assistant/summary";
+    for name in [HEADER, "x-fractal-scg-read-authorization"] {
+        // Omission preserves the deployed proof bytes. Explicit domains bind their own prefix.
+        for domain in [None, Some("st3.scg-read.v1"), Some("fractal.scg-read.v1")] {
+            let payload = fixture.payload("summary", "");
+            let canonical = canonical_json_text(&serde_json::to_value(&payload).unwrap()).unwrap();
+            let message = format!("{}\n{canonical}", domain.unwrap_or("st3.scg-read.v1"));
+            if domain.is_none() { assert_eq!(message, signing_bytes(&payload).unwrap()); }
+            let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(fixture.attestor.sign(message.as_bytes()).as_ref());
+            let mut proof = json!({"payload":payload,"signature":signature});
+            if let Some(domain) = domain { proof["domain"] = json!(domain); }
+            let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&proof).unwrap());
+            let response = super::super::super::super::fabric_router(fixture.state.clone()).oneshot(
+                Request::builder().uri(path).header(AUTHORIZATION, format!("Bearer {}", fixture.credential))
+                    .header(name, &header).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{name}, {domain:?}");
+        }
+    }
+    for (signed, presented) in [
+        ("st3.scg-read.v1", "fractal.scg-read.v1"),
+        ("fractal.scg-read.v1", "st3.scg-read.v1"),
+        ("st3.scg-read.v1", "unknown.scg-read.v1"),
+    ] {
+        let payload = fixture.payload("summary", "");
+        let canonical = canonical_json_text(&serde_json::to_value(&payload).unwrap()).unwrap();
+        let message = format!("{signed}\n{canonical}");
+        let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(fixture.attestor.sign(message.as_bytes()).as_ref());
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(
+            &json!({"domain":presented,"payload":payload,"signature":signature})).unwrap());
+        assert_eq!(fixture.request(path, Some(&header)).await.0, StatusCode::FORBIDDEN,
+            "signed {signed}, presented {presented}");
+    }
+    // Missing domain must not reinterpret a signature made over the new domain.
+    let payload = fixture.payload("summary", "");
+    let canonical = canonical_json_text(&serde_json::to_value(&payload).unwrap()).unwrap();
+    let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(fixture.attestor.sign(format!("fractal.scg-read.v1\n{canonical}").as_bytes()).as_ref());
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(
+        &json!({"payload":payload,"signature":signature})).unwrap());
+    assert_eq!(fixture.request(path, Some(&header)).await.0, StatusCode::FORBIDDEN);
+
+    let payload = fixture.payload("summary", "");
+    let header = fixture.header(&payload, &fixture.attestor);
+    let response = super::super::super::super::fabric_router(fixture.state.clone()).oneshot(
+        Request::builder().uri(path).header(AUTHORIZATION, format!("Bearer {}", fixture.credential))
+            .header(HEADER, &header).header("x-fractal-scg-read-authorization", "conflict")
+            .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    // Conflict refusal must not consume an otherwise valid deployed proof.
+    assert_eq!(fixture.request(path, Some(&header)).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn assistant_approved_pages_decode_native_sync_through_typed_sdk() {
     let mut fixture = fixture(SCOPES, true).await;
     fixture.state.configured_peers = vec!["birch".into()];
@@ -200,7 +258,7 @@ async fn assistant_response_budget_includes_envelope_and_supports_downward_polic
     let query=format!("?max_response_bytes={envelope_budget}");
     let payload=fixture.payload("summary",&query);
     let receipt=verify(&fixture.state,&fixture.session(),"/v1/client/assistant/summary",
-        &payload.parameters,&ReadAuthorization {payload:payload.clone(),signature:
+        &payload.parameters,&ReadAuthorization {domain:ReadDomain::default(),payload:payload.clone(),signature:
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fixture.attestor.sign(signing_bytes(&payload).unwrap().as_bytes()).as_ref())}).unwrap().1;
     let header=fixture.header(&payload,&fixture.attestor);
     let (status,value,_)=fixture.request(&format!("/v1/client/assistant/summary{query}"),Some(&header)).await;

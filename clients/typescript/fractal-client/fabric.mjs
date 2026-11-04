@@ -44,9 +44,10 @@ export class FabricTransportError extends Error {
 export class FabricEndpoint {
     #target;
     constructor(value) {
-        const match = /^fabric:\/\/([A-Za-z0-9_.-]+)\/st3-client-v0$/.exec(value);
+        // Unlike $, this end assertion also rejects a final line terminator.
+        const match = /^fabric:\/\/([A-Za-z0-9_.-]+)\/(?:st3|fractal)-client-v0(?![\s\S])/.exec(value);
         if (!match || match[1] === '.' || match[1] === '..') {
-            throw new FabricTransportError('invalid-endpoint', 'Expected fabric://<NodeID-or-name>/st3-client-v0');
+            throw new FabricTransportError('invalid-endpoint', 'Expected fabric://<NodeID-or-name>/st3-client-v0 or fabric://<NodeID-or-name>/fractal-client-v0');
         }
         this.#target = match[1];
     }
@@ -94,6 +95,8 @@ export class FabricEndpoint {
             if (matches.length !== 1) throw new FabricTransportError(matches.length ? 'ambiguous-peer' : 'unknown-peer', 'Choose one unique trusted Fabric peer name or a NodeID');
             node = matches[0].node;
         }
+        // Both URI names dial the gateway's exposed st3-client-v0 service;
+        // the URI formatter and gateway exposure retain their existing default.
         const answer = await run(['dial', node, protocol]);
         if (typeof answer.socket !== 'string' || !isAbsolute(answer.socket)) {
             throw new FabricTransportError('invalid-socket', 'Fabric dial returned no absolute Unix socket path');

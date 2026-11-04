@@ -106,6 +106,32 @@ records this boundary.
 
 Ctrl+\ is the leader, including through the palette, and is never sent to the
 child: it lists what to press next, and Ctrl+\ then c detaches (Ctrl+\ twice closes the tab). Legacy Ctrl+4 is its crossterm alias. Ctrl+K (or Command+K) opens the palette.
+From an agent conversation, Ctrl+A opens the agent actions and t (Terminal) opens its terminal.
+Enter attaches an already detached terminal pane; it does not open a terminal from the
+conversation. This guidance adds no Attach control and changes no keyboard meanings.
+The earlier binding cutover remains: Ctrl+] no longer attaches. Older daemons can still send
+attention text advertising Ctrl+] or an Attach control until they upgrade; follow the current
+Fractal TUI route above.
+Ctrl+[ and Ctrl+] are place-history shortcuts only outside attached programs and only
+with negotiated enhanced keyboard input. Legacy Ctrl+5 (0x1D) goes forward, never attaches.
+Inside an attached program these keys pass through. Ctrl+\ then [ or ] navigates back or
+forward across spaces on every terminal; these leader aliases do not switch tabs.
+Tab navigation remains [ and ] (when not typing), and Ctrl+PageUp/PageDown.
+Ctrl+L triages outstanding Inbox items only outside attached programs; inside, it remains
+the program's clear-screen chord. Ctrl+\ then l visits the previous triage item without
+sending either leader key to the program. Enhanced Ctrl+Shift+L is the detached equivalent.
+Ctrl+^ (Ctrl+6, 0x1E) opens the recent-place popup when detached, on every terminal type.
+While attached it reaches the program unchanged (for example, Vim's alternate-file key).
+Ctrl+\ then r opens the popup over an attached program. It preselects the previous
+destination; Up/Down changes the selection, Enter opens, Escape cancels, and typing filters.
+Enhanced Ctrl+Tab cycles recent places outside attached programs, not tabs. It commits on
+Control release only after such modifier releases have actually been observed; otherwise
+the same popup requires Enter. Ctrl+Shift+Tab cycles backward. Direct Ctrl+Tab remains
+program input while attached. Tabs keep quiet [ ] and Ctrl+PageUp/PageDown.
+The popup owns input until it closes: the first line of pasted text filters the list, mouse
+input does not reach the child, and the child receives focus-out followed by focus-in when
+input returns to it. Typing or pasting switches hold cycling to explicit Enter/Escape commit.
+Live state/attention labels refresh while the popup is open.
 The selection/reset chords and Shift+PageUp/PageDown stay the terminal UI's, including their
 repeat/release events. In an agent terminal Ctrl+C/D require two presses within two
 seconds; a shell receives them immediately. The existing focused-terminal exception

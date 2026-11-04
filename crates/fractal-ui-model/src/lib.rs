@@ -8,4 +8,6 @@ pub mod agents;
 pub mod attention;
 pub mod documents;
 pub mod missions;
+pub mod prompts;
 pub mod sidebar;
+pub mod slo;

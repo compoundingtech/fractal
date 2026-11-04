@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Only one live agent may declare `handles-faults`. Publishing a second holder is refused with `fault-agent-taken`, so the flag moves only by stopping its holder or dropping it there; when two members each accepted a different holder, neither is the fleet's fault agent until one steps down. A fault dismissal now hides a fault only when a person wrote it, or the agent that held `handles-faults` when it was written",
+  "replay": {"status": "none", "detail": "No replay change; the fault agent and dismissed faults are still derived from the graph on each read."},
+  "schema": {"status": "none", "detail": "No claim kind, field or database change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "A publication that declares a second live `handles-faults` holder is refused (`fault-agent-taken`); one that declares no holder is never refused. A member on an older build still takes the first holder by subject, and still honours a dismissal from any actor, until it runs this build."},
+  "downtime": {"status": "none", "detail": "No startup work or expected interruption."},
+  "manual": {"status": "changed", "detail": "Moving the fault agent to a new seat or a new run now means stopping the old holder first (or ending its run, or dropping `handles-faults` from it in the same publication); otherwise the new declaration is refused with `fault-agent-taken`. The fleet declares one holder today, so nothing needs doing at the roll."},
+  "recovery": {"status": "none", "detail": "No additional recovery procedure introduced by this change. Preserve graph state, keys and configuration and follow the standard roll-forward guidance; this note does not qualify binary-only downgrade of the whole release."}
+}

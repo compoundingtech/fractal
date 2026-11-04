@@ -147,6 +147,7 @@ const verifyReplay = async (world: World) => {
   const consume = () => {
     for (const frame of frames.slice(readFrames)) {
       const id = frame.id ?? ''
+      if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') throw new Error('Expected a resource collection window')
       const window = applyWindow(windows.get(id), frame)
       if (window !== undefined) windows.set(id, window)
       if (frame.kind === 'conversation') conversations.set(id, applyConversation(conversations.get(id), {

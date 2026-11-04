@@ -899,13 +899,14 @@ impl Drop for Span {
 }
 
 thread_local! {
-    /// What [`tagged`] appends to the key of each statement it runs on this thread.
+    /// What [`tagged`] puts in front of the key of each statement it runs on this thread.
     static STATEMENT_TAG: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Run `work` with `tag` appended to the key of every statement it runs on this thread, so the
-/// profile tells apart the callers of one query, such as which kind and which call site read a
-/// subject's whole history. Free when profiling is off: `tag` is not built.
+/// Run `work` with `tag` in front of the key of every statement it runs on this thread, as
+/// `/* TAG */ SQL`, so the profile tells apart the callers of one query, such as which kind and
+/// which call site read a subject's whole history. In front, it survives the cut a profile makes
+/// to long statements. Free when profiling is off: `tag` is not built.
 pub fn tagged<T>(tag: impl FnOnce() -> String, work: impl FnOnce() -> T) -> T {
     if !enabled() {
         return work();
@@ -928,7 +929,7 @@ pub fn sql(statement: &str, duration: Duration) {
     let ns = nanos(duration);
     STATEMENT_TAG.with(|tag| match &*tag.borrow() {
         Some(tag) => {
-            let tagged = format!("{statement} -- {tag}");
+            let tagged = format!("/* {tag} */ {statement}");
             with_acc_or_unlabeled(|acc| acc.statement(&tagged, ns));
         }
         None => with_acc_or_unlabeled(|acc| acc.statement(statement, ns)),
@@ -1625,11 +1626,11 @@ mod tests {
         );
     }
 
-    fn unfinished_op(label: &str, age: Duration) -> Arc<OpInner> {
+    fn unfinished_op(label: &str, started: Instant) -> Arc<OpInner> {
         Arc::new(OpInner {
             label: label.into(),
             caller: Some("test caller".into()),
-            started: Instant::now() - age,
+            started,
             acc: Mutex::new(Acc::default()),
             recorded: AtomicBool::new(false),
         })
@@ -1638,7 +1639,7 @@ mod tests {
     #[test]
     fn in_flight_snapshot_reports_unfinished_work_without_retaining_it() {
         let registry = Mutex::new(InFlight::default());
-        let op = unfinished_op("queued read", Duration::from_secs(20));
+        let op = unfinished_op("queued read", Instant::now() - Duration::from_secs(20));
         registry.lock().unwrap().insert(&op);
         let sample = in_flight_snapshot(&registry, Instant::now());
         assert_eq!(sample["tracked_live"], 1);
@@ -1658,11 +1659,13 @@ mod tests {
     #[test]
     fn in_flight_registry_and_output_are_bounded_and_keep_oldest_work() {
         let mut registry = InFlight::default();
+        // Keep the fixture's age order independent of scheduling during construction.
+        let now = Instant::now();
         let ops = (0..IN_FLIGHT_LIMIT + 3)
             .map(|index| {
                 unfinished_op(
                     &format!("read {index}"),
-                    Duration::from_millis(index as u64),
+                    now - Duration::from_millis(index as u64),
                 )
             })
             .collect::<Vec<_>>();
@@ -1670,7 +1673,7 @@ mod tests {
             registry.insert(op);
         }
         let registry = Mutex::new(registry);
-        let sample = in_flight_snapshot(&registry, Instant::now());
+        let sample = in_flight_snapshot(&registry, now);
         assert_eq!(sample["tracked_live"], IN_FLIGHT_LIMIT);
         assert_eq!(sample["untracked_starts"], 3);
         assert_eq!(
@@ -1696,7 +1699,7 @@ mod tests {
     #[test]
     fn in_flight_text_is_bounded_and_preserves_utf8_with_visible_truncation() {
         let registry = Mutex::new(InFlight::default());
-        let mut op = unfinished_op(&"☃".repeat(100), Duration::from_secs(2));
+        let mut op = unfinished_op(&"☃".repeat(100), Instant::now() - Duration::from_secs(2));
         Arc::get_mut(&mut op).unwrap().caller = Some("🧬".repeat(100).into());
         registry.lock().unwrap().insert(&op);
         let sample = in_flight_snapshot(&registry, Instant::now());
@@ -1879,6 +1882,7 @@ mod tests {
             return;
         }
         init_from_env();
+        let long = format!("SELECT {} FROM invented", "column, ".repeat(60));
         let op = Op::start("task invented-pass", None).unwrap();
         {
             let _entered = op.enter();
@@ -1890,11 +1894,16 @@ mod tests {
                 sql("SELECT invented", Duration::from_millis(4));
             });
             sql("SELECT invented", Duration::from_millis(5));
+            // A profile cuts a long statement, and its tag survives the cut.
+            tagged(|| "kind=invented at there".into(), || sql(&long, Duration::from_millis(6)));
         }
         let acc = op.0.acc.lock().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(acc.statements["SELECT invented"].count, 2);
-        assert_eq!(acc.statements["SELECT invented -- kind=invented at here"].count, 2);
-        assert_eq!(acc.statements["SELECT invented -- inner"].count, 1);
+        assert_eq!(acc.statements["/* kind=invented at here */ SELECT invented"].count, 2);
+        assert_eq!(acc.statements["/* inner */ SELECT invented"].count, 1);
+        let shown = top_statements(&acc, 10);
+        let cut = shown.iter().filter_map(|statement| statement["sql"].as_str()).find(|sql| sql.ends_with('…'));
+        assert_eq!(cut.map(|sql| sql.starts_with("/* kind=invented at there */ SELECT column,")), Some(true), "{shown:?}");
     }
 
     #[test]

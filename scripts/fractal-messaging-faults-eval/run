@@ -305,14 +305,17 @@ class Node:
             listener.bind((peer_host, peer_port))
             listener.listen()
             _PORT_RESERVATIONS[peer_port] = listener
-        self.daemon = await self.spawn(["up", "--config", str(self.root / "config.toml")], "daemon.log")
+        _PORT_RESERVATIONS.pop(peer_port).close()
+        self.worker = await self.spawn(["replication-worker", "--config", str(self.root / "config.toml")], "worker.log")
+        # Older compatibility binaries predate explicit foreground enrollment.
+        enrollment = (["--replication-worker-pid", str(self.worker.pid)]
+                      if "--replication-worker-pid" in await self.cli("up", "--help") else [])
+        self.daemon = await self.spawn(["up", "--config", str(self.root / "config.toml"), *enrollment], "daemon.log")
         async def ready():
             if self.daemon.returncode is not None:
                 raise RuntimeError("isolated daemon exited: " + (self.root / "daemon.log").read_text()[-2000:])
             return await self.api("/v1/replication/status")
         await until(ready, self.bound)
-        _PORT_RESERVATIONS.pop(peer_port).close()
-        self.worker = await self.spawn(["replication-worker", "--config", str(self.root / "config.toml")], "worker.log")
         async def peer_ready():
             if self.worker.returncode is not None:
                 raise RuntimeError("isolated replication worker exited: " + (self.root / "worker.log").read_text()[-2000:])
@@ -644,6 +647,11 @@ agent "fault-probe" {{
             return value if value.get("harness_state") == "idle" and provider_pids(target.seats()) else None
         phase = enter("provider-readiness")
         await until(ready, args.ready_seconds)
+        # Target readiness does not imply the sender's recipient preflight is ready.
+        # Agent cards can precede materialized desired state; probe native send's exact check.
+        phase = enter("sender-readiness")
+        await until(lambda: source.api("/v1/messages/recipient?to=agent%2Feval%2Ffault-probe"),
+                    args.ready_seconds)
         # A cross-node warmup proves the fixture before injecting any fault.
         phase = enter("cross-node-warmup")
         warmup = await send(source, "warmup")

@@ -11,6 +11,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("x-st3-client", "x-fractal-client"),
     ("x-st3-features", "x-fractal-features"),
     ("x-st3-raw-origin", "x-fractal-raw-origin"),
+    ("x-st3-scg-read-authorization", "x-fractal-scg-read-authorization"),
 ];
 
 pub(super) fn receive_headers(headers: &mut HeaderMap) -> Result<(), ApiError> {

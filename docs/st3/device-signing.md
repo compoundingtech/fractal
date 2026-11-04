@@ -224,6 +224,18 @@ the person's text.
 | `device-signature-replayed` | Another claim already carries this key and nonce. A retry with the same idempotency key gets the first answer instead. |
 | `device-key-not-enrolled` | The chain's first grant does not grant this key to this person. |
 | `device-signature-invalid` | The signature does not match the message. |
+| `signature-state-corrupt`, `signature-migration-incomplete` | This member cannot yet answer the replay check. |
+
+The replay check reads the nonces of every signature this member holds. Those come from the
+signature migration, which inventories each stored claim's carried signatures. Until that
+inventory is complete, or while it is stopped on a persisted fault, the member cannot say whether
+the nonce was used, so it refuses the signed send rather than risk admitting a replay. Agents
+and the local CLI are not affected, because the daemon signs for them and they carry no device
+nonce. `st doctor` names the fault. A busy, locked or unopenable database is retried and never
+persisted as a fault. Neither is a judgment pass that a request's read deadline or cancellation
+interrupted: the paced signature job, which has no request deadline, does that work. After the
+named defect is repaired, a person or the fleet's fault agent runs
+`st replication signatures resume --reason TEXT` on that member.
 
 Only the daemon that first accepts the send checks the time. Every member checks the signature
 and its chain when the claim arrives, and records the verdict (`st doctor`, claim-signatures).

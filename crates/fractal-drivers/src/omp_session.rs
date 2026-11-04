@@ -517,7 +517,8 @@ pub fn verify_admission_for_heal(binary: &str) -> Result<()> {
 /// Measure the installed producer and exact shipped extension before claiming the live seat.
 fn verify_supported_version(binary: &str, agent_dir: &Path, extension: &Path) -> Result<()> {
     use crate::driver_diagnostic::{Driver, Publisher};
-    let admission = crate::harness_admission::admit(binary, Driver::Omp, Some(extension));
+    let admission =
+        crate::harness_admission::admit_for_agent(binary, Driver::Omp, Some(extension), agent_dir);
     let mut publisher = Publisher::new(
         agent_dir,
         Driver::Omp,

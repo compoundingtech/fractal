@@ -12,7 +12,8 @@ A change goes from idea to main in this order, and each agent does all of it for
    with a check unsigned; a check that fails or flakes is fixed first.
 3. **Signed review.** The review below runs on the signed head and produces a structured verdict, which is signed like a check.
 4. **Merge queue.** A head with every check signed and a signed review that is `GO` at **low** or **medium** risk is put in the
-   merge queue by its own author, following the queue rules below.
+   merge queue by its own author, following the queue rules below. A **medium** change that touches a risky area (see "Factory
+   read" below) is read by Factory first and is not queued by its author alone.
 
 There is **no central intake, curator or watcher** in this flow: nobody reads, approves or queues a change on its author's behalf.
 Each agent runs the review on its own change and queues its own change.
@@ -109,6 +110,19 @@ All at one exact head:
 
 The verdict carries a risk, `low`, `medium` or `high`, and the reasons. Risk replaces asking a person: nothing that gates `main`,
 a deploy, a release or the merge queue waits for a person's approval. **Only `low` and `medium` may enter the merge queue.**
+
+**Factory read.** The review is a cheap extra reader, not a gate: replayed on twelve heads where a reviewer had found a blocking
+defect, `scripts/review` found it three times, and it misses mixed-version, concurrency, CI-queue and cost defects. So a **medium**
+change in one of these areas does not self-queue: its author sends the signed head to Factory for one read first. This is a lane rule
+the owner approved on top of the review (2026-10-30), not an intake step of the review itself: the review still reads, approves and queues
+nothing, and the author still queues their own change once Factory has read it. The areas are
+named in `.st/review-risk.json` under `factory_read`: replication and sync (smallclaims replication, the sync worker, claim ranges,
+inventory, the peer); store schema, trim and checkpoints; concurrency (watchers, locks, spawned background tasks, by path and by
+the lines added); CI and signing stages; and wire types shared between versions. `scripts/review-risk` lists the areas a change
+touches (`factory_read`) and `needs_factory_read` is true when the final risk is medium and an area is touched; the verdict carries
+both (`risk.deterministic.factory_read`, `risk.needs_factory_read`) and the runner prints `medium risk, needs Factory read (areas)`.
+The areas never change the risk level; they are read from the base, like the rest of the floor. Low changes and other mediums queue
+as before; high goes to a person as before.
 
 **High** — any one of these makes the change high:
 

@@ -7,8 +7,8 @@ Use invented people, host names, and paths in this public repository. Run
 `python3 scripts/check-public-repo` before opening a pull request.
 
 For Fractal claims, missions, replication, runtime ownership, or recovery, start with the
-[documentation index](st3/README.md). For st2 lifecycle, messaging, teardown, or presence,
-read and preserve the proofs in [st2 invariants](st2/invariants.md).
+[documentation index](st3/README.md) and preserve the applicable proofs in
+[native runtime invariants](st3/invariants.md).
 
 ## CLI actor contract
 
@@ -373,6 +373,13 @@ Namespace as overflow for ordinary PRs. The second test shard and supporting job
 macOS CI is currently disabled; its retained workflow is not a required check.
 See [CI operations](ci.md) for stage scope, routing, caches, and failure inspection.
 
+The `perf-cost` messaging-faults fixture applies its recipient on the receiving node,
+then waits for both provider readiness there and a successful native recipient
+preflight on the sending node before its cross-node warmup. Local provider readiness
+and agent-card visibility do not prove the sender's materialized recipient state is
+ready; the fixture polls the same `/v1/messages/recipient` endpoint as native sends.
+The subsequent fault and delivery deadline remain unchanged.
+
 Changes to `docs/site/**` on `main` notify `compoundingtech/private` to deploy
 fractal.how. The docs notification workflow mints a repository-scoped GitHub App
 token using this repository's `SITE_CI_APP_ID` variable and
@@ -491,7 +498,6 @@ wording consistent when both describe the same change.
 | `crates/fractal-ui-model`, `crates/fractal-conversation-ui` | Shared mission and conversation presentation. |
 | `clients`, `apps/ios` | TypeScript/Swift clients and the iOS app. |
 | `crates/fractal-migrate` | Migration tooling. |
-| `src`, `tests` | Legacy st2 package and its integration tests. |
 | `components`, `evals`, `fixtures` | Provider components, evals, and proof fixtures. |
 | `examples/fractal`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |

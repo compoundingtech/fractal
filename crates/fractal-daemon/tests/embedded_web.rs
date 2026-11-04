@@ -17,7 +17,7 @@ async fn browser_admission_matrix() {
     }
     let mut state = api::tests_shared::state(root.path());
     state.owning_person = Some("person/robin".into());
-    let server = tokio::spawn(prepared.serve(state));
+    let server = tokio::spawn(prepared.serve(state, Default::default()));
     let client = Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let url = format!("http://{address}");
     assert_eq!(client.get(&url).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);

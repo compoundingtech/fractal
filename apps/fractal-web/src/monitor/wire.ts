@@ -10,6 +10,11 @@ import { Result, Schema } from 'effect'
 
 const QUOTA_SCHEMA_VERSION = 3 as const
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+export const CLIENT_API_VERSIONS = ['st3.client.v0', 'fractal.client.v0'] as const
+const usagePeriodSchemas = CLIENT_API_VERSIONS.map((version) => `${version}/usage.period` as const)
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+
 /** An optional fact: the key may be absent or `null`; both mean "not reported". */
 const opt = <S extends Schema.Top>(schema: S) => Schema.optionalKey(Schema.NullOr(schema))
 
@@ -118,7 +123,7 @@ export type QuotaAccount = typeof QuotaAccount.Type
 export const QuotaEnvelope = Schema.Struct({
   schemaVersion: Schema.Literal(QUOTA_SCHEMA_VERSION),
   /** Local adapter provenance; native usage has no ledger account identity. */
-  sourceSchema: Schema.optionalKey(Schema.Literal('st3.client.v0/usage.period')),
+  sourceSchema: Schema.optionalKey(Schema.Literals(usagePeriodSchemas)),
   generatedAt: Iso,
   freshnessHorizonSeconds: Schema.Finite,
   coverage: Schema.Struct({

@@ -24,7 +24,7 @@ fn diagnostic(subject: &str, n: usize, reason: &str) -> ClaimInput {
 fn write_diagnostics(store: &Store, subject: &str, count: usize) {
     for n in 0..count {
         store
-            .append_claim(&diagnostic(subject, n, &format!("slow {n}")))
+            .append_as_older_build_for_test(&diagnostic(subject, n, &format!("slow {n}")))
             .unwrap();
     }
 }
@@ -375,12 +375,12 @@ fn a_retry_of_a_dropped_claim_is_answered_without_a_duplicate() {
     let before = store.claims_for("daemon/alder", None).unwrap().len();
 
     let retry = store
-        .append_claim(&diagnostic("daemon/alder", 0, "slow 0"))
+        .append_as_older_build_for_test(&diagnostic("daemon/alder", 0, "slow 0"))
         .unwrap_err();
     assert_eq!(retry.code, "claim-checkpointed");
     assert_eq!(retry.details["claim_id"], json!(dropped.id));
     let different = store
-        .append_claim(&diagnostic("daemon/alder", 0, "another reason"))
+        .append_as_older_build_for_test(&diagnostic("daemon/alder", 0, "another reason"))
         .unwrap_err();
     assert_eq!(different.code, "idempotency-mismatch");
     assert_eq!(
@@ -417,7 +417,7 @@ fn a_reused_operation_of_a_dropped_claim_still_conflicts() {
     let cedar = Store::open_memory("cedar").unwrap();
     cedar.bind_fleet(FLEET).unwrap();
     cedar
-        .append_claim(&diagnostic("daemon/alder", 0, "a different request"))
+        .append_as_older_build_for_test(&diagnostic("daemon/alder", 0, "a different request"))
         .unwrap();
     while sync(&cedar, "cedar", &alder, false).received != 0 {}
     while sync(&cedar, "cedar", &birch, false).received != 0 {}
@@ -445,7 +445,7 @@ fn a_repeat_of_a_dropped_request_is_no_conflict() {
     let cedar = Store::open_memory("cedar").unwrap();
     cedar.bind_fleet(FLEET).unwrap();
     cedar
-        .append_claim(&diagnostic("daemon/alder", 0, "slow 0"))
+        .append_as_older_build_for_test(&diagnostic("daemon/alder", 0, "slow 0"))
         .unwrap();
     while sync(&cedar, "cedar", &alder, false).received != 0 {}
     let answer = has_unknown_claim_at(&alder.readers.get(), "daemon/alder", None).unwrap();
@@ -492,7 +492,7 @@ fn the_committed_index_never_moves_back() {
     assert_eq!(store.index().unwrap(), index);
     assert_eq!(current_index(&store.readers.get()).unwrap(), index);
     let next = store
-        .append_claim(&diagnostic("daemon/alder-after", 0, "after"))
+        .append_as_older_build_for_test(&diagnostic("daemon/alder-after", 0, "after"))
         .unwrap();
     assert!(next.store_index > index);
 }
@@ -761,6 +761,50 @@ fn production_history_has_bounded_journal_writes() {
     );
 }
 
+/// A trim chunk that holds the writer over a second logs one line with what it deleted, the bytes
+/// of the bodies, and its hold split into the steps and the commit; a faster chunk logs nothing.
+#[test]
+fn a_slow_trim_chunk_logs_what_it_deleted_and_where_its_hold_went() {
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let slow_chunks = |lines: &std::sync::Mutex<Vec<String>>| -> Vec<serde_json::Value> {
+        lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|line| line.strip_prefix("st3: a trim chunk held the store's writer over 1 s "))
+            .map(|fields| serde_json::from_str(fields).unwrap())
+            .collect()
+    };
+    let store = Store::open_memory("alder").unwrap();
+    store.bind_fleet(FLEET).unwrap();
+    write_diagnostics(&store, "daemon/alder", 5);
+    let cut = now_ms() + 1_000;
+    let plan = plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
+    let seen = std::sync::Arc::clone(&lines);
+    *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
+    // Recorded in one transaction, so only the first deletion chunk pays the cost.
+    store.set_trim_row_cost(smallclaims::store::checkpoint_trim::LOGGED_TRIM_CHUNK);
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_fault(Some(TrimFault::AfterChunk(1)));
+    let mut actions = Vec::new();
+    assert!(
+        store
+            .trim_checkpoint(CHECKPOINT, cut, &plan.drop_digest, &plan.envelopes, &plan.claims, true, &mut actions)
+            .is_err()
+    );
+    let logged = slow_chunks(&lines);
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    let line = &logged[0];
+    assert_eq!((line["phase"].as_str(), line["envelopes"].as_u64(), line["claims"].as_u64()), (Some("envelopes"), Some(1), Some(1)), "{line}");
+    let field = |name: &str| line[name].as_u64().unwrap();
+    assert!(field("body_bytes") > 0, "{line}");
+    assert!(field("step_ms") >= 1_000, "{line}");
+    assert!(field("held_ms") >= field("step_ms"), "{line}");
+    store.set_trim_row_cost(std::time::Duration::ZERO);
+    store.finish_trim(CHECKPOINT, &mut actions).unwrap();
+    assert_eq!(slow_chunks(&lines).len(), 1, "a chunk under a second logs nothing");
+}
+
 /// How long a write waits behind a trim is wall time, which a loaded builder stretches (a
 /// commit's fsync alone). What the trim bounds is its work per writer loan: a chunk takes another
 /// envelope only while `TRIM_CHUNK_BUDGET` has not run out, so if each envelope costs at least
@@ -812,7 +856,7 @@ fn a_trim_never_makes_a_write_wait_long() {
     store.bind_fleet(FLEET).unwrap();
     // This test times how long the trim holds the writer. Every commit waits for the disk with
     // `synchronous=FULL`, and a shared disk makes that wait the whole measurement: a chunk
-    // held 13 ms of CPU and its commit waited 259 ms on hetz2. Without the sync, a write waits
+    // held 13 ms of CPU and its commit waited 259 ms on a build host. Without the sync, a write waits
     // only for the trim's own work. The 500 ms bound is unchanged.
     store
         .connection
@@ -858,7 +902,7 @@ fn a_trim_never_makes_a_write_wait_long() {
     while !trimming.is_finished() {
         let started = std::time::Instant::now();
         store
-            .append_claim(&diagnostic("daemon/birch", writes, "written during a trim"))
+            .append_as_older_build_for_test(&diagnostic("daemon/birch", writes, "written during a trim"))
             .unwrap();
         longest = longest.max(started.elapsed());
         writes += 1;

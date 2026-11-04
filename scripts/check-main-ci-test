@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """The main check must fail closed unless the exact queue SHA passed every required check."""
+import ast
 import copy
 import importlib.machinery
 import importlib.util
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -19,22 +21,32 @@ loader.exec_module(module)
 
 run = dict(head_sha='a' * 40, event='merge_group', path='.github/workflows/fleet.yml',
            status='completed', conclusion='success', head_branch='gh-readonly-queue/main/pr-1-example',
-           check_suite_id=1, html_url='https://github.com/example/project/actions/runs/1')
+           id=1, run_attempt=2, check_suite_id=1, html_url='https://github.com/example/project/actions/runs/1')
 checks = [dict(name=name, conclusion='success') for name in module.REQUIRED]
+jobs = [dict(name=name, head_sha='a' * 40, steps=[
+    dict(name='evidence skip taken', conclusion='skipped')]) for name in sorted(module.GATES)]
 
 
-def check(name, runs, results, expected):
+def check(name, runs, results, expected, job_results=None, skipped=False):
     def api(path):
         if '/actions/workflows/' in path:
             assert 'event=merge_group&head_sha=' + 'a' * 40 in path
             return [{'workflow_runs': []}, {'workflow_runs': runs}]
+        if '/actions/runs/' in path:
+            assert '/runs/1/attempts/2/jobs?per_page=100' in path
+            selected = jobs if job_results is None else job_results
+            return [{'jobs': selected[:3]}, {'jobs': selected[3:]}]
         assert '/check-suites/1/check-runs' in path
         return [{'check_runs': results[:2]}, {'check_runs': results[2:]}]
     module.api = api
     with tempfile.TemporaryDirectory() as tmp:
         os.environ.update(GITHUB_REPOSITORY='example/project', GITHUB_SHA='a' * 40,
-                          GITHUB_STEP_SUMMARY=str(Path(tmp) / 'summary'))
+                          GITHUB_STEP_SUMMARY=str(Path(tmp) / 'summary'), GITHUB_OUTPUT=str(Path(tmp) / 'outputs'))
         assert module.main() == expected, name
+        if expected == 0:
+            assert Path(os.environ['GITHUB_OUTPUT']).read_text() == f'evidence-skipped={str(skipped).lower()}\n'
+        else:
+            assert not Path(os.environ['GITHUB_OUTPUT']).exists()
     print('passed:', name)
 
 
@@ -57,6 +69,26 @@ for status in ['failure', 'skipped', 'neutral', 'cancelled', None]:
     check('reject required check ' + str(status), [run], failed, 1)
 check('missing required check', [run], checks[:-1], 1)
 
+for conclusion in ('success', 'failure', 'skipped', 'cancelled'):
+    marked = copy.deepcopy(jobs)
+    marked[0]['steps'][0]['conclusion'] = conclusion
+    check('exact attempt skip marker ' + conclusion, [run], checks, 0,
+          job_results=marked, skipped=conclusion == 'success')
+wrong_sha = copy.deepcopy(jobs)
+wrong_sha[0]['head_sha'] = 'b' * 40
+for invalid in ([], jobs[:-1], wrong_sha, jobs + [jobs[0]]):
+    check('incomplete or wrong-SHA jobs request hosted proof', [run], checks, 0, job_results=invalid, skipped=True)
+for steps in ([], None, [dict(name='other step', conclusion='skipped')],
+              [jobs[0]['steps'][0]] * 2, [dict(name='evidence skip taken', conclusion=None)]):
+    incomplete = copy.deepcopy(jobs)
+    if steps is None:
+        del incomplete[0]['steps']
+    else:
+        incomplete[0]['steps'] = steps
+    check('missing or ambiguous marker requests hosted proof', [run], checks, 0,
+          job_results=incomplete, skipped=True)
+
+
 # The merge queue's required checks are six since fractal-web joined the main ruleset; the queue watcher
 # waits for the same set, so a red fractal-web on main counts here and a queue run is not finished without it.
 queue_loader = importlib.machinery.SourceFileLoader('ci_queue_watch', str(ROOT / 'scripts/ci-queue-watch'))
@@ -71,6 +103,152 @@ check('reject a red fractal-web', [run], fractal_red, 1)
 fleet = (ROOT / '.github/workflows/fleet.yml').read_text()
 trigger = fleet.split('\non:\n', 1)[1].split('\npermissions:', 1)[0]
 assert 'push:' not in trigger and 'merge_group:' in trigger and 'pull_request:' in trigger
+upkeep = (ROOT / '.github/workflows/main-upkeep.yml').read_text()
+assert "needs.main-checks.outputs.evidence-skipped == 'true'" in upkeep
+assert 'proof-linux-gate:' in upkeep
+assert "github.run_id" in upkeep.split('concurrency:', 1)[1].split('jobs:', 1)[0]
+assert 'main is red; revert the merged change.' in upkeep
+assert "'failure'" in upkeep and "'cancelled'" in upkeep
+
+# Every queue job is reused once, except explicitly inapplicable lifecycle/advice jobs.
+def job_blocks(text):
+    text = text.split('\njobs:\n', 1)[1]
+    starts = list(re.finditer(r'^  ([\w-]+):\n', text, re.M))
+    return {match[1]: text[match.end():starts[i + 1].start() if i + 1 < len(starts) else len(text)]
+            for i, match in enumerate(starts)}
+
+original, composed = job_blocks(fleet), job_blocks(upkeep)
+assert module.GATES == {name for name in original if name.startswith('evidence-gate-')}
+omitted = {
+    'namespace-capacity': 'Ephemeral queue-ref cancellation must not cancel landed proof.',
+    'evidence-presign-notice': 'Pre-signing advice applies only to an open PR.',
+}
+assert omitted.keys() <= original.keys()
+assert {name for name in composed if name.startswith('proof-')} == {'proof-' + name for name in original.keys() - omitted.keys()}
+for name in original.keys() - omitted.keys():
+    body = composed['proof-' + name]
+    condition = re.search(r'^    if: (.*)$', body, re.M)[1]
+    assert "needs.main-checks.outputs.evidence-skipped == 'true'" in condition, name
+    assert "github.event_name == 'push'" in condition, name
+    declared = re.search(r'^    needs:([^\n]*(?:\n      [^\n]*)*)', body, re.M)[1]
+    assert 'main-checks' in declared, name
+    # All expression references, including bare step conditions, use the namespaced graph.
+    for dependency in re.findall(r'\bneeds(?:\.([\w-]+)|\[[\'"]([\w-]+)[\'"]\])', body):
+        used = dependency[0] or dependency[1]
+        assert used == 'main-checks' or used.startswith('proof-'), (name, used)
+aggregate = composed['proof-evidence-note-linux-gate']
+assert 'toJSON(needs)' not in aggregate
+assert 'toJSON(needs.proof-linux-gate)' in aggregate
+assert '"linux-gate":{' in aggregate  # evidence commands retain original dependency names
+print('passed: every composed hosted lane is conditional and dependency-safe')
+
+# Abstract interpretation keeps actual event/ref exact while allowing runtime outcomes and cache/config
+# choices to vary. It detects an impossible event conjunct anywhere, without treating quoted text as code.
+def possible_on_push(condition, bindings=None):
+    text = condition.strip()
+    if text.startswith('"'):
+        text = ast.literal_eval(text)
+    text = text.removeprefix('${{').removesuffix('}}').strip()
+    pattern = r"'(?:''|[^'])*'|&&|\|\||==|!=|>=|<=|[!(),<>]|[A-Za-z_][\w.*-]*|\d+"
+    tokens = re.findall(pattern, text)
+    assert not re.sub(pattern, '', text).strip(), text
+    domain = {False, True, '', 0, 1, *(t[1:-1].replace("''", "'") for t in tokens if t.startswith("'"))}
+    known = {'github.event_name': {'push'}, 'github.ref': {'refs/heads/main'}, **(bindings or {})}
+    position = 0
+
+    def primary():
+        nonlocal position
+        token = tokens[position]
+        position += 1
+        if token == '!':
+            return {not value for value in primary()}
+        if token == '(':
+            result = logical_or()
+            assert tokens[position] == ')', text
+            position += 1
+            return result
+        if position < len(tokens) and tokens[position] == '(':
+            position += 1
+            while tokens[position] != ')':
+                logical_or()
+                if tokens[position] != ',':
+                    break
+                position += 1
+            assert tokens[position] == ')', text
+            position += 1
+            return {True} if token == 'always' else {False, True}
+        if token.startswith("'"):
+            return {token[1:-1].replace("''", "'")}
+        if token in ('true', 'false'):
+            return {token == 'true'}
+        return known.get(token, domain)
+
+    def comparison():
+        nonlocal position
+        result = primary()
+        if position < len(tokens) and tokens[position] in ('==', '!='):
+            operator = tokens[position]
+            position += 1
+            right = primary()
+            result = {(left == other) if operator == '==' else (left != other) for left in result for other in right}
+        return result
+
+    def logical_and():
+        nonlocal position
+        result = comparison()
+        while position < len(tokens) and tokens[position] == '&&':
+            position += 1
+            right = comparison()
+            result = {bool(left) and bool(other) for left in result for other in right}
+        return result
+
+    def logical_or():
+        nonlocal position
+        result = logical_and()
+        while position < len(tokens) and tokens[position] == '||':
+            position += 1
+            right = logical_and()
+            result = {bool(left) or bool(other) for left in result for other in right}
+        return result
+
+    result = logical_or()
+    assert position == len(tokens), (text, tokens[position:])
+    return any(result)
+
+assert not possible_on_push("!cancelled() && github.event_name == 'merge_group'")
+assert not possible_on_push("github.event_name == 'pull_request'")
+assert possible_on_push("github.event_name == 'merge_group' || github.event_name == 'push'")
+for name, body in composed.items():
+    if not name.startswith('proof-'):
+        continue
+    conditions = re.findall(r'^\s+(?:- )?if: (.+)$', body, re.M)
+    for condition in conditions:
+        assert possible_on_push(condition), (name, condition)
+    assert 'github.event.merge_group.head_ref' not in body, name
+assert possible_on_push(re.search(r'^    if: (.*)$', composed['proof-pick-runner'], re.M)[1],
+                        {'vars.CI1_RUNNERS': {'off'}, 'vars.CI_PR_NAMESPACE_PROFILE': {''}})
+for index, name in enumerate(('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4'), 1):
+    assert f'CI_TEST_PARTITION: "hash:{index}/4"' in composed['proof-' + name], name
+assert 'EVENT: merge_group' in composed['proof-linux-gate']
+assert 'EVENT_NAME: ${{ github.event_name }}' in composed['proof-evidence-gate-linux-gate']
+assert 'CI_TEST_TOPOLOGY: merge-group' in composed['proof-evidence-note-rust-tests']
+assert 'IMPACT_BASE_SHA: ${{ github.event.before }}' in composed['proof-upgrade-impact']
+assert '--queue-ref' not in composed['proof-upgrade-impact']
+assert 'QUEUE_REF:' not in composed['proof-pick-runner']
+print('passed: queue-equivalent proof coverage, four partitions, and push-satisfiable job/step predicates')
+
+for gate in module.GATES:
+    assert 'EVENT_NAME: ${{ github.event_name }}' in composed['proof-' + gate], gate
+    assert 'HEAD_SHA: ${{ github.sha }}' in composed['proof-' + gate], gate
+linux = composed['proof-linux-gate']
+stage = linux.split('name: Require every Linux stage to pass', 1)[1].split('\n      - ', 1)[0]
+script = __import__('textwrap').dedent(stage.split('run: |\n', 1)[1])
+for extra, expected in [('success success', 0), ('skipped success', 1), ('success skipped', 1), ('success failure', 1)]:
+    env = dict(os.environ, EVENT='merge_group', RESULTS=' '.join(['success'] * 6),
+               MERGE_RESULTS=extra, GATE_SKIP='false', STAGE_SKIPS=' '.join(['false'] * 8))
+    done = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
+    assert done.returncode == expected, (extra, done.stdout, done.stderr)
+print('passed: actual Linux aggregate requires both extra proof partitions; evidence gates retain push identity')
 
 # Any accidental test execution defeats deduplication. Exercise every cache-fill stage with
 # command stand-ins which reject cargo test without --no-run, and cargo run/nextest execution.
@@ -82,6 +260,10 @@ with tempfile.TemporaryDirectory() as tmp:
         stub = scratch / command
         stub.write_text(f'''#!{bash}
 printf '%s\\n' "$*" >> "$COMMAND_LOG"
+if [ {command} = cargo ] && [ "${{1:-}}" = metadata ]; then
+  printf '%s\\n' '{{"workspace_members":[],"packages":[]}}'
+  exit 0
+fi
 if [ "${{1:-}}" = test ] && [[ " $* " != *" --no-run "* ]]; then exit 90; fi
 if [ "${{1:-}}" = run ] || {{ [ "${{1:-}}" = nextest ] && [ "${{2:-}}" != archive ]; }}; then exit 91; fi
 ''')

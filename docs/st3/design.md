@@ -341,8 +341,9 @@ answer asks with `st work ask`.
 
 Faults never enter attention either. A failed loop, step, deploy, observer or runtime goes to an
 owning agent: the agent assigned to the failed step, else the run's requester (or the requester of
-a run above it) when that is an agent, else the fleet's fault agent, the first live agent whose
-declaration carries the bare `handles-faults` node. Only a live agent declaration owns a fault. The
+a run above it) when that is an agent, else the fleet's fault agent, the one live agent whose
+declaration carries the bare `handles-faults` node (a second is refused at publication, and two
+accepted on different members leave none). Only a live agent declaration owns a fault. The
 host that runs the owner sends it one message per fault episode, from `daemon/runtime` with the
 title `Fault: TITLE`. The agent retries, revises or cancels, and asks a person with `st work ask`
 only for what only a person can give. A fault that no agent owns stays visible in `st doctor`'s

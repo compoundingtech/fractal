@@ -344,11 +344,14 @@ pub fn received(
     Ok(path)
 }
 
-/// Where the person keeps downloads: `ST3_DOWNLOADS`, else their XDG download directory
+/// Where the person keeps downloads: `FRACTAL_DOWNLOADS` (or `ST3_DOWNLOADS`), else their XDG download directory
 /// (`XDG_DOWNLOAD_DIR`, or `~/.config/user-dirs.dirs`), else `~/Downloads`.
-pub fn downloads() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let configured = std::env::var_os("ST3_DOWNLOADS")
+pub fn downloads() -> anyhow::Result<Option<PathBuf>> {
+    let downloads = crate::environment::read("FRACTAL_DOWNLOADS", "ST3_DOWNLOADS")?;
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let configured = downloads
         .or_else(|| std::env::var_os("XDG_DOWNLOAD_DIR"))
         .map(PathBuf::from)
         .or_else(|| {
@@ -367,11 +370,11 @@ pub fn downloads() -> Option<PathBuf> {
                     }
                 })
         });
-    Some(
+    Ok(Some(
         configured
             .filter(|dir| dir.is_absolute())
             .unwrap_or_else(|| home.join("Downloads")),
-    )
+    ))
 }
 
 /// Save an image a person opened where they keep downloads, under the name it was sent with

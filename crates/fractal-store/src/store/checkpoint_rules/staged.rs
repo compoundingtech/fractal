@@ -96,10 +96,10 @@ pub fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
     {
         let mut statement = staging.prepare(
             "SELECT limits_group, MAX(limits_measured) FROM claims
-             WHERE first=1 AND kind='harness.limits' AND limits_group IS NOT NULL
+             WHERE first=1 AND kind=?1 AND limits_group IS NOT NULL
              GROUP BY limits_group",
         )?;
-        let mut rows = statement.query([])?;
+        let mut rows = statement.query([LIMITS_KIND])?;
         while let Some(row) = rows.next()? {
             let group: (String, String, String, bool) = serde_json::from_str(&row.get::<_, String>(0)?)?;
             limits_newest.insert(group, u64::try_from(row.get::<_, i64>(1)?)?);
@@ -181,7 +181,8 @@ pub fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
                           WHERE envelopes.writer=claims.writer AND envelopes.included=1));",
     )?;
 
-    // D3, shared operations and whole envelopes, until nothing changes. Each step only keeps
+    // D3, shared operations and whole envelopes (unless a local cut lets envelopes split: see
+    // `StagedSet::split_envelopes`), until nothing changes. Each step only keeps
     // more, so the loop ends, and every witness is a kept claim. Slots, operations and
     // envelopes are each disjoint, so a step applied to all of its groups at once decides as
     // the sequential loop does.
@@ -220,7 +221,8 @@ pub fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
         )?;
         let kept = kept
             + staging.execute(
-                /* sqlite-large-value: allow-for-now lv-hc255b654722e owner=fractal_store::store::checkpoint_rules::staged TODO=chunk-or-reference-exact-wire-values */ "UPDATE claims SET dropped=0 WHERE dropped=1
+                /* sqlite-large-value: allow-for-now lv-hc4cf5762c02a owner=fractal_store::store::checkpoint_rules::staged TODO=chunk-or-reference-exact-wire-values */ "UPDATE claims SET dropped=0 WHERE dropped=1
+                   AND NOT EXISTS(SELECT 1 FROM split_envelopes)
                    AND EXISTS(SELECT 1 FROM claims other
                               WHERE other.writer=claims.writer AND other.sequence=claims.sequence
                                 AND other.envelope_hash=claims.envelope_hash AND other.dropped=0)",

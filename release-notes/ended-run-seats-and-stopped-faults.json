@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A seat whose mission run has ended is not restarted (the restart request is refused, or retired if it predates the end), a stop ends an earlier member-reconcile fault on every member, and a missing working directory is reported as such instead of as an unknown or launcher failure",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or replay changes. A member-reconcile fault is read against the subject's stop declarations in this store; nothing is rewritten."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No claim rule changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "POST /v1/agents/restart refuses a seat whose run has ended with 422 restart-run-ended, naming the run and how it ended. A member-reconcile fault recorded before a stop declaration for the subject no longer shows in doctor or on the agent card, also after the seat is declared again; a fault recorded after the stop still does. A start (not a running seat) whose absolute working directory does not exist fails as `working directory ... does not exist`, and the pty launcher's own message for it classifies as working-directory-missing. Each member applies this as it upgrades; older members keep showing such faults until then."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back is safe: faults before a stop show again and restarts of ended-run seats are accepted as before."
+  }
+}

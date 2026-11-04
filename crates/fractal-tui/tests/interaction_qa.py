@@ -75,7 +75,14 @@ def text_row(value: str) -> tuple[int, int] | None:
 def start(binary: str, prefix: str) -> str:
     """Start st ui in a detached PTY session and wait for its first frame."""
     session = f"{prefix}-{uuid.uuid4().hex[:10]}"
-    actor = os.environ.get("ST3_PERSON", "person/alex")
+    preferred = os.environ.get("FRACTAL_PERSON") or None
+    legacy = os.environ.get("ST3_PERSON") or None
+    if preferred and legacy and preferred != legacy:
+        raise ValueError(
+            "FRACTAL_PERSON and ST3_PERSON have different values; "
+            "unset one or set both to the same value"
+        )
+    actor = preferred or legacy or "person/alex"
     subprocess.run(
         [PTY, "run", "-d", "-e", "--id", session,
          "--env", f"ST3_PERSON={actor}", "--env", "TERM=xterm-256color",

@@ -191,6 +191,9 @@ fn day_of(path: &Path) -> i64 {
         .unwrap_or(i64::MIN)
 }
 fn files(dir: &Path) -> Vec<PathBuf> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let dir = fractal_client::product_dirs::tui_read_path(dir);
+    // LIVE-MIGRATION END
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()

@@ -40,7 +40,7 @@ fn upgrade_preserves_signed_backups_retries_and_stream_cursors() {
         })
         .unwrap()
         .unwrap();
-    let old = store.append_claim(&input(0)).unwrap();
+    let old = store.append_as_older_build_for_test(&input(0)).unwrap();
     store
         .connection
         .batched(|_| {
@@ -50,7 +50,7 @@ fn upgrade_preserves_signed_backups_retries_and_stream_cursors() {
         .unwrap()
         .unwrap();
     assert!(old.accepted_at_unix_ms <= now - 8 * 86_400_000);
-    let recent = store.append_claim(&input(1)).unwrap();
+    let recent = store.append_as_older_build_for_test(&input(1)).unwrap();
     let events = serde_json::to_value(store.events_after(0, None).unwrap()).unwrap();
     let resumed = serde_json::to_value(store.events_after(old.store_index, None).unwrap()).unwrap();
     let exchange = store
@@ -111,8 +111,13 @@ fn upgrade_preserves_signed_backups_retries_and_stream_cursors() {
         .unwrap(),
         serde_json::to_value(exchange).unwrap()
     );
+    // After the upgrade the kind is local; a retry through the real API still gets its claim,
+    // and a changed request under an old key is still refused.
     assert_eq!(store.append_claim(&input(0)).unwrap().id, old.id);
     assert_eq!(store.append_claim(&input(1)).unwrap().id, recent.id);
+    let mut changed = input(0);
+    changed.fields.insert("reason".into(), serde_json::json!("a different request"));
+    assert_eq!(store.append_claim(&changed).unwrap_err().code, "idempotency-mismatch");
     assert_eq!(
         serde_json::to_value(store.events_after(0, None).unwrap()).unwrap(),
         events
@@ -125,7 +130,7 @@ fn upgrade_preserves_signed_backups_retries_and_stream_cursors() {
     let header = store
         .write_backup(&mut std::fs::File::create(&archive).unwrap())
         .unwrap();
-    let restored = fractal_daemon::backup::restore(&archive, &root.path().join("restored.sqlite3")).unwrap();
+    let restored = fractal_daemon::backup::restore(&archive, &root.path().join("restored.sqlite3"), root.path()).unwrap();
     assert!(restored.projections_match);
     assert_eq!(restored.log_digest, header.log_digest);
 }

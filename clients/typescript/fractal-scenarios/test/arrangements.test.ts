@@ -41,6 +41,7 @@ describe('read-only sidebar arrangements', () => {
     expect(sidebar.owner).toBe(owner)
     expect(sidebar.body.name.value).toBe('Sidebar')
     expect(Object.keys(sidebar.body.folders)).toHaveLength(3)
+    if (sidebar.body.version !== 1) throw new Error('Expected a legacy Sidebar layout')
     expect(Object.keys(sidebar.body.placements)).toHaveLength(3)
     for (const [subject, placement] of Object.entries(sidebar.body.placements)) {
       expect(h.world.slices.roster.state.agents.some((agent) => agent.id === subject)).toBe(true)
@@ -124,10 +125,10 @@ describe('read-only sidebar arrangements', () => {
     expect(discovery.capabilities).toContainEqual({ id: 'arrangements', version: 1, state: 'ungranted' })
     expect(discovery.capabilities).toContainEqual({ id: 'read.arrangements', version: 0, state: 'ungranted' })
     expect(discovery.capabilities.some((row) => row.id === 'arrangements' && row.version === 1 && row.state === 'granted')).toBe(false)
-    // Same guard as fractal-web requireArrangements: feature id, exact version and granted state.
+    // Same guard as fractal-web requireArrangements: feature id, compatible version and granted state.
     const requireArrangements = () => {
-      if (!discovery.capabilities.some((row) => row.id === 'arrangements' && row.version === 1 && row.state === 'granted')) {
-        throw new TypeError('Granted arrangements capability version 1 is required; older pairings may need renewal')
+      if (!discovery.capabilities.some((row) => row.id === 'arrangements' && (row.version === 1 || row.version === 2) && row.state === 'granted')) {
+        throw new TypeError('Granted arrangements capability version 1 or 2 is required; older pairings may need renewal')
       }
     }
     expect(requireArrangements).toThrow(TypeError)
@@ -185,6 +186,7 @@ describe('read-only sidebar arrangements', () => {
     const sidebar = huge.slices.roster.state.arrangements![0]!
     decodeUnknownSync(Arrangement, 'strict')(sidebar)
     expect(Object.keys(sidebar.body.folders)).toHaveLength(57)
+    if (sidebar.body.version !== 1) throw new Error('Expected a legacy Sidebar layout')
     expect(Object.keys(sidebar.body.placements)).toHaveLength(1_000)
     expect(Object.values(sidebar.body.folders).some((folder) => folder.position.value.parent !== null && sidebar.body.folders[folder.position.value.parent]!.position.value.parent !== null)).toBe(true)
     const counts = new Map<string, number>()

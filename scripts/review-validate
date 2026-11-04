@@ -98,6 +98,11 @@ def semantic(verdict, problems, previous=None):
     for reason in risk["deterministic"]["reasons"]:
         if ORDER[reason["level"]] > ORDER[risk["deterministic"]["level"]]:
             problems.append(f"risk.deterministic: level {risk['deterministic']['level']!r} is lower than the reason {reason['rule']!r} ({reason['level']!r})")
+    if "needs_factory_read" in risk:
+        wanted = risk["final"] == "medium" and bool(risk["deterministic"].get("factory_read"))
+        if risk["needs_factory_read"] != wanted:
+            problems.append(f"risk.needs_factory_read: {risk['needs_factory_read']!r} but final risk {risk['final']!r} with "
+                            f"{len(risk['deterministic'].get('factory_read') or [])} area(s) makes it {wanted!r}")
     blocking = [finding for finding in verdict["findings"] if finding["severity"] == "blocking"]
     if verdict["verdict"] == "GO" and blocking:
         problems.append(f"verdict: GO with {len(blocking)} blocking finding(s)")

@@ -4,14 +4,12 @@ import type { UsageAccount, UsageLimit } from '@fractal/client/schema'
 import { Result, Schema } from 'effect'
 
 import type { QuotaFailure } from './model.ts'
-import type { QuotaAccount, QuotaEnvelope, QuotaLimit } from './wire.ts'
+import { CLIENT_API_VERSIONS, type QuotaAccount, type QuotaEnvelope, type QuotaLimit } from './wire.ts'
 
 /** Presentation freshness bound, matching the native default account-limits policy. */
 export const NATIVE_LIMIT_FRESHNESS_MS = 60 * 60 * 1000
 const NativeEnvelope = Schema.Struct({
-  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both:
-  // sunset 60 days after the first release shipping the bridge; emitted provenance stays st3.
-  api_version: Schema.Literals(['st3.client.v0', 'fractal.client.v0']),
+  api_version: Schema.Literals(CLIENT_API_VERSIONS),
   value: UsagePeriod,
 })
 

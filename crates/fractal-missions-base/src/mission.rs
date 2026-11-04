@@ -306,6 +306,7 @@ fn parse_mission(
     let mut resource_names = BTreeSet::new();
     let mut revision_owners = Vec::new();
     let mut system = false;
+    let mut capacity = None;
     for child in children.nodes() {
         match child.name().value() {
             "system" => {
@@ -500,6 +501,15 @@ fn parse_mission(
                     format!("mission `{id}` cannot own an account"),
                 ));
             }
+            "capacity" => {
+                if capacity.is_some() {
+                    return Err(St3Error::new(
+                        "duplicate-mission-field",
+                        format!("mission `{id}` repeats `capacity`"),
+                    ));
+                }
+                capacity = Some(parse_capacity(child)?);
+            }
             name if is_mission_declaration(name) => {
                 validate_deferred_declaration(child)?;
                 let child = take_agent_constraints(child, default_host, &mut agent_constraints)?;
@@ -562,6 +572,7 @@ fn parse_mission(
         revision_reviewer,
         revision_cutover,
         declarations_kdl,
+        capacity,
         work_selector,
         completion,
         goals,
@@ -809,6 +820,7 @@ fn parse_loop_group(
         constraints: Vec::new(),
         agent_constraints: BTreeMap::new(),
         timeout_ms: None,
+        capacity: None,
         retry: RetrySpec {
             attempts: rounds as u32,
             backoff_ms: 0,
@@ -1295,6 +1307,7 @@ fn parse_step(
     let mut title = None;
     let mut fresh_context = false;
     let mut keep_open = false;
+    let mut capacity = None;
     let mut goals = Vec::new();
     let mut constraints = Vec::new();
     let mut agent_constraints = BTreeMap::new();
@@ -1346,6 +1359,7 @@ fn parse_step(
                     ensure_bare(child)?;
                     keep_open = true;
                 }
+                "capacity" => capacity = Some(parse_step_capacity(child)?),
                 "goal" => goals.push(plain_string(child)?),
                 "constraint" => {
                     push_constraint(&mut constraints, child, &format!("step `{path}`"))?
@@ -1476,6 +1490,12 @@ fn parse_step(
         available_to,
         agentless,
     )?;
+    if capacity.is_some() && matches!(work_selector, Some(WorkSelector::Agentless)) {
+        return Err(St3Error::new(
+            "invalid-capacity",
+            format!("step `{path}` is agentless, so it has no seat whose lane its capacity could raise"),
+        ));
+    }
     let declarations_kdl = declarations_document(declarations);
     let mut step = StepSpec {
         id,
@@ -1489,6 +1509,7 @@ fn parse_step(
         constraints,
         agent_constraints,
         timeout_ms,
+        capacity,
         retry,
         finally,
         work_selector,
@@ -1827,6 +1848,52 @@ fn declarations_document(nodes: Vec<KdlNode>) -> Option<String> {
     document.nodes_mut().extend(nodes);
     document.autoformat();
     Some(document.to_string())
+}
+
+/// A run's declarations with the mission's `capacity` added to each agent that declares none of its
+/// own, before they are parsed into seats. A terminal-bound agent takes no lane, so it is left as
+/// it is.
+pub fn with_mission_capacity(
+    source: &str,
+    capacity: Option<fractal_runtime::Capacity>,
+) -> Result<std::borrow::Cow<'_, str>, St3Error> {
+    let Some(capacity) = capacity else {
+        return Ok(std::borrow::Cow::Borrowed(source));
+    };
+    let mut document = source
+        .parse::<KdlDocument>()
+        .map_err(|error| St3Error::new("invalid-kdl", error.to_string()))?;
+    let mut changed = false;
+    for node in document.nodes_mut() {
+        if node.name().value() != "agent" {
+            continue;
+        }
+        let Some(children) = node.children_mut() else {
+            continue;
+        };
+        if children
+            .nodes()
+            .iter()
+            .any(|child| matches!(child.name().value(), "capacity" | "bind-terminal"))
+        {
+            continue;
+        }
+        let mut lane = KdlNode::new("capacity");
+        lane.entries_mut()
+            .push(kdl::KdlEntry::new_prop("cores", i128::from(capacity.cores)));
+        lane.entries_mut().push(kdl::KdlEntry::new_prop(
+            "memory",
+            fractal_runtime::show_lane_memory(capacity.memory),
+        ));
+        // Format only the added node: the rest stays the author's text.
+        lane.autoformat();
+        children.nodes_mut().push(lane);
+        changed = true;
+    }
+    if !changed {
+        return Ok(std::borrow::Cow::Borrowed(source));
+    }
+    Ok(std::borrow::Cow::Owned(document.to_string()))
 }
 
 fn agent_owner(node: &KdlNode, _default_host: &str) -> Result<String, St3Error> {
@@ -2250,6 +2317,7 @@ pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionS
         constraints: Vec::new(),
         agent_constraints: BTreeMap::new(),
         timeout_ms: None,
+        capacity: None,
         retry: RetrySpec::default(),
         finally: false,
         work_selector: Some(WorkSelector::Agentless),

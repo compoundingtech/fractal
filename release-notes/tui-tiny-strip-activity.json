@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Keep visible terminal tab activity even in a one-cell strip",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or recovery behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Each split keeps a transient tab-strip view offset; workspace data is unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or coordinated upgrade changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Every nonempty strip keeps an activity glyph on each painted agent tab. Overflow markers, the add button and other tabs yield when necessary. Selection-following keeps the active tab visible; manual scrolling may intentionally hide it. Covered at widths 1 through 20, counts 1 through 60, and every initial offset and active index."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup work or expected interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator actions or configuration changes. Wheel over a tab strip to browse it; selecting another tab reveals it if needed."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes or new swap-back restrictions."
+  }
+}

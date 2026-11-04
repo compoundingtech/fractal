@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The phone's conversation view (the shared fractal-views conversationEntries) pairs a mailbox message's content entry with its header by body.message_id, so two messages that tie in order each keep their own text, and the Swift and Rust client models carry TimelineContentBody.message_id",
+  "replay": {
+    "status": "none",
+    "detail": "No graph claim, projection or cache changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No claim rule changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Client only. Content that names its message pairs with that header; content from an older daemon, without message_id, pairs with the header before it as before. The Swift and Rust TimelineContentBody models gain the optional message_id; decoders that do not know it ignore it."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back is safe: the phone pairs by adjacency again."
+  }
+}

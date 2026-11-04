@@ -292,8 +292,11 @@ pub async fn list_claims(
     }
     let store = state.store.clone();
     blocking_store(move || {
+        let subject = query.subject.as_deref().map(|subject| {
+            crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
+        }).transpose()?;
         store.claims_page(
-            query.subject.as_deref(),
+            subject.as_deref(),
             query.owner_run.as_deref(),
             query.after_index,
             query.before_index,
@@ -359,6 +362,18 @@ pub async fn request_attention(
         "attention-migrated",
         "attention is a derived view; use work ask/done/cancel-ask or act on its source",
     )))
+}
+
+/// A bound harness reaches this only as itself (`guard_bound_request`); the store allows a person
+/// or the fleet's fault agent, and only for a fault whose run has ended.
+pub async fn dismiss_fault(
+    State(state): State<AppState>,
+    Json(request): Json<crate::model::FaultDismissRequest>,
+) -> Result<Json<crate::model::FaultDismissal>, ApiError> {
+    let store = state.store.clone();
+    let dismissed = blocking_action(move || store.dismiss_fault_as(&request)).await?;
+    signal_changed(&state);
+    Ok(Json(dismissed))
 }
 
 pub async fn resolve_attention(

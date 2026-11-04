@@ -280,6 +280,21 @@ pub(super) async fn run_agents(
         AgentsCommand::Handoff { command } => {
             run_handoff(&cli_client(endpoint), configured_person, command, json_output).await
         }
+        AgentsCommand::Lane { subject } => {
+            // The client returns the envelope's value, as `/v1/health` below reads `node` from it;
+            // client_v0_cli's agent_lane_cli test runs this against a daemon for both outputs.
+            let response: Value = cli_client(endpoint)
+                .get(&format!(
+                    "/v1/agents/lane?agent={}",
+                    urlencoding::encode(&normalize_agent_subject(&subject))
+                ))
+                .await?;
+            if json_output {
+                return print_value(&response, true);
+            }
+            println!("{}", response["slice"].as_str().unwrap_or_default());
+            Ok(())
+        }
         AgentsCommand::Workspace { subject } => {
             let response = generated_client(endpoint, None)?
                 .agent_workspace_get(&normalize_agent_subject(&subject))
@@ -398,10 +413,15 @@ pub(super) async fn run_agents(
             if json_output {
                 let mut value = serde_json::to_value(&response)?;
                 value["handoff"] = serde_json::to_value(&agent.handoff)?;
+                if let Some(admission) = agent.extra.get("seat_admission") {
+                    value["seatAdmission"] = admission.clone();
+                }
                 print_value(&value, true)?;
             } else {
                 print_value(&response, false)?;
-                if let Some(handoff) = &agent.handoff {
+                if let Some(admission) = agent.extra.get("seat_admission") {
+                    println!("{}", admission_start_message(&subject, admission));
+                } else if let Some(handoff) = &agent.handoff {
                     println!("{subject}: {} → {}", handoff.phase, handoff.destination);
                     if !handoff.pending_sources.is_empty() {
                         println!(
@@ -433,8 +453,8 @@ pub(super) async fn run_agents(
         AgentsCommand::Retire(args) => {
             let subject = normalize_agent_subject(&args.subject);
             let client = generated_client(endpoint, Some(&args.actor))?;
-            let status = status_for(&cli_client(endpoint), &subject).await?;
-            let token = status
+            let token = status_for(&cli_client(endpoint), &subject)
+                .await?
                 .subjects
                 .first()
                 .and_then(|subject| subject.desired_token.clone())
@@ -451,12 +471,14 @@ pub(super) async fn run_agents(
                     ClientFence {
                         snapshot_id: snapshot,
                         runtime_desired_revision: Some(token),
+                        runtime_incarnation: args.expect_incarnation,
                         ..ClientFence::default()
                     },
                     fractal_client::AgentRetireParameters {
                         agent: subject.clone(),
                         reason: args.reason,
                         successor: args.successor.map(|value| normalize_agent_subject(&value)),
+                        expect_revision: args.expect_revision,
                     },
                 )
                 .await?;
@@ -543,6 +565,7 @@ pub(super) async fn run_agents(
                 "idempotency_key":uuid::Uuid::now_v7().to_string()})).await?;
             return print_value(&response, json_output);
         }
+        AgentsCommand::Burst(args) => return hold_lane_burst(&cli_client(endpoint), args).await,
         AgentsCommand::Restart(args) => {
             let timeout = fractal_daemon::graph::parse_duration(&args.timeout, false)?;
             let subject = normalize_agent_subject(&args.subject);
@@ -556,6 +579,8 @@ pub(super) async fn run_agents(
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
                         "now": args.now,
                         "fresh_session": args.fresh_session,
+                        "ignore_fit": args.ignore_fit,
+                        "reason": args.reason,
                     }),
                 )
                 .await?;
@@ -714,6 +739,92 @@ enum MissionSeatStart {
     Declared(String),
     /// Someone stopped it; the daemon restores the run's declaration.
     Stopped,
+}
+
+pub(super) fn admission_start_message(subject: &str, admission: &Value) -> String {
+    let reason = admission["reason"].as_str().unwrap_or("awaiting admission");
+    if admission["pending"].as_bool().unwrap_or(true) {
+        let position = admission["queuePosition"].as_u64()
+            .map(|position| format!(" (queue position {position})"))
+            .unwrap_or_default();
+        format!("{subject}: accepted-pending: {reason}{position}")
+    } else {
+        format!("{subject}: {reason}")
+    }
+}
+
+/// Holds an agent's lane burst while standard input stays open (docs/st3/seat-lanes.md, "Bursts"):
+/// one line per answer on standard output for the command that started it, then a renewal of its
+/// lease every half minute. Standard input closing, or a stop signal, gives it back. A daemon
+/// without bursts answers with an empty 404, which is `none`.
+async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
+    const WAITING_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+    const RENEW: std::time::Duration = std::time::Duration::from_secs(30);
+    let subject = normalize_agent_subject(&args.subject);
+    let body = json!({"agent": subject, "actor": args.actor, "cores": args.cores, "memory": args.memory, "reason": args.reason});
+    let (closed_tx, mut closed) = tokio::sync::oneshot::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+        let _ = closed_tx.send(());
+    });
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let say = |line: String| -> Result<()> {
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{line}")?;
+        out.flush()?;
+        Ok(())
+    };
+    let (mut told, mut granted) = (None::<String>, false);
+    loop {
+        match client.post::<_, Value>("/v1/agents/lane/burst", &body).await {
+            Ok(answer) => {
+                let why = answer["why"].as_str().unwrap_or_default().to_owned();
+                match answer["state"].as_str() {
+                    Some("granted") if !granted => {
+                        say(format!("granted {} {}", args.cores, args.memory))?;
+                        granted = true;
+                    }
+                    Some("granted") => {}
+                    Some("waiting") if told.as_deref() != Some(why.as_str()) => {
+                        say(format!("waiting {why}"))?;
+                        told = Some(why);
+                    }
+                    Some("waiting") => {}
+                    Some("none") => return say(format!("none {why}")),
+                    Some("refused") => {
+                        say(format!("refused {why}"))?;
+                        anyhow::bail!("lane burst refused: {why}");
+                    }
+                    other => anyhow::bail!("the daemon answered a lane burst with {other:?}"),
+                }
+            }
+            Err(error) if fractal_daemon::client::is_absent_route(&error) => {
+                return say("none this host's daemon has no lane bursts".into());
+            }
+            // A daemon restarting is waited for, as a full host is: the run that asked bounds the
+            // wait, and never goes on in a lane it did not get.
+            Err(error) if !granted && fractal_daemon::client::daemon_unreachable(&error).is_some() => {
+                let why = format!("this host's daemon is not reachable ({}); asking again", error.root_cause());
+                if told.as_deref() != Some(why.as_str()) {
+                    say(format!("waiting {why}"))?;
+                    told = Some(why);
+                }
+            }
+            // Held, a renewal that fails (a daemon restarting) is tried again: the lease outlasts a
+            // few, and the raised slice still counts meanwhile.
+            Err(error) if granted => eprintln!("fractal: WARN renewing the lane burst: {error:#}"),
+            Err(error) => return Err(error),
+        }
+        tokio::select! {
+            _ = &mut closed => break,
+            _ = terminate.recv() => break,
+            _ = tokio::signal::ctrl_c() => break,
+            () = tokio::time::sleep(if granted { RENEW } else { WAITING_POLL }) => {}
+        }
+    }
+    let _: Value = client.request("DELETE", "/v1/agents/lane/burst", Some(&json!({"agent": subject, "actor": args.actor}))).await?;
+    Ok(())
 }
 
 async fn agent_start_status(
@@ -1220,6 +1331,7 @@ async fn run_agent_inspection(
         }
         AgentsCommand::New(_)
         | AgentsCommand::Workspace { .. }
+        | AgentsCommand::Lane { .. }
         | AgentsCommand::Handoff { .. }
         | AgentsCommand::Repos { .. }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
@@ -1230,6 +1342,7 @@ async fn run_agent_inspection(
         | AgentsCommand::Retire(_)
         | AgentsCommand::Rollout(_)
         | AgentsCommand::Restart(_)
+        | AgentsCommand::Burst(_)
         | AgentsCommand::AcknowledgeSeed(_)
         | AgentsCommand::Suspend(_)
         | AgentsCommand::Resume(_)
@@ -1461,4 +1574,23 @@ async fn request_suspension(
                 if resume { "resume" } else { "suspend" }
             )
         })?
+}
+
+#[cfg(test)]
+mod admission_presentation_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_pending_is_not_reported_as_running_or_failure() {
+        assert_eq!(admission_start_message("agent/example/queued",
+            &json!({"reason":"memory reserve", "queuePosition":2})),
+            "agent/example/queued: accepted-pending: memory reserve (queue position 2)");
+    }
+
+    #[test]
+    fn authorized_replacement_retains_its_admission_reason() {
+        assert_eq!(admission_start_message("agent/example/restart",
+            &json!({"reason":"admitted: replacement", "pending":false})),
+            "agent/example/restart: admitted: replacement");
+    }
 }

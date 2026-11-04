@@ -11,7 +11,7 @@
 //! This module is location-agnostic: it operates on an inbox/agent directory a caller resolves (from
 //! the catalog for VRS-native, or `$ST_ROOT` for a compat shim).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -19,104 +19,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
-use fractal_wire::message::{SentCoverage, SentMessageRow, SentMessages};
 
-use crate::flock::{self, FileLock};
 use crate::identity::{AgentSelector, ResolveError};
-
-const SENT_VERSION: u32 = 1;
-const SENT_DIR: &str = "sent";
-const SENT_HEAD: &str = "index.json";
-const SENT_ACTIVE: &str = "active.json";
-const SENT_COMMITS: &str = "commits";
-const SENT_MESSAGES: &str = "messages";
-const SENT_PENDING: &str = "pending";
-const SENT_LOCK: &str = ".lock";
-const SENT_KEYS: &str = "keys";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SentHead {
-    version: u32,
-    since: u64,
-    count: u64,
-    tip: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SentActive {
-    version: u32,
-    filename: String,
-    record_digest: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SentCommit {
-    version: u32,
-    ordinal: u64,
-    previous: Option<String>,
-    filename: String,
-    row_digest: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SentKey {
-    version: u32,
-    to: String,
-    key: String,
-    filename: String,
-    record_digest: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SentRecord {
-    version: u32,
-    filename: String,
-    ts: u64,
-    from: String,
-    to: String,
-    subject: Option<String>,
-    in_reply_to: Option<String>,
-    tags: Vec<String>,
-    priority: Option<String>,
-    idempotency_key: Option<String>,
-    body: String,
-    rendered_message: String,
-}
-
-impl SentRecord {
-    fn row(&self, include_body: bool) -> SentMessageRow {
-        SentMessageRow {
-            filename: self.filename.clone(),
-            ts: self.ts,
-            to: self.to.clone(),
-            subject: self.subject.clone(),
-            in_reply_to: self.in_reply_to.clone(),
-            tags: self.tags.clone(),
-            priority: self.priority.clone(),
-            idempotency_key: self.idempotency_key.clone(),
-            body: include_body.then(|| self.body.clone()),
-        }
-    }
-
-    fn same_operation(&self, candidate: &Self) -> bool {
-        self.from == candidate.from
-            && self.to == candidate.to
-            && self.subject == candidate.subject
-            && self.in_reply_to == candidate.in_reply_to
-            && self.tags == candidate.tags
-            && self.priority == candidate.priority
-            && self.idempotency_key == candidate.idempotency_key
-            && self.body == candidate.body
-            && self.rendered_message == candidate.rendered_message
-    }
-}
 
 /// The alphabet st2 *generates* `<rand6>` from — Crockford base32 (`0-9a-z` minus `i l o u`). This is
 /// a strict subset of what the reader accepts: the frozen bus grammar is `[0-9a-z]{6}`, so a peer
@@ -403,11 +307,6 @@ pub fn materialize_message_once(
 /// The staging-name prefix for everything this module stages.
 const TMP_PREFIX: &str = ".message";
 
-/// The full staged-name prefix four inbox and sent-record walkers skip by prefix, spelled ONCE so
-/// a walker cannot drift from the writer. Tied to [`TMP_PREFIX`] by
-/// `the_staging_prefix_is_the_one_the_inbox_walkers_skip`.
-const TMP_STAGING_PREFIX: &str = ".message.tmp-";
-
 fn tmp_name() -> String {
     crate::fsatomic::staging_name(TMP_PREFIX)
 }
@@ -493,386 +392,6 @@ pub fn inbox_dir(agent_dir: &Path) -> PathBuf {
 /// An agent's message-archive dir: `<agent_dir>/resources/archive`.
 pub fn archive_dir(agent_dir: &Path) -> PathBuf {
     agent_dir.join("resources").join("archive")
-}
-
-fn sent_dir(agent_dir: &Path) -> PathBuf {
-    agent_dir.join("resources").join(SENT_DIR)
-}
-
-/// Read one sender's ledger without consulting recipient state.
-pub fn list_sent(agent_dir: &Path, include_body: bool) -> anyhow::Result<SentMessages> {
-    let root = sent_dir(agent_dir);
-    let _lock = SentLock::shared(&root)?;
-    list_sent_unlocked(&root, include_body)
-}
-
-/// Inspect one sender's ledger without creating sender state.
-///
-/// Doctor uses this read-only path. If a sender starts its first publication during the initial
-/// unlocked read, the second lock check repeats the read under that sender's persistent lock.
-pub fn inspect_sent(agent_dir: &Path, include_body: bool) -> anyhow::Result<SentMessages> {
-    let root = sent_dir(agent_dir);
-    if let Some(_lock) = SentLock::shared_existing(&root)? {
-        return list_sent_unlocked(&root, include_body);
-    }
-    let snapshot = list_sent_unlocked(&root, include_body);
-    if let Some(_lock) = SentLock::shared_existing(&root)? {
-        list_sent_unlocked(&root, include_body)
-    } else {
-        snapshot
-    }
-}
-
-fn list_sent_unlocked(root: &Path, include_body: bool) -> anyhow::Result<SentMessages> {
-    let head_path = root.join(SENT_HEAD);
-    let head: SentHead = match fs::read(&head_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .with_context(|| format!("reading sent head {}", head_path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            anyhow::ensure!(
-                read_sent_active(root)?.is_none()
-                    && read_pending_records(&root.join(SENT_PENDING))?.is_empty()
-                    && read_sent_records(&root.join(SENT_MESSAGES))?.is_empty()
-                    && read_sent_commits(&root.join(SENT_COMMITS))?.is_empty()
-                    && read_sent_keys(&root.join(SENT_KEYS))?.is_empty(),
-                "sender state exists without a sent head"
-            );
-            return Ok(SentMessages {
-                coverage: SentCoverage::Unavailable,
-                messages: Vec::new(),
-            });
-        }
-        Err(error) => return Err(error.into()),
-    };
-    validate_sent_head(&head)?;
-    let pending = read_pending_records(&root.join(SENT_PENDING))?;
-    anyhow::ensure!(pending.len() <= 1, "multiple pending sent intents");
-    let active = read_sent_active(root)?;
-    match (active.as_ref(), pending.as_slice()) {
-        (None, []) | (None, [_]) => {}
-        (Some(active), [record]) => anyhow::ensure!(
-            active.filename == record.filename && active.record_digest == digest_json(record)?,
-            "active sent intent differs from pending record"
-        ),
-        (Some(_), []) => {}
-        _ => unreachable!(),
-    }
-    let committed_pending_cleanup = if active.is_none()
-        && let [record] = pending.as_slice()
-        && sent_record_exists(root, &record.filename)?
-    {
-        anyhow::ensure!(
-            head_tip_commits_record(root, &head, record)?,
-            "committed pending intent is missing its active marker"
-        );
-        true
-    } else {
-        false
-    };
-
-    let rows = read_sent_records(&root.join(SENT_MESSAGES))?
-        .into_iter()
-        .map(|record| (record.filename.clone(), record))
-        .collect::<BTreeMap<_, _>>();
-    let commits = read_sent_commits(&root.join(SENT_COMMITS))?;
-    let mut reachable_nodes = BTreeSet::new();
-    let mut reachable_rows = BTreeSet::new();
-    let mut messages = Vec::new();
-    let mut digest = head.tip.clone();
-    let mut ordinal = head.count;
-    while let Some(current) = digest {
-        let node = commits.get(&current).context("missing sent commit node")?;
-        anyhow::ensure!(digest_json(node)? == current, "sent commit digest mismatch");
-        anyhow::ensure!(node.ordinal == ordinal, "sent commit ordinal mismatch");
-        let row = rows
-            .get(&node.filename)
-            .context("missing committed sent record")?;
-        anyhow::ensure!(
-            digest_json(row)? == node.row_digest,
-            "sent row digest mismatch"
-        );
-        anyhow::ensure!(
-            reachable_nodes.insert(current),
-            "sent commit chain contains a cycle"
-        );
-        anyhow::ensure!(
-            reachable_rows.insert(node.filename.clone()),
-            "sent commit chain references one row more than once"
-        );
-        messages.push(row.row(include_body));
-        digest = node.previous.clone();
-        ordinal = ordinal
-            .checked_sub(1)
-            .context("sent commit chain exceeds head count")?;
-    }
-    anyhow::ensure!(ordinal == 0, "sent commit count/genesis mismatch");
-    if let Some(active) = &active
-        && pending.is_empty()
-    {
-        let row = rows
-            .get(&active.filename)
-            .context("active sent intent without pending has no committed row")?;
-        anyhow::ensure!(
-            reachable_rows.contains(&active.filename),
-            "active sent intent without pending is not committed"
-        );
-        anyhow::ensure!(
-            digest_json(row)? == active.record_digest,
-            "active sent intent differs from committed row"
-        );
-    }
-
-    let active_row = active.as_ref().and_then(|active| {
-        rows.get(&active.filename)
-            .filter(|_| !reachable_rows.contains(&active.filename))
-    });
-    if let Some(row) = active_row {
-        let active = active
-            .as_ref()
-            .context("uncommitted sent row has no active intent")?;
-        anyhow::ensure!(
-            active.record_digest == digest_json(row)?,
-            "active sent intent differs from uncommitted row"
-        );
-    }
-    let explained_node = match active_row {
-        Some(row) => Some(digest_json(&sent_commit(&head, row)?)?),
-        None => None,
-    };
-    anyhow::ensure!(
-        rows.keys().all(|filename| {
-            reachable_rows.contains(filename)
-                || active
-                    .as_ref()
-                    .is_some_and(|active| active.filename == *filename)
-        }),
-        "unexplained sent record"
-    );
-    anyhow::ensure!(
-        commits.keys().all(|node| {
-            reachable_nodes.contains(node) || explained_node.as_ref() == Some(node)
-        }),
-        "unexplained sent commit node"
-    );
-    let keys = read_sent_keys(&root.join(SENT_KEYS))?;
-    let mut expected_keys = BTreeSet::new();
-    for filename in &reachable_rows {
-        let row = rows.get(filename).unwrap();
-        if let Some(key) = &row.idempotency_key {
-            let key_digest = digest_json(&(&row.to, key))?;
-            if let Some(receipt) = keys.get(&key_digest) {
-                anyhow::ensure!(
-                    receipt.filename == row.filename && receipt.record_digest == digest_json(row)?,
-                    "sent idempotency receipt differs from committed row"
-                );
-            } else {
-                anyhow::ensure!(
-                    active
-                        .as_ref()
-                        .is_some_and(|active| active.filename == *filename)
-                        || (committed_pending_cleanup
-                            && pending
-                                .first()
-                                .is_some_and(|record| record.filename == *filename)),
-                    "committed sent row is missing its idempotency receipt"
-                );
-            }
-            expected_keys.insert(key_digest);
-        }
-    }
-    anyhow::ensure!(
-        keys.keys().all(|digest| expected_keys.contains(digest)),
-        "unexplained sent idempotency receipt"
-    );
-
-    messages.sort_by(|left, right| {
-        left.ts
-            .cmp(&right.ts)
-            .then_with(|| left.filename.cmp(&right.filename))
-    });
-    let incomplete =
-        usize::from((!pending.is_empty() && !committed_pending_cleanup) || active.is_some());
-    let coverage = if incomplete == 0 {
-        SentCoverage::Since { since: head.since }
-    } else {
-        SentCoverage::Partial {
-            since: head.since,
-            pending: incomplete,
-        }
-    };
-    Ok(SentMessages { coverage, messages })
-}
-
-fn read_sent_records(directory: &Path) -> anyhow::Result<Vec<SentRecord>> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut records = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            anyhow::bail!("sent record filename is not UTF-8");
-        };
-        if name.starts_with(TMP_STAGING_PREFIX) {
-            continue;
-        }
-        anyhow::ensure!(name.ends_with(".json"), "unexpected sent record entry");
-        let record: SentRecord = serde_json::from_slice(&fs::read(entry.path())?)
-            .with_context(|| format!("reading sent record {}", entry.path().display()))?;
-        anyhow::ensure!(
-            record.version == SENT_VERSION,
-            "unsupported sent record version"
-        );
-        anyhow::ensure!(
-            sent_record_name(&record.filename) == name,
-            "sent record filename does not match its payload"
-        );
-        records.push(record);
-    }
-    records.sort_by(|left, right| left.filename.cmp(&right.filename));
-    Ok(records)
-}
-
-fn read_pending_records(directory: &Path) -> anyhow::Result<Vec<SentRecord>> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut records = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            anyhow::bail!("pending sent record filename is not UTF-8");
-        };
-        if name.starts_with(TMP_STAGING_PREFIX) {
-            continue;
-        }
-        let digest = name
-            .strip_suffix(".json")
-            .context("unexpected pending sent record entry")?;
-        anyhow::ensure!(is_sha256(digest), "invalid pending sent record digest");
-        let record: SentRecord = serde_json::from_slice(&fs::read(entry.path())?)
-            .with_context(|| format!("reading pending sent record {}", entry.path().display()))?;
-        anyhow::ensure!(
-            record.version == SENT_VERSION,
-            "unsupported sent record version"
-        );
-        anyhow::ensure!(
-            is_message_filename(&record.filename),
-            "invalid sent record filename"
-        );
-        anyhow::ensure!(
-            digest_json(&record)? == digest,
-            "pending sent record digest mismatch"
-        );
-        records.push(record);
-    }
-    records.sort_by(|left, right| left.filename.cmp(&right.filename));
-    Ok(records)
-}
-
-fn read_sent_active(root: &Path) -> anyhow::Result<Option<SentActive>> {
-    let path = root.join(SENT_ACTIVE);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let active: SentActive = serde_json::from_slice(&bytes)
-        .with_context(|| format!("reading active sent intent {}", path.display()))?;
-    anyhow::ensure!(
-        active.version == SENT_VERSION,
-        "unsupported active sent version"
-    );
-    anyhow::ensure!(
-        is_message_filename(&active.filename),
-        "invalid active sent filename"
-    );
-    Ok(Some(active))
-}
-
-fn read_sent_commits(directory: &Path) -> anyhow::Result<BTreeMap<String, SentCommit>> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut commits = BTreeMap::new();
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            anyhow::bail!("sent commit filename is not UTF-8");
-        };
-        if name.starts_with(TMP_STAGING_PREFIX) {
-            continue;
-        }
-        let digest = name
-            .strip_suffix(".json")
-            .context("unexpected sent commit entry")?;
-        let node: SentCommit = serde_json::from_slice(&fs::read(entry.path())?)
-            .with_context(|| format!("reading sent commit {}", entry.path().display()))?;
-        anyhow::ensure!(
-            node.version == SENT_VERSION,
-            "unsupported sent commit version"
-        );
-        anyhow::ensure!(
-            is_message_filename(&node.filename),
-            "invalid sent commit filename"
-        );
-        anyhow::ensure!(
-            digest_json(&node)? == digest,
-            "sent commit filename mismatch"
-        );
-        anyhow::ensure!(
-            commits.insert(digest.to_string(), node).is_none(),
-            "duplicate sent commit"
-        );
-    }
-    Ok(commits)
-}
-
-fn read_sent_keys(directory: &Path) -> anyhow::Result<BTreeMap<String, SentKey>> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut keys = BTreeMap::new();
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            anyhow::bail!("sent key filename is not UTF-8");
-        };
-        if name.starts_with(TMP_STAGING_PREFIX) {
-            continue;
-        }
-        let digest = name
-            .strip_suffix(".json")
-            .context("unexpected sent key entry")?;
-        let key: SentKey = serde_json::from_slice(&fs::read(entry.path())?)
-            .with_context(|| format!("reading sent key {}", entry.path().display()))?;
-        anyhow::ensure!(key.version == SENT_VERSION, "unsupported sent key version");
-        anyhow::ensure!(
-            digest_json(&(&key.to, &key.key))? == digest,
-            "sent key filename mismatch"
-        );
-        anyhow::ensure!(
-            keys.insert(digest.to_string(), key).is_none(),
-            "duplicate sent key"
-        );
-    }
-    Ok(keys)
-}
-
-fn sent_record_name(filename: &str) -> String {
-    format!("{filename}.json")
 }
 
 /// Eval-owned authority for one external flat requester mailbox. General catalog routing remains
@@ -1111,12 +630,12 @@ pub fn with_resolved_state_dir<T>(
             test_capability_checkpoint();
             let path = match agent.capability.as_ref() {
                 Some(capability) if components.is_empty() => {
-                    crate::catalog_transaction::retained_dir_path(capability)?
+                    crate::directory::retained_dir_path(capability)?
                 }
                 Some(capability) => {
                     let directory = open_message_box(capability, components, create)?
                         .context("resolved state directory does not exist")?;
-                    let path = crate::catalog_transaction::retained_dir_path(&directory)?;
+                    let path = crate::directory::retained_dir_path(&directory)?;
                     return operation(&path);
                 }
                 None => components
@@ -1150,32 +669,6 @@ pub fn with_resolved_state_dir<T>(
     }
 }
 
-/// Run an operation against retained, no-follow capabilities for an agent's inbox and archive.
-///
-/// Both directories are opened relative to the resolved agent capability, so replacing the
-/// declaration directory or either message-box ancestor with a symlink cannot redirect the
-/// operation outside the catalog after recipient resolution.
-pub(crate) fn with_resolved_message_boxes<T>(
-    catalog_root: &Path,
-    selector: &AgentSelector,
-    this_host: &str,
-    operation: impl FnOnce(&Path, &Path) -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    let agent = require_agent_handle(catalog_root, selector, this_host)?;
-    let capability = agent
-        .capability
-        .as_ref()
-        .context("resolved agent has no retained directory capability")?;
-    let inbox = open_message_box(capability, &["resources", "inbox"], true)?
-        .context("created inbox capability is missing")?;
-    let archive = open_message_box(capability, &["resources", "archive"], true)?
-        .context("created archive capability is missing")?;
-    operation(
-        &crate::catalog_transaction::retained_dir_path(&inbox)?,
-        &crate::catalog_transaction::retained_dir_path(&archive)?,
-    )
-}
-
 /// Locate one agent on a single coherent address book, reporting why an ordinary reference did not
 /// name exactly one subject (R24).
 ///
@@ -1199,23 +692,6 @@ fn find_agent_handle(
         return Ok(select_agent(candidates, selector, this_host));
     }
     anyhow::bail!("catalog address book changed repeatedly while resolving {selector:?}")
-}
-
-/// Resolve or fail with the address-specific diagnostic attached to the caller's own message.
-fn require_agent_handle(
-    catalog_root: &Path,
-    selector: &AgentSelector,
-    this_host: &str,
-) -> anyhow::Result<AddressableAgent> {
-    find_agent_handle(catalog_root, selector, this_host)?
-        .map_err(anyhow::Error::new)
-        .with_context(|| {
-            format!(
-                "no agent '{}' found in catalog {}",
-                selector_reference(selector),
-                catalog_root.display()
-            )
-        })
 }
 
 /// Absence-tolerant lookup for callers whose next step depends on "no such subject" — an external
@@ -1408,7 +884,7 @@ fn addressable_agent_dirs(
                     .parent()
                     .context("Agent Spec has no identity directory")?
                     .to_path_buf();
-                let capability = crate::catalog_transaction::open_dir_beneath(catalog_root, &path)?;
+                let capability = crate::directory::open_dir_beneath(catalog_root, &path)?;
                 Ok(AddressableAgent {
                     id: spec.effective_id(this_host),
                     bus_id: spec.bus_id(this_host),
@@ -1442,8 +918,8 @@ fn addressable_agent_dirs(
                 identity: identity_name.clone(),
             };
             let path = identity.path();
-            let capability = crate::catalog_transaction::open_dir_beneath(catalog_root, &path)?;
-            let retained = crate::catalog_transaction::retained_dir_path(&capability)?;
+            let capability = crate::directory::open_dir_beneath(catalog_root, &path)?;
+            let retained = crate::directory::retained_dir_path(&capability)?;
             let current_spec = marker_spec_matches(&retained, &key)?;
             let retained_state =
                 transition.original_agents.contains(&key) && marker_state_exists(&retained)?;
@@ -1614,7 +1090,7 @@ pub fn collect_thread(catalog_root: &Path, filename: &str) -> anyhow::Result<Vec
                 let Some(dir) = open_message_box(capability, components, false)? else {
                     continue;
                 };
-                for message in list_dir(&crate::catalog_transaction::retained_dir_path(&dir)?)
+                for message in list_dir(&crate::directory::retained_dir_path(&dir)?)
                     .unwrap_or_default()
                 {
                     all.entry(message.filename.clone()).or_insert(message);
@@ -1682,748 +1158,6 @@ pub fn collect_thread(catalog_root: &Path, filename: &str) -> anyhow::Result<Vec
     Ok(out)
 }
 
-enum DeliveryEndpoint {
-    Agent(AddressableAgent),
-    External {
-        bus_id: String,
-        inbox: PathBuf,
-        archive: PathBuf,
-    },
-    Flat {
-        bus_id: String,
-        inbox: PathBuf,
-        archive: PathBuf,
-    },
-}
-
-impl DeliveryEndpoint {
-    fn bus_id(&self) -> &str {
-        match self {
-            Self::Agent(agent) => &agent.bus_id,
-            Self::External { bus_id, .. } | Self::Flat { bus_id, .. } => bus_id,
-        }
-    }
-
-    fn boxes(&self) -> anyhow::Result<(PathBuf, PathBuf)> {
-        match self {
-            Self::Agent(agent) => {
-                let root = match agent.capability.as_ref() {
-                    Some(capability) => crate::catalog_transaction::retained_dir_path(capability)?,
-                    None => agent.path.clone(),
-                };
-                Ok((inbox_dir(&root), archive_dir(&root)))
-            }
-            Self::External { inbox, archive, .. } | Self::Flat { inbox, archive, .. } => {
-                Ok((inbox.clone(), archive.clone()))
-            }
-        }
-    }
-}
-
-fn catalogless(root: &Path) -> bool {
-    let discovered = crate::discover(root);
-    crate::catalog_transaction::catalog_transition(root)
-        .map(|transition| transition.is_none())
-        .unwrap_or(false)
-        && !root.join(crate::catalog_lock::CONTROL_DIR).exists()
-        && discovered.specs.is_empty()
-        && discovered.errors.is_empty()
-}
-
-fn resolve_delivery_endpoint(
-    root: &Path,
-    recipient: &AgentSelector,
-    host: &str,
-    external: Option<&ExternalInbox>,
-) -> anyhow::Result<DeliveryEndpoint> {
-    if let Some(agent) = optional_agent_handle(root, recipient, host)? {
-        return Ok(DeliveryEndpoint::Agent(agent));
-    }
-    let recipient = selector_reference(recipient);
-    if let Some(external) = external
-        && external.root == root
-        && external.identity == recipient
-        && external.inbox.is_dir()
-    {
-        return Ok(DeliveryEndpoint::External {
-            bus_id: external.identity.clone(),
-            inbox: external.inbox.clone(),
-            archive: sibling_archive_dir(&external.inbox),
-        });
-    }
-    if catalogless(root) {
-        return Ok(DeliveryEndpoint::Flat {
-            bus_id: recipient.to_string(),
-            inbox: root.join(recipient).join("inbox"),
-            archive: root.join(recipient).join("archive"),
-        });
-    }
-    anyhow::bail!("no agent '{recipient}' found in catalog {}", root.display())
-}
-
-/// Send one message between two selected endpoints.
-///
-/// Both endpoints are selectors, not bare strings: an exact-ID endpoint is the form an
-/// `ST_AGENT`-defaulted sender uses, and it must not be re-resolved through a mutable address.
-#[allow(clippy::too_many_arguments)]
-pub fn send_to_resolved_inbox(
-    catalog_root: &Path,
-    recipient: &AgentSelector,
-    this_host: &str,
-    sender: &AgentSelector,
-    subject: Option<&str>,
-    in_reply_to: Option<&str>,
-    tags: &[String],
-    body: &str,
-    idempotency_key: Option<&str>,
-    external: Option<&ExternalInbox>,
-) -> anyhow::Result<String> {
-    if let Some(key) = idempotency_key {
-        validate_idempotency_key(key)?;
-    }
-    let from = selector_reference(sender);
-    let recipient = resolve_delivery_endpoint(catalog_root, recipient, this_host, external)?;
-    let sender = optional_agent_handle(catalog_root, sender, this_host)?;
-    let external_sender = external.is_some_and(|external| {
-        external.root == catalog_root
-            && (external.identity == from || external.sender.as_deref() == Some(from))
-    });
-    if matches!(&recipient, DeliveryEndpoint::External { .. }) || external_sender {
-        anyhow::ensure!(
-            idempotency_key.is_none(),
-            "external requester messages do not own an ordinary sent-message index"
-        );
-        let canonical_from = sender
-            .as_ref()
-            .map(|agent| agent.bus_id.as_str())
-            .unwrap_or(from);
-        anyhow::ensure!(
-            sender.is_some() || external_sender,
-            "no agent '{from}' found in catalog {}",
-            catalog_root.display()
-        );
-        let (inbox, _) = recipient.boxes()?;
-        return send_to_inbox(&inbox, canonical_from, subject, in_reply_to, tags, body);
-    }
-    let (canonical_from, sender_root) = match sender.as_ref() {
-        Some(agent) => {
-            let path = match agent.capability.as_ref() {
-                Some(capability) => crate::catalog_transaction::retained_dir_path(capability)?,
-                None => agent.path.clone(),
-            };
-            (agent.bus_id.clone(), path)
-        }
-        None if catalogless(catalog_root) => (from.to_string(), catalog_root.join(from)),
-        None => anyhow::bail!(
-            "no agent '{from}' found in catalog {}",
-            catalog_root.display()
-        ),
-    };
-    test_capability_checkpoint();
-    send_with_ledger(
-        catalog_root,
-        this_host,
-        external,
-        &sender_root,
-        &canonical_from,
-        recipient,
-        subject,
-        in_reply_to,
-        tags,
-        body,
-        idempotency_key,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn send_with_ledger(
-    catalog_root: &Path,
-    this_host: &str,
-    external: Option<&ExternalInbox>,
-    sender_root: &Path,
-    from: &str,
-    recipient: DeliveryEndpoint,
-    subject: Option<&str>,
-    in_reply_to: Option<&str>,
-    tags: &[String],
-    body: &str,
-    idempotency_key: Option<&str>,
-) -> anyhow::Result<String> {
-    let root = sent_dir(sender_root);
-    let _lock = SentLock::exclusive(&root)?;
-    let mut head = ensure_sent_head(&root)?;
-    validate_sent_tip(&root, &head)?;
-    test_send_checkpoint("coverage")?;
-    let recovered = recover_active(catalog_root, this_host, external, &root, &mut head)?;
-
-    let filename = new_filename();
-    let rendered_message =
-        render_message_with_idempotency(from, subject, in_reply_to, tags, body, idempotency_key);
-    let parsed = parse_message(&filename, &rendered_message);
-    let candidate = SentRecord {
-        version: SENT_VERSION,
-        filename,
-        ts: parsed.ts_ms,
-        from: from.to_string(),
-        to: recipient.bus_id().to_string(),
-        subject: parsed.subject,
-        in_reply_to: parsed.in_reply_to,
-        tags: parsed.tags,
-        priority: parsed.priority,
-        idempotency_key: parsed.idempotency_key,
-        body: parsed.body,
-        rendered_message,
-    };
-    if let Some(existing) = keyed_record(&root, &candidate)? {
-        return Ok(existing.filename);
-    }
-    let mut matching = recovered
-        .iter()
-        .filter(|record| record.same_operation(&candidate));
-    if let Some(existing) = matching.next() {
-        anyhow::ensure!(
-            matching.next().is_none(),
-            "multiple recovered sends match one retry"
-        );
-        return Ok(existing.filename.clone());
-    }
-
-    let pending = root
-        .join(SENT_PENDING)
-        .join(pending_record_name(&candidate)?);
-    anyhow::ensure!(
-        atomic_create_file(&pending, &serde_json::to_vec(&candidate)?)?,
-        "new send intent already exists"
-    );
-    test_send_checkpoint("pending")?;
-    publish_active(&root, &candidate)?;
-    test_send_checkpoint("active")?;
-    deliver_record(&recipient, &candidate)?;
-    test_send_checkpoint("recipient")?;
-    publish_sent_record(&root, &candidate)?;
-    test_send_checkpoint("row")?;
-    let node = publish_sent_commit(&root, &head, &candidate)?;
-    test_send_checkpoint("node")?;
-    head.count = node.ordinal;
-    head.tip = Some(digest_json(&node)?);
-    write_sent_head(&root, &head)?;
-    publish_key(&root, &candidate)?;
-    test_send_checkpoint("head")?;
-    fs::remove_file(&pending)?;
-    test_send_checkpoint("pending-cleanup")?;
-    fs::remove_file(root.join(SENT_ACTIVE))?;
-    test_send_checkpoint("active-cleanup")?;
-    Ok(candidate.filename)
-}
-
-fn ensure_sent_head(root: &Path) -> anyhow::Result<SentHead> {
-    let path = root.join(SENT_HEAD);
-    let candidate = SentHead {
-        version: SENT_VERSION,
-        since: now_ms(),
-        count: 0,
-        tip: None,
-    };
-    if atomic_create_file(&path, &serde_json::to_vec(&candidate)?)? {
-        return Ok(candidate);
-    }
-    let head: SentHead = serde_json::from_slice(&fs::read(&path)?)?;
-    validate_sent_head(&head)?;
-    Ok(head)
-}
-
-fn validate_sent_head(head: &SentHead) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        head.version == SENT_VERSION,
-        "unsupported sent head version"
-    );
-    anyhow::ensure!(
-        (head.count == 0) == head.tip.is_none(),
-        "sent head count/tip mismatch"
-    );
-    if let Some(tip) = &head.tip {
-        anyhow::ensure!(is_sha256(tip), "invalid sent head tip");
-    }
-    Ok(())
-}
-
-fn validate_sent_tip(root: &Path, head: &SentHead) -> anyhow::Result<()> {
-    let Some(digest) = &head.tip else {
-        return Ok(());
-    };
-    let node_path = root.join(SENT_COMMITS).join(format!("{digest}.json"));
-    let node: SentCommit = serde_json::from_slice(&fs::read(node_path)?)?;
-    anyhow::ensure!(
-        node.version == SENT_VERSION,
-        "unsupported sent commit version"
-    );
-    anyhow::ensure!(
-        is_message_filename(&node.filename),
-        "invalid sent commit filename"
-    );
-    anyhow::ensure!(
-        digest_json(&node)? == *digest,
-        "sent commit digest mismatch"
-    );
-    anyhow::ensure!(node.ordinal == head.count, "sent commit ordinal mismatch");
-    let row_path = root
-        .join(SENT_MESSAGES)
-        .join(sent_record_name(&node.filename));
-    let row: SentRecord = serde_json::from_slice(&fs::read(row_path)?)?;
-    anyhow::ensure!(
-        row.version == SENT_VERSION,
-        "unsupported sent record version"
-    );
-    anyhow::ensure!(
-        row.filename == node.filename,
-        "sent record filename does not match payload"
-    );
-    anyhow::ensure!(
-        digest_json(&row)? == node.row_digest,
-        "sent row digest mismatch"
-    );
-    Ok(())
-}
-
-fn recover_active(
-    catalog_root: &Path,
-    this_host: &str,
-    external: Option<&ExternalInbox>,
-    root: &Path,
-    head: &mut SentHead,
-) -> anyhow::Result<Vec<SentRecord>> {
-    let pending = read_pending_records(&root.join(SENT_PENDING))?;
-    anyhow::ensure!(pending.len() <= 1, "multiple pending sent intents");
-    let active = read_sent_active(root)?;
-    if let Some(active) = &active
-        && head_tip_commits(root, head, &active.filename)?
-    {
-        let record = read_sent_record(root, &active.filename)
-            .context("committed active intent has no sender row")?;
-        anyhow::ensure!(
-            digest_json(&record)? == active.record_digest,
-            "committed active intent differs from sender row"
-        );
-        publish_key(root, &record)?;
-        remove_if_exists(&root.join(SENT_PENDING).join(pending_record_name(&record)?))?;
-        remove_if_exists(&root.join(SENT_ACTIVE))?;
-        return Ok(Vec::new());
-    }
-    if active.is_none()
-        && let [record] = pending.as_slice()
-        && sent_record_exists(root, &record.filename)?
-    {
-        anyhow::ensure!(
-            head_tip_commits_record(root, head, record)?,
-            "committed pending intent is missing its active marker"
-        );
-        publish_key(root, record)?;
-        remove_if_exists(&root.join(SENT_PENDING).join(pending_record_name(record)?))?;
-        return Ok(Vec::new());
-    }
-    let record = match (active, pending.as_slice()) {
-        (None, []) => return Ok(Vec::new()),
-        (None, [record]) => {
-            anyhow::ensure!(
-                !sent_record_exists(root, &record.filename)?,
-                "committed pending intent is missing its active marker"
-            );
-            publish_active(root, record)?;
-            record.clone()
-        }
-        (Some(active), [record]) => {
-            anyhow::ensure!(
-                active.filename == record.filename && active.record_digest == digest_json(record)?,
-                "active sent intent differs from pending record"
-            );
-            record.clone()
-        }
-        (Some(_), []) => anyhow::bail!("active sent intent has no recoverable pending record"),
-        _ => unreachable!(),
-    };
-    // A durable record's `to` is the canonical endpoint — the legacy bus identity, which is also
-    // the subject's effective immutable ID — so recovery selects by ID. An address cutover between
-    // the pending write and the retry is a nondisruptive route change, not a changed recipient.
-    let recipient = resolve_delivery_endpoint(
-        catalog_root,
-        &AgentSelector::Id(record.to.clone()),
-        this_host,
-        external,
-    )?;
-    anyhow::ensure!(
-        recipient.bus_id() == record.to,
-        "pending recipient identity changed"
-    );
-    deliver_record(&recipient, &record)?;
-    publish_sent_record(root, &record)?;
-    let node = publish_sent_commit(root, head, &record)?;
-    head.count = node.ordinal;
-    head.tip = Some(digest_json(&node)?);
-    write_sent_head(root, head)?;
-    publish_key(root, &record)?;
-    remove_if_exists(&root.join(SENT_PENDING).join(pending_record_name(&record)?))?;
-    remove_if_exists(&root.join(SENT_ACTIVE))?;
-    Ok(vec![record])
-}
-
-fn publish_active(root: &Path, record: &SentRecord) -> anyhow::Result<()> {
-    let active = SentActive {
-        version: SENT_VERSION,
-        filename: record.filename.clone(),
-        record_digest: digest_json(record)?,
-    };
-    let path = root.join(SENT_ACTIVE);
-    let bytes = serde_json::to_vec(&active)?;
-    if !atomic_create_file(&path, &bytes)? {
-        anyhow::ensure!(fs::read(&path)? == bytes, "active sent intent collision");
-    }
-    Ok(())
-}
-
-fn pending_record_name(record: &SentRecord) -> anyhow::Result<String> {
-    Ok(format!("{}.json", digest_json(record)?))
-}
-
-fn sent_commit(head: &SentHead, record: &SentRecord) -> anyhow::Result<SentCommit> {
-    Ok(SentCommit {
-        version: SENT_VERSION,
-        ordinal: head
-            .count
-            .checked_add(1)
-            .context("sent commit count overflow")?,
-        previous: head.tip.clone(),
-        filename: record.filename.clone(),
-        row_digest: digest_json(record)?,
-    })
-}
-
-fn publish_sent_commit(
-    root: &Path,
-    head: &SentHead,
-    record: &SentRecord,
-) -> anyhow::Result<SentCommit> {
-    let node = sent_commit(head, record)?;
-    let digest = digest_json(&node)?;
-    let path = root.join(SENT_COMMITS).join(format!("{digest}.json"));
-    let bytes = serde_json::to_vec(&node)?;
-    if !atomic_create_file(&path, &bytes)? {
-        anyhow::ensure!(fs::read(&path)? == bytes, "sent commit collision");
-    }
-    Ok(node)
-}
-
-fn publish_sent_record(root: &Path, record: &SentRecord) -> anyhow::Result<()> {
-    let path = root
-        .join(SENT_MESSAGES)
-        .join(sent_record_name(&record.filename));
-    let bytes = serde_json::to_vec(record)?;
-    if !atomic_create_file(&path, &bytes)? {
-        anyhow::ensure!(fs::read(&path)? == bytes, "sent record collision");
-    }
-    Ok(())
-}
-
-fn read_sent_record(root: &Path, filename: &str) -> anyhow::Result<SentRecord> {
-    anyhow::ensure!(
-        is_message_filename(filename),
-        "invalid sent record filename"
-    );
-    let path = root.join(SENT_MESSAGES).join(sent_record_name(filename));
-    let record: SentRecord = serde_json::from_slice(&fs::read(&path)?)
-        .with_context(|| format!("reading sent record {}", path.display()))?;
-    anyhow::ensure!(
-        record.version == SENT_VERSION,
-        "unsupported sent record version"
-    );
-    anyhow::ensure!(
-        record.filename == filename,
-        "sent record filename does not match payload"
-    );
-    Ok(record)
-}
-
-fn sent_record_exists(root: &Path, filename: &str) -> anyhow::Result<bool> {
-    anyhow::ensure!(
-        is_message_filename(filename),
-        "invalid sent record filename"
-    );
-    let path = root.join(SENT_MESSAGES).join(sent_record_name(filename));
-    match fs::metadata(path) {
-        Ok(metadata) => {
-            anyhow::ensure!(metadata.is_file(), "sent record path is not a file");
-            Ok(true)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn deliver_record(recipient: &DeliveryEndpoint, record: &SentRecord) -> anyhow::Result<()> {
-    let (inbox, archive) = recipient.boxes()?;
-    let archived = archive.join(&record.filename);
-    if archived.is_file() {
-        let same = match fs::read_to_string(&archived) {
-            Ok(content) => content == record.rendered_message,
-            // A read failure is a failed delivery too: report it before propagating so
-            // message_deliveries_total{result="fail"} covers filesystem errors, not just mismatches.
-            Err(error) => {
-                crate::metrics::record_message_delivery(true);
-                return Err(error.into());
-            }
-        };
-        if !same {
-            crate::metrics::record_message_delivery(true);
-            anyhow::bail!(
-                "archived message differs from pending send {}",
-                record.filename
-            );
-        }
-        crate::metrics::record_message_delivery(false);
-        return Ok(());
-    }
-    match materialize_message_once(&inbox, &record.filename, &record.rendered_message) {
-        Ok(_) => {
-            crate::metrics::record_message_delivery(false);
-            Ok(())
-        }
-        Err(error) => {
-            crate::metrics::record_message_delivery(true);
-            Err(error)
-        }
-    }
-}
-
-fn key_path(root: &Path, to: &str, key: &str) -> anyhow::Result<PathBuf> {
-    Ok(root
-        .join(SENT_KEYS)
-        .join(format!("{}.json", digest_json(&(to, key))?)))
-}
-
-fn publish_key(root: &Path, record: &SentRecord) -> anyhow::Result<()> {
-    let Some(key) = &record.idempotency_key else {
-        return Ok(());
-    };
-    let receipt = SentKey {
-        version: SENT_VERSION,
-        to: record.to.clone(),
-        key: key.clone(),
-        filename: record.filename.clone(),
-        record_digest: digest_json(record)?,
-    };
-    let path = key_path(root, &record.to, key)?;
-    let bytes = serde_json::to_vec(&receipt)?;
-    if !atomic_create_file(&path, &bytes)? {
-        anyhow::ensure!(fs::read(&path)? == bytes, "sent idempotency-key collision");
-    }
-    Ok(())
-}
-
-fn keyed_record(root: &Path, candidate: &SentRecord) -> anyhow::Result<Option<SentRecord>> {
-    let Some(key) = candidate.idempotency_key.as_deref() else {
-        return Ok(None);
-    };
-    let path = key_path(root, &candidate.to, key)?;
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let receipt: SentKey = serde_json::from_slice(&bytes)?;
-    anyhow::ensure!(
-        receipt.version == SENT_VERSION,
-        "unsupported sent key version"
-    );
-    anyhow::ensure!(
-        receipt.to == candidate.to && receipt.key == key,
-        "sent key scope mismatch"
-    );
-    anyhow::ensure!(
-        is_message_filename(&receipt.filename),
-        "invalid sent key filename"
-    );
-    let record_path = root
-        .join(SENT_MESSAGES)
-        .join(sent_record_name(&receipt.filename));
-    let record: SentRecord = serde_json::from_slice(&fs::read(record_path)?)?;
-    anyhow::ensure!(
-        record.version == SENT_VERSION,
-        "unsupported sent record version"
-    );
-    anyhow::ensure!(
-        record.filename == receipt.filename,
-        "sent key record filename mismatch"
-    );
-    anyhow::ensure!(
-        digest_json(&record)? == receipt.record_digest,
-        "sent key record mismatch"
-    );
-    anyhow::ensure!(
-        record.same_operation(candidate),
-        "message idempotency key reused with different content"
-    );
-    Ok(Some(record))
-}
-
-fn head_tip_commit(root: &Path, head: &SentHead) -> anyhow::Result<Option<SentCommit>> {
-    let Some(digest) = &head.tip else {
-        return Ok(None);
-    };
-    let path = root.join(SENT_COMMITS).join(format!("{digest}.json"));
-    let node: SentCommit = serde_json::from_slice(&fs::read(path)?)?;
-    anyhow::ensure!(
-        node.version == SENT_VERSION,
-        "unsupported sent commit version"
-    );
-    anyhow::ensure!(
-        is_message_filename(&node.filename),
-        "invalid sent commit filename"
-    );
-    anyhow::ensure!(
-        digest_json(&node)? == *digest,
-        "sent commit digest mismatch"
-    );
-    anyhow::ensure!(node.ordinal == head.count, "sent commit ordinal mismatch");
-    Ok(Some(node))
-}
-
-fn head_tip_commits(root: &Path, head: &SentHead, filename: &str) -> anyhow::Result<bool> {
-    Ok(head_tip_commit(root, head)?.is_some_and(|node| node.filename == filename))
-}
-
-fn head_tip_commits_record(
-    root: &Path,
-    head: &SentHead,
-    record: &SentRecord,
-) -> anyhow::Result<bool> {
-    let Some(node) = head_tip_commit(root, head)? else {
-        return Ok(false);
-    };
-    if node.filename != record.filename {
-        return Ok(false);
-    }
-    let pending_digest = digest_json(record)?;
-    anyhow::ensure!(
-        node.row_digest == pending_digest,
-        "committed pending intent differs from head tip"
-    );
-    let committed = read_sent_record(root, &record.filename)
-        .context("committed pending intent has no sender row")?;
-    anyhow::ensure!(
-        digest_json(&committed)? == pending_digest,
-        "committed pending intent differs from sender row"
-    );
-    Ok(true)
-}
-
-fn digest_json(value: &impl Serialize) -> anyhow::Result<String> {
-    let digest = Sha256::digest(serde_json::to_vec(value)?);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-fn is_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn write_sent_head(root: &Path, head: &SentHead) -> anyhow::Result<()> {
-    validate_sent_head(head)?;
-    atomic_replace_file(&root.join(SENT_HEAD), &serde_json::to_vec(head)?)
-}
-
-/// Publish `bytes` at `path` unless the name is already taken, reporting whether this call
-/// created it. The staged sibling is hardlinked rather than renamed, so the name being taken is an
-/// answer instead of a failure — that boolean is how a caller tells a replay from a first send.
-fn atomic_create_file(path: &Path, bytes: &[u8]) -> anyhow::Result<bool> {
-    Ok(crate::fsatomic::create_once(
-        path,
-        bytes,
-        crate::fsatomic::Staging::new(TMP_PREFIX),
-    )?)
-}
-
-fn atomic_replace_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    crate::fsatomic::replace(
-        path,
-        bytes,
-        crate::fsatomic::Staging::new(TMP_PREFIX),
-        crate::fsatomic::Durability::Rename,
-    )?;
-    Ok(())
-}
-
-fn remove_if_exists(path: &Path) -> anyhow::Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn validate_idempotency_key(value: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !value.is_empty() && value.trim() == value && !value.chars().any(char::is_control),
-        "message idempotency key must be non-empty single-line text without surrounding whitespace"
-    );
-    Ok(())
-}
-
-/// One sender's ledger lock. Read only by `Drop`: the guard's job is to outlive the read-decide-
-/// publish cycle, and closing the descriptor is what releases it.
-struct SentLock {
-    _held: FileLock,
-}
-
-impl SentLock {
-    fn shared(root: &Path) -> anyhow::Result<Self> {
-        fs::create_dir_all(root)?;
-        Self::acquire(root, flock::Mode::Shared)
-    }
-
-    fn exclusive(root: &Path) -> anyhow::Result<Self> {
-        fs::create_dir_all(root)?;
-        Self::acquire(root, flock::Mode::Exclusive)
-    }
-
-    /// The read-only path: `Ok(None)` means this sender has never published, which a reader
-    /// answers without creating the sender's ledger directory or its lock file.
-    ///
-    /// It opens the lock file `O_RDWR` rather than `O_RDONLY`, because the transport has one open
-    /// shape. That is a real narrowing — a reader who may read the lock file but not write it now
-    /// fails here — and it is admissible only because every ledger is single-uid: its owner and
-    /// root are the only readers, and a lock file this build creates is `0600` anyway.
-    fn shared_existing(root: &Path) -> anyhow::Result<Option<Self>> {
-        let file = match flock::open(&root.join(SENT_LOCK), flock::Open::Existing) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        Ok(Some(Self {
-            _held: FileLock::hold_blocking(file, flock::Mode::Shared)
-                .context("locking sent-message ledger failed")?,
-        }))
-    }
-
-    fn acquire(root: &Path, mode: flock::Mode) -> anyhow::Result<Self> {
-        let file = flock::open(&root.join(SENT_LOCK), flock::Open::Create)?;
-        Ok(Self {
-            _held: FileLock::hold_blocking(file, mode)
-                .context("locking sent-message ledger failed")?,
-        })
-    }
-}
-
-#[cfg(debug_assertions)]
-fn test_send_checkpoint(point: &str) -> anyhow::Result<()> {
-    if std::env::var("ST2_TEST_MESSAGE_SEND_FAIL_AFTER").as_deref() == Ok(point) {
-        anyhow::bail!("injected message send failure after {point}");
-    }
-    Ok(())
-}
-
-#[cfg(not(debug_assertions))]
-fn test_send_checkpoint(_point: &str) -> anyhow::Result<()> {
-    Ok(())
-}
-
 #[cfg(debug_assertions)]
 fn test_capability_checkpoint() {
     let (Ok(ready), Ok(release)) = (
@@ -2479,8 +1213,8 @@ pub fn archive_resolved_message(
         let archive = open_message_box(capability, &["resources", "archive"], true)?
             .context("created archive capability is missing")?;
         archive_msg(
-            &crate::catalog_transaction::retained_dir_path(&inbox)?,
-            &crate::catalog_transaction::retained_dir_path(&archive)?,
+            &crate::directory::retained_dir_path(&inbox)?,
+            &crate::directory::retained_dir_path(&archive)?,
             filename,
         )
     } else {
@@ -2497,7 +1231,7 @@ fn open_message_box(
     use std::os::fd::AsRawFd as _;
     let mut current = agent.try_clone()?;
     for component in components {
-        match crate::catalog_transaction::openat_dir_nofollow(
+        match crate::directory::openat_dir_nofollow(
             &current,
             std::ffi::OsStr::new(component),
         ) {
@@ -2514,7 +1248,7 @@ fn open_message_box(
                         return Err(error.into());
                     }
                 }
-                current = crate::catalog_transaction::openat_dir_nofollow(
+                current = crate::directory::openat_dir_nofollow(
                     &current,
                     std::ffi::OsStr::new(component),
                 )?;
@@ -2581,25 +1315,23 @@ fn remove_inbox_duplicate(source: &Path, filename: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
-    /// The staged name is a contract with four walkers that skip it by prefix (`inbox_dir` and the
-    /// three sent-record scans), all of which now match [`TMP_STAGING_PREFIX`] so none can drift
-    /// from the writer. What a shared const cannot catch is both sides being renamed together,
-    /// which would leave every already-staged file on the fleet unrecognized — hence the value
-    /// assertion.
+    /// Native inbox walkers reject staged names as non-message filenames. Pin the historical
+    /// prefix on the actual generated name as well as that rejection.
     #[test]
     fn the_staging_prefix_is_the_one_the_inbox_walkers_skip() {
         assert_eq!(TMP_PREFIX, ".message");
-        assert_eq!(TMP_STAGING_PREFIX, format!("{TMP_PREFIX}.tmp-"));
+        assert!(tmp_name().starts_with(".message.tmp-"));
         assert!(
             !is_message_filename(&tmp_name()),
             "a staged name must never look like a message"
         );
     }
 
-    /// [`atomic_create_file`]'s create-once contract. It is a hardlink, not a rename, and that is
+    /// The shared `fsatomic` create-once contract. It is a hardlink, not a rename, and that is
     /// the whole point: the first publication wins, a second reports `false` instead of replacing
-    /// the winner's bytes, and neither leaves a staged sibling behind for the four `.message.tmp-`
+    /// the winner's bytes, and neither leaves a staged sibling for the `.message.tmp-` inbox
     /// walkers to trip over.
     ///
     /// The mode is the deliberate change of the fold onto `fsatomic` — these records used to be
@@ -2612,8 +1344,14 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested/record.json");
-        assert!(atomic_create_file(&path, b"first").unwrap());
-        assert!(!atomic_create_file(&path, b"second").unwrap());
+        assert!(
+            crate::fsatomic::create_once(&path, b"first", crate::fsatomic::Staging::new(TMP_PREFIX))
+                .unwrap()
+        );
+        assert!(
+            !crate::fsatomic::create_once(&path, b"second", crate::fsatomic::Staging::new(TMP_PREFIX))
+                .unwrap()
+        );
         assert_eq!(fs::read(&path).unwrap(), b"first");
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -2624,7 +1362,7 @@ mod tests {
         let residue = fs::read_dir(path.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(TMP_STAGING_PREFIX))
+            .filter(|name| name.starts_with(".message.tmp-"))
             .collect::<Vec<_>>();
         assert!(
             residue.is_empty(),
@@ -2632,20 +1370,32 @@ mod tests {
         );
     }
 
-    /// [`atomic_replace_file`]'s contract, pinned for the same fold: replacement is unconditional
-    /// and complete, and the staged sibling never survives it.
+    /// The shared `fsatomic` replacement contract: replacement is unconditional and complete,
+    /// and the staged sibling never survives it.
     #[test]
     fn a_replacing_message_write_lands_the_complete_bytes_and_leaves_no_staged_sibling() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(SENT_HEAD);
-        atomic_replace_file(&path, b"first").unwrap();
-        atomic_replace_file(&path, b"second").unwrap();
+        let path = tmp.path().join("record.json");
+        crate::fsatomic::replace(
+            &path,
+            b"first",
+            crate::fsatomic::Staging::new(TMP_PREFIX),
+            crate::fsatomic::Durability::Rename,
+        )
+        .unwrap();
+        crate::fsatomic::replace(
+            &path,
+            b"second",
+            crate::fsatomic::Staging::new(TMP_PREFIX),
+            crate::fsatomic::Durability::Rename,
+        )
+        .unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"second");
 
         let residue = fs::read_dir(tmp.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(TMP_STAGING_PREFIX))
+            .filter(|name| name.starts_with(".message.tmp-"))
             .collect::<Vec<_>>();
         assert!(
             residue.is_empty(),
@@ -2968,80 +1718,5 @@ mod tests {
                 "accepted unsafe external sender {identity:?}"
             );
         }
-    }
-
-    /// The transport hardened this lock file with `O_NOFOLLOW`; nothing pinned it before.
-    #[test]
-    fn a_symlinked_ledger_lock_is_refused_instead_of_locking_its_target() {
-        let tmp = tempfile::tempdir().unwrap();
-        let outside = tmp.path().join("outside");
-        fs::write(&outside, "unchanged").unwrap();
-        let root = sent_dir(tmp.path());
-        fs::create_dir_all(&root).unwrap();
-        std::os::unix::fs::symlink(&outside, root.join(SENT_LOCK)).unwrap();
-
-        for error in [
-            list_sent(tmp.path(), false).unwrap_err(),
-            inspect_sent(tmp.path(), false).unwrap_err(),
-        ] {
-            assert_eq!(
-                error
-                    .downcast_ref::<std::io::Error>()
-                    .and_then(std::io::Error::raw_os_error),
-                Some(libc::ELOOP),
-                "a symlinked ledger lock must be refused, got {error:#}"
-            );
-        }
-        assert_eq!(fs::read_to_string(&outside).unwrap(), "unchanged");
-    }
-
-    /// `flock` locks the open file description rather than the process, so a second open of the
-    /// same lock file observes a live holder without a second thread or process.
-    fn ledger_lock_is_free(root: &Path, mode: crate::flock::Mode) -> bool {
-        let file = crate::flock::open(&root.join(SENT_LOCK), crate::flock::Open::Existing).unwrap();
-        FileLock::hold(file, mode, crate::flock::Wait::Now)
-            .unwrap()
-            .is_some()
-    }
-
-    #[test]
-    fn the_ledger_lock_excludes_a_second_holder_and_releases_on_drop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = sent_dir(tmp.path());
-        let held = SentLock::exclusive(&root).unwrap();
-        assert!(
-            !ledger_lock_is_free(&root, crate::flock::Mode::Shared),
-            "an exclusive ledger holder must exclude a reader"
-        );
-        drop(held);
-        assert!(
-            ledger_lock_is_free(&root, crate::flock::Mode::Shared),
-            "dropping the guard must release the ledger lock"
-        );
-    }
-
-    /// `inspect_sent` takes up to two sequential guards around one unlocked read, and neither may
-    /// outlive the call, or the doctor read would block every subsequent publication by that
-    /// sender. This pins the *first* guard only: once the lock file exists, `shared_existing`
-    /// answers `Some` and the function early-returns on that first guard, which is the guard held
-    /// on this path. Reaching the second guard needs `shared_existing` to answer `None` and then
-    /// `Some` — a race a single-threaded test cannot arrange — so it stays unpinned rather than
-    /// fake-covered.
-    #[test]
-    fn inspect_sent_leaves_no_guard_held_and_creates_no_sender_state() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = sent_dir(tmp.path());
-        inspect_sent(tmp.path(), false).unwrap();
-        assert!(
-            !root.exists(),
-            "the read-only path must not create sender state"
-        );
-
-        drop(SentLock::exclusive(&root).unwrap());
-        inspect_sent(tmp.path(), false).unwrap();
-        assert!(
-            ledger_lock_is_free(&root, crate::flock::Mode::Exclusive),
-            "inspect_sent must release the shared guard it early-returns on"
-        );
     }
 }

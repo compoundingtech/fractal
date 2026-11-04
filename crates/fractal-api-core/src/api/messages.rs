@@ -3,6 +3,12 @@ use crate::DeliveryStore;
 use crate::DelegationStore;
 use super::*;
 
+fn message_party_identity(store: &Store, party: &str) -> Result<String, ApiError> {
+    crate::store::identities::resolve_reference_conn(
+        &store.readers.get(), &normalize_message_party(party),
+    ).map_err(ApiError::bad)
+}
+
 pub async fn message_delivery(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
@@ -12,13 +18,52 @@ pub async fn message_delivery(
     } else {
         format!("message/{subject}")
     };
+    let (message, sent_at, host) = {
+        let (state, subject) = (state.clone(), subject.clone());
+        blocking_api(move || {
+            let message = state
+                .store
+                .message(&subject)
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| {
+                    ApiError::not_found(format!("message `{subject}` does not exist"))
+                })?;
+            let claims = state
+                .store
+                .claims_for(&subject, Some("message.sent"))
+                .map_err(ApiError::internal)?;
+            // A stream item's sent claim is in the messages shard, not the graph.
+            let sent = match claims.into_iter().next() {
+                Some(claim) => Some(claim),
+                None => {
+                    crate::store::messages_shard::mailbox_reads::sent_claim(&state.store, &subject)
+                        .map_err(ApiError::internal)?
+                }
+            };
+            let sent_at = sent
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or_default();
+            let host = super::message_reads::relay_host(&state.store, &message)
+                .map_err(ApiError::internal)?;
+            Ok((message, sent_at, host))
+        })
+        .await?
+    };
+    // The recipient's host keeps how far it got: ask it, within the status deadline.
+    let relayed = match host {
+        Some(host) => super::message_reads::read(
+            &state,
+            BTreeMap::from([(host, vec![subject.clone()])]),
+            super::message_reads::STATUS_DEADLINE,
+        )
+        .await
+        .remove(&subject),
+        None => None,
+    };
     blocking_api(move || {
-        let message = state.store.message(&subject).map_err(ApiError::internal)?
-            .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
-        let claims = state.store.claims_for(&subject, Some("message.sent")).map_err(ApiError::internal)?;
-        let sent_at = claims.first().map(|claim| claim.accepted_at_unix_ms).unwrap_or_default();
         Ok(Json(json!({ "id": subject, "from": message.from, "to": message.to,
-            "delivery": message_delivery_for(&state.store, &message, sent_at, client_now_ms()).map_err(ApiError::internal)? })))
+            "delivery": message_delivery_for(&state.store, &message, sent_at, client_now_ms(), relayed.as_ref())
+                .map_err(ApiError::internal)? })))
     }).await
 }
 
@@ -34,7 +79,8 @@ pub async fn message_by_key(
     State(state): State<AppState>,
     Query(query): Query<MessageKeyQuery>,
 ) -> Result<Json<MessageSendReceipt>, ApiError> {
-    blocking_api(move || {
+    let reads = state.clone();
+    let mut receipt = blocking_api(move || {
         let not_sent = || ApiError {
             status: StatusCode::NOT_FOUND,
             code: "message-not-sent".into(),
@@ -54,7 +100,7 @@ pub async fn message_by_key(
             .ok_or_else(not_sent)?;
         let requested_recipient = message.to.clone();
         let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
-        Ok(Json(MessageSendReceipt {
+        Ok(MessageSendReceipt {
             requested_recipient,
             recipient,
             recipient_identity,
@@ -70,9 +116,14 @@ pub async fn message_by_key(
             idempotency_key: query.key.clone(),
             already_sent: true,
             sent_at: Some(client_timestamp(claim.accepted_at_unix_ms)),
-        }))
+        })
     })
-    .await
+    .await?;
+    // The recipient's host keeps how far it got.
+    super::message_reads::read_view(&reads, &mut receipt.message)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(receipt))
 }
 
 #[derive(Deserialize)]
@@ -231,9 +282,13 @@ pub async fn list_messages_page(
     peer: Option<Extension<NativeDeliveryPeer>>,
 ) -> Result<Json<MessagePage>, ApiError> {
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
-    let to = query.to.as_deref().map(normalize_message_party);
-    let from = query.from.as_deref().map(normalize_message_party);
-    let acting_as = query.acting_as.as_deref().map(normalize_message_party);
+    let peer = peer.map(|Extension(mut peer)| {
+        peer.agent = message_party_identity(&state.store, &peer.agent)?;
+        Ok::<_, ApiError>(Extension(peer))
+    }).transpose()?;
+    let to = query.to.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
+    let from = query.from.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
+    let acting_as = query.acting_as.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
     query.validate_filters()?;
     if acting_as.is_some() && to.is_none() {
         return Err(ApiError::bad(St3Error::new(
@@ -245,7 +300,8 @@ pub async fn list_messages_page(
             state.store.agent_retirement(to).map_err(ApiError::bad)?
         } else { None };
         let permitted = if let Some(retirement) = retirement.as_ref() {
-            retirement.body["fields"]["successor"].as_str() == Some(actor)
+            retirement.body["fields"]["successor"].as_str()
+                .map(|successor| message_party_identity(&state.store, successor)).transpose()?.as_deref() == Some(actor)
         } else { to == actor };
         if !permitted {
             return Err(ApiError::bad(St3Error::new("wrong-message-recipient", format!(
@@ -286,11 +342,15 @@ pub async fn list_messages_page(
     let subject = query.subject.clone();
     let subject_prefix = query.subject_prefix.clone();
     let store = state.store.clone();
-    let (items, next_after) = blocking_store(move || {
-        let native = !query.include_closed
-            && peer
-                .as_ref()
-                .is_some_and(|peer| to.as_deref() == Some(peer.0.agent.as_str()));
+    let cursor_to = to.clone();
+    let cursor_from = from.clone();
+    let cursor_actor = acting_as.clone();
+    let native = !query.include_closed
+        && peer
+            .as_ref()
+            .is_some_and(|peer| to.as_deref() == Some(peer.0.agent.as_str()));
+    let include_closed = query.include_closed;
+    let (mut items, next_after) = blocking_store(move || {
         let filtered = from.is_some() || subject.is_some() || subject_prefix.is_some();
         let (mut items, next_after) = if filtered {
             store.messages_page_filtered(
@@ -314,16 +374,24 @@ pub async fn list_messages_page(
         Ok((items, next_after))
     })
     .await?;
+    // A seat's own delivery poll reads its own host's records. Any other page asks each
+    // message's seat's host; a page of open mail can come back shorter than `limit` when a host
+    // says some of it is closed, and the cursor goes on from where the records left off.
+    if !native {
+        super::message_reads::read_views(&state, &mut items, !include_closed)
+            .await
+            .map_err(ApiError::internal)?;
+    }
     let next_cursor = next_after
         .map(|after| {
             let cursor = MessagesPageCursor {
                 after,
                 through,
-                to: query.to.as_deref().map(normalize_message_party),
-                from: query.from.as_deref().map(normalize_message_party),
+                to: cursor_to.clone(),
+                from: cursor_from.clone(),
                 subject: query.subject.clone(),
                 subject_prefix: query.subject_prefix.clone(),
-                acting_as: query.acting_as.as_deref().map(normalize_message_party),
+                acting_as: cursor_actor.clone(),
                 include_closed: query.include_closed,
                 limit,
             };
@@ -349,18 +417,23 @@ pub async fn list_messages(
     Query(query): Query<MessagesQuery>,
     peer: Option<Extension<NativeDeliveryPeer>>,
 ) -> Result<Json<Vec<MessageView>>, ApiError> {
-    let recipient = query.to.as_deref().map(normalize_message_party);
+    let recipient = query.to.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
+    let peer = peer.map(|Extension(mut peer)| {
+        peer.agent = message_party_identity(&state.store, &peer.agent)?;
+        Ok::<_, ApiError>(Extension(peer))
+    }).transpose()?;
     record_legacy_poll(
         peer.as_ref().map(|Extension(peer)| peer),
         recipient.as_deref(),
         query.include_closed,
     );
     let store = state.store.clone();
-    blocking_store(move || {
-        let native = !query.include_closed
-            && peer
-                .as_ref()
-                .is_some_and(|peer| recipient.as_deref() == Some(peer.0.agent.as_str()));
+    let native = !query.include_closed
+        && peer
+            .as_ref()
+            .is_some_and(|peer| recipient.as_deref() == Some(peer.0.agent.as_str()));
+    let include_closed = query.include_closed;
+    let mut messages = blocking_store(move || {
         let mut messages = if native {
             store.messages_for_delivery_through(recipient.as_deref().unwrap(), store.index()?)?
         } else {
@@ -371,8 +444,15 @@ pub async fn list_messages(
         )?;
         Ok(messages)
     })
-    .await
-    .map(Json)
+    .await?;
+    // A seat's own delivery poll reads its own host's records. Any other list asks each
+    // message's seat's host.
+    if !native {
+        super::message_reads::read_views(&state, &mut messages, !include_closed)
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    Ok(Json(messages))
 }
 
 pub async fn read_message(
@@ -386,9 +466,13 @@ pub async fn read_message(
     };
     let store = state.store.clone();
     let lookup = subject.clone();
-    let message = blocking_store(move || store.message(&lookup))
+    let mut message = blocking_store(move || store.message(&lookup))
         .await?
         .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
+    // The recipient's host keeps how far it got.
+    super::message_reads::read_view(&state, &mut message)
+        .await
+        .map_err(ApiError::internal)?;
     let provenance = {
         let state = state.clone();
         let lookup = message.subject.clone();
@@ -438,16 +522,20 @@ pub async fn post_message_claim(
                 "message lifecycle transitions require the recipient actor",
             ))
         })?;
-        let actor = normalize_message_party(&actor);
-        let retirement = if message.to.starts_with("agent/") {
-            store.agent_retirement(&message.to).map_err(ApiError::bad)?
+        let actor = message_party_identity(&store, &actor)?;
+        let recipient = message_party_identity(&store, &message.to)?;
+        let retirement = if recipient.starts_with("agent/") {
+            store.agent_retirement(&recipient).map_err(ApiError::bad)?
         } else { None };
-        let acting_for = retirement.as_ref().and_then(|claim| {
+        let successor = retirement.as_ref()
+            .and_then(|claim| claim.body["fields"]["successor"].as_str())
+            .map(|successor| message_party_identity(&store, successor)).transpose()?;
+        let acting_for = retirement.as_ref().and_then(|_| {
             (matches!(kind, "message.read" | "message.closed")
-                && claim.body["fields"]["successor"].as_str() == Some(actor.as_str()))
-                .then(|| message.to.clone())
+                && successor.as_deref() == Some(actor.as_str()))
+                .then(|| recipient.clone())
         });
-        if acting_for.is_none() && (retirement.is_some() || actor != message.to)
+        if acting_for.is_none() && (retirement.is_some() || actor != recipient)
             && !request
                 .delegation
                 .as_ref()
@@ -480,6 +568,43 @@ pub async fn post_message_claim(
             if let Some(runtime_id) = request.runtime_id {
                 fields.insert("runtime_id".into(), Value::String(runtime_id));
             }
+        }
+        // A stream item's lifecycle is this member's record, not a graph claim.
+        if message.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
+            if request.expected_subject.is_some() {
+                return Err(ApiError::bad(St3Error::new(
+                    "expected-subject-unsupported",
+                    format!("`{subject}` is a stream item: it has no graph claim to compare with"),
+                )));
+            }
+            // A successor's custody step and a delegated step pass the rules the graph applies to
+            // their claims, read against the stream item; the step itself stays this member's
+            // record, with its custody or delegation proof in its fields.
+            let input = ClaimInput {
+                subject: subject.clone(),
+                kind: kind.into(),
+                actor: Some(actor.clone()),
+                fields: fields.clone(),
+                evidence: evidence.clone(),
+                expected_subject: None,
+                idempotency_key: None,
+            };
+            crate::store::retirements::admit_mail_claim_to(&store.readers.get(), &input, &message)
+                .map_err(ApiError::bad)?;
+            if fields.contains_key("delegation") || fields.contains_key("acted_for") {
+                crate::store::delegation::validate_stream_write(
+                    &store, &subject, kind, Some(&actor), &fields, &evidence,
+                )
+                .map_err(ApiError::bad)?;
+            }
+            let appended = crate::store::messages_shard::record_lifecycle(
+                &store, &subject, kind, Some(&actor), &fields,
+            )
+            .map_err(ApiError::bad)?;
+            let record = crate::store::messages_shard::lifecycle_receipt(
+                &store.graph.origin, &subject, kind, Some(&actor), &fields,
+            );
+            return Ok((record, appended, is_work_wake(&message.tags)));
         }
         let (record, appended) = store
             .append_claim_outcome(&ClaimInput {

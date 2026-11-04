@@ -96,7 +96,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         },
         {
           "name": "Test release names, install entry points and isolated app transactions",
-          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-fractal-edge-test\npython3 scripts/release-fractal-manifest-test\npython3 scripts/compat-baseline-release-test\n"
+          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-fractal-edge-test\npython3 scripts/release-publish-embed-test\npython3 scripts/release-fractal-manifest-test\npython3 scripts/compat-baseline-release-test\n"
         },
         {
           "name": "Test the daily release failure path",
@@ -125,17 +125,14 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
       permissions: { contents: 'write' },
       env: { GH_TOKEN: '${{ github.token }}', GH_REPO: '${{ github.repository }}', SOURCE_SHA: '${{ github.sha }}' },
       steps: [
+        // The publish script, at the commit this run releases.
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
         { uses: 'actions/download-artifact@v4', with: { name: 'release-web-embed', path: 'dist' } },
         {
           name: 'Publish once under a source-addressed release, never the rolling edge tag',
-          run: `set -euo pipefail
-cd dist
-sha256sum --check ./*.sha256
-# No --clobber or edit of an existing release: even reruns cannot replace a pin.
-gh release create "embed-$SOURCE_SHA" --target "$SOURCE_SHA" --draft --prerelease --latest=false \\
-  --title "Fractal web embed $SOURCE_SHA" --notes "Offline embed, four posters and provenance for source $SOURCE_SHA. Verify the archive against its SHA-256 sidecar." \\
-  ./*.tar.gz ./*.sha256
-gh release edit "embed-$SOURCE_SHA" --draft=false`,
+          // No --clobber or edit of a published release: even reruns cannot replace a pin. A draft a
+          // failed attempt left is continued, and GitHub's 5xx and timeouts are retried (#4606).
+          run: 'scripts/release-publish-embed --source "$SOURCE_SHA" --dist dist',
         },
       ],
     },

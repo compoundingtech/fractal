@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Publish Codex bootstrap fixture exit status only after its contents are complete.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or backfill. This changes only the isolated Codex bootstrap test fixture."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored field, schema, checkpoint or digest format changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No production or admission rule changes. The bound-shell fixture writes its exit status to a same-directory temporary file and atomically renames it before the test reader can see it."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No CLI, client, wire or declaration format changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No running service or seat is changed by this fixture correction."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No stored state changes; ordinary source rollback restores the earlier fixture."
+  }
+}

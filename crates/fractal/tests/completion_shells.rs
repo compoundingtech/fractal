@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! `st completions <shell>` installs a stub that asks st for candidates on every TAB. These tests
+//! `fractal completions <shell>` installs a stub that asks fractal for candidates on every TAB. These tests
 //! serve an in-process daemon with known terminals and drive the stub in real bash, fish, and zsh
 //! (docs/st3/cli-completion/spec.md). The shells are test inputs: the Nix check and the
 //! dev shell provide them, and a missing shell fails the test rather than skipping it.
@@ -57,12 +57,13 @@ async fn daemon(root: &Path) -> (PathBuf, tokio::task::JoinHandle<()>) {
 }
 
 fn st3() -> PathBuf {
-    test_bin!("st3").to_path_buf()
+    test_bin!("fractal-unstamped").to_path_buf()
 }
 
 /// An operator environment: no seat identity, config and state under `root`, daemon at `socket`.
 fn environment(command: &mut Command, root: &Path, socket: &Path) {
     command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        .env_remove("FRACTAL_SUPPRESS_DEPRECATION")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
         .env_remove("COMPLETE")
@@ -75,7 +76,7 @@ fn environment(command: &mut Command, root: &Path, socket: &Path) {
         .env("ST3_COMPLETION_DEADLINE_MS", "10000");
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let st = bin.join("st");
+    let st = bin.join("fractal");
     if !st.exists() {
         std::os::unix::fs::symlink(st3(), &st).unwrap();
     }
@@ -103,7 +104,7 @@ fn complete_with(
     command
         .env("COMPLETE", "fish")
         .arg("--")
-        .arg("st")
+        .arg("fractal")
         .args(line);
     let started = Instant::now();
     let output = command.output().unwrap();
@@ -155,6 +156,23 @@ fn run_shell(root: &Path, socket: &Path, shell: &Path, args: &[&str]) -> String 
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn alias_completion_callbacks_are_silent_without_warning_suppression() {
+    use std::os::unix::process::CommandExt;
+    let root = tempfile::tempdir().unwrap();
+    for name in ["st", "st3"] {
+        let mut command = Command::new(st3());
+        environment(&mut command, root.path(), &root.path().join("absent.sock"));
+        let output = command.arg0(name)
+            .env("COMPLETE", "fish")
+            .args(["--", name, "--he"])
+            .output().unwrap();
+        assert!(output.status.success(), "{name}: {output:?}");
+        assert!(output.stderr.is_empty(), "{name}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("--help"), "{name}: {output:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -260,7 +278,7 @@ async fn real_shells_complete_live_terminals_through_the_installed_stub() {
                 "--no-config",
                 "-c",
                 &format!(
-                    "source {}; complete -C 'st terminals attach agent/example/'",
+                    "source {}; complete -C 'fractal terminals attach agent/example/'",
                     fish_stub.display()
                 ),
             ],
@@ -280,8 +298,8 @@ async fn real_shells_complete_live_terminals_through_the_installed_stub() {
                 "--norc",
                 "-c",
                 &format!(
-                    "source {}; COMP_WORDS=(st terminals attach agent/example/so); COMP_CWORD=3; \
-                     COMP_TYPE=9; _clap_complete_st st agent/example/so attach; \
+                    "source {}; COMP_WORDS=(fractal terminals attach agent/example/so); COMP_CWORD=3; \
+                     COMP_TYPE=9; _clap_complete_fractal fractal agent/example/so attach; \
                      printf '%s\\n' \"${{COMPREPLY[@]}}\"",
                     bash_stub.display()
                 ),
@@ -313,11 +331,11 @@ async fn real_shells_complete_live_terminals_through_the_installed_stub() {
 zpty z 'TERM=xterm zsh -f -i'
 zpty -w z 'PS1="ready-$((1+1))> "; autoload -Uz compinit; compinit -u -D; source {stub}; _capture_completion() {{ zle expand-or-complete; print -r -- "$BUFFER" > {buffer}.tmp; mv -- {buffer}.tmp {buffer}; }}; zle -N _capture_completion; bindkey "^I" _capture_completion'
 zpty -r z out '*ready-2> *'
-zpty -w -n z $'st terminals attach agent/example/so\t'
+zpty -w -n z $'fractal terminals attach agent/example/so\t'
 for attempt in {{1..600}}; do
   if [[ -f {buffer} ]]; then
     seen=$(<{buffer})
-    [[ $seen == 'st terminals attach agent/example/solo-worker ' || $seen == 'st terminals attach agent/example/solo-worker' ]] && {{ print -r -- completed; exit 0 }}
+    [[ $seen == 'fractal terminals attach agent/example/solo-worker ' || $seen == 'fractal terminals attach agent/example/solo-worker' ]] && {{ print -r -- completed; exit 0 }}
     print -r -- "wrong completion buffer: ${{(q)seen}}"
     exit 1
   fi
@@ -336,7 +354,7 @@ exit 1
         // Nix's zsh reads its own zshenv even under -f, and on NixOS that sources
         // /etc/set-environment unless this marker is set. A service's environment (a CI runner's
         // or a build host's) lacks it, so the zsh in zpty would rebuild PATH without the dev
-        // shell's zsh and the test's st, and the widget would never finish.
+        // shell's zsh and the test's fractal, and the widget would never finish.
         command.env("__NIXOS_SET_ENVIRONMENT_DONE", "1");
         let zsh_binary = shell("zsh");
         let output = command

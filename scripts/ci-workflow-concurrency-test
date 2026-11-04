@@ -58,11 +58,10 @@ for workflow in ['public-repo.yml']:
     assert old == latest and latest[1], (workflow, 'main pushes must replace obsolete work')
     print('passed:', workflow, 'only latest main push remains')
 
-# Main upkeep fills caches: main pushes share one group, so they coalesce into one pending run, but a
-# started run is never cancelled (most runs were killed half way when each push cancelled the last).
+# Every landed tree may require hosted proof: neither active nor pending upkeep runs may coalesce.
 old, latest = policy('main-upkeep.yml', 'push', 100), policy('main-upkeep.yml', 'push', 101)
-assert old == latest == ('main-upkeep-main', False), (old, latest)
-print('passed: main-upkeep.yml main pushes coalesce and a started run finishes')
+assert old == ('main-upkeep-100', False) and latest == ('main-upkeep-101', False), (old, latest)
+print('passed: main-upkeep.yml preserves independent proof for every main push')
 
 # Performance is manual dispatch only (the daily long lanes run its load jobs on main): no push trigger,
 # and no run, whatever its event, replaces another outside a PR's own group.

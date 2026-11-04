@@ -690,8 +690,11 @@ impl PersonWorkStore for Store {
         let deadlines = self.ask_deadlines();
         // Off, the count restarts when deadlines are next on, so asks made meanwhile do not
         // resolve at once.
-        if !deadlines && ask_deadlines_since(&self.readers.get())? != 0 {
-            self.connection.batched(|tx| stop_counting_ask_deadlines(tx)).map_err(anyhow::Error::msg)??;
+        if !deadlines
+            && ask_deadlines_since(&self.readers.get())? != 0
+            && self.connection.batched(|tx| stop_counting_ask_deadlines(tx)).map_err(anyhow::Error::msg)??
+        {
+            self.ask_deadline_policy_changed();
         }
         // Off, nothing applies a default, so there is none to override; the check resumes from
         // where it stopped when deadlines are on again.
@@ -707,15 +710,15 @@ impl PersonWorkStore for Store {
             // A concurrent new ask is handled by the next notified reconcile pass.
             return Ok(PersonAskPass { changed: overridden, ..PersonAskPass::default() });
         }
-        let default_ms = self.default_ask_deadline_ms();
-        self.connection.batched(|tx| -> Result<PersonAskPass> {
+        let mut started = false;
+        let pass = self.connection.batched(|tx| -> Result<PersonAskPass> {
             let asks = person_asks_for_reconcile(tx)?;
             // Asks already open when deadlines are turned on count theirs from the first pass
             // that sees them on, not from when they were asked, so they do not all resolve at once.
             if deadlines {
-                start_counting_ask_deadlines(tx, now)?;
+                started = start_counting_ask_deadlines(tx, now)?;
             }
-            let since = ask_deadlines_since(tx)?;
+            let (since, default_ms) = ask_deadline_policy(tx)?;
             let mut pass = PersonAskPass { changed: overridden, ..PersonAskPass::default() };
             let mut ended = 0;
             for ask in asks {
@@ -767,7 +770,11 @@ impl PersonWorkStore for Store {
                 pass.changed = true;
             }
             Ok(pass)
-        }).map_err(anyhow::Error::msg)?
+        }).map_err(anyhow::Error::msg)??;
+        if started {
+            self.ask_deadline_policy_changed();
+        }
+        Ok(pass)
     }
 
     /// A person may answer on another member before an ask's deadline while the ask's own

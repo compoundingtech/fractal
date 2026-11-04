@@ -311,10 +311,8 @@ pub fn message_allowed_under(
         return Ok(true);
     }
     if message.from == "daemon/runtime"
-        && message.tags.iter().any(|tag| {
-            let Some(value) = tag.strip_prefix("st3-work:") else {
-                return false;
-            };
+        && crate::silent::message_tag_values(message.tags.iter().map(String::as_str), "work:")
+            .any(|value| {
             let mut parts = value.rsplitn(4, '@');
             let _incarnation = parts.next();
             let _epoch = parts.next();
@@ -322,7 +320,7 @@ pub fn message_allowed_under(
             parts
                 .next()
                 .is_some_and(|step| operation.allowed_work.get(step).copied() == attempt)
-        })
+            })
     {
         return Ok(true);
     }

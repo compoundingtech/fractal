@@ -10,6 +10,18 @@ shows the mode that daemon actually started with.
 Auto is not a security boundary. It reduces accidents; it does not isolate seats.
 Codex hook trust is bypassed in both modes.
 
+## Seat temporary files
+
+Newly started seats receive `TMPDIR=/var/tmp` when the login-shell environment has
+no TMPDIR or an empty one. On Linux an inherited TMPDIR on tmpfs is replaced too,
+including a path through a symlink. This keeps large session scratch files off a
+RAM-backed `/tmp`. An inherited TMPDIR on disk is preserved, and a seat's explicit
+`env { TMPDIR "/chosen/scratch"; }` declaration takes precedence.
+
+Running seats keep their existing environment. This does not sweep session scratch
+from ended sessions or remove files earlier launches left in `/tmp`; existing host
+cleanup still governs those files.
+
 ## Choosing and changing the mode
 
 This section is written for a person's own agent to read and act on at their request. The
@@ -160,6 +172,31 @@ branch checked out for review, must not be a seat workspace; the same goes for a
 (`st: approved project MCP server NAME in DIR (definition sha256 HASH)`), so a changed definition is
 visible after the fact.
 
+The driver resolves `claude` once, on the seat's own PATH, and uses that path both for the plugin check
+(`claude plugin marketplace list`, `claude plugin list`) and to launch Claude, so the two cannot mean
+different Claudes. When the approved plugin cannot be used, the seat still starts on Claude's development
+channel, whose consent Fractal accepts; the check's error is kept in the attachment diagnostic's cause
+(below) rather than only printed on a screen Claude repaints.
+
+A Claude seat's channel is judged from Claude's own start, not the driver's. On a loaded host the driver's
+preparation (the plugin check and the workspace's admission) took up to half a minute and Claude about
+another half minute to bring its channel server up. Until Claude's first native hook (its SessionStart)
+the seat is `starting`; a Claude that has not reached it within 5 minutes of the driver's start is
+reported `stalled`. After SessionStart, the channel has 60 seconds to initialize before the seat is
+`blocked` (`ST3_CLAUDE_ATTACH_WINDOW_MS` and `ST3_CLAUDE_START_BOUND_MS` can only shorten these). Both
+publish `claude-channel-unattached`; every member folds a status other than `starting` to blocked. The
+reason ends with the cause as JSON after ` cause=`: its kind (`channel-not-initialized` or
+`claude-not-started`), the route the driver chose (`approved-plugin`, `plugin-development-consent`,
+`inline-development`), the plugin check's error and time, whether the workspace declares its own project
+server named `st`, and when the driver started, launched Claude and saw SessionStart.
+
+Automatic channel recovery restarts a blocked seat and parks it after 3 attempts within 6 hours. Only a
+new channel failure spends that budget. A `stalled` seat, or one blocked again for the cause the last
+charged attempt named (the same kind, route, plugin error and project server, whatever the times), is
+restarted without charging it, on a long backoff of 5 minutes that doubles to at most 30. After 3 such
+restarts in a row for one cause, an operational fault names the seat and the cause, so it is seen; it
+clears when the channel attaches.
+
 A Claude seat in auto mode also gets Read rules in its settings, merged with any authored settings. Auto
 mode's classifier treats a read in another repository as scope escalation and asks a person, which stalls
 an unattended seat on "Read outside the working directories" (a release builder reading a sibling worktree
@@ -177,8 +214,9 @@ Managed Claude runs with `DISABLE_AUTOUPDATER=1`; pi and omp already disable the
 startup update checks. When a recognized update menu still appears, the daemon
 records a `harness.diagnostic` with code `provider-update-available`, status
 `available`, provider, incarnation, and the observed notice. Its evidence points
-to the retained startup-prompt diagnostic. It remains after the prompt is resolved
-and can be read through the seat's trace. Operations owns provider upgrades.
+to the retained startup-prompt diagnostic. It is an observability code: it stays in
+the local observation log of the seat's host, after the prompt is resolved, and
+goes to OpenTelemetry when a collector is configured. Operations owns provider upgrades.
 
 Skipping a Codex update requires the complete recognized menu,
 a fresh screen and the same incarnation. Failed input, changed screens and a menu

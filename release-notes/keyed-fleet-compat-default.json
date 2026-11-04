@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test signs linux-fleet-compat by default, as it does linux-clippy: from linux-gate's own fleet-compat stage when linux-gate runs (the stage runs once) or from the stage run alone; the note records scripts/ci-fleet-compat-result, which fails when the stage's integration-test build read a repository file outside linux-fleet-compat's input key, and carries the key so a tree with the same key reuses it; linux-gate keeps its fleet-compat stage while linux-fleet-compat is in shadow",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes; local linux-fleet-compat notes record run_command_sha256 and source_inputs, as linux-clippy's do."},
+  "schema": {"status": "none", "detail": "None."},
+  "rules": {"status": "changed", "detail": "Still shadow: the linux-fleet-compat gate never says skip while enforce is false. Its host, agent and queue levels now hold a note to python3 scripts/ci-fleet-compat-result and require run_command_sha256, and its lane declares its CI inputs. CI's linux-fleet-compat job still only warns on an uncovered read until the flip; every local run now fails on one first."},
+  "compatibility": {"status": "none", "detail": "The caller's command is unchanged (scripts/st-test --all --push origin). linux-gate's notes and command are unchanged. Local linux-fleet-compat notes signed with the old opt-in command (scripts/ci-fleet-compat-keyed, removed) no longer match its policy, and are measured again."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the change; linux-fleet-compat returns to an opt-in local check."}
+}

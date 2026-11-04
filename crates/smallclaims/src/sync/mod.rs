@@ -444,6 +444,12 @@ pub struct PeerResponse<T> {
 /// The version every signed peer answer carries.
 pub const PEER_API_VERSION: &str = "st3.v1";
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+/// Accepted peer envelope labels. Writers still emit `PEER_API_VERSION`;
+/// `st3.v1` remains a permanent read spelling, including after contraction.
+pub const ACCEPTED_PEER_API_VERSIONS: &[&str] = &[PEER_API_VERSION, "fractal.v1"];
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+
 impl<T> PeerResponse<T> {
     pub fn new(node: &str, store_index: u64, value: T) -> Self {
         Self {

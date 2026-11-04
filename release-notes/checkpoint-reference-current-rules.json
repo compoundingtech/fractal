@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Describe checkpoint retention rules without allocation history.",
+  "replay": {
+    "status": "none",
+    "detail": "Removes historical parentheticals from the human-readable checkpoint rule summary. The canonical retention definitions, engine version, rules digest and drop behavior are unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Removes historical parentheticals from the human-readable checkpoint rule summary. The canonical retention definitions, engine version, rules digest and drop behavior are unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Removes historical parentheticals from the human-readable checkpoint rule summary. The canonical retention definitions, engine version, rules digest and drop behavior are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Removes historical parentheticals from the human-readable checkpoint rule summary. The canonical retention definitions, engine version, rules digest and drop behavior are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Removes historical parentheticals from the human-readable checkpoint rule summary. The canonical retention definitions, engine version, rules digest and drop behavior are unchanged."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Removes historical parentheticals from the human-readable checkpoint rule summary. The canonical retention definitions, engine version, rules digest and drop behavior are unchanged."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Removes historical parentheticals from the human-readable checkpoint rule summary. The canonical retention definitions, engine version, rules digest and drop behavior are unchanged."
+  }
+}

@@ -12,11 +12,11 @@ the Assistant claims.
 evals/fractal/onboarding-play/run.sh
 
 # Spends nothing: a throwaway st with no harness, proving the collector works on a live graph.
-evals/fractal/onboarding-play/run.sh --plumbing --st-bin target/debug/st3
+evals/fractal/onboarding-play/run.sh --plumbing --st-bin target/debug/fractal
 
 # The paid run. Both variants, at most two runs, on a login you made yourself.
 evals/fractal/onboarding-play/run.sh --paid --max-runs 2 --harness claude \
-  --claude-config-dir /path/to/claude-login --st-bin target/debug/st3
+  --claude-config-dir /path/to/claude-login --st-bin target/debug/fractal
 ```
 
 `--max-runs` is required for a paid run and caps it. Use `--harness codex --codex-home DIR` for

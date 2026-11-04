@@ -350,6 +350,40 @@ describe('mailbox provenance and server ordering', () => {
     })
   })
 
+  // Two messages that arrived on the messages stream behind the same graph claim share their
+  // sequence slot, and can share a millisecond: their content names its message, so each pairs
+  // with its own header. Content from an older daemon names none and pairs by slot, as before;
+  // two such messages in one slot still pair with whichever header came last, a limit it keeps.
+  it.each([
+    ['named content', true],
+    ['an older daemon\'s content, alone in its slot', false],
+  ])('pairs stored mailbox content with its own header by %s', (_, named) => {
+    const timeline = new LiveTimeline()
+    const pair = (message: string, header: string, content: string, text: string) => [
+      entry(header, 42, 'message', {
+        message_id: message, from: 'agent/other', to: 'agent/example',
+        attachments: [{ ...image, origin: message }],
+      }, 'assistant'),
+      entry(content, 43, 'content', {
+        media_type: 'text/plain', text, ...(named ? { message_id: message } : {}),
+      }, 'assistant'),
+    ]
+    timeline.apply({
+      replace: true, hasMore: false,
+      entries: [
+        ...pair('message/first', 'timeline-entry/s1/111111111111111111111111', 'timeline-entry/s1/222222222222222222222222', 'first'),
+        ...(named ? pair('message/second', 'timeline-entry/s1/333333333333333333333333', 'timeline-entry/s1/444444444444444444444444', 'second') : []),
+      ],
+    })
+    const items = timeline.project().items
+    expect(items.find(item => item.id === 'timeline-entry/s1/222222222222222222222222')).toMatchObject({
+      _tag: 'Text', text: 'first', attachments: [{ messageId: 'message/first' }],
+    })
+    if (named) expect(items.find(item => item.id === 'timeline-entry/s1/444444444444444444444444')).toMatchObject({
+      _tag: 'Text', text: 'second', attachments: [{ messageId: 'message/second' }],
+    })
+  })
+
   it('invalidates paired attachment metadata on header revisions without replacing unrelated cached rows', () => {
     const timeline = new LiveTimeline()
     const prefix = entry('timeline-entry/native-0', 0, 'content', { media_type: 'text/plain', text: 'Before' })

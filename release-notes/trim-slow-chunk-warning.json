@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A trim chunk that holds the store's writer over 1 s logs one WARN line with its phase, envelopes, claims, the bytes of the claim bodies it deleted, and its hold split into step and commit time",
+  "replay": {"status": "none", "detail": "No claim is written or read differently."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "Only a log line is added; each delete chunk also reads the length of the bodies it deletes."},
+  "downtime": {"status": "none", "detail": "No restart beyond the normal upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting removes the log line."}
+}

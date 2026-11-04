@@ -4,9 +4,8 @@
 //! through a retained directory descriptor, so no path is re-resolved between check and use.
 //! Named `capability` rather than `fs` because the parent imports `std::fs`.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
@@ -46,57 +45,6 @@ pub fn sync_dir(path: &Path) -> Result<()> {
         .with_context(|| format!("open directory {}", path.display()))?
         .sync_all()
         .with_context(|| format!("sync directory {}", path.display()))
-}
-
-fn open_dir_nofollow(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(path)
-}
-
-#[doc(hidden)]
-pub fn open_dir_beneath(catalog: &Path, target: &Path) -> std::io::Result<File> {
-    let relative = target.strip_prefix(catalog).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "directory escapes catalog",
-        )
-    })?;
-    let mut current = open_dir_nofollow(catalog)?;
-    for component in relative.components() {
-        let Component::Normal(name) = component else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "directory has an unsafe component",
-            ));
-        };
-        current = openat_dir_nofollow(&current, name)?;
-    }
-    Ok(current)
-}
-
-pub(crate) fn openat_dir_nofollow(parent: &File, name: &std::ffi::OsStr) -> std::io::Result<File> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt as _;
-    let name = CString::new(name.as_bytes()).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "directory name contains NUL",
-        )
-    })?;
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-        )
-    };
-    if fd < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(unsafe { File::from_raw_fd(fd) })
-    }
 }
 
 pub(super) fn control_plane_rename_error(error: std::io::Error) -> anyhow::Error {

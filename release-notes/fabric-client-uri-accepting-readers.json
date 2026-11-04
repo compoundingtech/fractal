@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Accept both Fabric native client URI service names in Rust and Node clients",
+  "replay": {"status": "none", "detail": "No claim history or projection changes."},
+  "schema": {"status": "none", "detail": "No stored schema or gateway setting changes."},
+  "rules": {"status": "none", "detail": "Trusted peer resolution, pairing authentication and client route restrictions are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Rust and Node native readers accept exactly st3-client-v0 and fractal-client-v0 URI services. Both dial the exposed st3-client-v0 gateway service. Formatters and gateway defaults still emit st3-client-v0; exposure is unchanged. Other services and URI suffixes remain refused, including trailing line breaks."},
+  "downtime": {"status": "none", "detail": "No data migration is required."},
+  "manual": {"status": "none", "detail": "No configuration edits or additional gateway exposures are required."},
+  "recovery": {"status": "none", "detail": "No saved endpoint or gateway settings are rewritten. Older clients still require the st3-client-v0 URI spelling."}
+}

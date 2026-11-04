@@ -92,6 +92,46 @@ class FakeApi:
         return {"subject": "step-run/probe/ask"}
 
 
+class IdentityTests(unittest.TestCase):
+    def test_preferred_legacy_and_equal_identities_start_the_declared_probe(self):
+        actor = "agent/probe/amber"
+        for environment in ({"FRACTAL_AGENT": actor}, {"ST_AGENT": actor},
+                            {"FRACTAL_AGENT": actor, "ST_AGENT": actor}):
+            with self.subTest(environment=environment), tempfile.TemporaryDirectory() as directory:
+                config = {"agent": actor, "host": "amber", "binary": "/bin/false",
+                          "socket": "/unused", "state_dir": directory,
+                          "peers": [{"host": "cobalt", "agent": "agent/probe/cobalt"}]}
+                with patch.dict(os.environ, environment, clear=True):
+                    monitor = probe.Probe(config)
+                try:
+                    self.assertEqual(monitor.actor, actor)
+                    self.assertTrue((Path(directory) / "probe.lock").exists())
+                finally:
+                    monitor.lock.close()
+
+    def test_empty_missing_and_conflicting_identities_refuse_before_state_creation(self):
+        actor = "agent/probe/amber"
+        cases = [
+            ({}, "run this probe as its own declared FRACTAL_AGENT (or legacy ST_AGENT) seat"),
+            ({"FRACTAL_AGENT": "", "ST_AGENT": actor},
+             "run this probe as its own declared FRACTAL_AGENT (or legacy ST_AGENT) seat"),
+            ({"FRACTAL_AGENT": "private-preferred", "ST_AGENT": "private-legacy"},
+             "Conflicting identity environment variables: FRACTAL_AGENT and ST_AGENT"),
+            ({"FRACTAL_AGENT": actor, "ST_AGENT": ""},
+             "Conflicting identity environment variables: FRACTAL_AGENT and ST_AGENT"),
+        ]
+        for environment, diagnostic in cases:
+            with self.subTest(environment=environment), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory) / "state"
+                with patch.dict(os.environ, environment, clear=True), self.assertRaises(ValueError) as error:
+                    probe.Probe({"agent": actor, "state_dir": str(state)})
+                self.assertEqual(str(error.exception), diagnostic)
+                self.assertNotIn(actor, str(error.exception))
+                self.assertNotIn("private-preferred", str(error.exception))
+                self.assertNotIn("private-legacy", str(error.exception))
+                self.assertFalse(state.exists())
+
+
 class ProbeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -99,7 +139,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
                        "socket": "/unused", "state_dir": self.directory.name, "reviewer": "person/eval",
                        "presence_ttl_ms": 0,
                        "peers": [{"host": "cobalt", "agent": "agent/probe/cobalt"}]}
-        with patch.dict(os.environ, ST_AGENT=self.config["agent"]):
+        with patch.dict(os.environ, FRACTAL_AGENT=self.config["agent"], ST_AGENT=self.config["agent"]):
             self.monitor = probe.Probe(self.config)
         self.monitor.api = FakeApi()
         self.target = "agent/probe/cobalt"
@@ -519,7 +559,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
     def restart_monitor(self):
         api = self.monitor.api
         self.monitor.lock.close()
-        with patch.dict(os.environ, ST_AGENT=self.config["agent"]):
+        with patch.dict(os.environ, FRACTAL_AGENT=self.config["agent"], ST_AGENT=self.config["agent"]):
             self.monitor = probe.Probe(self.config)
         self.monitor.api = api
 
@@ -624,7 +664,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_alert_agent_rejects_person_and_empty_identities(self):
         for value in ("person/eval", "agent/", "", None, 3):
-            with self.subTest(value=value), patch.dict(os.environ, ST_AGENT=self.config["agent"]):
+            with self.subTest(value=value), patch.dict(os.environ, FRACTAL_AGENT=self.config["agent"], ST_AGENT=self.config["agent"]):
                 with self.assertRaisesRegex(ValueError, "alert_agent must be an agent identity"):
                     probe.Probe({**self.config, "alert_agent": value})
 
@@ -906,7 +946,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.monitor.persist()
         before = self.monitor.state["routes"][self.target].copy()
         self.monitor.lock.close()
-        with patch.dict(os.environ, ST_AGENT=self.config["agent"]):
+        with patch.dict(os.environ, FRACTAL_AGENT=self.config["agent"], ST_AGENT=self.config["agent"]):
             self.monitor = probe.Probe(self.config)
         self.monitor.api = FakeApi()
         self.assertEqual(self.monitor.state["routes"][self.target], before)

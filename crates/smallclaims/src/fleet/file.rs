@@ -299,6 +299,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn persisted_fleet_protocol_round_trip_preserves_either_name() {
+        let state = tempfile::tempdir().unwrap();
+        let fleet_id = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
+        for prefix in [
+            super::super::transport::LEGACY_FLEET_PROTOCOL_PREFIX,
+            super::super::transport::FRACTAL_FLEET_PROTOCOL_PREFIX,
+        ] {
+            let protocol = format!("{prefix}{fleet_id}");
+            let file: FleetFile = toml::from_str(&format!(
+                "fleet_id = '{fleet_id}'\nfabric_protocol = '{protocol}'"
+            )).unwrap();
+            file.save(state.path()).unwrap();
+            let loaded = FleetFile::load(state.path()).unwrap().unwrap();
+            assert_eq!(loaded.fabric_protocol.as_deref(), Some(protocol.as_str()));
+            loaded.save(state.path()).unwrap();
+            assert_eq!(
+                FleetFile::load(state.path()).unwrap().unwrap().fabric_protocol,
+                Some(protocol),
+            );
+        }
+    }
+
+    #[test]
     fn omitted_transport_list_defaults_to_tailscale_then_fabric() {
         let file: FleetFile = toml::from_str("").unwrap();
         assert_eq!(file.transports, ["tailscale", "fabric"]);

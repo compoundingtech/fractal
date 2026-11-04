@@ -1,11 +1,18 @@
 //! One local daemon stream per delivery component. Ownership and receipts are fenced in SQLite,
 //! so an old channel reconnecting after a replacement cannot consume or acknowledge its mail.
 use crate::SeatsStore;
+use crate::store::messages_shard::mailbox_reads;
 use super::*;
 
 /// Recover only recent mail which has never been offered. A prior staging claim is
 /// already an offer attempt, even when its delivered receipt has not arrived yet.
 pub fn never_offered(store: &Store, message: &crate::model::MessageView) -> anyhow::Result<bool> {
+    // A stream item's offers are this member's own lifecycle records, not graph claims.
+    if mailbox_reads::is_stream_item(message) {
+        return Ok(message.status == "sent"
+            && mailbox_reads::lifecycle_step(store, &message.subject, "message.staged")?.is_none()
+            && mailbox_reads::lifecycle_step(store, &message.subject, "message.delivered")?.is_none());
+    }
     Ok(message.status == "sent"
         && store
             .latest_claim(&message.subject, Some("message.staged"))?
@@ -40,26 +47,47 @@ pub fn hold_pre_boot_mail(
         if crate::silent::waits_for_turn(message) {
             continue;
         }
-        let Some(sent) = store.latest_claim(&message.subject, Some("message.sent"))? else {
+        let Some(sent) = sent_claim(store, message)? else {
             message.status = "closed".into();
             continue;
         };
+        // A stream item's index is past every graph index, so only its accepted time places
+        // it against the boot; its staging is a local record without a graph index.
         let after_boot = message.created_index > through && sent.accepted_at_unix_ms >= since;
         let recent = sent.accepted_at_unix_ms
             > since.saturating_sub(u128::from(super::mail_backlog::THRESHOLD_MS));
         let current_offer = recent
-            && store
-                .latest_claim(&message.subject, Some("message.staged"))?
-                .is_some_and(|claim| {
-                    claim.store_index > through
-                        && claim.accepted_at_unix_ms >= since
-                        && claim.actor.as_deref() == Some(peer.agent.as_str())
-                });
+            && if mailbox_reads::is_stream_item(message) {
+                mailbox_reads::lifecycle_step(store, &message.subject, "message.staged")?
+                    .is_some_and(|(actor, at)| at >= since && actor == peer.agent)
+            } else if let Some((consumer, at)) = crate::store::message_marks::staged(&store.readers.get(), &message.subject)? {
+                // A staging this member recorded as a mark has no graph index either.
+                at >= since && consumer == peer.agent
+            } else {
+                store
+                    .latest_claim(&message.subject, Some("message.staged"))?
+                    .is_some_and(|claim| {
+                        claim.store_index > through
+                            && claim.accepted_at_unix_ms >= since
+                            && claim.actor.as_deref() == Some(peer.agent.as_str())
+                    })
+            };
         if !after_boot && !(recent && (never_offered(store, message)? || current_offer)) {
             message.status = "closed".into();
         }
     }
     Ok(())
+}
+
+/// A message's `message.sent` claim; a stream item's is in the messages shard.
+pub fn sent_claim(
+    store: &Store,
+    message: &crate::model::MessageView,
+) -> anyhow::Result<Option<ClaimRecord>> {
+    if mailbox_reads::is_stream_item(message) {
+        return mailbox_reads::sent_claim(store, &message.subject);
+    }
+    store.latest_claim(&message.subject, Some("message.sent"))
 }
 
 // Unit controls can pause snapshot processing while the real subscription and
@@ -76,6 +104,46 @@ pub struct FixtureDirtyGate {
 mod tests {
     use super::*;
     use crate::api::mailbox_tests_shared::age_sent;
+
+    /// A staging recorded as a mark is a current offer like a `message.staged` claim: it keeps a
+    /// recent message open through this boot, and the next boot holds it.
+    #[test]
+    fn a_staging_mark_is_a_current_offer_until_the_next_boot() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("graph.db"), "node").unwrap();
+        let seat = "agent/eval.worker";
+        let peer = NativeDeliveryPeer { agent: seat.into(), transport: "omp-channel", pid: 37, archives_inbox: true };
+        crate::store::mailbox_tests::ready(&store, "first-boot");
+        store
+            .append_claim(&ClaimInput {
+                subject: "message/fresh".into(),
+                kind: "message.sent".into(),
+                actor: Some("person/eval".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("person/eval")),
+                    ("to".into(), json!(seat)),
+                    ("content".into(), json!("QUARTZ SIGNAL")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("send:fresh".into()),
+            })
+            .unwrap();
+        crate::store::mailbox_tests::ready(&store, "second-boot");
+        crate::store::message_marks::record(&store, "message/fresh", "message.staged", seat).unwrap();
+        let held = |store: &Store| {
+            let mut messages = store.messages(Some(seat), false).unwrap();
+            hold_pre_boot_mail(store, Some(&peer), Some(seat), &mut messages).unwrap();
+            messages.into_iter().find(|m| m.subject == "message/fresh").unwrap().status
+        };
+        assert_eq!(held(&store), "staged", "the boot's own staging mark closed its offer");
+        // A mark has no graph index: only its time places it before the next boot.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        crate::store::mailbox_tests::ready(&store, "third-boot");
+        assert_eq!(held(&store), "closed");
+        assert!(store.claims_for("message/fresh", Some("message.staged")).unwrap().is_empty());
+    }
 
     #[test]
     fn native_poll_recovers_unoffered_preboot_mail_until_its_current_offer_finishes() {

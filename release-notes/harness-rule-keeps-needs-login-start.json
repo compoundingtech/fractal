@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A checkpoint no longer moves a seat's needs-login since: the harness.observed rule also keeps the credential report that ended the run before the current one",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No table or claim schema change."},
+  "rules": {"status": "changed", "detail": "Rules version 24: harness.observed keeps one more claim per incarnation, the last provider_auth report of the other value before the current run. The rules digest changes, so members agree on a checkpoint only once they all run this build; until then, a member on the new rules waits instead of sealing with older peers.", "transitions": [[23, 24]]},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change. Checkpoints already trimmed keep what they dropped."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build: later checkpoints use version 23 again."}
+}

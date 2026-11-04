@@ -4,6 +4,7 @@ an ordinary change to the same file."""
 import json
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ loader = importlib.machinery.SourceFileLoader("classify_risk", str(HERE / "class
 spec = importlib.util.spec_from_loader("classify_risk", loader)
 classify_risk = importlib.util.module_from_spec(spec)
 loader.exec_module(classify_risk)
+config_path = runpy.run_path(str(HERE / "review-risk"))["config_path"]
 
 
 class Classify(unittest.TestCase):
@@ -75,9 +77,9 @@ class Classify(unittest.TestCase):
         self.assertEqual([line.split(":")[0] for line in hit[0]["lines"]], ["src/a.rs"])
 
     def test_the_schema_content_rule_skips_test_files_like_data_deletion_does(self):
-        rules = json.loads((HERE.parent / ".st/risky-classes.json").read_text())
+        rules = json.loads(classify_risk.config_path(HERE.parent).read_text())
         schema = next(rule for rule in rules["classes"] if rule["name"] == "schema")
-        deletion = next(rule for rule in json.loads((HERE.parent / ".st/review-risk.json").read_text())["rules"] if rule["name"] == "data-deletion")
+        deletion = next(rule for rule in json.loads((HERE.parent / config_path(HERE.parent, ".st/review-risk.json")).read_text())["rules"] if rule["name"] == "data-deletion")
         self.assertEqual(schema["content"][0]["exclude"], deletion["content"][0]["exclude"])
 
     def test_removing_a_trigger_counts_too(self):

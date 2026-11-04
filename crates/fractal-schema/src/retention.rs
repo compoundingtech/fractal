@@ -65,6 +65,10 @@ pub struct KindPolicy {
     /// Why a kind whose class allows dropping has no checkpoint rule yet.
     #[serde(default)]
     pub pending: Option<String>,
+    /// For a kind whose claims carry a `code` field: the codes that go only to the local
+    /// observation log, whatever `log` says. Every other code follows `log`.
+    #[serde(default)]
+    pub local_codes: Vec<String>,
 }
 
 /// One checkpoint rule. It renders as one line of the rules description.
@@ -131,6 +135,15 @@ impl Policy {
             if entry.class == Class::Durable && entry.pending.is_some() {
                 return Err(format!("{kind}: a durable kind is never dropped, so nothing is pending"));
             }
+            if !entry.local_codes.is_empty() && entry.log != Log::Claims {
+                return Err(format!("{kind}: local_codes only narrows a kind whose log is claims"));
+            }
+            let mut codes = std::collections::BTreeSet::new();
+            for code in &entry.local_codes {
+                if code.is_empty() || !codes.insert(code) {
+                    return Err(format!("{kind}: local code `{code}` is empty or named twice"));
+                }
+            }
         }
         for rule in &policy.rules {
             if let Some(min_age) = &rule.min_age {
@@ -152,6 +165,17 @@ impl Policy {
             log: Log::Claims,
             window: None,
             pending: None,
+            local_codes: Vec::new(),
+        })
+    }
+
+    /// Whether a write of `kind` with this `code` goes only to the local observation log
+    /// because the policy names the code as observability only.
+    pub fn local_code(&self, kind: &str, code: Option<&str>) -> bool {
+        code.is_some_and(|code| {
+            self.kinds
+                .get(kind)
+                .is_some_and(|entry| entry.local_codes.iter().any(|local| local == code))
         })
     }
 
@@ -245,6 +269,8 @@ mod tests {
                 "harness.timeline" | "harness.telemetry" | "render.applied"
                 | "runtime.readiness-deadline-reached" | "sekret.called" | "sekret.exited"
                 | "sekret.refused" | "sekret.changed" => Retention::Local,
+                // Observability only since step 2b of the claims-store breakup.
+                "daemon.diagnostic" => Retention::Local,
                 "runtime.action.requested" | "runtime.action.succeeded" | "runtime.action.failed"
                 | "runtime.action.deadline-reached" => Retention::SystemLocal,
                 "harness.observed" | "harness.usage" | "harness.todo.observed"
@@ -253,6 +279,43 @@ mod tests {
             };
             assert_eq!(spec.retention, before, "{kind}");
         }
+    }
+
+    /// Step 2c of the claims-store breakup: a diagnostic's code decides where it goes. Control
+    /// codes stay claims for the members and control logic that read them; observability codes
+    /// stay on the node that wrote them; a code the policy does not name stays a claim.
+    #[test]
+    fn diagnostic_codes_are_classed_control_or_observability() {
+        let policy = policy();
+        for code in [
+            "provider-auth-expired", "provider-auth-restored", "provider-trust-prompt",
+            "provider-update-prompt", "provider-update-restored", "claude-channel-attached",
+            "claude-channel-unattached", "harness-admission-failed", "provider-capacity",
+            "permission-denied", "native-prompt-call", "native-prompt-answered",
+            "native-prompt-gone", "native-screen-prompt", "native-screen-prompt-gone",
+            "native-screen-prompt-delivered", "native-screen-prompt-undelivered",
+            "native-plan-approved", "native-resume-unavailable", "native-continue-unavailable",
+            "work-wake-exhausted", "work-claim-socket-failed", "stop-deferred",
+            "stop-deferral-cleared", "claude-message-unforwarded",
+            // Kept on purpose beside the first-launch receipts (docs/st3/checkpoints.md).
+            "first-native-launch-incomplete", "a-code-nobody-classed",
+        ] {
+            assert!(!policy.local_code("harness.diagnostic", Some(code)), "{code} must stay a claim");
+        }
+        assert!(!policy.local_code("harness.diagnostic", None));
+        for code in ["codex-driver-failed", "native-delivery-degraded", "render-warning"] {
+            assert!(policy.local_code("harness.diagnostic", Some(code)), "{code} is observability");
+        }
+        assert!(!policy.local_code("daemon.started", Some("codex-driver-failed")));
+        assert_eq!(policy.kind("harness.diagnostic").log, Log::Claims);
+        assert!(Policy::parse(
+            "[kinds]\n\"a.b\" = { class = \"current\", log = \"local\", local_codes = [\"x\"] }\n"
+        )
+        .is_err());
+        assert!(Policy::parse(
+            "[kinds]\n\"a.b\" = { class = \"current\", local_codes = [\"x\", \"x\"] }\n"
+        )
+        .is_err());
     }
 
     #[test]

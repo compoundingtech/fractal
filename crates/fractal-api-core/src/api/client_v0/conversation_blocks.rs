@@ -8,12 +8,23 @@ use ring::aead;
 use std::sync::LazyLock;
 
 // Bound expensive reads without a queued backlog or a second content cache.
+#[cfg(not(any(test, feature = "test-support")))]
 static READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 /// The read budget serving `transcript`: the process-wide one, or under test the budget of
 /// the test's own scope, so parallel tests never take each other's slots.
+#[cfg(not(any(test, feature = "test-support")))]
 pub fn read_slots(_transcript: &std::path::Path) -> &'static tokio::sync::Semaphore {
     &READ_SLOTS
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semaphore> {
+    static SCOPES: crate::external_sessions::timeline_test_support::Scopes<tokio::sync::Semaphore> =
+        LazyLock::new(std::sync::Mutex::default);
+    crate::external_sessions::timeline_test_support::scoped(&SCOPES, transcript, || {
+        tokio::sync::Semaphore::new(4)
+    })
 }
 
 static REF_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
@@ -492,7 +503,7 @@ pub fn read(
     // The fold is held before the slot is taken: waiting viewers of this conversation hold
     // no global read slot, so they never crowd an unrelated conversation out of the budget.
     let slots = read_slots(&source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     let before = basis(source)?;
     let items = held.read(source).map_err(ApiError::internal)?;
     if before != basis(source)? {
@@ -529,7 +540,7 @@ pub fn read_slice(
     let mut held = timeline.hold();
     // Same ordering as `read`: park on the shared fold first, then take the global slot.
     let slots = read_slots(&source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     drop(queue);
     let basis = basis(source)?;
     let fold = crate::profile::span("conversation/native-fold");
@@ -990,7 +1001,7 @@ pub fn assistant_text(
     let native: crate::external_sessions::NativeLocator =
         serde_json::from_value(locator.native.clone()).map_err(|_| invalidated())?;
     let slots = read_slots(&locator.source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     // Each read resolves the managed owner at the current frontier, as chunk_local does.
     let current_source = || {
         let index = state.store.index().map_err(ApiError::internal)?;

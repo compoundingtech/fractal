@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A watch's pull request facts (head, checks, review state) no longer lag up to 180 s after `st gh watch`. The watch declares the repository's standing observer, which reads issues, before the watch subscription that adds pull requests and comments. A poll that landed between the two read issues alone, and the next poll kept that poll's three-minute deadline. An observer whose requested fields widen now polls at once; admission and rate-limit deadlines still bound it. Fixes #4470.",
+  "replay": {"status": "none", "detail": "No claim or projection replay; the change is in-memory scheduling."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Only when this member polls changes; members of older builds keep their cadence and read the same claims."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Rolling back restores the old cadence; nothing persisted changes."}
+}

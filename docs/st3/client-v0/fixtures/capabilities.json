@@ -13,6 +13,7 @@
     "session_actor": "person/alex/session/device-7",
     "transport": "fabric-loopback",
     "capabilities": [
+      { "id": "harness.answer", "version": 0, "state": "unavailable" },
       {
         "id": "read.projections",
         "version": 0,

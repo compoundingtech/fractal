@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test --push tops up a green run that main overtook: it merges the base in when the gate would judge the merge, signs only what the new tree lacks (every check after any merge, also for a narrowed run), and pushes the branch the moment it is covered; after 3 rounds it fails with 'main is moving too fast; run again'. Before any wait it checks for nix (PATH, then the system and profile locations) and, with --push, for a git identity; a --base commit ID reads its repository through origin",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites. The run record gains top_up (the round number); a top-up round is not a full run."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes. What a note covers and how the gate judges it are unchanged."},
+  "compatibility": {"status": "none", "detail": "Runs re-execute main's st-test, so this applies to every run once on main. A green whole-suite --push run now pushes its branch itself; the caller's own git push afterwards has nothing left to send."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None. A run started from a systemd-run --user unit should pass --setenv=PATH=\"$PATH\"; without nix it now fails at once instead of after the wait."},
+  "recovery": {"status": "none", "detail": "No persistent state changes."}
+}

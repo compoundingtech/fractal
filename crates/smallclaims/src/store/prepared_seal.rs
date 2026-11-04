@@ -378,11 +378,13 @@ fn sealed_batch_current(connection: &Connection, sealed: &SealedBatch) -> Result
     Ok(true)
 }
 
-/// What sealing read to sign envelopes: the member key's public half and the fleet id.
+/// What sealing read to sign envelopes: the member key's public half, the fleet id and the
+/// shard the envelopes belong to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EnvelopeSigner {
     member_key: String,
     fleet_id: Option<String>,
+    shard: Option<String>,
 }
 
 /// The next chunk of this node's batches, sealed and signed without the writer.
@@ -417,10 +419,11 @@ impl Store {
         else {
             return Ok(None);
         };
-        let fleet_id = fleet_meta(connection, "fleet_id")?;
+        let fleet_id = self.signing_fleet_id(connection)?;
         let signer = EnvelopeSigner {
             member_key: key.public().to_owned(),
             fleet_id,
+            shard: fleet_meta(connection, "shard_id")?,
         };
         Ok(Some((key, signer)))
     }
@@ -479,6 +482,7 @@ impl Store {
             key,
             EnvelopeSigner {
                 fleet_id: Some(fleet_id),
+                shard,
                 ..
             },
         )) = &signer
@@ -498,7 +502,8 @@ impl Store {
                     .map(|sealed| (sealed.batch.sequence, sealed.envelope_hash.clone())),
             );
             for (sequence, envelope_hash) in unsigned {
-                let signature = key.sign(&crate::fleet::envelope_signature_message(
+                let signature = key.sign(&crate::fleet::envelope_signature_message_in(
+                    shard.as_deref(),
                     fleet_id,
                     &self.origin,
                     sequence,

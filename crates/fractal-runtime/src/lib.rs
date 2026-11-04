@@ -12,6 +12,7 @@
 //! evidence. This API observes only; it never stops a process or unloads a scope.
 
 mod environment;
+pub mod host;
 mod isolate;
 mod lane;
 mod priority;
@@ -19,6 +20,10 @@ mod peer_process;
 mod process;
 mod procfs;
 mod pty;
+mod seat_placement;
+pub mod seat_admission;
+pub mod seat_admission_status;
+pub use seat_placement::UnlanedSeatPlacement;
 mod pty_launcher;
 #[path = "../../pty-launch-environment.rs"]
 mod pty_launch_environment;
@@ -38,9 +43,12 @@ pub use priority::{
     protect_server, protect_servers, report as priority_report, server_unit,
     set_configured as set_configured_seat_priority, work_prefix,
 };
+pub use host::installed_memory_bytes;
 pub use lane::{
-    CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, end as end_lane, enforced as lanes_enforced,
-    parse_memory as parse_lane_memory, seat_slice, set_enforced as set_lanes_enforced,
+    CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, Raise, end as end_lane, resize as resize_lane, held_memory as lane_held_memory, live as live_lane, enforced as lanes_enforced,
+    parse_memory as parse_lane_memory, sccache_socket as lane_sccache_socket, seat_slice,
+    show_memory as show_lane_memory,
+    set_enforced as set_lanes_enforced,
 };
 pub use peer_process::PeerProcessIdentity;
 pub use process::{

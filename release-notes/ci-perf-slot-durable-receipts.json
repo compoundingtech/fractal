@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "ci-perf-slot tests can retain attributed, atomic fixture receipts outside disposable test trees",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "Opt-in diagnostic JSON receipts are not stored application data."},
+  "rules": {"status": "none", "detail": "The optional CI_PERF_SLOT_RECEIPT_DIR sink must be a real, privately writable directory outside source trees and st-test disposable roots. Directory-fd-relative writes preserve an incomplete started receipt until atomic finalization. Receipts include invocation/source/caller attribution, runtime host and UTC timestamps, stdout evidence, separate live and lifecycle peak samples, fixture limits and final unit/cgroup counts. Live peak read failures fail closed."},
+  "compatibility": {"status": "none", "detail": "Without the sink, evidence continues on stdout and helpers require no git working directory. Sink and validator checks remain active with Python optimization enabled. Validation requires a named admitted scope containing the caller, both drained fixtures in that scope's parent slice, valid peaks and consistent manager readbacks. The no-user-manager skip instead requires null admission and no fixtures. Final scans cover app.slice, builds.slice and each actual fixture parent, deduplicated and recorded; validation requires each fixture parent among those roots. An absent lane root counts as zero; other inspection errors fail closed. SIGKILL leaves an incomplete receipt. st-test preserves the receipt setting and exports resolved disposable roots."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No required operator step."},
+  "recovery": {"status": "none", "detail": "Unset CI_PERF_SLOT_RECEIPT_DIR to disable durable receipt transport."}
+}

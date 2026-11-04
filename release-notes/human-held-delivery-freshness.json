@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep the human-held message explanation current between unchanged harness heartbeats",
+  "replay": {"status": "none", "detail": "Harness observation claims and replicated heartbeat frequency are unchanged; freshness is evaluated only at read time."},
+  "schema": {"status": "none", "detail": "No storage schema changes."},
+  "rules": {"status": "none", "detail": "Human-blocked mail gating and incarnation fencing are unchanged. Staged mail remains staged, not delivered."},
+  "compatibility": {"status": "none", "detail": "Harness observations remain current for the five-minute heartbeat interval plus a thirty-second scheduling and replication margin. Older evidence falls back to the generic delivery explanation; other presence and health thresholds are unchanged."},
+  "downtime": {"status": "none", "detail": "The read-time freshness correction takes effect when the binary is updated."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No replicated state or recovery behavior changes."}
+}

@@ -9,7 +9,7 @@
 //!
 //! Catalog wrappers also own their status lease for the same reason Claude does: the extension lives
 //! only as long as the provider's process, and a measured SIGKILL of pi produces no terminal record
-//! at all (`docs/vrs/.experiments/2026-08-18-pi-harness-integration.md`). Presence therefore decays
+//! at all ([historical capture](https://github.com/compoundingtech/fractal/blob/bb51bdcb0cd549b06c298d81c1907a7fd35f0c83/docs/vrs/.experiments/2026-08-18-pi-harness-integration.md)). Presence therefore decays
 //! by staleness, exactly as for the other harnesses. Native launches omit that status transport
 //! and retain session-owned observed records and terminal fencing.
 //!
@@ -77,27 +77,6 @@ pub(crate) struct HarnessKind {
 /// What the wrapper hands the provider process: the channel environment plus the launch argv with
 /// the channel extension spliced in.
 type PreparedLaunch = (Vec<(String, String)>, Vec<String>);
-
-/// Run one ordinary interactive pi-family provider.
-pub(crate) fn run_for(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    provider_argv: Vec<String>,
-    kind: &HarnessKind,
-) -> Result<()> {
-    run_for_with_environment(
-        catalog_root,
-        identity,
-        runtime_id,
-        provider_argv,
-        kind,
-        &[],
-        &[],
-        None,
-        true,
-    )
-}
 
 /// Run one interactive pi-family provider and maintain its presence until it exits.
 pub(crate) fn run_for_with_environment(

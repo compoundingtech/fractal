@@ -127,7 +127,7 @@ fn configured_read_cache_kib(value: Option<&str>) -> usize {
 /// How much of the store file each reader maps, in MiB. In WAL mode SQLite drops a reader's whole
 /// page cache when its next transaction sees any commit, so on a busy store every request
 /// fetched every page it touched again with one `read()` call each: 87,500 calls a second
-/// across 73 readers on dev3 (#3343). A mapped page is the kernel's one shared copy and costs
+/// across 73 readers on one host (#3343). A mapped page is the kernel's one shared copy and costs
 /// no call. The default covers any store; the bundled SQLite's ceiling is raised to match.
 pub const READ_MMAP_MIB: u64 = 1 << 20;
 
@@ -363,6 +363,20 @@ pub fn truncate_idle_wal(connection: &Connection) -> Result<bool> {
     Ok(busy == 0)
 }
 
+/// Wait up to `busy` for readers on older snapshots, then make the next write start the WAL from
+/// its beginning. RESTART takes SQLite's writer lock, so the daemon calls this only while it has
+/// borrowed the Store's sole writer; it keeps the file, unlike TRUNCATE, which costs a writer hold
+/// to free it.
+pub fn restart_wal(connection: &Connection, busy: std::time::Duration) -> Result<bool> {
+    connection.busy_timeout(busy)?;
+    let restarted = {
+        let _checkpoint = telemetry::CheckpointGuard::start(connection);
+        connection.query_row("PRAGMA wal_checkpoint(RESTART)", [], |row| row.get::<_, i32>(0))
+    };
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    Ok(restarted? == 0)
+}
+
 /// The store's only write connection, owned by one writer thread. Writes queue in front of it in
 /// foreground arrival order: a batched write runs on the writer thread with the others queued behind it, each
 /// in a savepoint of one transaction that commits once for all of them, and its caller hears back
@@ -469,6 +483,39 @@ impl WriterConnection {
         observer: Option<Arc<dyn WriterObserver>>,
         policy: Option<writer_budget::OwnedHandlerPolicy>,
     ) -> Result<Self> {
+        Self::new_inner_admitted(connection, committed_index, observer, policy, None,
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    pub(crate) fn new_admitted(
+        connection: Connection,
+        committed_index: Arc<AtomicU64>,
+        observer: Option<Arc<dyn WriterObserver>>,
+        admitted: Arc<crate::store::AdmittedStore>,
+    ) -> Result<Self> {
+        Self::new_inner_admitted(connection, committed_index, observer, None, Some(admitted),
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new_temporary(
+        connection: Connection,
+        committed_index: Arc<AtomicU64>,
+        observer: Option<Arc<dyn WriterObserver>>,
+        directory: Option<Arc<tempfile::TempDir>>,
+    ) -> Result<Self> {
+        Self::new_inner_admitted(connection, committed_index, observer, None, None, directory)
+    }
+
+    fn new_inner_admitted(
+        connection: Connection,
+        committed_index: Arc<AtomicU64>,
+        observer: Option<Arc<dyn WriterObserver>>,
+        policy: Option<writer_budget::OwnedHandlerPolicy>,
+        admitted: Option<Arc<crate::store::AdmittedStore>>,
+        #[cfg(any(test, feature = "test-support"))]
+        temporary_directory: Option<Arc<tempfile::TempDir>>,
+    ) -> Result<Self> {
         if let Some(policy) = &policy {
             policy.install(&connection)?;
         }
@@ -494,6 +541,10 @@ impl WriterConnection {
         let thread = std::thread::Builder::new()
             .name("st3-writer".into())
             .spawn(move || {
+                // A commit observer can release the final WriterConnection owner
+                // on this thread. Keep admission independently until SQLite closes,
+                // including its final WAL checkpoint during write_queue shutdown.
+                let directory_admission = admitted;
                 write_queue(
                     connection,
                     queue,
@@ -502,7 +553,12 @@ impl WriterConnection {
                     (&observed, &finalized, mutations.as_ref(), writer_telemetry.as_deref()),
                     background_queue,
                     &observed_fifo,
-                )
+                );
+                drop(directory_admission);
+                // A final observer can drop the store on this writer thread. Keep
+                // its scratch until write_queue has closed SQLite, including its WAL.
+                #[cfg(any(test, feature = "test-support"))]
+                drop(temporary_directory);
             })
             .expect("the writer thread starts");
         Ok(Self {
@@ -1168,6 +1224,9 @@ pub struct ReadPool {
     counts: Arc<ReaderCounts>,
     admission: Arc<Semaphore>,
     diagnostic_id: u64,
+    admitted: Option<Arc<crate::store::AdmittedStore>>,
+    #[cfg(any(test, feature = "test-support"))]
+    temporary_directory: Option<Arc<tempfile::TempDir>>,
 }
 
 /// A Send, pool-specific capacity token. Once lent to a request, it follows that reader
@@ -1192,6 +1251,10 @@ pub struct ReadConnection {
     counts: Arc<ReaderCounts>,
     // Last: close SQLite before returning capacity if this connection is not pooled.
     permit: Option<ReadPermit>,
+    _admitted: Option<Arc<crate::store::AdmittedStore>>,
+    // Last: a retained connection must close before its scratch is deleted.
+    #[cfg(any(test, feature = "test-support"))]
+    _temporary_directory: Option<Arc<tempfile::TempDir>>,
 }
 
 impl Deref for ReadConnection {
@@ -1372,6 +1435,41 @@ impl Drop for PinnedRead<'_> {
 
 impl ReadPool {
     pub fn new(path: &Path, shared_memory: bool) -> Result<Self> {
+        Self::new_with(path, shared_memory, None,
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    pub(crate) fn new_admitted(admitted: Arc<crate::store::AdmittedStore>) -> Result<Self> {
+        let path = admitted.database_path().to_path_buf();
+        Self::new_with(&path, false, Some(admitted),
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new_temporary(path: &Path, directory: Option<Arc<tempfile::TempDir>>) -> Result<Self> {
+        Self::new_with(path, false, None, directory)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn temporary_directory(&self) -> Option<Arc<tempfile::TempDir>> {
+        self.temporary_directory.clone()
+    }
+
+    pub(crate) fn is_admitted(&self) -> bool {
+        self.admitted.is_some()
+    }
+
+    pub(crate) fn admitted_handle(&self) -> Option<Arc<crate::store::AdmittedStore>> {
+        self.admitted.clone()
+    }
+
+    fn new_with(
+        path: &Path,
+        shared_memory: bool,
+        admitted: Option<Arc<crate::store::AdmittedStore>>,
+        #[cfg(any(test, feature = "test-support"))]
+        temporary_directory: Option<Arc<tempfile::TempDir>>,
+    ) -> Result<Self> {
         let mut pool = Self {
             idle: Arc::new(Mutex::new(Vec::new())),
             returned: Condvar::new(),
@@ -1380,10 +1478,15 @@ impl ReadPool {
             counts: Arc::new(ReaderCounts::default()),
             admission: Arc::new(Semaphore::new(constructor_read_limit())),
             diagnostic_id: read_lifetime::next_pool_id(),
+            admitted,
+            #[cfg(any(test, feature = "test-support"))]
+            temporary_directory,
         };
         // Open one now, so a store that cannot be read fails to open.
         let connection = pool.open_connection()?;
-        pool.path = opened_database_path(&connection, path)?;
+        if pool.admitted.is_none() {
+            pool.path = opened_database_path(&connection, path)?;
+        }
         pool.release(connection);
         telemetry::register_pool(&pool);
         Ok(pool)
@@ -1405,7 +1508,11 @@ impl ReadPool {
     }
 
     fn open_connection(&self) -> Result<ReadConnection> {
-        let connection = open_read_connection(&self.path, self.shared_memory)?;
+        let connection = if let Some(admitted) = &self.admitted {
+            configure_open_read_connection(admitted.open_connection(OpenFlags::SQLITE_OPEN_READ_ONLY)?)?
+        } else {
+            open_read_connection(&self.path, self.shared_memory)?
+        };
         let open = self.counts.open.fetch_add(1, Ordering::Relaxed) + 1;
         self.counts.peak.fetch_max(open, Ordering::Relaxed);
         let id = self.counts.opened.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1415,6 +1522,9 @@ impl ReadPool {
             connection,
             counts: self.counts.clone(),
             permit: None,
+            _admitted: self.admitted.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            _temporary_directory: self.temporary_directory.clone(),
         })
     }
 
@@ -2041,11 +2151,19 @@ pub mod work {
 /// SQLite URI filenames. Empty filenames denote memory/temporary databases: retain the
 /// original URI so named shared-memory readers still open the same database.
 pub(crate) fn opened_database_path(connection: &Connection, requested: &Path) -> Result<PathBuf> {
-    let filename: Vec<u8> = connection
-        .query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |row| {
-            Ok(row.get_ref(0)?.as_bytes()?.to_vec())
-        })
-        .with_context(|| format!("resolve opened st database {}", requested.display()))?;
+    // SAFETY: the connection owns a live SQLite handle. The returned filename is
+    // borrowed only while that handle remains alive, and copied before returning.
+    // Unlike pragma_database_list, this does not prepare or execute SQL before
+    // admitted-directory post-open validation.
+    let filename = unsafe {
+        let filename = rusqlite::ffi::sqlite3_db_filename(connection.handle(), c"main".as_ptr());
+        if filename.is_null() {
+            Vec::new()
+        } else {
+            std::ffi::CStr::from_ptr(filename).to_bytes().to_vec()
+        }
+    };
+    // Empty filenames are SQLite's memory/temporary databases.
     if filename.is_empty() {
         return Ok(requested.to_path_buf());
     }
@@ -2068,8 +2186,12 @@ pub fn open_read_connection(path: &Path, shared_memory: bool) -> Result<Connecti
     } else {
         OpenFlags::SQLITE_OPEN_READ_ONLY
     };
-    let mut connection = Connection::open_with_flags(path, flags)
+    let connection = Connection::open_with_flags(path, flags)
         .with_context(|| format!("open st read connection {}", path.display()))?;
+    configure_open_read_connection(connection)
+}
+
+fn configure_open_read_connection(mut connection: Connection) -> Result<Connection> {
     crate::read_budget::check()?;
     configure_read_cancellation(&connection);
     observe(&mut connection);
@@ -2821,6 +2943,58 @@ mod commit_observer_tests {
         assert!(retained.upgrade().is_some());
         drop(writer);
         assert!(retained.upgrade().is_none());
+        drop(observer);
+    }
+
+    #[test]
+    fn admitted_writer_retains_lock_until_sqlite_closes_after_observer_releases_last_owner() {
+        use crate::store::AdmittedStore;
+
+        let directory = tempfile::tempdir().unwrap();
+        let admit = || AdmittedStore::from_locked_directory(
+            directory.path(), std::fs::File::open(directory.path()).unwrap(),
+        );
+        let admitted = admit().unwrap();
+        let connection = admitted.open_connection(OpenFlags::default()).unwrap();
+        connection.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT, authority INTEGER);",
+        ).unwrap();
+        let writer = Arc::new(WriterConnection::new_admitted(
+            connection, Arc::new(AtomicU64::new(0)), None, admitted,
+        ).unwrap());
+        // Keep a deterministic shutdown barrier outside the last owner. It is joined
+        // only after the callback has released that owner on the worker thread.
+        let worker = writer.thread.lock().unwrap_or_else(PoisonError::into_inner)
+            .take().unwrap();
+        let owner = Arc::downgrade(&writer);
+        let (entered, entered_rx) = mpsc::sync_channel(1);
+        let (drop_owner, drop_owner_rx) = mpsc::sync_channel(1);
+        let (dropped, dropped_rx) = mpsc::sync_channel(1);
+        let (finish, finish_rx) = mpsc::sync_channel(1);
+        let drop_owner_rx = parking_lot::Mutex::new(drop_owner_rx);
+        let finish_rx = parking_lot::Mutex::new(finish_rx);
+        let observer = writer.observe_commits(move |_| {
+            let owner = owner.upgrade().unwrap();
+            entered.send(()).unwrap();
+            drop_owner_rx.lock().recv().unwrap();
+            drop(owner);
+            dropped.send(()).unwrap();
+            finish_rx.lock().recv().unwrap();
+        });
+        let answer = queued_claim(&writer);
+        let timeout = std::time::Duration::from_secs(5);
+        entered_rx.recv_timeout(timeout).unwrap();
+        drop(writer);
+        drop_owner.send(()).unwrap();
+        dropped_rx.recv_timeout(timeout).unwrap();
+        assert!(admit().is_err(), "SQLite still lives on the observer's worker stack");
+        finish.send(()).unwrap();
+        answer.recv_timeout(timeout).unwrap().unwrap();
+        worker.join().unwrap();
+        let connection = admit().unwrap().open_connection(OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let count: i64 = connection.query_row("SELECT count(*) FROM claims", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1, "committed data survives SQLite's final WAL close");
         drop(observer);
     }
 
