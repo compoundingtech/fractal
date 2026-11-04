@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "summary": "Move repository configuration from .st to .fractal, updating the ci-script-tests and genie-freshness lane definition directories to cover .fractal. All other configuration contents are preserved. Readers continue to prefer .fractal and use .st only when the preferred file is absent at the same pinned revision or checkout root.",
+  "summary": "Move repository configuration from .st to .fractal, updating the ci-script-tests and genie-freshness lane definition directories and configuration ci_inputs to .fractal. The ci-script-tests tree_inputs retain the .st/.fractal bridge pair. Readers continue to prefer .fractal and use .st only when the preferred file is absent at the same pinned revision or checkout root.",
   "replay": {
     "status": "none",
     "detail": "No graph, replay or runtime state-directory change. Tracked repository configuration moves, with two lane definition-directory entries updated to the new location."
   },
   "schema": {
     "status": "none",
-    "detail": "Configuration schemas are unchanged. The only configuration-content changes are the ci-script-tests and genie-freshness definition_paths directory entries from .st to .fractal."
+    "detail": "Configuration schemas are unchanged. The ci-script-tests and genie-freshness definition_paths directory entries change from .st to .fractal; ci-script-tests tree_inputs retain both .st and .fractal. Configuration ci_inputs change to .fractal: plain evidence-skip-policy.json inputs for linux-clippy and linux-fleet-compat; evidence-skip-policy.json check selectors for fractal-web, linux-gate, rust-tests and typescript-client; and required-lanes.json lane selectors for those four lanes plus linux-clippy and linux-fleet-compat. Both selector spellings resolve identically; .fractal is used consistently."
   },
   "rules": {
     "status": "none",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Readiness requires verification of all production configuration readers and accepted bases. Retain the absence-only legacy fallback until consumer adoption is evidenced by the required peer receipts and the owner approves its removal. Nathan Factory sign-off, risk classification, the assigned protected window and owner admission remain required."
+    "detail": "Readiness requires verification of all production configuration readers and accepted bases. The change lands alone in a planned merge window. PRs branched before this change must merge main before signing. Nathan reviews after merge; no pre-merge Nathan Factory sign-off is required, per the Johannes no-wait decision in compoundingtech/fractal#4898. Retain the absence-only legacy fallback until consumer adoption is evidenced by the required peer receipts and the owner approves its removal."
   },
   "recovery": {
     "status": "changed",
