@@ -8,17 +8,24 @@ import { persistence, persistedAtom } from '../state/persistence.ts'
 import { decodeChangelogManifest } from './contract.ts'
 import { ChangelogPopover, ChangelogView, type ChangelogLoad } from './ChangelogView.tsx'
 import { changelogDeployment, changelogEntryIds } from './metadata.ts'
-import { loadChangelog } from './load.ts'
+import { loadChangelog, loadedChangelog } from './load.ts'
 import { acknowledgeEntryIds, initialSeen, seenKey, type ChangelogSeen } from './seen.ts'
 
 const seen = persistedAtom({ key: seenKey(changelogDeployment), schema: Schema.Struct({ visited: Schema.Boolean, entryIds: Schema.Array(Schema.String) }), defaultValue: initialSeen })
 const baseline = Atom.make<ChangelogSeen>(initialSeen)
+const readyManifest = (manifest: unknown): ChangelogLoad => ({
+  _tag: 'Ready', manifest: decodeChangelogManifest(manifest, { machineVersion: buildIdentity.machineVersion }),
+})
 const manifest = Atom.make<ChangelogLoad>((get) => {
+  const prefetched = loadedChangelog()
+  if (prefetched !== undefined) {
+    try { return readyManifest(prefetched.changelogManifest) }
+    catch { return { _tag: 'Failed' } }
+  }
   let active = true
   get.addFinalizer(() => { active = false })
   void loadChangelog().then((module) => {
-    const decoded = decodeChangelogManifest(module.changelogManifest, { machineVersion: buildIdentity.machineVersion })
-    if (active) get.setSelf({ _tag: 'Ready', manifest: decoded })
+    if (active) get.setSelf(readyManifest(module.changelogManifest))
   }).catch(() => { if (active) get.setSelf({ _tag: 'Failed' }) })
   return { _tag: 'Loading' }
 }).pipe(Atom.keepAlive)

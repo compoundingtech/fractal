@@ -6,6 +6,7 @@
  * and an overflowed segment's unseen state is mirrored on the kit's +N control.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import type * as ChangelogModule from '../changelog/build.ts'
 
 const fixture = vi.hoisted(() => ({
   machineVersion: '0.1.0+test.123456789abc',
@@ -14,6 +15,7 @@ const fixture = vi.hoisted(() => ({
   wait: undefined as Promise<void> | undefined,
   fail: false,
   loads: 0,
+  loaded: undefined as typeof ChangelogModule | undefined,
 }))
 
 // Node tests stub only the CSS runtime; the composition and disclosure behaviour is under test.
@@ -30,11 +32,13 @@ vi.mock('@overeng/meters/react', () => ({
 // One deterministic entry instead of the app registry, in both the unseen ids and the lazy prose.
 vi.mock('../changelog/metadata.ts', () => ({ changelogDeployment: 'main', changelogEntryIds: [fixture.entryId] }))
 vi.mock('../changelog/load.ts', () => ({
+  loadedChangelog: () => fixture.loaded,
   loadChangelog: async () => {
     fixture.loads++
     await fixture.wait
     if (fixture.fail) throw new Error('Chunk unavailable')
-    return import('../changelog/build.ts')
+    fixture.loaded = await import('../changelog/build.ts')
+    return fixture.loaded
   },
 }))
 vi.mock('../changelog/build.ts', () => ({
@@ -53,6 +57,7 @@ beforeEach(() => {
   fixture.wait = undefined
   fixture.fail = false
   fixture.loads = 0
+  fixture.loaded = undefined
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   // React Aria and the overflow focus fallback use CSS.escape; jsdom does not supply it.
@@ -132,6 +137,15 @@ it('prefetches on focus without opening or acknowledging changes', async () => {
   await act(async () => changelogTrigger(host).click())
   expect(recentChanges()?.textContent).toContain(fixture.title)
   expect(recentChanges()?.querySelector('[role="status"]')).toBeNull()
+}, 30_000)
+
+it('opens idle-prefetched code without an intermediate loading state', async () => {
+  await (await import('../changelog/load.ts')).loadChangelog()
+  const { act, host } = await mount()
+  await act(async () => changelogTrigger(host).click())
+  expect(recentChanges()?.textContent).toContain(fixture.title)
+  expect(recentChanges()?.querySelector('[role="status"]')).toBeNull()
+  expect(fixture.loads).toBe(1)
 }, 30_000)
 
 it('opens immediately on a cold load and contains a failed chunk with retry', async () => {
