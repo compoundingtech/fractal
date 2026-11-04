@@ -37,7 +37,7 @@ async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
             .route("/v1/fleet/membership", axum::routing::get(move || {
                 let mut view = membership.fleet_view().unwrap();
                 view.members[0].endpoints = if observed.load(std::sync::atomic::Ordering::SeqCst) { vec![] } else { vec![json!({"transport":"tailscale", "address":"100.64.0.1:123"})] };
-                async move { axum::Json(view) }
+                async move { axum::Json(json!({"api_version": "st3.v1", "value": view})) }
             }))
             .route("/v1/fleet/transports", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
                 let store = published.clone();
@@ -47,21 +47,19 @@ async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
                         store.publish_fleet_endpoints(body["mode"].as_str().unwrap(), body["endpoints"].as_array().unwrap(), "test",
                             Some((body["actor"].as_str().unwrap(), body["mutation_id"].as_str().unwrap()))).unwrap();
                     }
-                    (if lost { axum::http::StatusCode::INTERNAL_SERVER_ERROR } else { axum::http::StatusCode::OK }, axum::Json(json!({})))
+                    (if lost { axum::http::StatusCode::INTERNAL_SERVER_ERROR } else { axum::http::StatusCode::OK }, axum::Json(json!({"api_version": "st3.v1", "value": {}})))
                 }
             }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = Client::new(Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let prefer = |actor: &str| FleetTransportsCommand::Prefer { actor: Some(actor.into()), transport: "fabric".into(), no_service: true };
-        assert!(run_fleet_transports(&client, &config, prefer("agent/example"), true).await.is_err());
-        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(fleet_cli::run_fleet_transports(&client, &config, prefer("agent/example"), true).await.is_err()); assert_eq!(fs::read(&path).unwrap(), before);
         assert!(path.with_extension("transport-change.json").exists());
         if changed_base { let mut edited = file.clone(); edited.transports.swap(1, 2); fs::write(&path, toml::to_string(&edited).unwrap()).unwrap(); }
         observations.store(changed_endpoints, std::sync::atomic::Ordering::SeqCst);
         if abandoned { let mut other = file.clone(); other.transports.swap(0, 2); other.save(root.path()).unwrap(); file.save(root.path()).unwrap(); }
-        run_fleet_transports(&client, &config, prefer(actor), true).await.unwrap();
-        assert_eq!(store.claims_for("host/local", Some("fleet.member-endpoints")).unwrap().len(), count);
+        fleet_cli::run_fleet_transports(&client, &config, prefer(actor), true).await.unwrap(); assert_eq!(store.claims_for("host/local", Some("fleet.member-endpoints")).unwrap().len(), count);
         assert_eq!(store.latest_claim("host/local", Some("fleet.member-endpoints")).unwrap().unwrap().actor.as_deref(), Some(actor));
         assert_eq!(fractal_daemon::config::FleetFile::load(root.path()).unwrap().unwrap().transports, ["fabric", "tailscale", "loopback"]);
         assert!(!path.with_extension("transport-change.json").exists());

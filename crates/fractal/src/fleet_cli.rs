@@ -1158,7 +1158,7 @@ fn refresh_fleet_services(no_service: bool, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_fleet_transports(
+pub(super) async fn run_fleet_transports(
     client: &Client,
     config: &Config,
     mut command: FleetTransportsCommand,
