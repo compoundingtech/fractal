@@ -53,6 +53,7 @@ pub mod schedule_active_run_tests;
 pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod mission_capacity;
+pub mod marks_switch;
 pub mod glasses;
 pub mod mailbox_wakes;
 pub mod mailbox_changes;
@@ -112,6 +113,8 @@ mod planning_production_copy_tests;
 pub mod projectors;
 #[cfg(test)]
 pub mod projectors_tests;
+#[cfg(test)]
+mod mission_start_production_copy_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -124,7 +127,7 @@ pub use crate::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALL
 pub use crate::store::shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use crate::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
+pub use crate::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS, WAKE_HISTORY_READS};
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::shared::*;
@@ -10798,6 +10801,17 @@ fn first_unknown_kind(kinds: impl IntoIterator<Item = String>) -> Option<String>
     kinds.into_iter().find(|kind| !known_replicated_claim_kind(kind))
 }
 
+/// The recipient a graph message was sent to, as its send names it.
+fn message_recipient_tx(connection: &Connection, subject: &str) -> Result<Option<String>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT json_extract(body,'$.fields.to') FROM claims WHERE subject=?1 AND kind='message.sent' LIMIT 1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-had57f3887933 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))
+        .optional()?
+        .flatten())
+}
+
 fn validate_message_transition(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
@@ -11508,6 +11522,7 @@ pub(crate) fn message_view_from(
         body_bytes: body.as_ref().map(|body| body.size),
         body_origin: body.map(|body| body.origin),
         created_index,
+        status_from: None,
     })
 }
 
@@ -19564,6 +19579,16 @@ pub fn enrich_step_queue_cached(
     snapshot_unix_ms: u128,
     definitions: &mut PinnedDefinitions,
 ) -> rusqlite::Result<()> {
+    enrich_step_queue_with(connection, view, snapshot_unix_ms, definitions, WakeHistory::Read)
+}
+
+fn enrich_step_queue_with(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+    definitions: &mut PinnedDefinitions,
+    history: WakeHistory,
+) -> rusqlite::Result<()> {
     #[cfg(any(test, feature = "test-support"))]
     STEPS_ENRICHED.with(|enriched| enriched.set(enriched.get() + 1));
     apply_effective_step_state(connection, view, snapshot_unix_ms)?;
@@ -19582,7 +19607,7 @@ pub fn enrich_step_queue_cached(
         step_timeout_extension_at(connection, &view.subject, view.attempt, snapshot_unix_ms)?;
     enrich_step_summaries_at(connection, view, snapshot_unix_ms)?;
     enrich_step_nudge_at(connection, view, snapshot_unix_ms)?;
-    enrich_step_wake_at(connection, view, snapshot_unix_ms)?;
+    enrich_step_wake_with(connection, view, snapshot_unix_ms, history)?;
     enrich_step_definition_cached(connection, view, definitions)?;
     adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;
     person_work::enrich_responses(connection, view)
@@ -19822,16 +19847,38 @@ pub fn fresh_context_ready_tx(
     )
 }
 
+/// Whether a step's wake view reads its wake history. A step created in the open transaction has
+/// none: its wake messages and wake-exhausted diagnostics name it, so none can predate it. Reading
+/// them means scanning every message its assignee was ever sent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WakeHistory {
+    Read,
+    NewStep,
+}
+
 pub fn enrich_step_wake_at(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
+) -> rusqlite::Result<()> {
+    enrich_step_wake_with(connection, view, snapshot_unix_ms, WakeHistory::Read)
+}
+
+fn enrich_step_wake_with(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+    history: WakeHistory,
 ) -> rusqlite::Result<()> {
     view.ready_age_ms =
         (view.status == "ready").then(|| snapshot_unix_ms.saturating_sub(view.updated_at_unix_ms));
     let Some(assignee) = view.assigned_to.as_deref() else {
         return Ok(());
     };
+    // A new step shows a wake only once it is ready; until then its assignee's harness is unread.
+    if history == WakeHistory::NewStep && view.status != "ready" {
+        return Ok(());
+    }
     let harness = current_harness_at(connection, assignee, None).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             0,
@@ -19849,6 +19896,30 @@ pub fn enrich_step_wake_at(
         .unwrap_or_else(|| "unknown".into());
     let current_incarnation_key =
         hex::encode(Sha256::digest(current_incarnation_id.as_bytes()))[..12].to_owned();
+    if history == WakeHistory::NewStep {
+        // What the reads below find for a ready step with no history: no attempts, no failure,
+        // and the assignee's current incarnation.
+        let incarnation_id = harness_incarnation_for_key_at(
+            connection,
+            assignee,
+            &current_incarnation_key,
+            snapshot_unix_ms,
+        )?
+        .unwrap_or(current_incarnation_id);
+        view.wake = Some(WorkWakeView {
+            assignee: assignee.into(),
+            assignee_state,
+            incarnation_id,
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
+            acknowledged_by: None,
+            failure: None,
+            asks: Default::default(),
+        });
+        return Ok(());
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    WAKE_HISTORY_READS.with(|reads| reads.set(reads.get() + 1));
     let mut attempts = Vec::new();
     let wake_tag_prefix = format!(
         "{}@{}@{}@",
@@ -19858,8 +19929,8 @@ pub fn enrich_step_wake_at(
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h98fccb80a458 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-        "SELECT claims.body, claims.accepted_at_unix_ms,
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-habf9fbe214b0 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT claims.body, claims.accepted_at_unix_ms, claims.subject,
                 EXISTS(SELECT 1 FROM claims consumed
                        WHERE consumed.subject=claims.subject
                          AND consumed.kind IN ('message.read','message.closed')
@@ -19880,6 +19951,9 @@ pub fn enrich_step_wake_at(
                        WHERE staged.subject=claims.subject
                          AND staged.kind='message.staged'
                          AND staged.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_staged staged
+                       WHERE staged.message=claims.subject
+                         AND staged.recorded_at_unix_ms<=CAST(?1 AS INTEGER))
          FROM claims INDEXED BY claims_message_to_index
          WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
            AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
@@ -19897,14 +19971,15 @@ pub fn enrich_step_wake_at(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, bool>(2)?,
+                row.get::<_, String>(2)?,
                 row.get::<_, bool>(3)?,
                 row.get::<_, bool>(4)?,
+                row.get::<_, bool>(5)?,
             ))
         },
     )?;
     for row in rows {
-        let (body, accepted, consumed, delivered, staged) = row?;
+        let (body, accepted, message, consumed, delivered, staged) = row?;
         let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
         let fields = body.get("fields").unwrap_or(&body);
         if fields
@@ -19938,6 +20013,7 @@ pub fn enrich_step_wake_at(
                 consumed,
                 delivered,
                 staged,
+                message,
             ));
         }
     }
@@ -19968,14 +20044,14 @@ pub fn enrich_step_wake_at(
         Some("claim".into())
     } else if attempts
         .iter()
-        .any(|(_, incarnation, consumed, _, _)| *consumed && incarnation == wake_incarnation_key)
+        .any(|(_, incarnation, consumed, ..)| *consumed && incarnation == wake_incarnation_key)
     {
         Some("consumed".into())
     } else if harness.as_ref().is_some_and(|harness| {
         harness.state == "working" && current_incarnation_key == wake_incarnation_key
     }) && attempts
         .iter()
-        .any(|(_, incarnation, _, delivered, staged)| {
+        .any(|(_, incarnation, _, delivered, staged, _)| {
             incarnation == wake_incarnation_key
                 && (*delivered
                     || *staged
@@ -19995,6 +20071,18 @@ pub fn enrich_step_wake_at(
         Some("turn".into())
     } else {
         None
+    };
+    // What the assignee's host would have to say for the wake to be acknowledged, when it keeps
+    // its seats' receipts: the API asks it (db break-up step 4b).
+    let asks = crate::model::WakeAsks {
+        messages: attempts
+            .iter()
+            .filter(|(_, incarnation, consumed, ..)| !consumed && incarnation == wake_incarnation_key)
+            .map(|(.., message)| message.clone())
+            .collect(),
+        delivery_acknowledges: harness.as_ref().is_some_and(|harness| {
+            harness.state == "working" && current_incarnation_key == wake_incarnation_key
+        }),
     };
     let failure = connection
         .query_row(
@@ -20040,6 +20128,7 @@ pub fn enrich_step_wake_at(
             last_attempt_at_unix_ms,
             acknowledged_by,
             failure,
+            asks,
         });
     }
     Ok(())
@@ -21365,6 +21454,12 @@ pub fn mission_run_view_tx(connection: &Connection, run_id: &str) -> rusqlite::R
     mission_run_view_with_enrichment_tx(connection, run_id, true)
 }
 
+/// The presentation view of a run created in the open transaction, whose steps have no wake
+/// history to read.
+pub fn created_mission_run_view_tx(connection: &Connection, run_id: &str) -> rusqlite::Result<MissionRunView> {
+    mission_run_view_and_definition_tx(connection, run_id, MissionRunEnrichment::Created).map(|(view, _)| view)
+}
+
 pub fn mission_run_view_for_reconcile_tx(
     connection: &Connection,
     run_id: &str,
@@ -21437,6 +21532,8 @@ fn mission_run_view_with_enrichment_tx(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MissionRunEnrichment {
     Presentation,
+    /// [`Self::Presentation`] for a run created in the open transaction.
+    Created,
     Reconcile,
     Evaluation,
 }
@@ -21446,7 +21543,8 @@ pub fn mission_run_view_and_definition_tx(
     run_id: &str,
     enrichment: MissionRunEnrichment,
 ) -> rusqlite::Result<(MissionRunView, Option<MissionSpec>)> {
-    let presentation = enrichment == MissionRunEnrichment::Presentation;
+    let presentation = matches!(enrichment, MissionRunEnrichment::Presentation | MissionRunEnrichment::Created);
+    let history = if enrichment == MissionRunEnrichment::Created { WakeHistory::NewStep } else { WakeHistory::Read };
     let mut view = mission_run_header_tx(connection, run_id)?;
     let mut statement = connection.prepare(
         "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -21467,7 +21565,7 @@ pub fn mission_run_view_and_definition_tx(
     let mut definitions = PinnedDefinitions::default();
     for step in &mut view.steps {
         if presentation {
-            enrich_step_queue_cached(connection, step, now_ms(), &mut definitions)?;
+            enrich_step_queue_with(connection, step, now_ms(), &mut definitions, history)?;
         } else {
             let snapshot_unix_ms = now_ms();
             apply_effective_step_state(connection, step, snapshot_unix_ms)?;
@@ -22348,6 +22446,10 @@ pub fn append_claim_with_commit_context(
                 stored_fields = Some(fields);
             }
             if settled_receipt || validate_message_transition(transaction, input)? {
+                // A repeat of a step recorded as a mark answers that mark's receipt.
+                if let Some(receipt) = message_marks::recorded(transaction, &graph.origin, &input.subject, &input.kind).map_err(internal)? {
+                    return Ok((receipt, false));
+                }
                 let latest_id = latest_claim_id_tx(transaction, &input.subject)
                     .map_err(internal)?
                     .ok_or_else(|| {
@@ -22365,6 +22467,22 @@ pub fn append_claim_with_commit_context(
                         )
                     })?;
                 return Ok((latest, false));
+            }
+            // A seat this member hosts records its own delivery, read and close of graph mail as a
+            // local mark once marks are on (db break-up 4b-2; message_marks::local_consumer and
+            // recorded_as_mark: a staging stays a claim for now), whoever acts for it:
+            // the fences, replays and transition rules above have applied. A write acting for a
+            // retired seat or under a delegation stays a claim, which carries its proof, and so
+            // does a native read, whose proof links the native turn to its claim
+            // (local_native_delivery_receipts_v2, conversation_deliveries.rs).
+            if message_marks::recorded_as_mark(&input.kind)
+                && context.native_receipt.is_none()
+                && !input.fields.contains_key("acting_for")
+                && !input.fields.contains_key("delegation")
+                && let Some(recipient) = message_recipient_tx(transaction, &input.subject).map_err(internal)?
+                && message_marks::local_consumer(transaction, &graph.origin, &input.subject, &recipient).map_err(internal)?
+            {
+                return message_marks::record_tx(transaction, &graph.origin, &input.subject, &input.kind, &recipient);
             }
             let predecessor = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                 transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_, String>(0)).optional().map_err(internal)?
