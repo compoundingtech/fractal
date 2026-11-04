@@ -228,6 +228,8 @@ pub struct MailboxWatermark {
     desired: Option<String>,
     /// The messages shard's position: its items and their local lifecycle are not graph claims.
     stream: fractal_store::store::messages_shard::mailbox_reads::StreamPosition,
+    /// The newest local mark event: a seat's marks are not graph claims either (message_marks.rs).
+    marks: u64,
 }
 
 fn message_reminder_rank(tags: &[String]) -> Option<(&str, u64)> {

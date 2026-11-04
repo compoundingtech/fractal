@@ -17,7 +17,8 @@ GitHub is only the transport. One `pull` (scripts/evidence-log.timer runs it eve
      than its bound, so a deleted or rewound log costs skips and never makes an old one count;
   5. with --publish, pushes the head to `refs/evidence-log/main` on the remote, only as a fast-forward of the published head
      this run fetched (then the preceding checkpoint), and leased on it: a host whose chain does not continue the published one
-     (a second publisher) refuses loudly and publishes nothing, so two publishers never overwrite each other's heads;
+     (a second publisher, or a copy not seeded from the remote) refuses loudly and publishes nothing, so two publishers never
+     overwrite each other's heads;
      with --restore, pushes back any logged record the remote no longer has (and reports it: `missing`).
 `gc` appends a GC line for every tree and input key of an evidence-gc plan (`--plan-out`) and drops their copies: run it BEFORE
 the plan's deletions (evidence-gc --before-delete), so a pull does not restore what GC removed. It also keeps the names of the
@@ -32,7 +33,8 @@ THE LOG is a chain of commits signed with the log key (`--signer` signs stdin to
   keys/<check>/<key[:2]>/<key>         record <record> <check> <exit_code> <signer> <observed_at>   one per input-index ref
                                        gc <time> <plan sha256>                                        GC removed what came before
 A verifier reads one file at the head and needs nothing else. Before extending the chain a pull checks that the current head is
-signed by a key in --log-keys (principal log/...), so a head that is not ours is never extended.
+signed by a key in --log-keys (principal log/...), so a head that is not ours is never extended. An unreadable local chain is
+repaired only from a readable, trusted published continuation of that same head. Empty copies require explicit seeding as before.
 
   exit 0  done    exit 1  a step failed    exit 2  usage    exit 4  logged records are missing on the remote (an alarm)
 """
@@ -43,6 +45,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -76,7 +79,7 @@ class Usage(Refused):
     pass
 
 
-def git(repo, *args, stdin=None, check=True, env=None, config=()):
+def git(repo, *args, stdin=None, check=True, env=None, config=(), stdout=subprocess.PIPE):
     clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     clean.update(env or {})
     # No automatic maintenance: a detached `git maintenance run --auto` after one fetch rewrote the shallow file while the next
@@ -84,7 +87,7 @@ def git(repo, *args, stdin=None, check=True, env=None, config=()):
     command = ['git', '-C', repo, '-c', 'core.hooksPath=/dev/null', '-c', 'gpg.format=ssh', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0']
     for item in config:
         command += ['-c', item]
-    done = subprocess.run([*command, *args], input=stdin, capture_output=True, timeout=1800,
+    done = subprocess.run([*command, *args], input=stdin, stdout=stdout, stderr=subprocess.PIPE, timeout=1800,
                           env=dict(clean, GIT_NO_REPLACE_OBJECTS='1', GIT_NO_LAZY_FETCH='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C'))
     if check and done.returncode != 0:
         raise Refused(f'git {args[0]}: {done.stderr.decode(errors="replace").strip()[-300:]}')
@@ -200,8 +203,19 @@ def commit(repo, tree, parent, message, signer, now):
     return git(repo, 'hash-object', '-t', 'commit', '-w', '--stdin', stdin=signed.encode()).stdout.decode().strip()
 
 
-def log_signed(repo, oid, log_keys):
-    shown = git(repo, 'show', '-s', '--format=%G?%x00%GS', oid, config=[f'gpg.ssh.allowedSignersFile={log_keys}'], check=False)
+def log_signed(repo, oid, log_keys, git_dir=None):
+    where = [f'--git-dir={git_dir}'] if git_dir else []
+    config = []
+    if git_dir:
+        # An isolated object store must retain the publisher's effective verification policy, including revocations.
+        settings = git(repo, 'config', '--null', '--get-regexp', r'^gpg\.').stdout.decode().split('\0')
+        for setting in filter(None, settings):
+            key, separator, value = setting.partition('\n')
+            if not separator:
+                raise Refused('cannot read the publisher\'s signature verification configuration')
+            config.append(f'{key}={value}')
+    shown = git(repo, *where, 'show', '-s', '--format=%G?%x00%GS', oid,
+                config=[*config, f'gpg.ssh.allowedSignersFile={log_keys}'], check=False)
     status, _, principal = shown.stdout.decode().strip('\n').partition('\0')
     return status == 'G' and principal.startswith('log/')
 
@@ -307,6 +321,69 @@ def locked(repo):
     return handle
 
 
+def readable_log(repo, head):
+    # Walk the chain and its trees too: a readable commit can still name an empty tree/blob after a hard reset.
+    walked = git(repo, 'rev-list', '--objects', '--missing=print', head, check=False)
+    if walked.returncode != 0 or any(line.startswith(b'?') for line in walked.stdout.splitlines()):
+        return False
+    objects = b''.join(line.split(b' ', 1)[0] + b'\n' for line in walked.stdout.splitlines())
+    checked = git(repo, 'cat-file', '--batch-check', stdin=objects, check=False)
+    if checked.returncode != 0 or any(line.endswith(b' missing') for line in checked.stdout.splitlines()):
+        return False
+    # Headers alone accept a truncated compressed blob. Read the current view too, streaming without retaining its contents.
+    # Historical blob bodies are not scanned on every heartbeat; rev-list above checks the chain's connectivity.
+    current = git(repo, 'ls-tree', '-r', '--format=%(objectname)', head, check=False)
+    if current.returncode != 0:
+        return False
+    bodies = b''.join(oid + b'\n' for oid in sorted(set(current.stdout.splitlines())))
+    return git(repo, 'cat-file', '--batch', stdin=bodies, check=False, stdout=subprocess.DEVNULL).returncode == 0
+
+
+def prepare_log(repo, remote, published, log_keys):
+    """Recover only from a trusted published continuation, never manufacture a new chain after damage."""
+    head = refs(repo, LOG).get(LOG)
+    if not head:
+        return
+    if readable_log(repo, head):
+        if not log_signed(repo, head, log_keys):
+            raise Refused(f'the local log head {head} is not signed by a key in --log-keys: refusing to extend it')
+        return
+    if not published:
+        raise Refused('the local log is unreadable and the remote has no published head: cannot repair it')
+    # Fetch in isolation: broken local refs must not enter negotiation or suppress objects we need to restore.
+    with tempfile.TemporaryDirectory() as fresh:
+        git(fresh, 'init', '-q', '--bare')
+        url = git(repo, 'remote', 'get-url', remote, check=False)
+        source = url.stdout.decode().strip() if url.returncode == 0 else remote
+        # Keep relative file remotes relative to the publisher, while isolating refs and objects in the fresh Git directory.
+        git(repo, f'--git-dir={fresh}', 'fetch', '--no-tags', '-q', source, f'{LOG}:{LOG}')
+        fetched = refs(fresh, LOG).get(LOG)
+        if fetched != published or not log_signed(repo, published, log_keys, git_dir=fresh) or not readable_log(fresh, published):
+            raise Refused('the published log is unreadable, changed, or not signed by a key in --log-keys: refusing repair')
+        if git(fresh, 'merge-base', '--is-ancestor', head, published, check=False).returncode != 0:
+            raise Refused('the published log does not continue the damaged local head: refusing repair')
+        # Preserve damaged loose objects for inspection. Healthy objects and the COPY refs stay in place.
+        objects = Path(repo) / 'objects'
+        quarantine = Path(repo) / 'evidence-log.broken-objects'
+        loose = {folder.name + path.name: path for folder in objects.iterdir() if len(folder.name) == 2 and folder.is_dir()
+                 for path in folder.iterdir() if OID.fullmatch(folder.name + path.name)}
+        checked = git(repo, 'cat-file', '--batch-check', stdin=''.join(f'{oid}\n' for oid in loose).encode(), check=False)
+        broken = {line.split()[0] for line in checked.stdout.decode().splitlines() if line.endswith(' missing')}
+        # A repair scans complete objects once so header-readable, truncated bodies are moved aside as well.
+        scanned = git(repo, 'fsck', '--no-dangling', '--no-reflogs', check=False)
+        broken.update(re.findall(r"(?m)^error: corrupt loose object '([0-9a-f]+)'$", scanned.stderr.decode(errors='replace')))
+        broken.update(re.findall(r'(?m)^error: ([0-9a-f]+): object corrupt or missing:', scanned.stderr.decode(errors='replace')))
+        for oid in sorted(broken & loose.keys()):
+            if git(repo, 'cat-file', '-p', oid, check=False, stdout=subprocess.DEVNULL).returncode == 0:
+                continue  # preserve readable loose objects even if a diagnostic mentions their names
+            quarantine.mkdir(exist_ok=True)
+            os.replace(loose[oid], quarantine / f'{oid}.{time.time_ns()}')
+        git(repo, 'fetch', '--refetch', '--no-tags', '-q', fresh, f'+{LOG}:{REMOTE_LOG}')
+        if not readable_log(repo, published) or not log_signed(repo, published, log_keys):
+            raise Refused('the published log could not repair the local object store')
+        git(repo, 'update-ref', LOG, published, *([head] if head else []))
+
+
 def pull(args):
     repo, remote, summary = args.repo, args.remote, {'mode': 'pull'}
     module = verifier()
@@ -315,6 +392,7 @@ def pull(args):
     there = {line.split()[1]: line.split()[0] for line in listed if len(line.split()) == 2 and OID.match(line.split()[0])}
     published = there.pop(LOG, None)
     main_tip = there.pop(f'refs/heads/{remote_main}', None)
+    prepare_log(repo, remote, published, args.log_keys)
     if main_tip != refs(repo, f'refs/remotes/{args.main}').get(f'refs/remotes/{args.main}'):
         git(repo, 'fetch', '--no-tags', '-q', remote, f'+refs/heads/{remote_main}:refs/remotes/{args.main}')
     keys_text = git(repo, 'show', f'{args.main}:{config_path(repo, args.main, "evidence-keys")}').stdout
@@ -373,6 +451,7 @@ def pull(args):
         processed, started = 0, time.monotonic()
         return True
 
+    publish_failed = False
     with tempfile.NamedTemporaryFile() as keys, tempfile.NamedTemporaryFile() as revocations:
         keys.write(keys_text)
         keys.flush()
@@ -388,12 +467,12 @@ def pull(args):
             processed += 1
             if processed >= CHUNK_REFS or time.monotonic() - started >= CHUNK_SECONDS:
                 if not checkpoint():
-                    return 1, summary
-    if processed or not summary['chunks']:
-        if not checkpoint():
-            return 1, summary
+                    publish_failed = True
+                    break
+    if not publish_failed and (processed or not summary['chunks']):
+        publish_failed = not checkpoint()
     git(repo, 'pack-refs', '--all')  # thousands of loose refs made one for-each-ref take 7 s
-    status = 0
+    status = 1 if publish_failed else 0
     if args.restore and summary['missing']:
         pushed = git(repo, 'push', '--porcelain', remote, *[f'{copied[name]}:{name}' for name in summary['missing']], check=False)
         summary['restored'] = pushed.returncode == 0
