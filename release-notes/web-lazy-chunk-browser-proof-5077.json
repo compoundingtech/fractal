@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A production Vite proof covers aborted chunk, static dependency and stylesheet loads in Chromium, Firefox and WebKit, including draft and selection persistence.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay format change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored or wire schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No daemon rule change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No public wire change; lazy recovery consumes emitted URLs from the same production build."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Takes effect in the next web build; no daemon restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Run the dedicated browser proof on demand with Nix browser executables; existing CI remains Chromium-only."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert this change and rebuild the web application."
+  }
+}
