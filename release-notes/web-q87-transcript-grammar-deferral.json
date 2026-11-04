@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Load cold-conversation syntax grammars on demand while preserving readable code, transcript layout, composer state and keyboard focus; keep plain code available if grammar loading fails.",
+  "replay": {"status": "none", "detail": "Client presentation only; no replay changes."},
+  "schema": {"status": "none", "detail": "No stored data or schema changes."},
+  "rules": {"status": "none", "detail": "No permission or fleet rule changes."},
+  "compatibility": {"status": "none", "detail": "No runtime, wire or data contract changes."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes; failed optional grammar loads retain plain code and can retry on a later render."}
+}
