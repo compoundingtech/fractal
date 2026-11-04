@@ -275,12 +275,19 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    // An archive with shards restores each beside the database, where the daemon opens it. A
-    // shard already there must be empty and offline, as the database must.
+    // An archive with shards restores each beside the database, where the daemon opens it. On
+    // every restore, a shard already there must be empty and offline, as the database must: a
+    // restored graph never stands beside another store's stream items. Its lock is held through
+    // publication; an archive without shards leaves an empty one in place.
     let restores_shard = !header.shards.is_empty();
     let shard_destination = backup_shards::database_path(directory)?;
-    let existing_shard = if restores_shard && shard_destination.exists() {
-        Some(lock_empty_offline(&shard_destination).context("the messages shard beside the database")?)
+    let existing_shard = if shard_destination.exists() {
+        Some(lock_empty_offline(&shard_destination).with_context(|| {
+            format!(
+                "restore refuses a destination whose messages shard at {} is not empty and offline",
+                shard_destination.display()
+            )
+        })?)
     } else {
         None
     };

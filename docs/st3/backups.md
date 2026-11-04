@@ -289,11 +289,15 @@ shard's admission admits the envelopes on the source's authority, as the graph's
 so a member removed or rekeyed since keeps its stream items; every envelope must be admitted.
 Lifecycle rows are added by union, so a restored item is never behind where the archive had it:
 a read item stays read and is not delivered again. The shard's envelope-log digest, envelope
-count and lifecycle digest then have to equal the header's, or nothing is published. A shard
-already beside the destination must be empty and offline; it is replaced. `stream_arrivals`,
-where each item fell in this member's graph order, is not carried: the restored graph's order
-is new, and readers record each item again at its first read.
-
+count and lifecycle digest then have to equal the header's, or nothing is published. Every
+restore, whatever its version, refuses a destination whose messages shard holds anything or is
+open; an empty one is replaced by a version `5` restore and left in place by an earlier one.
+Publication is not atomic across the two databases: the shard is placed first, and if the graph
+then fails to publish, only a shard this restore created is removed. An empty shard it replaced
+is not put back, and the restored shard left in its place holds stream items, so move that shard
+aside before restoring again. `stream_arrivals`, where each item fell in this member's graph
+order, is not carried: the restored graph's order is new, and readers record each item again at
+its first read.
 
 ### Message marks
 

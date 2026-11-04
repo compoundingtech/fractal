@@ -1510,6 +1510,38 @@ mod tests {
     }
 
     #[test]
+    fn any_restore_refuses_a_destination_whose_messages_shard_holds_anything() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open_memory("alder").unwrap();
+        let mut sent = stream_message("message/backup-a", "agent/node.birch");
+        sent.actor = Some("agent/node.alder".into());
+        sent.fields.insert("from".into(), json!("agent/node.alder"));
+        source.append_claim(&sent).unwrap();
+        super::super::message_marks::record(&source, "message/backup-a", "message.delivered", "agent/node.birch").unwrap();
+        let path = root.path().join("marks.jsonl");
+        assert_eq!(archive(&source, &path).version, super::super::backup_format::VERSION_WITH_MARKS);
+        // A shard left beside the destination by another store, holding a sealed stream item.
+        let destination = root.path().join("stale");
+        fs::create_dir_all(&destination).unwrap();
+        let other = Arc::new(Store::open(&root.path().join("other.sqlite3"), "cedar").unwrap());
+        let stale = super::super::messages_shard::open(&other, &destination).unwrap();
+        stale.append_claim(&stream_message("message/00000000000000c9", "agent/cedar")).unwrap();
+        stale.seal_local_batches().unwrap();
+        drop((stale, other));
+        let error = backup::restore(&path, &destination.join("claims.sqlite3"), root.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("whose messages shard at"), "{error:#}");
+        assert!(!destination.join("claims.sqlite3").exists());
+        let envelopes: i64 = rusqlite::Connection::open(super::super::backup_shards::database_path(&destination).unwrap())
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM replica_envelopes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(envelopes, 1, "the refused restore left the shard as it was");
+        // The same archive restores into a clean destination.
+        let clean = root.path().join("clean").join("claims.sqlite3");
+        assert!(backup::restore(&path, &clean, root.path()).unwrap().projections_match);
+    }
+
+    #[test]
     fn a_shard_with_stream_items_is_version_five_and_restores_them_with_their_lifecycle() {
         let root = tempfile::tempdir().unwrap();
         let source_root = root.path().join("source");
