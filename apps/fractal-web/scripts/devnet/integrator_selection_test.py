@@ -107,6 +107,7 @@ class SelectionTest(unittest.TestCase):
                 patch.object(self.module, 'candidate_key', return_value='same-tree'), \
                 patch.object(self.module, 'git'), \
                 patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                 patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                 contextlib.redirect_stdout(io.StringIO()):
             yield commands
@@ -121,6 +122,63 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse((self.module.L / 'live-r3-tree-cache.json').exists())
         self.assertEqual(row['skipped'], [])
         return row
+
+    def test_capacity_precheck_refuses_before_selection_or_candidate_writes(self):
+        self.activation_builds()
+        previous = (self.module.P / 'current').resolve()
+        self.module.atomic_json(self.module.S / 'steward/last-skips.json', {'previous': 'selection'})
+        self.module.atomic_json(self.module.L / 'live-r3-state.json', {'previous': 'state'})
+        before = {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+        error = subprocess.CalledProcessError(75, ['nix', 'eval', '--expr', 'null'],
+                                             stderr='memory pressure')
+        responses = [
+            subprocess.CompletedProcess([], 0, 'https://example.test', ''),
+            self.response({'rev': 'b' * 40}),
+        ] * 2
+        with patch.object(self.module.candidate_sandbox, 'capacity_precheck', side_effect=error), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration') as configuration, \
+                patch.object(self.module, 'run') as run, \
+                patch.object(self.module, 'git') as git, \
+                patch.object(self.module, 'prepare_clone') as prepare, \
+                patch.object(self.module, 'publish_skips') as publish, \
+                patch.object(self.module.subprocess, 'run', side_effect=responses), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.module.tick()
+        row = self.capacity_row()
+        self.assertEqual(row['servedSha'], 'b' * 40)
+        self.assertEqual(row['localServedSha'], 'b' * 40)
+        self.assertFalse(row['current'])
+        self.assertIsNone(row['sha'])
+        self.assertEqual(row['selection'], [])
+        for operation in (configuration, run, git, prepare, publish):
+            operation.assert_not_called()
+        self.assertEqual((self.module.P / 'current').resolve(), previous)
+        after = {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+        self.assertEqual(set(after) - set(before),
+                         {self.module.L / 'live-r3.lock', self.module.L / 'live-r3.jsonl'})
+        self.assertEqual({path: after[path] for path in before}, before)
+        self.assertEqual(after[self.module.L / 'live-r3.lock'], b'')
+
+    def test_capacity_precheck_pass_preserves_candidate_build_path(self):
+        with self.capacity_tick([0]) as commands, \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck') as precheck:
+            self.module.tick()
+        precheck.assert_called_once_with()
+        self.assertEqual(len(commands), 1)
+        cached = json.loads((self.module.L / 'live-r3-tree-cache.json').read_text())
+        self.assertEqual(cached['same-tree']['outcome'], 'built')
+
+    def test_capacity_precheck_uses_bootstrap_nix_wrapper_without_filesystem_setup(self):
+        sandbox = self.module.candidate_sandbox
+        with patch.object(sandbox.shutil, 'which', return_value='/policy-bin/nix'), \
+                patch.object(sandbox.subprocess, 'run', return_value=self.response(None)) as run:
+            sandbox.capacity_precheck()
+        args, kwargs = run.call_args
+        self.assertEqual(args[0], ['/policy-bin/nix', 'eval', *sandbox.NIX_OPTIONS, '--expr', 'null'])
+        self.assertEqual(kwargs['cwd'], sandbox.TRUSTED_CHECKOUT)
+        self.assertEqual(kwargs['env']['PATH'], '/policy-bin')
+        self.assertEqual(kwargs['env']['HOME'], '/nonexistent')
+        self.assertTrue(kwargs['check'])
 
     def test_capacity_helper_exit_is_retryable_without_cache_or_attribution(self):
         with self.capacity_tick([75, 1, 75]), patch.object(self.module, 'first_break') as attribution:
@@ -546,6 +604,7 @@ class SelectionTest(unittest.TestCase):
         with patch.object(self.module, 'run', side_effect=self.module.SelectionDeadline('expired')), \
                 patch.object(self.module, 'observe_served', side_effect=observed), \
                 patch.object(self.module, 'prepare_clone', side_effect=AssertionError('candidate mutated')), \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                 patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.module.tick()
@@ -574,6 +633,7 @@ class SelectionTest(unittest.TestCase):
                              side_effect=[None, None, 'https://old.invalid']), \
                 patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
                 patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                 patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.module.tick()
@@ -608,6 +668,7 @@ class SelectionTest(unittest.TestCase):
                 log = io.StringIO()
                 with patch.object(self.module, 'run', side_effect=run), \
                         patch.object(self.module, 'observe_served'), \
+                        patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                         patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                         contextlib.redirect_stdout(log):
                     self.module.tick()
@@ -647,6 +708,7 @@ class SelectionTest(unittest.TestCase):
                 patch.object(self.module, 'prepare_clone',
                              side_effect=lambda: self.module.git('checkout', 'missing-branch')), \
                 patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                 patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                 contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -683,6 +745,7 @@ class SelectionTest(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True), \
                 patch.object(self.module, 'run', side_effect=run), \
                 patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                 patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.module.tick()

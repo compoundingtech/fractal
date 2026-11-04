@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The live web integrator checks the sandbox bootstrap's authoritative agent-nix capacity preflight before selection, fetch or candidate writes. Refused ticks append their normal retryable capacity-error observation and retain the served build and previous selection state.",
+  "replay": {"status": "none", "detail": "No replay or backfill."},
+  "schema": {"status": "none", "detail": "No storage schema changes."},
+  "rules": {"status": "none", "detail": "Admission policy, thresholds, cadence, gate-slot use and fallback deployment are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Integrator version advances to 14. A refused precheck records the existing build=error, reason=capacity-refused, retryable=true row with served identity observations, but does not replace last-skips.json or candidate state. The literal Nix evaluation uses the same policy wrapper and sanitized environment as sandbox bootstrap; no candidate Nix expression is evaluated."},
+  "downtime": {"status": "none", "detail": "The previous build remains served during refused ticks."},
+  "manual": {"status": "none", "detail": "No new configuration or operator action."},
+  "recovery": {"status": "changed", "detail": "The next scheduled tick retries after capacity recovers. In-build refusal handling remains necessary if pressure rises after a passing precheck; those ticks may still write candidate merge bytes. Rolling back restores late-only capacity checks without a data migration."}
+}
