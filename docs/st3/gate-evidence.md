@@ -1758,7 +1758,11 @@ suffix, and nondefault ports stay distinct. Relative local paths resolve from th
 pool identity. The data is read from the pinned accepted base, including when the runner is extracted alone; an absent file on an
 older base means no aliases. A malformed alias file refuses the run. Canonical identities keep existing pools warm and need not be
 the current repository name. No redirect or other network lookup discovers aliases. Selecting a pool never moves or deletes another
-pool: duplicate pools under former keys, including keys changed by the stricter normalization, retire through the ordinary cap eviction.
+pool. Duplicate pools under former keys, including keys changed by stricter normalization, remain eligible for ordinary global
+least-recently-used eviction when the pool cap is enabled and exceeded. With the cap off or not exceeded, an idle duplicate can persist
+indefinitely: there is no idle-age timer. No manual migration is needed; operators may independently reclaim unlocked duplicate build
+output after rollout under their existing cleanup policy. Unknown schemes (for example `fabric://`) keep their whole URL and may also
+change pool key once.
 Thus a fresh or throwaway clone takes a warm slot instead of building a target of its own:
 the slot keeps its path (`tree-N` and `target-N`, so cargo's ids for the workspace crates, which contain the path, still match), and when the tree
 there was last registered by another clone it is re-registered as a worktree of the clone now running (its notes land in that clone) while the inputs

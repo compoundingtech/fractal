@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Older bases without alias data keep their existing remote identities. The former-name pool remains warm; the duplicate current-name pool and any pools with keys changed by stricter path or port normalization retire through existing least-recently-used cap eviction. No pool migration or special deletion path is added."
+    "detail": "Older bases without alias data keep their existing remote identities. The former-name pool remains warm. Non-GitHub path case, local/file paths, nondefault ports and unknown schemes such as fabric:// may change pool key once; unknown schemes now keep the whole URL. Duplicate pools remain eligible for existing global least-recently-used eviction when the pool cap is enabled and exceeded. With the cap off or not exceeded, idle duplicates can persist indefinitely. No pool migration, idle-age timer or special deletion path is added."
   },
   "downtime": {
     "status": "none",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "none",
-    "detail": "None. Leave retired pools to normal cap eviction; do not move or delete trees by hand."
+    "detail": "None required by this change. Pool selection leaves retired pools untouched. Operations may independently clear unlocked duplicate build output after rollout under its existing cleanup policy; the runner needs no manual migration."
   },
   "recovery": {
     "status": "none",
