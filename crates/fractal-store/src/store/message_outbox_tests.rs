@@ -145,6 +145,25 @@ fn a_message_the_shard_refuses_ends_in_the_graph_and_holds_up_nothing() {
     assert!(rows(&graph).is_empty());
 }
 
+/// New mail that follows a refused message drains alone; the refused one keeps its count.
+#[test]
+fn a_fresh_drain_leaves_a_refused_message_to_its_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    let refused = sent("message/outbox-a-person", "person/ada");
+    enqueue(&graph, &refused);
+    assert_eq!(message_outbox::drain_fresh(&graph).unwrap(), 0);
+    for n in 0..message_outbox::ATTEMPTS {
+        let later = sent(&format!("message/outbox-b-later-{n}"), "agent/birch");
+        enqueue(&graph, &later);
+        assert_eq!(message_outbox::drain_fresh(&graph).unwrap(), 1);
+        assert_eq!(shard_items(&graph, &later.subject), 1);
+    }
+    let [(subject, attempts, _)] = rows(&graph).try_into().unwrap();
+    assert_eq!((subject.as_str(), attempts), (refused.subject.as_str(), 1));
+    assert_eq!(graph_items(&graph, &refused.subject), 0);
+}
+
 #[test]
 fn a_member_without_a_shard_drains_to_the_graph() {
     let graph = Store::open_memory("alder").unwrap();
@@ -188,7 +207,7 @@ fn a_backup_waits_while_a_message_is_still_queued() {
     enqueue(&graph, &message);
     // No shard here, so the export does not drain, and refuses rather than leave the mail out.
     let error = graph.write_backup(&mut Vec::new()).unwrap_err();
-    assert!(format!("{error:#}").contains("outbox"), "{error:#}");
+    assert!(format!("{error:#}").contains("`message/outbox-backup` waits after 0 attempts"), "{error:#}");
     message_outbox::drain(&graph).unwrap();
     graph.write_backup(&mut Vec::new()).unwrap();
 }

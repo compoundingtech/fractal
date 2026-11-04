@@ -153,10 +153,12 @@ impl Store {
                 // Admission and projection commit separately. Only a snapshot whose persisted
                 // projection frontier covers its log can promise the same graph on restore.
                 self.check_backup_projection()?;
-                anyhow::ensure!(
-                    !super::message_outbox::pending(&self.readers.get())?,
-                    "backup waits for the messages in the outbox to drain; retry once the daemon has written them"
-                );
+                if let Some((subject, attempts, error)) = super::message_outbox::oldest(&self.readers.get())? {
+                    anyhow::bail!(
+                        "backup waits for the messages in the outbox to drain; retry once the daemon has written them (`{subject}` waits after {attempts} attempts{})",
+                        error.map(|error| format!(", last: {error}")).unwrap_or_default()
+                    );
+                }
                 let mut header = self.backup_header()?;
                 if super::backup_ledgers::MARK_LEDGERS.iter().any(|table| header.ledgers.contains_key(*table)) {
                     header.version = super::backup_format::VERSION_WITH_MARKS;

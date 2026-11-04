@@ -66,11 +66,23 @@ pub fn enqueue_tx(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<b
     Ok(inserted > 0)
 }
 
-/// Whether any message waits in the outbox: one probe of the table, which a backup asks.
+/// Whether any message waits in the outbox: one probe of the table.
 pub fn pending(connection: &Connection) -> Result<bool> {
     Ok(connection
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM local_message_outbox)")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h0684c036783e owner=fractal_store::store::message_outbox TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
+}
+
+/// The oldest message still waiting, with its attempts and last error, which a backup names
+/// when it refuses: a row no drain could write needs someone to look at it.
+pub fn oldest(connection: &Connection) -> Result<Option<(String, i64, Option<String>)>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT subject, attempts, last_error FROM local_message_outbox
+             ORDER BY queued_at_unix_ms, subject LIMIT 1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h21a97f532ef5 owner=fractal_store::store::message_outbox TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .optional()?)
 }
 
 /// Whether a message waits that no drain has tried yet, and whether any waits at all: the
@@ -96,6 +108,17 @@ pub struct Drainer(Mutex<()>);
 /// shard (it did not open), every message goes to the graph. A message the graph refuses too
 /// stays with its error, and the drain goes on past it, so it never holds up later mail.
 pub fn drain(graph: &Store) -> Result<usize> {
+    drain_rows(graph, false)
+}
+
+/// Drain only the messages no drain has tried yet. The daemon drains this way after a commit
+/// that queued new mail, so a refused message keeps its pause however much mail follows it,
+/// and reaches the graph after its [`ATTEMPTS`] retries, not sooner.
+pub fn drain_fresh(graph: &Store) -> Result<usize> {
+    drain_rows(graph, true)
+}
+
+fn drain_rows(graph: &Store, fresh_only: bool) -> Result<usize> {
     let drainer = graph.extension::<Drainer>();
     let _running = drainer.0.lock().unwrap_or_else(PoisonError::into_inner);
     let shard = super::messages_shard::shard(graph);
@@ -107,10 +130,10 @@ pub fn drain(graph: &Store) -> Result<usize> {
             .get()
             .prepare_cached(
                 "SELECT subject, claim, queued_at_unix_ms, attempts FROM local_message_outbox
-                 WHERE (queued_at_unix_ms, subject) > (?1, ?2)
+                 WHERE (queued_at_unix_ms, subject) > (?1, ?2) AND (NOT ?4 OR attempts=0)
                  ORDER BY queued_at_unix_ms, subject LIMIT ?3",
             )?
-            .query_map(params![after.0, after.1, BATCH], |row| {
+            .query_map(params![after.0, after.1, BATCH, fresh_only], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -20724,9 +20724,15 @@ fn spawn_message_outbox(store: Arc<Store>) {
             receiver.borrow_and_update();
             match waiting(store.clone()).await {
                 Ok((fresh, any)) if fresh || (any && retry_at.is_none_or(|at| Instant::now() >= at)) => {
+                    // New mail alone drains only new mail: a refused message waits out its pause.
+                    let retry_due = any && retry_at.is_none_or(|at| Instant::now() >= at);
                     let drain_store = store.clone();
                     match drain_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("messages.outbox_drain", || {
-                        fractal_store::store::message_outbox::drain(&drain_store)
+                        if retry_due {
+                            fractal_store::store::message_outbox::drain(&drain_store)
+                        } else {
+                            fractal_store::store::message_outbox::drain_fresh(&drain_store)
+                        }
                     }))
                     .await
                     {
