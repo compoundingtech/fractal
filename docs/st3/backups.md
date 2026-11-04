@@ -41,7 +41,8 @@ claims name in all, since another member owns the rest.
 An explicit `--database` matching the configured database still reads or restores bodies in
 `state_dir`. For an arbitrary `--database` override, its parent remains the auxiliary product
 root, preserving standalone rehearsal behavior. For an offline export of a copied database,
-copy its `message-bodies` alongside it too if those bodies should be archived.
+copy its `message-bodies` alongside it too if those bodies should be archived, and its
+`shards` directory beside it if its stream items should be.
 
 For rehearsals, make a consistent SQLite copy first, then export that copy:
 
@@ -241,12 +242,13 @@ until a separately planned recovery accounts for writes since the snapshot.
 
 ## Format and verification
 
-The archive is UTF-8 JSON Lines, format `st3.claim-backup`, version `1`, `2`, `3` or `4`. Each record is limited
+The archive is UTF-8 JSON Lines, format `st3.claim-backup`, version `1` to `5`. Each record is limited
 to 128 MiB; export refuses a larger record before publishing a file:
 
 - `header`: format version, exporting build, database schema and claim registry digest, fleet ID
   and public anchor, complete admitted envelope-log digest, graph digest, each shared table's digest and row count,
-  and from version `3` each permanent ledger's digest and row count.
+  and from version `3` each permanent ledger's digest and row count; from version `5`, for each
+  carried shard, its admitted envelope-log digest, envelope count and local table digests.
 - `envelope`: the unchanged `ReplicaEnvelope` sync wire record, including writer, sequence,
   previous batch hash, payload hash, accept time, base64 CBOR claims and document bytes, and the
   writer's public key and signature when present. Envelopes sort by writer, sequence, hash;
@@ -256,13 +258,46 @@ to 128 MiB; export refuses a larger record before publishing a file:
   tombstones. Restore initializes empty checkpoint state through the normal certificate checks,
   even if the source knew a newer certificate it had not applied yet.
 - `ledger`: one page of one permanent ledger, in its primary-key order (see below).
-- `end`: envelope count and SHA-256 of all preceding bytes, including line endings.
+- `shard-envelope`, `shard-signatures`, `shard-local`: a shard's envelopes in its own sync wire
+  form, their signatures, and pages of its local tables, each naming its shard (version `5`).
+- `end`: the graph's envelope count and SHA-256 of all preceding bytes, including line endings.
 
 An archive that carries the long-message texts of its member is version `2`. An archive that
 carries permanent ledger rows is version `3`. An archive that carries local message marks is
-version `4`. A build that predates a version refuses its archives cleanly ("unsupported claim
-backup format/version") instead of restoring part of them; an archive with none of these keeps
-version `1`, so every build restores it.
+version `4`. An archive that carries the messages shard is version `5`. A build that predates a
+version refuses its archives cleanly ("unsupported claim backup format/version"; from version `5`
+builds, followed by the version found and the versions the build restores) instead of restoring
+part of them; an archive with none of these keeps version `1`, so every build restores it.
+
+### The messages shard
+
+The messages shard beside the database (`shards/messages/claims.sqlite3`, see
+[replication](replication.md#the-messages-shard)) holds stream items as envelopes of its own,
+and this member's staging, delivery, read and close of each one in a local table,
+`stream_lifecycle`. Version `5` carries the shard's admitted envelopes with their signatures and
+its lifecycle rows, once the shard holds either. A shard that is opened but empty adds nothing:
+the archive is byte for byte the one an earlier build writes, at the version it would choose.
+
+Export reads the shard in its own snapshot, pinned just after the graph's and held while the
+archive is written. The shard only grows, so it holds every stream item the graph snapshot could
+know of, and perhaps a few that arrived after it; those restore as an item that arrives ahead of
+its graph context does on any member.
+
+Restore rebuilds the graph first, then the shard beside the restored database, bound to the
+restored graph's fleet. Each shard signature is verified in the shard's signing domain. The
+shard's admission admits the envelopes on the source's authority, as the graph's restore does,
+so a member removed or rekeyed since keeps its stream items; every envelope must be admitted.
+Lifecycle rows are added by union, so a restored item is never behind where the archive had it:
+a read item stays read and is not delivered again. The shard's envelope-log digest, envelope
+count and lifecycle digest then have to equal the header's, or nothing is published. Every
+restore, whatever its version, refuses a destination whose messages shard holds anything or is
+open; an empty one is replaced by a version `5` restore and left in place by an earlier one.
+Publication is not atomic across the two databases: the shard is placed first, and if the graph
+then fails to publish, only a shard this restore created is removed. An empty shard it replaced
+is not put back, and the restored shard left in its place holds stream items, so move that shard
+aside before restoring again. `stream_arrivals`, where each item fell in this member's graph
+order, is not carried: the restored graph's order is new, and readers record each item again at
+its first read.
 
 ### Message marks
 
@@ -316,7 +351,8 @@ state directory, generate new local keys, and join the fleet as that new member.
 signing a sequence that the original writer already used, including writes after the backup.
 
 The archive contains durable shared claims, their referenced blobs, public signature material,
-checkpoint tombstones and the permanent ledgers. It does not contain private node keys, invite secrets, device capabilities,
+checkpoint tombstones, the permanent ledgers and, from version `5`, the messages shard's stream
+items and their lifecycle on this member. It does not contain private node keys, invite secrets, device capabilities,
 driver state, active terminals, local observations, lease renewals, transcripts, staged blobs,
 configuration, or other local caches. Protect the file like the original graph: claims and document
 bytes can contain private information. A restored standalone graph can be inspected immediately;
