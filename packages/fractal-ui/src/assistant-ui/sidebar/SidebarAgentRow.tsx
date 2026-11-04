@@ -11,6 +11,7 @@ import { SidebarStatus, type DiscRefinement, type GlyphVariant } from './Sidebar
 import { SidebarTime, type SidebarClock } from './SidebarTime'
 import { SidebarDuration } from './SidebarDuration'
 import { formatDuration } from '../../time/human-time'
+import { describeMissionEta } from '../MissionEta'
 import { SidebarRowSignals, attachSidebarLine1Fit } from './SidebarRowSignals'
 import { useSidebarHoverIntent } from './useSidebarHoverIntent'
 import { useTouchLayout } from './useTouchLayout'
@@ -71,11 +72,14 @@ export const sidebarRowAccessibleName = (row: Row): string => {
     parts.splice(1, 0, row.subagentCount === undefined ? '? subagents' : `${row.subagentCount} ${row.subagentCount === 1 ? 'subagent' : 'subagents'}`)
   }
   if (row.missionContext?._tag === 'Mission') {
-    const { slug, progress, step } = row.missionContext
+    const { slug, progress, step, eta } = row.missionContext
     parts.push(`Mission ${slug}`)
     if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
     if (step._tag === 'Step') parts.push(`Step ${step.name}`)
     if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
+    // The row draws no ETA; the tree item's name is the only place assistive tech hears it outside the Missions screen.
+    const estimate = eta === null || eta === undefined ? null : describeMissionEta(eta, new Date(eta.as_of).toISOString())
+    if (estimate !== null) parts.push(estimate)
     if (row.missionInfo !== undefined && row.missionInfo._tag !== 'Live') parts.push('mission info may be out of date')
   }
   if (row.missionContext?._tag === 'Unavailable') parts.push('mission info unavailable')

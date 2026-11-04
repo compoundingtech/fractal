@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { MissionRunSummary, decodeUnknownSync } from '@fractal/client/schema'
 import * as Option from 'effect/Option'
-import { MissionEtaLabel, formatMissionEta, type MissionEta } from '../../../../packages/fractal-ui/src/assistant-ui/MissionEta.tsx'
+import { MissionEtaLabel, describeMissionEta, formatMissionEta, type MissionEta } from '../../../../packages/fractal-ui/src/assistant-ui/MissionEta.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -29,9 +29,20 @@ describe('served mission ETA', () => {
     expect(aged).toContain('served as of')
     expect(aged).not.toBe(fresh)
   })
+  it('renders only the hidden description for hosts that draw no range', () => {
+    const markup = renderToStaticMarkup(createElement(MissionEtaLabel, { eta, now: eta.as_of + 120_000, variant: 'description' }))
+    expect(markup).toContain('data-mission-eta="~12–18 min left"')
+    expect(markup).toContain('Estimated 12–18 min left, served as of')
+    expect(markup).toContain('2m ago. Critical-path basis, 12 retained samples.')
+    expect(markup).not.toContain('aria-hidden')
+    expect(markup).not.toContain('title=')
+    expect(describeMissionEta(eta, '2026-11-04T12:00:00.000Z')).toBe('Estimated 12–18 min left, served as of 2026-11-04T12:00:00.000Z. Critical-path basis, 12 retained samples.')
+  })
   it.each([null, undefined])('renders nothing for missing ETA %s', value => {
     expect(formatMissionEta(value)).toBeNull()
+    expect(describeMissionEta(value, 'now')).toBeNull()
     expect(renderToStaticMarkup(createElement(MissionEtaLabel, { eta: value, now: eta.as_of }))).toBe('')
+    expect(renderToStaticMarkup(createElement(MissionEtaLabel, { eta: value, now: eta.as_of, variant: 'description' }))).toBe('')
   })
 
   it.each([{}, { eta: null }])('decodes older and unsampled runs without an ETA', extra => {

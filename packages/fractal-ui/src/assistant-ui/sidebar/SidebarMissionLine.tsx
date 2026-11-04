@@ -1,7 +1,9 @@
 /**
  * Line 2 of an agent row that works on a mission (J2 · V3 · T1 · P2): `[mission pill] · step`, or
- * `[mission pill] · q143 Pick hover scope` while a question waits on you. A served ETA of an unfinished run sits after the
- * pill, `[pill] · ~12–18 min left · step`, exactly as served; absent or null, it takes no space.
+ * `[mission pill] · q143 Pick hover scope` while a question waits on you. A served ETA of an unfinished run is never drawn
+ * here: line 2 cannot fit the pill, the step and a range, and the step says what happens now. The ETA rides along as the
+ * mission slot's visually hidden description (range, basis, samples and as_of) and is drawn on the Missions screen, so
+ * the line is identical with and without one.
  *
  * The pill is the row's only box: 16px tall, fully rounded, starting at line 2's first pixel so every pill shares one x
  * and one height. The mission side holds at most 56% of the line and the slug truncates inside the pill, so the step
@@ -22,7 +24,7 @@ import { Button, Dialog, DialogTrigger, VisuallyHidden } from 'react-aria-compon
 import { Popover } from '../composition/Controls'
 import { HumanClockProvider, HumanTime, fixedClock } from '../../time/HumanTime'
 import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
-import { MissionEtaLabel, formatMissionEta } from '../MissionEta'
+import { MissionEtaLabel } from '../MissionEta'
 import { missionHueVars as hue } from './mission-hue.stylex'
 import type { SidebarMissionContext, SidebarMissionInfo } from './model'
 
@@ -76,10 +78,9 @@ export interface SidebarMissionLineProps {
   readonly frozen?: boolean
 }
 
-/** `[pill] · ~ETA · step`, `[pill] · q143 question`, `[pill] · question`, or the bare pill when the step is Unknown; the ETA shows only when served. */
+/** `[pill] · step`, `[pill] · q143 question`, `[pill] · question`, or the bare pill when the step is Unknown; a served ETA adds only hidden text. */
 export function SidebarMissionLine({ mission, info = live, touch = false, now, frozen = false }: SidebarMissionLineProps) {
   const { step, queued } = mission
-  const showEta = formatMissionEta(mission.eta) !== null
   const muted = info._tag !== 'Live'
   const trigger = missionLineHasTrigger(mission, info)
   const merged = touch && trigger
@@ -88,11 +89,9 @@ export function SidebarMissionLine({ mission, info = live, touch = false, now, f
       {trigger
         ? <MissionInfoTrigger mission={mission} info={info} queued={queued} touch={touch} now={now} />
         : <MissionPill mission={mission} info={info} />}
+      {/* Absolutely positioned and clipped: it adds no flex item, so the pill and step never move. */}
+      <MissionEtaLabel eta={mission.eta} now={now} variant="description" />
     </span>
-    {showEta && <>
-      <span aria-hidden="true" {...stylex.props(styles.sep)}>·</span>
-      <span data-line2-slot="eta" {...stylex.props(styles.etaSlot)}><MissionEtaLabel eta={mission.eta} now={now} /></span>
-    </>}
     {step._tag !== 'Unknown' && <>
       <span aria-hidden="true" {...stylex.props(styles.sep)}>·</span>
       <span data-line2-slot="step" {...stylex.props(styles.stepSlot, muted && styles.mutedInk)}>
@@ -159,7 +158,6 @@ const styles = stylex.create({
   missionSlotTouch: { alignSelf: 'stretch' },
   stepSlot: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flex: '1 1 0', minWidth: 0, overflow: 'hidden' },
   sep: { flexShrink: 0, paddingInline: s.xs, color: ink.fgMuted },
-  etaSlot: { display: 'inline-flex', alignItems: 'center', flexShrink: 0, color: ink.fgMuted },
   ellipsis: { flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   metric: { flexShrink: 0, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   pill: {

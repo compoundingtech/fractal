@@ -39,16 +39,26 @@ export const formatMissionEta = (eta: MissionEta | null | undefined): string | n
 const methodLabel = { 'per-step': 'Per-step', 'critical-path': 'Critical-path' } as const
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`
 
+/** `Estimated 12–18 min left, served as of <servedAs>. Critical-path basis, 12 retained samples.` Null only without an ETA. */
+export const describeMissionEta = (eta: MissionEta | null | undefined, servedAs: string): string | null => {
+  const text = formatMissionEta(eta)
+  if (text === null || eta === null || eta === undefined) return null
+  return `Estimated ${text.slice(1)}, served as of ${servedAs}. ${methodLabel[eta.basis.method]} basis, ${plural(eta.basis.samples, 'retained sample')}.`
+}
+
 /**
  * The compact served range, described by its basis and its exact `as_of` with a relative age. `now` fixes the age;
  * omitted, the age follows the context clock. Either way the range itself never changes until the server serves a new one.
+ * `variant="description"` renders only the visually hidden description: hosts too narrow for the range (the sidebar row)
+ * keep it for assistive tech without taking any layout space.
  */
-export const MissionEtaLabel = React.memo(function MissionEtaLabel({ eta, now }: { readonly eta: MissionEta | null | undefined; readonly now?: number }) {
+export const MissionEtaLabel = React.memo(function MissionEtaLabel({ eta, now, variant = 'inline' }: { readonly eta: MissionEta | null | undefined; readonly now?: number; readonly variant?: 'inline' | 'description' }) {
   const text = formatMissionEta(eta)
   const asOf = eta?.as_of ?? 0
   const age = useClockLabel((current, zone) => text === null ? '' : `${formatExact(asOf, zone)}, ${formatRelative(asOf, current, zone)}`, now)
-  if (text === null || eta === null || eta === undefined) return null
-  const description = `Estimated ${text.slice(1)}, served as of ${age}. ${methodLabel[eta.basis.method]} basis, ${plural(eta.basis.samples, 'retained sample')}.`
+  const description = describeMissionEta(eta, age)
+  if (text === null || description === null || eta === null || eta === undefined) return null
+  if (variant === 'description') return <VisuallyHidden elementType="span" data-mission-eta={text} data-mission-eta-method={eta.basis.method}>{description}</VisuallyHidden>
   return <span data-mission-eta={text} data-mission-eta-method={eta.basis.method} title={description} {...stylex.props(styles.eta)}>
     <span aria-hidden="true">{text}</span>
     <VisuallyHidden elementType="span">{description}</VisuallyHidden>

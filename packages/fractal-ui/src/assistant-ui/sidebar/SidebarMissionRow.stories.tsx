@@ -3,8 +3,9 @@
  * mission shared across project folders, a long slug, a question waiting on you with and without a decision handle,
  * unknown progress, an unknown step, rows without a mission, missions queued behind the current one and retained Stale
  * (with and without a reported update time) and Failed mission info. The phone frame proves the merged 44px mission
- * target on a touch layout. The ETA stories prove a served range, a single value, and null, absent or finished ETAs
- * taking no space. A separate scenario story projects the catalog roster without these fixed contract cases.
+ * target on a touch layout. The ETA stories prove a served range or single value adds only its hidden description and the
+ * row's accessible name, never a drawn slot, so every ETA state lays out identically; null, absent or finished ETAs add
+ * nothing. A separate scenario story projects the catalog roster without these fixed contract cases.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
@@ -378,13 +379,16 @@ export const QueuedMissionsLight: Story = { ...QueuedMissions, name: 'Queued mis
 const etaAsOf = storyNow - 120_000
 const etaRange: MissionEta = { remaining_low_ms: 720_000, remaining_high_ms: 1_080_000, basis: { method: 'critical-path', samples: 12 }, as_of: etaAsOf }
 const etaStep = { progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Review hover scopes' }, queued: [] } as const
-/** Served range, served single value, served null, an older daemon that omits it, and a finished run that must hide it. */
+/**
+ * Served range, served single value, served null, an older daemon that omits it, and a finished run that must hide it.
+ * One slug and step throughout, so their line 2 geometry must match exactly whatever the ETA state.
+ */
 const etaRows: readonly Row[] = [
   row('eta-range', 'ETA range', { missionContext: mission('eta-range', 'sidebar-polish', { ...etaStep, eta: etaRange }) }),
-  row('eta-single', 'ETA single', { missionContext: mission('eta-single', 'docs-refresh', { ...etaStep, eta: { ...etaRange, remaining_high_ms: 720_000, basis: { method: 'per-step', samples: 1 } } }) }),
-  row('eta-null', 'ETA null', { missionContext: mission('eta-null', 'flaky-test-hunt', { ...etaStep, eta: null }) }),
-  row('eta-absent', 'ETA absent', { missionContext: mission('eta-absent', 'rename-users-api', etaStep) }),
-  row('eta-finished', 'ETA finished', { missionContext: mission('eta-finished', 'upload-retries', { ...etaStep, progress: { _tag: 'Known', done: 5, total: 5 }, eta: null }) }),
+  row('eta-single', 'ETA single', { missionContext: mission('eta-single', 'sidebar-polish', { ...etaStep, eta: { ...etaRange, remaining_high_ms: 720_000, basis: { method: 'per-step', samples: 1 } } }) }),
+  row('eta-null', 'ETA null', { missionContext: mission('eta-null', 'sidebar-polish', { ...etaStep, eta: null }) }),
+  row('eta-absent', 'ETA absent', { missionContext: mission('eta-absent', 'sidebar-polish', etaStep) }),
+  row('eta-finished', 'ETA finished', { missionContext: mission('eta-finished', 'sidebar-polish', { ...etaStep, progress: { _tag: 'Known', done: 5, total: 5 }, eta: null }) }),
 ]
 function EtaStatesStory({ scheme, only }: { readonly scheme: Scheme; readonly only?: string }) {
   return <main data-testid="mission-eta-rows" data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}>
@@ -392,39 +396,56 @@ function EtaStatesStory({ scheme, only }: { readonly scheme: Scheme; readonly on
   </main>
 }
 
-/** A served ETA sits between pill and step with its exact served text and a description ending in `tail`. */
-const expectEta = async (row: HTMLElement, text: string, tail: RegExp) => {
-  const label = await waitFor(() => { const found = row.querySelector<HTMLElement>('[data-mission-eta]'); expect(found).not.toBeNull(); return found! })
-  await expect(label).toHaveTextContent(text)
-  const description = label.getAttribute('title')!
-  await expect(description).toMatch(tail)
-  await expect(label).toHaveTextContent(description)
-  const eta = rect(row.querySelector('[data-line2-slot="eta"]')!)
-  await expect(eta.left).toBeGreaterThanOrEqual(rect(row.querySelector('[data-line2-slot="mission"]')!).right)
-  await expect(eta.right).toBeLessThanOrEqual(rect(row.querySelector('[data-line2-slot="step"]')!).left)
+/** Line 2 as drawn, relative to its row: `[pill] · step` with the step keeping a readable width. */
+const line2Geometry = (row: HTMLElement) => {
+  const origin = rect(row)
+  const box = (selector: string) => { const found = rect(row.querySelector(selector)!); return [found.left - origin.left, found.top - origin.top, found.width, found.height].map(Math.round) }
+  return { row: [Math.round(origin.width), Math.round(origin.height)], mission: box('[data-line2-slot="mission"]'), pill: box('[data-box="pill"]'), step: box('[data-line2-slot="step"]') }
 }
-/** No ETA: no slot and no extra separator, so the step follows the mission slot directly. */
-const expectNoEta = async (row: HTMLElement) => {
+const expectDrawnLine = async (row: HTMLElement) => {
   await waitFor(() => expect(row.querySelector('[data-line2-slot="step"]')).not.toBeNull())
-  await expect(row.querySelector('[data-line2-slot="eta"], [data-mission-eta]')).toBeNull()
-  await expect(line2(row).textContent).not.toContain('left')
+  await expect(row.querySelector('[data-line2-slot="eta"]')).toBeNull()
   const sep = row.querySelector('[data-line2-slot="mission"]')!.nextElementSibling!
   await expect(sep.textContent).toBe('·')
   await expect(sep.nextElementSibling).toBe(row.querySelector('[data-line2-slot="step"]'))
+  // The step stays readable: at least "Review h…" at the narrowest sidebar.
+  await expect(rect(row.querySelector('[data-row-field="step"]')!).width).toBeGreaterThanOrEqual(56)
+}
+/** A served ETA: only a visually hidden description in the mission slot, plus the row's accessible name; nothing drawn. */
+const expectEta = async (row: HTMLElement, item: Row, text: string, tail: RegExp, name: RegExp) => {
+  await expectDrawnLine(row)
+  const description = await waitFor(() => { const found = row.querySelector<HTMLElement>('[data-line2-slot="mission"] [data-mission-eta]'); expect(found).not.toBeNull(); return found! })
+  await expect(description).toHaveAttribute('data-mission-eta', text)
+  await expect(description.textContent).toMatch(tail)
+  await expect(getComputedStyle(description).position).toBe('absolute')
+  await expect(rect(description).width).toBeLessThanOrEqual(1)
+  await expect(sidebarRowAccessibleName(item)).toMatch(name)
+}
+/** No ETA: no description, nothing in the name, and the same drawn line. */
+const expectNoEta = async (row: HTMLElement, item: Row) => {
+  await expectDrawnLine(row)
+  await expect(row.querySelector('[data-mission-eta]')).toBeNull()
+  await expect(line2(row).textContent).not.toContain('left')
+  await expect(sidebarRowAccessibleName(item)).not.toContain('Estimated')
 }
 // The basis, retained samples, exact as_of and its age relative to the story's fixed now; never a recomputed range.
-const etaChecks: Readonly<Record<string, (row: HTMLElement) => Promise<void>>> = {
-  'ETA range': row => expectEta(row, '~12–18 min left', /^Estimated 12–18 min left, served as of .+, 2m ago\. Critical-path basis, 12 retained samples\.$/),
-  'ETA single': row => expectEta(row, '~12 min left', /^Estimated 12 min left, served as of .+, 2m ago\. Per-step basis, 1 retained sample\.$/),
+const etaChecks: Readonly<Record<string, (row: HTMLElement, item: Row) => Promise<void>>> = {
+  'ETA range': (row, item) => expectEta(row, item, '~12–18 min left', /^Estimated 12–18 min left, served as of .+, 2m ago\. Critical-path basis, 12 retained samples\.$/,
+    /, Step Review hover scopes, Estimated 12–18 min left, served as of 2026-10-21T09:28:00\.000Z\. Critical-path basis, 12 retained samples\.$/),
+  'ETA single': (row, item) => expectEta(row, item, '~12 min left', /^Estimated 12 min left, served as of .+, 2m ago\. Per-step basis, 1 retained sample\.$/,
+    /, Estimated 12 min left, served as of 2026-10-21T09:28:00\.000Z\. Per-step basis, 1 retained sample\.$/),
   'ETA null': expectNoEta,
   'ETA absent': expectNoEta,
   'ETA finished': expectNoEta,
 }
 const etaPlay = (titles: readonly string[]): NonNullable<Story['play']> => async ({ canvasElement }) => {
   await waitFor(() => expect(canvasElement.querySelectorAll('[data-milestone-row]').length).toBe(titles.length))
-  for (const title of titles) await etaChecks[title]!(designedRow(canvasElement, title))
+  for (const title of titles) await etaChecks[title]!(designedRow(canvasElement, title), etaRows.find(item => item.title === title)!)
+  // No layout shift between states: every row's drawn line 2 matches the first, to the pixel.
+  const [first, ...rest] = titles.map(title => line2Geometry(designedRow(canvasElement, title)))
+  for (const geometry of rest) await expect(geometry).toEqual(first)
 }
-const etaScenario = { scenario: { _tag: 'contract-fixture', reason: 'Fixed served ETA rows prove the exact served text, its basis and as_of description and that null, absent or finished ETAs take no space; catalog runs rarely serve every state.' } } as const
+const etaScenario = { scenario: { _tag: 'contract-fixture', reason: 'Fixed served ETA rows prove the exact served description with its basis and as_of, and that no ETA state (range, single, null, absent, finished) changes the drawn row; catalog runs rarely serve every state.' } } as const
 const etaState = (title: string, name: string): Story => ({ tags: ['critical'], name: `Mission ETA · ${name}`, parameters: etaScenario, render: ({ scheme }) => <EtaStatesStory scheme={scheme} only={title} />, play: etaPlay([title]) })
 
 export const EtaRange: Story = etaState('ETA range', 'served range')
