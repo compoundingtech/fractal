@@ -1,18 +1,22 @@
 //! Versioned logical backups. Envelope payloads use the peer wire format unchanged.
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 
 use crate::client::Endpoint;
 use crate::store::{CheckpointManifest, Store};
+use crate::store::backup_shards;
+use crate::store::messages_shard::{self, SHARD_ID};
 use crate::message_body::BodyAttachment as _;
 
 pub use crate::store::backup_format::{
-    FORMAT, Header, MessageBodyRecord, Record, RestoreReport, TableDigest, VERSION,
-    VERSION_WITH_BODIES, VERSION_WITH_LEDGERS, VERSION_WITH_MARKS,
+    FORMAT, Header, MessageBodyRecord, Record, RestoreReport, ShardDigest, TableDigest, VERSION,
+    VERSION_WITH_BODIES, VERSION_WITH_LEDGERS, VERSION_WITH_MARKS, VERSION_WITH_SHARDS,
 };
 pub use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
 
@@ -28,9 +32,9 @@ pub async fn create(endpoint: &Endpoint, destination: &Path) -> Result<()> {
     let temporary = tempfile::NamedTempFile::new_in(directory)?;
     let mut output = tokio::fs::File::from_std(temporary.reopen()?);
     let (client, url) = match endpoint {
-        Endpoint::Unix(socket) => (
+        Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => (
             reqwest::Client::builder()
-                .unix_socket(socket.as_path())
+                .unix_socket(endpoint.unix_socket().expect("Unix endpoint").as_ref())
                 .build()?,
             "http://localhost/v1/backup".to_owned(),
         ),
@@ -84,12 +88,24 @@ pub fn create_from_database(
         .optional()?
         .unwrap_or_else(|| "backup-reader".into());
     drop(reader);
-    let store = Store::open(database, writer)?;
+    let store = Arc::new(Store::open(database, writer)?);
     // Opening an older copy migrates its schema; finish the normal upgrade recovery
     // before describing the current registry and projections in the archive header.
     store.validate_replication_backlog()?;
     store.apply_replication_repairs()?;
     store.replay_replication_graph()?;
+    // The messages shard beside the database, when there is one, as the daemon opens it. A copy
+    // made without its `shards` directory is archived without stream items.
+    let root = database
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if backup_shards::database_path(root)?.exists() {
+        let shard = messages_shard::open(&store, root)?;
+        shard.validate_replication_backlog()?;
+        shard.apply_replication_repairs()?;
+        shard.project_replication_backlog()?;
+    }
     let directory = destination
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -122,11 +138,22 @@ fn read_record(input: &mut impl BufRead) -> Result<Option<(Record, Vec<u8>)>> {
 }
 
 fn check_header(header: &Header) -> Result<()> {
+    // Builds before version 5 say only "unsupported claim backup format/version"; this one also
+    // names what it found and what it restores.
     ensure!(
-        header.format == FORMAT
-            && [VERSION, VERSION_WITH_BODIES, VERSION_WITH_LEDGERS, VERSION_WITH_MARKS].contains(&header.version),
-        "unsupported claim backup format/version"
+        header.format == FORMAT && (VERSION..=VERSION_WITH_SHARDS).contains(&header.version),
+        "unsupported claim backup format/version: {:?} version {}; this build restores {FORMAT:?} \
+         versions {VERSION} to {VERSION_WITH_SHARDS}",
+        header.format,
+        header.version
     );
+    ensure!(
+        header.version >= VERSION_WITH_SHARDS || header.shards.is_empty(),
+        "shard digests in an archive that does not declare shards"
+    );
+    if let Some(shard) = header.shards.keys().find(|shard| *shard != SHARD_ID) {
+        anyhow::bail!("backup carries an unknown shard {shard:?}");
+    }
     ensure!(
         header.tables.contains_key("claim_sources"),
         "backup lacks the claim source digest"
@@ -151,6 +178,19 @@ fn body_bytes(body: &MessageBodyRecord) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// A shard record must belong to a shard the header lists, in an archive that declares shards.
+fn check_shard_record(header: &Header, shard: &str) -> Result<()> {
+    ensure!(
+        header.version >= VERSION_WITH_SHARDS,
+        "a shard record in an archive that does not declare shards"
+    );
+    ensure!(
+        header.shards.contains_key(shard),
+        "a record of shard {shard:?}, which the backup header does not list"
+    );
+    Ok(())
+}
+
 /// Check framing and completeness without admitting anything.
 pub fn verify_file(path: &Path) -> Result<Header> {
     let mut input = BufReader::new(fs::File::open(path)?);
@@ -164,6 +204,7 @@ pub fn verify_file(path: &Path) -> Result<Header> {
     let mut hash = Sha256::new();
     hash.update(bytes);
     let mut envelopes = 0;
+    let mut shard_envelopes = BTreeMap::<String, u64>::new();
     loop {
         let (record, bytes) = read_record(&mut input)?.context("backup has no end record")?;
         match record {
@@ -188,6 +229,12 @@ pub fn verify_file(path: &Path) -> Result<Header> {
                     "message marks in an archive that does not declare them"
                 );
             }
+            Record::ShardEnvelope(record) => {
+                check_shard_record(&header, &record.shard)?;
+                *shard_envelopes.entry(record.shard).or_default() += 1;
+            }
+            Record::ShardSignatures(record) => check_shard_record(&header, &record.shard)?,
+            Record::ShardLocal(page) => check_shard_record(&header, &page.shard)?,
             Record::End {
                 envelopes: expected,
                 sha256,
@@ -196,6 +243,14 @@ pub fn verify_file(path: &Path) -> Result<Header> {
                     envelopes == expected && hex::encode(hash.finalize()) == sha256,
                     "backup checksum/count mismatch"
                 );
+                for (shard, digest) in &header.shards {
+                    let found = shard_envelopes.get(shard).copied().unwrap_or(0);
+                    ensure!(
+                        found == digest.envelope_count,
+                        "backup shard {shard:?} holds {found} envelopes, not the {} its header lists",
+                        digest.envelope_count
+                    );
+                }
                 ensure!(
                     read_record(&mut input)?.is_none(),
                     "data follows the backup end record"
@@ -212,20 +267,7 @@ pub fn verify_file(path: &Path) -> Result<Header> {
 pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_store::backup TODO=chunk-or-reference-exact-wire-values */ fn restore(source: &Path, destination: &Path, state_root: &Path) -> Result<RestoreReport> {
     let header = verify_file(source)?;
     let existing = if destination.exists() {
-        let connection = rusqlite::Connection::open(destination)?;
-        connection.busy_timeout(std::time::Duration::ZERO)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h84213c6880a6 owner=fractal_store::backup TODO=trace-statement-and-value-representation */ "BEGIN EXCLUSIVE;")?;
-        require_empty_database(&connection)?;
-        // A WAL file may outlive the last connection. Changing journal mode takes the locks
-        // that distinguish a closed database from a live WAL reader, unlike file existence.
-        // Keep the exclusive connection lock through publication so no new writer can enter.
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9a6064fa060f owner=fractal_store::backup TODO=trace-statement-and-value-representation */ "COMMIT; PRAGMA locking_mode=EXCLUSIVE;")?;
-        connection
-            .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
-            .context("restore requires an offline database")?;
-        // Recheck after the journal-mode transition released the first transaction.
-        require_empty_database(&connection)?;
-        Some(connection)
+        Some(lock_empty_offline(destination)?)
     } else {
         None
     };
@@ -233,14 +275,37 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
+    // An archive with shards restores each beside the database, where the daemon opens it. On
+    // every restore, a shard already there must be empty and offline, as the database must: a
+    // restored graph never stands beside another store's stream items. Its lock is held through
+    // publication; an archive without shards leaves an empty one in place.
+    let restores_shard = !header.shards.is_empty();
+    let shard_destination = backup_shards::database_path(directory)?;
+    let existing_shard = if shard_destination.exists() {
+        Some(lock_empty_offline(&shard_destination).with_context(|| {
+            format!(
+                "restore refuses a destination whose messages shard at {} is not empty and offline",
+                shard_destination.display()
+            )
+        })?)
+    } else {
+        None
+    };
     fs::create_dir_all(directory)?;
     let stage = tempfile::tempdir_in(directory)?;
     let staged_path = stage
         .path()
         .join(fractal_client::product_dirs::STORE_DATABASE_FILES[0]);
     let writer = format!("restored-{}", uuid::Uuid::now_v7().simple());
-    let store = Store::open(&staged_path, &writer)?;
+    let store = Arc::new(Store::open(&staged_path, &writer)?);
     store.prepare_backup_restore(&header, &writer)?;
+    // The staged shard takes its fleet from the staged graph, as the daemon's does.
+    let shard = if restores_shard {
+        Some(messages_shard::open(&store, stage.path())?)
+    } else {
+        None
+    };
+    let staged_shard = backup_shards::database_path(stage.path())?;
     let mut input = BufReader::new(fs::File::open(source)?);
     let (Record::Header(restoring_header), bytes) =
         read_record(&mut input)?.context("empty backup")?
@@ -257,6 +322,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
     let mut checkpoint_finished = false;
     let mut count = 0;
     let mut page = Vec::with_capacity(PAGE);
+    let mut shard_page = Vec::new();
     let mut checkpoint = None;
     let mut restored_bodies = Vec::new();
     loop {
@@ -281,6 +347,19 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
                 store.receive_backup_signatures(&header, &signatures)?
             }
             Record::Ledger(page) => store.receive_backup_ledger(&page)?,
+            // `verify_file` admitted shard records only for a shard the header lists, which is
+            // open whenever the header lists one.
+            Record::ShardEnvelope(record) => {
+                shard_page.push(record.envelope);
+                if shard_page.len() == PAGE {
+                    backup_shards::receive_envelopes(restoring_shard(&shard)?, &header, &shard_page)?;
+                    shard_page.clear();
+                }
+            }
+            Record::ShardSignatures(record) => {
+                backup_shards::receive_signatures(restoring_shard(&shard)?, &header, &record.signatures)?
+            }
+            Record::ShardLocal(page) => backup_shards::receive_local(restoring_shard(&shard)?, &page.page)?,
             Record::Checkpoint(page) => {
                 ensure!(!checkpoint_finished, "duplicate checkpoint manifest");
                 let manifest = checkpoint.get_or_insert_with(|| CheckpointManifest {
@@ -310,7 +389,16 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
         restore_hash.update(bytes);
     }
     store.receive_backup_page(&header, &page)?;
+    if let Some(shard) = &shard {
+        backup_shards::receive_envelopes(shard, &header, &shard_page)?;
+    }
     let mut report = store.finish_backup_restore(&header, &writer, count, checkpoint.as_ref())?;
+    // The shard after the graph: its admission reads the restored graph's fleet.
+    if let Some(shard) = &shard {
+        report
+            .shards
+            .insert(SHARD_ID.into(), backup_shards::finish_restore(shard, &header)?);
+    }
     // Restore only the texts a restored claim names, with the hash it gives. The count of long
     // messages the claims name says how many texts the archive did not hold: those another
     // member owns, or that were lost before the backup.
@@ -330,9 +418,79 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
     }
     report.message_bodies_restored = verified.len() as u64;
     report.message_bodies_referenced = store.message_body_references()?;
+    // The graph holds the shard too: both close here.
+    drop(shard);
     drop(store);
     // Store closes/checkpoints its writer before publication; never publish WAL-dependent data.
-    let connection = rusqlite::Connection::open(&staged_path)?;
+    seal_staged(&staged_path)?;
+    // The shard is published first, so a graph that restored stream items never stands without
+    // them. Should the graph then fail to publish, a shard this restore placed is removed again.
+    if restores_shard {
+        seal_staged(&staged_shard)?;
+        let shards = shard_destination.parent().context("a shard database has a directory")?;
+        fs::create_dir_all(shards)?;
+        if existing_shard.is_some() {
+            fs::rename(&staged_shard, &shard_destination)?;
+        } else {
+            fs::hard_link(&staged_shard, &shard_destination)?;
+        }
+        fs::File::open(shards)?.sync_all()?;
+    }
+    let published = if existing.is_some() {
+        fs::rename(&staged_path, destination)
+    } else {
+        // A concurrent restore cannot overwrite a database that appeared after the initial check.
+        fs::hard_link(&staged_path, destination)
+    };
+    if let Err(error) = published {
+        if restores_shard && existing_shard.is_none() {
+            let _ = fs::remove_file(&shard_destination);
+        }
+        return Err(error.into());
+    }
+    drop(existing);
+    drop(existing_shard);
+    // External message bodies belong to the product state root, not the database directory.
+    let restored = crate::message_body::bodies(state_root);
+    for (actor, message) in &verified {
+        if let Some(bytes) = staged_bodies.read(actor, message)? {
+            restored.put(actor, message, &bytes)?;
+        }
+    }
+    fs::File::open(directory)?.sync_all()?;
+    Ok(report)
+}
+
+/// The staged shard, for a shard record; `verify_file` refuses a shard record without one.
+fn restoring_shard(shard: &Option<Arc<crate::store::GraphStore>>) -> Result<&crate::store::GraphStore> {
+    shard
+        .as_deref()
+        .context("a shard record in an archive that does not declare shards")
+}
+
+/// Lock an existing destination that must be an empty database no process has open, and keep
+/// the lock through publication so no writer can enter it.
+fn lock_empty_offline(path: &Path) -> Result<rusqlite::Connection> {
+    let connection = rusqlite::Connection::open(path)?;
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h84213c6880a6 owner=fractal_store::backup TODO=trace-statement-and-value-representation */ "BEGIN EXCLUSIVE;")?;
+    require_empty_database(&connection)?;
+    // A WAL file may outlive the last connection. Changing journal mode takes the locks
+    // that distinguish a closed database from a live WAL reader, unlike file existence.
+    // Keep the exclusive connection lock through publication so no new writer can enter.
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9a6064fa060f owner=fractal_store::backup TODO=trace-statement-and-value-representation */ "COMMIT; PRAGMA locking_mode=EXCLUSIVE;")?;
+    connection
+        .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+        .context("restore requires an offline database")?;
+    // Recheck after the journal-mode transition released the first transaction.
+    require_empty_database(&connection)?;
+    Ok(connection)
+}
+
+/// Fold a closed staged database's WAL into it, make it private and sync it, so what is
+/// published never depends on a WAL file.
+fn seal_staged(path: &Path) -> Result<()> {
+    let connection = rusqlite::Connection::open(path)?;
     let checkpoint_started = std::time::Instant::now();
     let checkpoint = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     smallclaims::sqlite::telemetry::checkpoint_finished(
@@ -349,25 +507,10 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&staged_path, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
-    fs::File::open(&staged_path)?.sync_all()?;
-    if existing.is_some() {
-        fs::rename(&staged_path, destination)?;
-    } else {
-        // A concurrent restore cannot overwrite a database that appeared after the initial check.
-        fs::hard_link(&staged_path, destination)?;
-    }
-    drop(existing);
-    // External message bodies belong to the product state root, not the database directory.
-    let restored = crate::message_body::bodies(state_root);
-    for (actor, message) in &verified {
-        if let Some(bytes) = staged_bodies.read(actor, message)? {
-            restored.put(actor, message, &bytes)?;
-        }
-    }
-    fs::File::open(directory)?.sync_all()?;
-    Ok(report)
+    fs::File::open(path)?.sync_all()?;
+    Ok(())
 }
 
 fn require_empty_database(connection: &rusqlite::Connection) -> Result<()> {
@@ -403,8 +546,13 @@ fn require_empty_database(connection: &rusqlite::Connection) -> Result<()> {
         )?;
         ensure!(!has_tables, "restore refuses a nonempty database");
     }
-    // An older reader can hold unknown claims only in the wire log. That is still data.
-    for table in ["replica_envelopes", "checkpoint_envelopes"] {
+    // An older reader can hold unknown claims only in the wire log. That is still data, as is
+    // a shard's record of how far this member took its stream items.
+    for (table, what) in [
+        ("replica_envelopes", "envelopes"),
+        ("checkpoint_envelopes", "envelopes"),
+        ("stream_lifecycle", "stream item lifecycle"),
+    ] {
         let exists: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
             [table],
@@ -418,7 +566,7 @@ fn require_empty_database(connection: &rusqlite::Connection) -> Result<()> {
             )?;
             ensure!(
                 !has_envelopes,
-                "restore refuses a database that already holds envelopes"
+                "restore refuses a database that already holds {what}"
             );
         }
     }

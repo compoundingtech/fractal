@@ -1783,6 +1783,7 @@ name = "fractal-client-codegen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fractal-store",
  "serde_json",
  "sha2 0.10.9",
 ]
@@ -2030,6 +2031,7 @@ dependencies = [
  "blake3",
  "clap",
  "hex",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
