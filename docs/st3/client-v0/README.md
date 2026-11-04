@@ -23,6 +23,14 @@ Generated Effect string length checks count Unicode code points, matching JSON S
 URI-reference format checks validate RFC3986 syntax, including relative references,
 without URL-constructor normalization of malformed input.
 
+The standalone `NoticeCreated`, `NoticeSnapshot`, `NoticeFence` and notice parameter
+definitions are internal contract models, not server support: no notice Resource,
+operation, action, collection or capability is registered. `NoticeSnapshot.input`
+preserves full immutable producer input; its recipient is the addressed person.
+Delivery/integrity use tagged states, and person controls are explicitly nullable.
+Unicode limits are schema-enforced; admission must additionally enforce the 64 KiB
+serialized claim-field budget and cross-field provenance/receipt consistency.
+
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
 WebSocket senders now offer only the corresponding `fractal.client.*` protocol
