@@ -87,6 +87,20 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
   })
 
+  it('keeps the changelog registry out of the eager workspace and AgentUsage graphs', () => {
+    for (const entry of ['main.tsx', '../shell/AgentUsage.tsx']) {
+      const graph = eagerGraph(resolve(web, entry))
+      expect(graph.files).toContain(resolve(web, '../extensions/app-public.ts'))
+      expect(graph.files.some(file => file.includes('/.changelog/'))).toBe(false)
+      expect(graph.files).not.toContain(resolve(web, '../changelog/build.ts'))
+    }
+    // The on-demand development manifest still reaches the real registry; production compiles it.
+    const manifest = eagerGraph(resolve(web, '../changelog/build.ts'))
+    expect(manifest.files).toContain(resolve(web, '../../.changelog/registry.generated.ts'))
+    // Workspace stories can warm code without owning the application's virtual build identity.
+    expect(manifest.dependencies).not.toContain('virtual:build-identity')
+  })
+
   it('still reaches the real heavy composition through the on-demand pane', () => {
     const graph = eagerGraph(resolve(web, 'ConversationPane.tsx'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Transcript.tsx'))
