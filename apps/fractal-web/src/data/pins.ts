@@ -36,6 +36,7 @@ export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
     throw new TypeError('Pins require granted arrangements version 2')
   const writable = discovery.capabilities.some((item) => item.id === 'control.arrangements' && item.state === 'granted')
   let closed = false
+  let interrupted = false
   let reading = false
   let dirty = false
   let ready = false
@@ -48,6 +49,7 @@ export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
   const abort = new AbortController()
   const publish = (next: PinsState) => { state = next; if (!closed) onState(next) }
   const fail = (error: unknown) => { ready = false; publish({ ...state, phase: 'unavailable', detail: error instanceof Error ? error.message : String(error) }) }
+  const interrupt = (error: unknown) => { interrupted = true; fail(error) }
   let membershipSubscribed = false
   let pendingRead: Promise<void> | undefined
   const runRead = async (): Promise<void> => {
@@ -84,7 +86,7 @@ export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
             if (cursor !== undefined) seen.add(cursor)
           } while (cursor !== undefined)
         }
-        if (!closed && !dirty) {
+        if (!closed && !dirty && !interrupted) {
           ready = !retired
           publish({ phase: retired ? 'unavailable' : busy ? 'pending' : 'synced', members, ...(retired ? { detail: 'Restoring removed Pins is not available.' } : {}) })
         }
@@ -101,10 +103,10 @@ export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
   try {
     stream = await gateway.collectionStream({
       onFrame: (frame) => {
-        if (frame.kind === 'error') { fail(new Error(frame.message)); return }
+        if (frame.kind === 'error') { interrupt(new Error(frame.message)); return }
         if ((frame.kind === 'snapshot' || frame.kind === 'changes') && (frame.id === 'pins-layout' || frame.id === 'pins-members')) refresh()
       },
-      onEnd: (error) => fail(error ?? new Error('Pins updates disconnected; reopen the Pins follow.')),
+      onEnd: (error) => interrupt(error ?? new Error('Pins updates disconnected; reopen the Pins follow.')),
     })
     stream.subscribeArrangements('pins-layout', selection.owner, 1, selection.subject)
     await read()

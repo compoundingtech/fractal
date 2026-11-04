@@ -627,7 +627,8 @@ read, including changes outside the window. Edits use caller-owned action identi
 and fences, root membership place/remove operations, and no Sidebar folder changes.
 Creation is disabled unless the caller confirms the coordinated v2 reader rollout.
 Incompatible v1 bodies and permanent retirement are refused, not migrated.
-Consumers close and reopen the follow after a socket interruption; failed reads
+Consumers close and reopen the follow after a socket interruption; an HTTP refresh
+cannot restore synced or editable state on an interrupted follow. Failed reads
 retain the last complete members with an unavailable phase. Sidebar rendering is
 independent of this data API.
 

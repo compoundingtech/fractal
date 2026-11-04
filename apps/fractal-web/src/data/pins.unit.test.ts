@@ -9,6 +9,7 @@ const identity = { id: 'action/pin', idempotency_key: 'pins-edit-000001', fence:
 const setup = (absent = false, version = 2, createCode?: 'arrangement-exists' | 'arrangement-retired') => {
   let exists = !absent
   let frame: CollectionStreamOptions['onFrame'] | undefined
+  let end: CollectionStreamOptions['onEnd']
   const actions: Record<string, unknown>[] = []
   const requests: URL[] = []
   const subscribed: unknown[][] = []
@@ -34,11 +35,37 @@ const setup = (absent = false, version = 2, createCode?: 'arrangement-exists' | 
     subscribeArrangements: (...args) => { subscribed.push(args) }, subscribeOrderedMemberships: (...args) => { subscribed.push(args) },
     subscribe: () => {}, subscribeAgent: async () => {}, subscribeAgentsPublication: async () => {}, subscribeGlasses: () => {}, subscribeTerminal: () => {}, subscribeConversation: () => {}, unsubscribe: () => {}, close: () => {},
   }
-  client.collectionStream = async (options) => { frame = options.onFrame; return stream }
-  return { client, states, actions, requests, subscribed, retire: () => { exists = false }, invalidate: () => frame?.({ kind: 'changes', id: 'pins-members', collection: 'ordered-memberships', snapshot, membership: { container: subject, live_count: 2, changed_index: 9 }, upserts: [], removes: [], order: [], has_more: true }) }
+  client.collectionStream = async (options) => { frame = options.onFrame; end = options.onEnd; return stream }
+  return { client, states, actions, requests, subscribed, end: () => end?.(), retire: () => { exists = false }, invalidate: () => frame?.({ kind: 'changes', id: 'pins-members', collection: 'ordered-memberships', snapshot, membership: { container: subject, live_count: 2, changed_index: 9 }, upserts: [], removes: [], order: [], has_more: true }) }
 }
 
 describe('principal ordered Pins', () => {
+  it('keeps a late post-edit HTTP read unavailable after socket end until reopened', async () => {
+    const h = setup()
+    const onState = (state: PinsState) => h.states.push(state)
+    const pins = await followPins({ gateway: h.client, onState })
+    const started = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const get = h.client.arrangementsGet.bind(h.client)
+    h.client.arrangementsGet = async (...args) => { started.resolve(); await release.promise; return get(...args) }
+    const operations = [{ op: 'remove' as const, member: 'agent/example' }]
+    const editing = pins.edit(identity, operations)
+    await started.promise
+    h.end()
+    expect(h.states.at(-1)?.phase).toBe('unavailable')
+    release.resolve()
+    await editing
+    expect(h.states.at(-1)?.phase).toBe('unavailable')
+    await expect(pins.edit(identity, operations)).rejects.toThrow('must be synced')
+    pins.refresh()
+    await expect(pins.edit(identity, operations)).rejects.toThrow('must be synced')
+    pins.close()
+    h.client.arrangementsGet = get
+    const reopened = await followPins({ gateway: h.client, onState })
+    expect(h.states.at(-1)?.phase).toBe('synced')
+    await reopened.edit({ ...identity, id: 'action/reopened', idempotency_key: 'pins-reopened-0001' }, operations)
+    reopened.close()
+  })
   it('uses only the principal reserved identity', () => {
     expect(pinsSelection('person/example/session/device')).toEqual({ owner: 'person/example', subject })
     expect(() => pinsSelection('agent/example')).toThrow('person principal')
