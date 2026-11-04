@@ -663,6 +663,11 @@ needs the same `read.declarations` grant as `publication.definition`. A refusal 
 show this declaration to this device". A published revision never changes, so this read reads
 it directly. It is a `person-read` path.
 
+The mission renderer emits deterministic KDL from `MissionSpec`, not original authored bytes.
+It redacts environment values and embedded declaration KDL. URI edges use stored subjects because
+published revisions do not retain URI locators. Legacy collection loops use their last accepted
+syntax with a `legacy loop shape` comment; the current parser still rejects those shapes.
+
 Today no client reads a declaration: the terminal UI shows one only in the demo, and
 `subject.definition` refuses missions.
 
