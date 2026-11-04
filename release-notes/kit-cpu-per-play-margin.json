@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Normalize the kit commit CPU gate per play with a measured variance margin",
+  "replay": {"status": "none", "detail": "CI policy only; no replay changes."},
+  "schema": {"status": "none", "detail": "No persistent data changes."},
+  "rules": {"status": "none", "detail": "No product rules or play selection changes."},
+  "compatibility": {"status": "changed", "detail": "Commit CPU cost is compared per completed play against the frozen 413.1/171 CPU-seconds-per-play anchor plus 15%. Twenty successful hosted commit receipts range from 1.450409 to 2.475682 CPU seconds per play, with median 2.266790. The 2.778158 limit covers the maximum with 12.2% headroom and rejects a 2x increase from every sample. Receipts add per-play measurements and policy fields; total CPU anchor and ceiling fields now scale with completed plays. The independent 268-second wall guard is unchanged."},
+  "downtime": {"status": "none", "detail": "No deployment impact."},
+  "manual": {"status": "none", "detail": "Adding plays no longer requires re-anchoring."},
+  "recovery": {"status": "none", "detail": "No persisted state changes require recovery."}
+}

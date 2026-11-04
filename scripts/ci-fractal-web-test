@@ -624,6 +624,8 @@ usage_story = ["apps/fractal-web/src/monitor/UsagePane.stories.tsx", "apps/fract
 assert detector_kit_paths(usage_story) == usage_story, "the Usage story and its production data closure select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/web/subagentThreadFocus.ts", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
+pins_closure = ["apps/fractal-web/src/data/pins.ts", "apps/fractal-web/src/data/sidebarPins.ts"]
+assert detector_kit_paths(pins_closure) == pins_closure, "the workspace sidebar bundles the ordered Pins binding"
 embed_closure = ["apps/fractal-web/src/embed/Embed.stories.tsx", "apps/fractal-web/src/embed/Embed.tsx", "apps/fractal-web/src/embed/captures/provenance.json", "apps/fractal-web/src/state/storageAdapter.ts"]
 assert detector_kit_paths(embed_closure) == embed_closure, "the product embed story and its nested fixtures select kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
