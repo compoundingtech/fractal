@@ -1584,6 +1584,89 @@ fn a_harness_cannot_act_as_another_agent() {
 }
 
 #[test]
+fn execution_actor_options_parse_and_fail_closed() {
+    for (path, tail) in [
+        (["changes", "sync"], vec!["--repository", "fixture/garden"]),
+        (["missions", "check"], vec!["mission.kdl"]),
+        (["gate", "cargo-test"], vec!["fixture", "--package", "fixture"]),
+    ] {
+        for actor in ["agent/example/caller", "agent/example/peer", "person/operator"] {
+            let mut argv = vec!["fractal", path[0], path[1], "--as", actor];
+            argv.extend(tail.iter().copied());
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert_eq!(
+                guard_mutating_cli_actor(&cli.command, Some("agent/example/caller"), None).is_ok(),
+                actor == "agent/example/caller",
+            );
+            match cli.command {
+                Command::Changes(change_cli::ChangesArgs {
+                    command: change_cli::ChangesCommand::Sync { actor: value, .. },
+                }) | Command::Gate {
+                    command: GateCommand::CargoTest { actor: value, .. },
+                } => assert_eq!(value.as_deref(), Some(actor)),
+                Command::Missions { command: MissionViewCommand::Check(args) } => {
+                    assert_eq!(args.actor.as_deref(), Some(actor));
+                }
+                _ => panic!("unexpected execution command"),
+            }
+        }
+        let mut argv = vec!["fractal", path[0], path[1]];
+        argv.extend(tail);
+        assert!(Cli::try_parse_from(argv).is_ok(), "the actor remains optional");
+    }
+}
+
+#[tokio::test]
+async fn execution_requests_carry_actor_without_changing_the_work() {
+    use axum::{Json, Router, http::HeaderMap};
+    for actor in ["person/operator", "agent/example/caller"] {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("execution.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let app = Router::new()
+            .route("/v1/client/changes/sync", axum::routing::post(
+                move |headers: HeaderMap, Json(body): Json<Value>| async move {
+                    assert_eq!(headers["x-st3-person"], actor);
+                    assert_eq!(body, json!({"repository": "fixture/garden"}));
+                    Json(json!({"api_version": "st3.v1", "value": {}}))
+                },
+            ))
+            .route("/v1/gate-checks", axum::routing::post(
+                move |headers: HeaderMap, Json(body): Json<Value>| async move {
+                    assert_eq!(headers["x-st3-person"], actor);
+                    assert_eq!(body["intent"]["kdl"], "// fixture");
+                    assert_eq!(body["inputs"], json!({"revision": "fixture"}));
+                    Json(json!({"api_version": "st3.v1", "value": {"id": "fixture", "host": "fixture", "finished": true, "gates": []}}))
+                },
+            ));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let endpoint = Endpoint::DiscoveredUnix(fractal_client::UnixSocketDiscovery::Defaults {
+            runtime: socket.clone(),
+            published: socket.clone(),
+        });
+        let client = execution_client(&endpoint, actor.into()).unwrap();
+        assert!(matches!(&client.endpoint, Endpoint::DiscoveredUnix(
+            fractal_client::UnixSocketDiscovery::Defaults { runtime, published }
+        ) if runtime == &socket && published == &socket));
+        change_cli::run(&client, change_cli::ChangesArgs {
+            command: change_cli::ChangesCommand::Sync {
+                actor: Some(actor.into()), repository: "fixture/garden".into(),
+            },
+        }, true).await.unwrap();
+        let file = directory.path().join("mission.kdl");
+        std::fs::write(&file, "// fixture").unwrap();
+        run_mission_view(&cli_client(&endpoint), &endpoint, MissionViewCommand::Check(
+            MissionCheckArgs {
+                actor: Some(actor.into()), file, workspace: directory.path().into(),
+                inputs: vec![("revision".into(), "fixture".into())],
+            },
+        ), true).await.unwrap();
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[test]
 fn mission_start_requires_an_explicit_actor() {
     assert!(Cli::try_parse_from(["st3", "missions", "start", "mission/demo"]).is_err());
 }

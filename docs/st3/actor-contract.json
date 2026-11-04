@@ -436,10 +436,10 @@
         "ignores_actor": false
       },
       "st changes sync": {
-        "actor": "none",
-        "accepts_person": false,
+        "actor": "optional",
+        "accepts_person": true,
         "can_carry_person": true,
-        "as_role": "none",
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -1030,10 +1030,10 @@
         "ignores_actor": false
       },
       "st gate cargo-test": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
@@ -1417,10 +1417,10 @@
         "ignores_actor": false
       },
       "st missions check": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
