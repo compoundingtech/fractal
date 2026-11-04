@@ -75,7 +75,7 @@ pub enum Hit {
     Field(usize),
     /// Revoke a paired device (after a confirmation).
     Revoke(String),
-    /// Attach the focused terminal tab, as Ctrl+].
+    /// Attach the focused terminal tab, as Enter on a detached terminal pane.
     Attach,
     /// Leave the terminal view.
     Detach,
@@ -152,7 +152,7 @@ impl DocExt for Doc {
                 column += 2;
             }
             let key_text = format!(" {key} ");
-            let label_text = format!("{label} ");
+            let label_text = format!(" {label} ");
             let width = (text::width(&key_text) + text::width(&label_text)) as u16;
             spans.push(Span::styled(
                 key_text,
@@ -240,6 +240,29 @@ pub fn meter(done: usize, total: usize, cells: usize, color: Color) -> Vec<Span<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buttons_separate_keycaps_and_labels_and_include_the_gap_in_targets() {
+        let mut doc = Doc::new();
+        doc.buttons(&[
+            ("a", "Choose an answer", Hit::Key('a'), theme::ACCENT),
+            ("Esc", "Cancel", Hit::Escape, theme::OVERLAY1),
+        ]);
+        assert_eq!(doc.lines[0].to_string(), " a  Choose an answer    Esc  Cancel ");
+        assert_eq!(doc.lines[0].spans[1].content, " Choose an answer ");
+        assert_eq!(doc.targets[0].column, 0);
+        assert_eq!(doc.targets[0].width, 21);
+        assert_eq!(doc.targets[1].column, 23);
+        assert_eq!(doc.targets[1].width, 13);
+        let gap = 3;
+        assert_eq!(
+            doc.targets
+                .iter()
+                .find(|target| gap >= target.column && gap < target.column + target.width)
+                .map(|target| &target.hit),
+            Some(&Hit::Key('a'))
+        );
+    }
 
     #[test]
     fn card_lines_have_one_width_and_targets_move_inside_the_frame() {

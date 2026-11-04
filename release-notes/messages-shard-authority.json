@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Named shard stores take their fleet from the default store, sign envelopes in a domain that names the shard, and replicate beside it; a peer that refuses a shard parks that route",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or cache changes; nothing is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, view, trigger or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The default store signs, verifies and admits envelopes exactly as before. A named shard, which no daemon opens yet, signs st3-shard-envelope-v1 over its shard ID. It admits a keyed member's envelope only with a signature in that domain by a key of one of the writer's non-removed incarnations in the default store's membership, and judges a writer without membership as the default store does."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, client or stored-format change for the default store, and no daemon opens a shard in this release. The replication listener can answer exchanges for named shards it is given, and the dialer parks a route whose peer refuses an exchange with shard-mismatch instead of retrying it; neither path is reachable until a later release opens the messages shard."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back to the previous release is safe: nothing this release adds is written or read by the default store."
+  }
+}

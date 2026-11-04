@@ -45,6 +45,25 @@ pub struct RenameReplication {
     pub frontier: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RenameProofExportRequest {
+    pub name: String,
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub include_co_batched_claims: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FleetAnchor {
+    pub fleet_anchor: String,
+}
+
+#[derive(Deserialize)]
+struct NativeValue<T> {
+    value: T,
+}
+
 // Native routes use the st3.v1 value envelope, not the client-v0 snapshot envelope.
 #[derive(Deserialize)]
 struct RenameResponse {
@@ -52,6 +71,29 @@ struct RenameResponse {
 }
 
 impl Client {
+    /// Export the exact signed evidence, preserving the versioned bundle's wire shape.
+    pub async fn agent_rename_proof_export(
+        &self,
+        request: &RenameProofExportRequest,
+    ) -> Result<serde_json::Value, ClientError> {
+        Ok(self.post::<NativeValue<serde_json::Value>>(
+            "/v1/agents/rename-id/proof/export", request,
+        ).await?.value)
+    }
+
+    pub async fn mission_rename_proof_export(
+        &self,
+        request: &RenameProofExportRequest,
+    ) -> Result<serde_json::Value, ClientError> {
+        Ok(self.post::<NativeValue<serde_json::Value>>(
+            "/v1/missions/rename-id/proof/export", request,
+        ).await?.value)
+    }
+
+    pub async fn fleet_anchor(&self) -> Result<FleetAnchor, ClientError> {
+        Ok(self.get::<NativeValue<FleetAnchor>>("/v1/fleet/anchor").await?.value)
+    }
+
     pub async fn agent_rename_id(&self, request: &RenameRequest) -> Result<RenameReceipt, ClientError> {
         Ok(self.post::<RenameResponse>("/v1/agents/rename-id", request).await?.value)
     }
@@ -64,6 +106,27 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proof_export_preserves_revision_tokens_and_native_bundle_envelope() {
+        let request: RenameProofExportRequest = serde_json::from_value(serde_json::json!({
+            "name": "agent/example-storage",
+            "revision": "claim/exact-revision",
+        })).unwrap();
+        assert_eq!(request.revision.as_deref(), Some("claim/exact-revision"));
+        assert!(!request.include_co_batched_claims);
+        assert_eq!(serde_json::to_value(&request).unwrap()["name"], "agent/example-storage");
+        let response: NativeValue<serde_json::Value> = serde_json::from_value(serde_json::json!({
+            "api_version": "st3.v1",
+            "value": { "schema": "fractal.rename-proof.v1", "envelopes": [] },
+        })).unwrap();
+        assert_eq!(response.value["schema"], "fractal.rename-proof.v1");
+        let anchor: NativeValue<FleetAnchor> = serde_json::from_value(serde_json::json!({
+            "api_version": "st3.v1",
+            "value": { "fleet_anchor": "caller-distributed-anchor" },
+        })).unwrap();
+        assert_eq!(anchor.value.fleet_anchor, "caller-distributed-anchor");
+    }
 
     #[test]
     fn request_optional_fences_and_full_ids_round_trip() {

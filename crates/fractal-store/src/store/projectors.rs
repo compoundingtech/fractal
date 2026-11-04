@@ -73,7 +73,7 @@ pub const APPEND: &[AppendProjector] = &[
     },
     AppendProjector {
         name: "resources",
-        takes: Takes::Kinds(&["resource.observed"]),
+        takes: Takes::Kinds(&["resource.observed", fractal_schema::github_plugin::ITEM_STATE]),
         project: |transaction, claim| resources::refresh(transaction, &claim.subject),
     },
     AppendProjector {
@@ -183,8 +183,10 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/flush", run: publication_facts::reset },
 ];
 
+/// Run each hook in order. Inside a staged writer lend each is its own stage, named after it, so
+/// a long hold says which domain's catch-up it spent its time in.
 pub fn run_hooks(hooks: &[Hook], transaction: &Transaction<'_>) -> Result<()> {
-    hooks.iter().try_for_each(|hook| (hook.run)(transaction))
+    hooks.iter().try_for_each(|hook| holds::stage(hook.name, || (hook.run)(transaction)))
 }
 
 /// Run each projector that takes `claim`'s kind, in the registry's order.

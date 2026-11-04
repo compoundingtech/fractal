@@ -27,6 +27,7 @@ const SCREEN: &[u8] = b"the worker's screen";
 
 pub(crate) fn state(root: &Path) -> AppState {
     AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("attach-node").unwrap()),
         notify: Arc::new(Notify::new()),

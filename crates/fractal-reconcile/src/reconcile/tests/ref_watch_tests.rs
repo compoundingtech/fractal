@@ -348,20 +348,26 @@ async fn watched_ref_discards_inflight_results_even_after_cadence_returns_to_def
         tokio::time::advance(Duration::from_secs(31)).await;
         for _ in 0..10 { tokio::task::yield_now().await; }
     }
-    let mut requests = std::mem::take(&mut *provider.0.lock().unwrap());
-    assert_eq!(requests.len(), 3);
+    // One look runs per observer: the first arm's look is in flight, and the arms that
+    // retired it wait for it rather than polling beside it.
+    let requests = std::mem::take(&mut *provider.0.lock().unwrap());
+    assert_eq!(requests.len(), 1);
     let observation = |head: &str| crate::resource::ProviderObservation {
         facts: serde_json::json!({"head":head}),
         cursor: Some(head.into()),
         next_check_unix_ms: now_ms() + 300_000,
     };
-    requests.pop().unwrap().send(observation("newest")).unwrap();
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
+    // The retired look's result is discarded, and only then does the current arm look.
     for request in requests {
         request.send(observation("stale")).unwrap();
     }
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(store.latest_actual_value("resource/ref").unwrap().is_none(), "a retired look recorded");
+    let mut requests = std::mem::take(&mut *provider.0.lock().unwrap());
+    assert_eq!(requests.len(), 1, "the current arm looks once the retired look ends");
+    requests.pop().unwrap().send(observation("newest")).unwrap();
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }

@@ -702,7 +702,7 @@ fn has_git_marker(workspace: &Path) -> bool {
 fn git_exclude(workspace: &Path, line: &str) -> Result<bool> {
     // A failed `git rev-parse` costs a process spawn per op per pass. On catalogs whose
     // workspaces are plain directories this repeats every reconcile (measured live: ~28 spawns
-    // plus stderr captures per pass on dev3). The marker probe answers "not a repo" for free;
+    // plus stderr captures per pass on a loaded host). The marker probe answers "not a repo" for free;
     // `.git` may be a directory or a file (linked worktrees), which `exists` covers either way.
     if !has_git_marker(workspace) {
         anyhow::bail!(

@@ -35,6 +35,7 @@ async fn provider_incarnation(
         })
         .unwrap();
     let state = AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),

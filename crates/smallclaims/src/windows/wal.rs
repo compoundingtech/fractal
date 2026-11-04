@@ -29,6 +29,19 @@ struct Wal {
     bytes: Option<u64>,
     /// When checkpoints started being deferred or failing, unbroken since.
     deferred_since_unix_ms: Option<u128>,
+    /// Restarts the recycle escalated to since the daemon started, and the newest.
+    escalations: u64,
+    last_escalation: Option<Escalation>,
+}
+
+/// One restart the recycle escalated to: when, the frames it found, how long it held the writer
+/// (none when it never took it), and whether the WAL restarted.
+#[derive(Clone, Copy, Debug)]
+struct Escalation {
+    at_unix_ms: u128,
+    frames: i32,
+    held_ms: Option<u128>,
+    restarted: bool,
 }
 
 static WAL: Mutex<Wal> = Mutex::new(Wal {
@@ -36,6 +49,8 @@ static WAL: Mutex<Wal> = Mutex::new(Wal {
     report: None,
     bytes: None,
     deferred_since_unix_ms: None,
+    escalations: 0,
+    last_escalation: None,
 });
 
 fn unix_ms() -> u128 {
@@ -62,6 +77,29 @@ impl Wal {
             recycled: report.recycled,
         });
         self.bytes = bytes;
+    }
+
+    fn escalated(&mut self, at: u128, report: &WalCheckpointReport) {
+        self.escalations += 1;
+        self.last_escalation = Some(Escalation {
+            at_unix_ms: at,
+            frames: report.frames,
+            held_ms: report.truncate_ms,
+            restarted: report.recycled,
+        });
+    }
+
+    fn escalations(&self, now: u128) -> Value {
+        json!({
+            "count": self.escalations,
+            "last": self.last_escalation.map(|last| json!({
+                "at_unix_ms": last.at_unix_ms,
+                "age_ms": now.saturating_sub(last.at_unix_ms),
+                "frames": last.frames,
+                "held_ms": last.held_ms,
+                "restarted": last.restarted,
+            })),
+        })
     }
 
     fn report(&self, now: u128) -> Value {
@@ -93,6 +131,7 @@ impl Wal {
             "wal_bytes": self.bytes,
             "deferred_since_unix_ms": self.deferred_since_unix_ms,
             "deferred_ms": self.deferred_since_unix_ms.map(|since| now.saturating_sub(since)),
+            "escalations": self.escalations(now),
         })
     }
 }
@@ -102,6 +141,20 @@ pub fn observe(report: Option<&WalCheckpointReport>, bytes: Option<u64>) {
     WAL.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .observe(unix_ms(), report, bytes);
+}
+
+/// Note a restart the recycle escalated to.
+pub fn escalated(report: &WalCheckpointReport) {
+    WAL.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .escalated(unix_ms(), report);
+}
+
+/// How many restarts the recycle escalated to since the daemon started, and the newest.
+pub fn escalations() -> Value {
+    WAL.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .escalations(unix_ms())
 }
 
 /// The newest observation and how long checkpoints have been deferred; null before any.
@@ -157,5 +210,22 @@ mod tests {
         let settled = wal.report(21_000);
         assert_eq!(settled["checkpoint"]["outcome"], "recycled");
         assert_eq!(settled["deferred_ms"], Value::Null);
+    }
+
+    #[test]
+    fn each_escalation_counts_and_the_newest_says_what_it_held() {
+        let mut wal = Wal::default();
+        assert_eq!(wal.escalations(1_000), json!({"count": 0, "last": null}));
+        let restart = |frames, held_ms, recycled| WalCheckpointReport {
+            truncate_ms: held_ms,
+            ..checkpoint(frames, frames, recycled)
+        };
+        wal.escalated(2_000, &restart(300_000, None, false));
+        wal.escalated(7_000, &restart(310_000, Some(42), true));
+        let escalations = wal.escalations(9_000);
+        assert_eq!(escalations["count"], 2);
+        assert_eq!(escalations["last"], json!({"at_unix_ms": 7_000, "age_ms": 2_000, "frames": 310_000, "held_ms": 42, "restarted": true}));
+        wal.observe(9_000, Some(&checkpoint(0, 0, false)), Some(0));
+        assert_eq!(wal.report(9_000)["escalations"]["count"], 2, "the checkpoint report carries them");
     }
 }

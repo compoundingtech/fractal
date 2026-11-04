@@ -61,6 +61,8 @@ pub(super) async fn run(start: Start) -> Result<PreparedSetup> {
         );
     }
 
+    // Where agents work, and so where a harness's sign-in handover starts; resolved once.
+    let work_root = start.config.work_root();
     let shared = Mutex::new(Result_::default());
     let config = Mutex::new(start.config.clone());
     let executable = std::env::current_exe()?;
@@ -70,7 +72,10 @@ pub(super) async fn run(start: Start) -> Result<PreparedSetup> {
             validate_name(value, field == Field::Machine).map_err(|error| error.to_string())
         },
         |run, reporter| work(&start, &shared, &config, &executable, run, reporter),
-        hand_over,
+        |id: &str| match &work_root {
+            Ok(root) => hand_over(id, root),
+            Err(error) => Err(format!("the work folder cannot be used: {error:#}")),
+        },
         &|| {
             fractal_daemon::environment::refresh();
             fractal_daemon::environment::snapshot()
@@ -362,35 +367,107 @@ fn needs_you(state: Signin) -> bool {
     state.first_run == Tri::No || state.signed_in == Tri::No
 }
 
-fn sign_in_words(id: &str) -> &'static str {
-    match id {
-        "claude" => "Claude is installed, but its first launch or sign-in is not finished. Run claude in your own terminal, pick a theme and sign in, then retry.",
-        "codex" => "Codex is installed, but not signed in. Run codex login in your own terminal, then retry.",
-        _ => "OpenCode is installed, but not signed in. Run opencode auth login in your own terminal, then retry.",
+/// What setup says when a harness is installed but still not signed in after the handover.
+///
+/// For an instance the sign-in belongs to the instance's own Claude, Codex or OpenCode account, so
+/// a plain `claude` or `codex login` typed in the person's own terminal would sign in their
+/// default account and leave this check unsatisfied: the words name setup's own retry instead.
+/// Without an instance the harness's own command in the person's terminal is the right one.
+fn sign_in_words(id: &str, instance: Option<&str>) -> String {
+    let (name, command) = match id {
+        "claude" => ("Claude", "claude"),
+        "codex" => ("Codex", "codex login"),
+        _ => ("OpenCode", "opencode auth login"),
+    };
+    match (instance, id) {
+        (Some(instance), "claude") => format!(
+            "{name} is installed, but its sign-in is not finished for this instance. Run fractal --instance {instance} setup to try the sign-in again."
+        ),
+        (Some(instance), _) => format!(
+            "{name} is installed, but not signed in for this instance. Run fractal --instance {instance} setup to try the sign-in again."
+        ),
+        (None, "claude") => format!(
+            "{name} is installed, but its first launch or sign-in is not finished. Run {command} in your own terminal, sign in, then retry."
+        ),
+        (None, _) => format!("{name} is installed, but not signed in. Run {command} in your own terminal, then retry."),
     }
 }
 
-/// Run a harness's own first launch in this terminal, so the person can finish it, and return
-/// when they leave it.
-fn hand_over(id: &str) -> Result<(), String> {
+/// Run a harness's own first launch in this terminal, so the person can sign in, and return when
+/// they leave it. The harness starts in the work folder, never in the folder setup was run from
+/// (usually the home folder), and its own first-run state is written first, so its first screen is
+/// the sign-in and not a theme chooser or a trust question (see [`admit_handover_folder`]).
+fn hand_over(id: &str, work_root: &Path) -> Result<(), String> {
     let environment = fractal_daemon::environment::snapshot().map_err(|error| format!("{error:#}"))?;
     let program = fractal_runtime::resolve_executable(id, &environment).map_err(|error| format!("{error:#}"))?;
-    let (arguments, note): (&[&str], &str) = match id {
-        "claude" => (
+    let Some((arguments, note)) = handover_plan(id) else {
+        return Ok(());
+    };
+    let work = admit_handover_folder(id, &environment, &home(&environment), work_root)?;
+    println!("\n{note}\n");
+    start_handover(&program, arguments, &environment, &work)
+}
+
+/// What each harness's sign-in handover runs, and what setup says before it.
+fn handover_plan(id: &str) -> Option<(&'static [&'static str], &'static str)> {
+    match id {
+        "claude" => Some((
             &[],
-            "Claude is starting so you can pick a theme and sign in. Leave it with /exit when you are done, and setup carries on.",
-        ),
-        "codex" => (&["login"], "Codex is asking you to sign in. Setup carries on when it finishes."),
-        "opencode" => (
+            "Claude is starting so you can sign in. Leave it with /exit when you are done, and setup carries on.",
+        )),
+        "codex" => Some((&["login"], "Codex is asking you to sign in. Setup carries on when it finishes.")),
+        "opencode" => Some((
             &["auth", "login"],
             "OpenCode is asking you to sign in. Setup carries on when it finishes.",
-        ),
-        _ => return Ok(()),
-    };
-    println!("\n{note}\n");
+        )),
+        _ => None,
+    }
+}
+
+/// Make the work folder exist and write the first-run state Claude and Codex read at their first
+/// start, in the config the harness will read (the one in `environment`, which is the instance's
+/// own for an instance and the person's own otherwise): Claude's onboarding flag and the folder's
+/// trust, Codex's trust entry. The writers keep their rules: only absent keys, idempotent, and no
+/// login or key file is read or written. Returns the folder as the harness will see it.
+fn admit_handover_folder(
+    id: &str,
+    environment: &BTreeMap<String, String>,
+    home: &Path,
+    work_root: &Path,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(work_root)
+        .map_err(|error| format!("could not create the work folder {}: {error}", work_root.display()))?;
+    let work = std::fs::canonicalize(work_root)
+        .map_err(|error| format!("could not resolve the work folder {}: {error}", work_root.display()))?;
+    let variable = |name: &str| environment.get(name).filter(|value| !value.is_empty()).map(PathBuf::from);
+    match id {
+        "claude" => {
+            let config = variable("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.to_path_buf()).join(".claude.json");
+            fractal_drivers::pretrust::pretrust_at(&config, std::slice::from_ref(&work))
+                .map(drop)
+                .map_err(|error| format!("could not prepare Claude's first start: {error:#}"))?;
+        }
+        "codex" => {
+            let config = variable("CODEX_HOME").unwrap_or_else(|| home.join(".codex")).join("config.toml");
+            fractal_drivers::pretrust::pretrust_codex_at(&config, std::slice::from_ref(&work))
+                .map(drop)
+                .map_err(|error| format!("could not prepare Codex's first start: {error:#}"))?;
+        }
+        _ => {}
+    }
+    Ok(work)
+}
+
+/// Run the handover program with the login shell's environment, in `work`, until the person leaves it.
+fn start_handover(
+    program: &Path,
+    arguments: &[&str],
+    environment: &BTreeMap<String, String>,
+    work: &Path,
+) -> Result<(), String> {
     let mut command = Command::new(program);
-    command.args(arguments);
-    for (name, value) in &environment {
+    command.args(arguments).current_dir(work);
+    for (name, value) in environment {
         // The terminal in front of the person describes itself better than a login shell does.
         if !matches!(name.as_str(), "TERM" | "COLUMNS" | "LINES") {
             command.env(name, value);
@@ -399,7 +476,7 @@ fn hand_over(id: &str) -> Result<(), String> {
     command
         .status()
         .map(|_| ())
-        .map_err(|error| format!("could not start {id}: {error}"))
+        .map_err(|error| format!("could not start {}: {error}", program.display()))
 }
 
 /// Start a program with `--version` and say what it answered; a program that cannot start is the
@@ -626,7 +703,7 @@ fn set_up_row(id: &str, executable: &Path, reporter: &Reporter) -> Outcome {
     facts.signed_in = state.signed_in;
     reporter.facts(id, facts);
     if needs_you(state) {
-        Outcome::NeedsLogin(sign_in_words(id).into())
+        Outcome::NeedsLogin(sign_in_words(id, fractal_daemon::instance::current().as_ref().map(|instance| instance.name())))
     } else {
         let tail = match state.signed_in {
             Tri::Yes => " You are signed in.",
@@ -748,5 +825,162 @@ mod tests {
         std::fs::set_permissions(&good, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         assert_eq!(starts(&good, &BTreeMap::new()).unwrap(), "good 2.5");
         assert!(starts(&home.path().join("absent"), &BTreeMap::new()).unwrap_err().contains("could not be started"));
+    }
+
+    /// A person's own default folders, with files that only they would write.
+    fn default_folders(home: &Path) -> (Vec<u8>, Vec<u8>) {
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".claude/settings.json"), b"{\"note\":\"Avery's own Claude settings\"}").unwrap();
+        std::fs::write(home.join(".codex/config.toml"), b"# Avery's own Codex config\n").unwrap();
+        (
+            std::fs::read(home.join(".claude/settings.json")).unwrap(),
+            std::fs::read(home.join(".codex/config.toml")).unwrap(),
+        )
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn the_claude_handover_writes_first_run_state_in_the_instance_config_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let (settings, _) = default_folders(&home);
+        let instance = tmp.path().join("instance");
+        let work_root = instance.join("work");
+        let mut env = environment(&home);
+        env.insert("CLAUDE_CONFIG_DIR".into(), instance.join("claude").display().to_string());
+
+        let work = admit_handover_folder("claude", &env, &home, &work_root).unwrap();
+
+        assert_eq!(work, std::fs::canonicalize(&work_root).unwrap(), "the work folder was not created");
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(instance.join("claude/.claude.json")).unwrap()).unwrap();
+        assert_eq!(config["hasCompletedOnboarding"], true);
+        assert_eq!(config["projects"][work.to_str().unwrap()]["hasTrustDialogAccepted"], true);
+        assert!(config.get("oauthAccount").is_none(), "setup must not write a login");
+        // The person's default Claude folder and config are untouched.
+        assert_eq!(std::fs::read(home.join(".claude/settings.json")).unwrap(), settings);
+        assert_eq!(listing(&home.join(".claude")), ["settings.json"]);
+        assert!(!home.join(".claude.json").exists(), "the default ~/.claude.json was written");
+        // A second preparation changes nothing.
+        let first = std::fs::read(instance.join("claude/.claude.json")).unwrap();
+        admit_handover_folder("claude", &env, &home, &work_root).unwrap();
+        assert_eq!(std::fs::read(instance.join("claude/.claude.json")).unwrap(), first);
+    }
+
+    #[test]
+    fn the_codex_handover_trusts_the_work_folder_in_the_instance_codex_home_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let (_, codex) = default_folders(&home);
+        let instance = tmp.path().join("instance");
+        let work_root = instance.join("work");
+        let mut env = environment(&home);
+        env.insert("CODEX_HOME".into(), instance.join("codex").display().to_string());
+
+        let work = admit_handover_folder("codex", &env, &home, &work_root).unwrap();
+
+        let written = std::fs::read_to_string(instance.join("codex/config.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&written).unwrap();
+        assert_eq!(parsed["projects"][work.to_str().unwrap()]["trust_level"].as_str(), Some("trusted"));
+        assert_eq!(listing(&instance.join("codex")), ["config.toml"], "a login file was created");
+        // The person's default Codex folder is untouched.
+        assert_eq!(std::fs::read(home.join(".codex/config.toml")).unwrap(), codex);
+        assert_eq!(listing(&home.join(".codex")), ["config.toml"]);
+        // A second preparation changes nothing.
+        admit_handover_folder("codex", &env, &home, &work_root).unwrap();
+        assert_eq!(std::fs::read_to_string(instance.join("codex/config.toml")).unwrap(), written);
+    }
+
+    #[test]
+    fn a_harness_with_no_first_run_state_to_write_still_gets_the_work_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let work_root = tmp.path().join("work");
+
+        let work = admit_handover_folder("opencode", &environment(&home), &home, &work_root).unwrap();
+
+        assert_eq!(work, std::fs::canonicalize(&work_root).unwrap());
+        assert_eq!(listing(&home), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_handover_starts_in_the_work_folder_after_the_state_is_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        default_folders(&home);
+        let instance = tmp.path().join("instance");
+        let mut env = environment(&home);
+        env.insert("CLAUDE_CONFIG_DIR".into(), instance.join("claude").display().to_string());
+        // Stands in for `claude`: records where it started and what its config held at that moment.
+        let program = tmp.path().join("claude");
+        let seen = tmp.path().join("seen");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\npwd -P > '{seen}.cwd'\ncp \"$CLAUDE_CONFIG_DIR/.claude.json\" '{seen}.config'\n",
+                seen = seen.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let work = admit_handover_folder("claude", &env, &home, &instance.join("work")).unwrap();
+        start_handover(&program, &[], &env, &work).unwrap();
+
+        let started_in = std::fs::read_to_string(format!("{}.cwd", seen.display())).unwrap();
+        assert_eq!(Path::new(started_in.trim()), work, "the handover did not start in the work folder");
+        assert_ne!(Path::new(started_in.trim()), std::fs::canonicalize(&home).unwrap());
+        let held: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(format!("{}.config", seen.display())).unwrap()).unwrap();
+        assert_eq!(held["hasCompletedOnboarding"], true, "the state was not written before the handover");
+    }
+
+    #[test]
+    fn the_handover_words_ask_only_for_a_sign_in() {
+        let (arguments, note) = handover_plan("claude").unwrap();
+        assert!(arguments.is_empty());
+        assert!(note.contains("sign in"), "{note}");
+        assert!(!note.to_lowercase().contains("theme"), "{note}");
+        assert_eq!(handover_plan("codex").unwrap().0, ["login"]);
+        assert_eq!(handover_plan("opencode").unwrap().0, ["auth", "login"]);
+        assert!(handover_plan("pi").is_none());
+    }
+
+    #[test]
+    fn an_instances_closing_words_name_setups_retry_and_never_the_default_folders() {
+        for id in ["claude", "codex", "opencode"] {
+            let words = sign_in_words(id, Some("trial"));
+            assert!(words.contains("fractal --instance trial setup"), "{id}: {words}");
+            assert!(!words.to_lowercase().contains("theme"), "{id}: {words}");
+            // A plain harness command in the person's terminal would sign in their default account.
+            assert!(!words.contains("your own terminal"), "{id}: {words}");
+            assert!(!words.contains("Run claude") && !words.contains("Run codex") && !words.contains("Run opencode"), "{id}: {words}");
+        }
+        assert!(sign_in_words("claude", Some("trial")).starts_with("Claude is installed"));
+        assert!(sign_in_words("codex", Some("trial")).starts_with("Codex is installed"));
+        assert!(sign_in_words("opencode", Some("trial")).starts_with("OpenCode is installed"));
+    }
+
+    #[test]
+    fn without_an_instance_the_closing_words_name_the_harness_command_in_the_persons_terminal() {
+        let claude = sign_in_words("claude", None);
+        assert!(claude.contains("Run claude in your own terminal"), "{claude}");
+        assert!(!claude.to_lowercase().contains("theme"), "no theme to pick once the first-run state is written: {claude}");
+        assert!(sign_in_words("codex", None).contains("Run codex login in your own terminal"));
+        assert!(sign_in_words("opencode", None).contains("Run opencode auth login in your own terminal"));
+        for id in ["claude", "codex", "opencode"] {
+            assert!(!sign_in_words(id, None).contains("--instance"), "{id}");
+        }
     }
 }

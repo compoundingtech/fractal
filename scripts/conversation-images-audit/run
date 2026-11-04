@@ -39,8 +39,10 @@ st() { on garden-host "$home" "$instance" "$@"; }
 st_pond() { on pond-host "$audit/home-pond" images-audit-pond "$@"; }
 on() {
   local host="$1" at="$2" name="$3"; shift 3
+  local exec_worker=()
+  if [[ "${1:-}" == replication-worker ]]; then exec_worker=(exec); fi
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  env -i HOME="$at" PATH="$audit/tools:$(dirname "$(command -v ls)"):/usr/bin:/bin" USER="$(id -un)" \
+  "${exec_worker[@]}" env -i HOME="$at" PATH="$audit/tools:$(dirname "$(command -v ls)"):/usr/bin:/bin" USER="$(id -un)" \
     LANG=C.UTF-8 SHELL=/bin/sh HOSTNAME="$host" FRACTAL_PERSON="$person" ST3_PERSON="$person" FRACTAL_WORKER_INTERVAL_MS=300 ST3_WORKER_INTERVAL_MS=300 \
     "$audit/tools/st3" --instance "$name" "$@"
 }
@@ -72,8 +74,8 @@ up() {
   # A fleet of one on loopback, so a second host can join it for the remote image case.
   st fleet create --no-service --name garden --port 47811 --transports loopback --advertise-loopback \
     >"$audit/fleet-create.txt" 2>&1 || { cat "$audit/fleet-create.txt"; exit 1; }
-  st up >"$audit/daemon.log" 2>&1 &
   st replication-worker >"$audit/worker.log" 2>&1 &
+  st up --replication-worker-pid "$!" >"$audit/daemon.log" 2>&1 &
   for _ in $(seq 1 120); do
     st --daemon-wait 0 agents ls >/dev/null 2>&1 && break
     sleep 0.5
@@ -216,8 +218,8 @@ pond() {
   code="$(st fleet invite pond --code-only --via loopback --as "$person")"
   st_pond fleet join "$code" --no-service --name pond --port 47812 --transports loopback --advertise-loopback \
     >"$audit/fleet-join.txt" 2>&1 || { cat "$audit/fleet-join.txt"; exit 1; }
-  st_pond up >"$audit/daemon-pond.log" 2>&1 &
   st_pond replication-worker >"$audit/worker-pond.log" 2>&1 &
+  st_pond up --replication-worker-pid "$!" >"$audit/daemon-pond.log" 2>&1 &
   st_pond fleet wait --timeout 90s >"$audit/fleet-wait.txt" 2>&1 || { cat "$audit/fleet-wait.txt"; exit 1; }
   st_pond conversations send agent/example/gardener --from "$person" --body 'the far pond, from the other host' \
     --attach "$images/far.png" >"$audit/case-pond-send.txt" 2>&1 || { cat "$audit/case-pond-send.txt"; exit 1; }

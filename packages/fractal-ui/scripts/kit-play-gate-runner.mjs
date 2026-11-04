@@ -200,6 +200,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
           console.log(JSON.stringify(row))
         }
       }
+      return row
     }
     const results = await Promise.allSettled(Array.from({ length: workers }, async (_, workerId) => {
       const worker = await createIsolatedKitWorker(browser, base, { workerId })
@@ -207,8 +208,9 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
       try {
         while (nextCase < cases.length) {
           const currentCase = cases[nextCase++]
-          await runCase(worker, workerId, previousCase, currentCase)
-          previousCase = currentCase
+          const row = await runCase(worker, workerId, previousCase, currentCase)
+          // The next case's isolation report names how long this case's page took to close (#3896).
+          previousCase = { ...currentCase, closeMilliseconds: Math.round(row.timings.closeMilliseconds) }
           worker.setPreviousCase(previousCase)
         }
       } finally {

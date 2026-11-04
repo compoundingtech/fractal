@@ -59,7 +59,9 @@ that its envelope inventory, claim sources and all graph table digests match.
 
 `store_dir = "/absolute/path"` in the daemon's TOML config, or `fractal up --store-dir
 /absolute/path`, selects the directory for exactly `claims.sqlite3`, `claims.sqlite3-wal`,
-and `claims.sqlite3-shm`. Unset configuration keeps the database in `state_dir`; there is no
+and `claims.sqlite3-shm`, and for the messages shard the daemon opens beside them at
+`shards/messages/claims.sqlite3`. A store moved without its `shards` directory opens a new,
+empty shard, which then receives the stream again from peers. Unset configuration keeps the database in `state_dir`; there is no
 automatic file move. Keep the product state directory and its identity, keys, sockets,
 message bodies, transcripts, PTYs, runtime files and caches unchanged.
 
@@ -160,6 +162,45 @@ WAL or SHM files from different snapshots. A database rollback does not roll bac
 product state, so retain the unchanged state root throughout.
 
 
+## Preserve suspected unsigned history before maintenance
+
+A populated v0.3.4 store can contain sealed delegation grants without claim
+signatures. Preserve raw state and keys **before** doctor, restart, checkpoint,
+or offline export: those operations can seal pending work or migrate their input.
+A claim archive does not preserve private keys or all pending unsealed work.
+
+Keep the original database, keys, configuration and exact binary together with
+checksums and capture times. A consistent SQLite copy must include committed WAL
+state; copying only the live database file is insufficient. Use SQLite's read-only
+source connection and backup API, or a consistent filesystem snapshot that also
+accounts for keys and configuration. Retain an untouched original and inspect a copy.
+
+From a clean checkout, use Python 3 to run the bounded stored-evidence audit:
+
+```sh
+python3 scripts/audit-claim-signatures /path/to/preserved/claims.sqlite3 > audit.json
+```
+
+The path is an invented example. The script opens SQLite with `mode=ro`,
+`query_only` and one read transaction; it never opens the store through Fractal,
+seals claims or changes verdicts. A missing database fails without creating one.
+Its `--help` lists query, row and payload caps. Optional `cbor2` enables inspection
+of original sealed payload maps; without it, payload inspection is incomplete.
+Install dependencies away from the specimen or inspect a preserved copy elsewhere.
+
+Exit 0 means the bounded audit completed, including when it found unsigned grants;
+exit 2 means incomplete evidence. Read `complete` and `limitations` along with the
+stored-signature, sealed-payload and cached-invalid counts. This tool does not
+recompute cryptographic validity, and retained history on one replica does not
+establish the state of its peers. Keep raw results private.
+
+Preserved unsealed work needs an isolated upgrade rehearsal with its original keys
+and a verified build before any rollout. Already-sealed unsigned delegations remain
+affected: restoring their envelopes, signing an outer wrapper or issuing a child
+grant cannot supply the missing inner signature. Do not rewrite envelopes, insert
+signature rows, delete verdicts or reset identities to clear warnings. Preserve the
+evidence and obtain an operator's recovery decision for the affected authority chain.
+
 ## Rehearse a restore
 
 Use a healthy current daemon and a separate empty directory. These commands neither start a
@@ -200,7 +241,7 @@ until a separately planned recovery accounts for writes since the snapshot.
 
 ## Format and verification
 
-The archive is UTF-8 JSON Lines, format `st3.claim-backup`, version `1`, `2` or `3`. Each record is limited
+The archive is UTF-8 JSON Lines, format `st3.claim-backup`, version `1`, `2`, `3` or `4`. Each record is limited
 to 128 MiB; export refuses a larger record before publishing a file:
 
 - `header`: format version, exporting build, database schema and claim registry digest, fleet ID
@@ -218,9 +259,20 @@ to 128 MiB; export refuses a larger record before publishing a file:
 - `end`: envelope count and SHA-256 of all preceding bytes, including line endings.
 
 An archive that carries the long-message texts of its member is version `2`. An archive that
-carries permanent ledger rows is version `3`. A build that predates a version refuses its
-archives cleanly instead of restoring part of them; an archive with neither keeps version `1`,
-so every build restores it.
+carries permanent ledger rows is version `3`. An archive that carries local message marks is
+version `4`. A build that predates a version refuses its archives cleanly ("unsupported claim
+backup format/version") instead of restoring part of them; an archive with none of these keeps
+version `1`, so every build restores it.
+
+### Message marks
+
+A consumer's delivery, read and close of a message can be a local mark instead of a lifecycle
+claim (`local_message_marks`, db break-up step 4b): it never replicates, so only a backup can
+carry it. Version `4` lists the table among its ledgers and restores its rows by union, after the
+claims, so each mark folds into the member's local projections as it did when it was recorded;
+without them a restore would redeliver every message a mark covers. A build older than marks
+refuses the archive, and marks inside an archive that declares an earlier version are refused
+before restore.
 
 ### Permanent ledgers
 

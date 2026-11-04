@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Separate native child-process support from catalog reconciliation.",
+  "replay": {
+    "status": "none",
+    "detail": "Moves the existing bounded-capture and child-reaper module to a private shared-driver module while retaining the run module alias and re-exports. Function bodies, statics, caps, deadlines, process-group handling and existing test paths are unchanged; only the parent wildcard import becomes an explicit Context trait import. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Moves the existing bounded-capture and child-reaper module to a private shared-driver module while retaining the run module alias and re-exports. Function bodies, statics, caps, deadlines, process-group handling and existing test paths are unchanged; only the parent wildcard import becomes an explicit Context trait import. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Moves the existing bounded-capture and child-reaper module to a private shared-driver module while retaining the run module alias and re-exports. Function bodies, statics, caps, deadlines, process-group handling and existing test paths are unchanged; only the parent wildcard import becomes an explicit Context trait import. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Moves the existing bounded-capture and child-reaper module to a private shared-driver module while retaining the run module alias and re-exports. Function bodies, statics, caps, deadlines, process-group handling and existing test paths are unchanged; only the parent wildcard import becomes an explicit Context trait import. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Moves the existing bounded-capture and child-reaper module to a private shared-driver module while retaining the run module alias and re-exports. Function bodies, statics, caps, deadlines, process-group handling and existing test paths are unchanged; only the parent wildcard import becomes an explicit Context trait import. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Moves the existing bounded-capture and child-reaper module to a private shared-driver module while retaining the run module alias and re-exports. Function bodies, statics, caps, deadlines, process-group handling and existing test paths are unchanged; only the parent wildcard import becomes an explicit Context trait import. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Moves the existing bounded-capture and child-reaper module to a private shared-driver module while retaining the run module alias and re-exports. Function bodies, statics, caps, deadlines, process-group handling and existing test paths are unchanged; only the parent wildcard import becomes an explicit Context trait import. No runtime, authority, schema, protocol or recovery behavior changes."
+  }
+}

@@ -635,6 +635,41 @@ fn a_person_ask_gate_or_scheduled_retry_holds_an_otherwise_idle_seat() {
 }
 
 #[test]
+fn idle_nudge_run_report_wake_uses_the_canonical_prefix_for_both_wire_tags() {
+    for prefix in ["st3-", "fractal-"] {
+        let store = Store::open_memory("node").unwrap();
+        let mut input: ClaimInput = serde_json::from_value(json!({
+            "subject": "message/run-report", "kind": "message.sent", "actor": "daemon/runtime",
+            "fields": {"from": "daemon/runtime", "to": SEAT, "content": "Run failed",
+                "status": "sent", "tags": [format!("{prefix}run-report:failed"), "mission-run:report"]},
+            "evidence": [], "expected_subject": null, "idempotency_key": null
+        })).unwrap();
+        store.append_claim(&input).unwrap();
+        assert_eq!(
+            store
+                .last_wake_to(SEAT, "mission-run:report", "st3-run-report:")
+                .unwrap(),
+            None
+        );
+        input.kind = "message.delivered".into();
+        input.fields = BTreeMap::from([("status".into(), json!("delivered"))]);
+        store.append_claim(&input).unwrap();
+        assert!(
+            store
+                .last_wake_to(SEAT, "mission-run:report", "st3-run-report:")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .last_wake_to(SEAT, "mission-run:other", "st3-run-report:")
+                .unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
 fn a_run_reporting_to_the_seat_holds_then_expires_without_delivered_progress() {
     let idle = fixture();
     idle.hold("queued", "reported");
