@@ -92,9 +92,12 @@ def lock_packages(text):
 
 
 def manifest_license(manifest, license_file=None):
-    value = manifest.get("license") or manifest.get("licenses")
-    if value is None and license_file is not None:
-        value = LICENSE_FILE_HASHES.get(hashlib.sha256(license_file).hexdigest())
+    if "license" in manifest:
+        value = manifest["license"]
+    elif "licenses" in manifest:
+        value = manifest["licenses"]
+    else:
+        value = LICENSE_FILE_HASHES.get(hashlib.sha256(license_file).hexdigest()) if license_file is not None else None
     if isinstance(value, list):
         licenses = [license_string(item) for item in value]
         if not licenses:
@@ -122,7 +125,7 @@ def installed_manifests(directory, keys):
             key = (data.get("name"), data.get("version"))
             if key in keys:
                 license_path = path / "LICENSE"
-                license_file = license_path.read_bytes() if not (data.get("license") or data.get("licenses")) and license_path.is_file() else None
+                license_file = license_path.read_bytes() if "license" not in data and "licenses" not in data and license_path.is_file() else None
                 license = manifest_license(data, license_file)
                 if key in found and found[key] != license:
                     raise ValueError(f"conflicting installed licenses for {key}: {manifest}")
@@ -171,7 +174,7 @@ def archive_manifest(data, integrity, key):
         if not member.isfile():
             raise ValueError(f"archive manifest is not a regular file: {key}")
         manifest = json.load(archive.extractfile(member))
-        if not (manifest.get("license") or manifest.get("licenses")):
+        if "license" not in manifest and "licenses" not in manifest:
             license_member = next((member for member in members if member.name == f"{root}/LICENSE" and member.isfile()), None)
             if license_member is not None:
                 manifest["license"] = manifest_license(manifest, archive.extractfile(license_member).read())
