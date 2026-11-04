@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve signed Fabric identity transitions through endpoint refreshes with a fixed ten-minute overlap deadline",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "Reuses fleet.member-endpoints claims; no database migration."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Non-routing rekey metadata is preserved during worker refresh and removed by explicit transport withdrawal."},
+  "downtime": {"status": "none", "detail": "No service restart required."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "changed", "detail": "Signed prepare, commit, abort and exact remote receipts retain the original immutable deadline."}
+}

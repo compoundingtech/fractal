@@ -69,6 +69,7 @@ mod sealed_view_cache_tests;
 mod repair_operation_tests;
 #[cfg(test)]
 mod schema_install_tests;
+pub mod fabric_rekey;
 #[cfg(any(test, feature = "test-support"))]
 pub mod contents;
 pub mod prepared_seal;
@@ -844,6 +845,8 @@ pub struct Store {
     /// it instead of building their own.
     pub replication_snapshot_build: Mutex<()>,
     pub replication_sync: Mutex<BTreeMap<String, PeerSyncProgress>>,
+    /// Serializes endpoint refreshes and signed Fabric rekey transitions.
+    fleet_endpoints_publication: Mutex<()>,
     /// Whether exchanges compare projections with a peer at all, keeping what a reproduction
     /// needs when they differ. Off unless the daemon's divergence check is on: a default
     /// install never compares, reports no divergence, and settles sync on claims alone.
@@ -1305,6 +1308,7 @@ impl Store {
             replication_snapshot: Mutex::new(None),
             replication_snapshot_build: Mutex::new(()),
             replication_sync: Mutex::new(BTreeMap::new()),
+            fleet_endpoints_publication: Mutex::new(()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
             trim_local: AtomicBool::new(false),
             trim_daily_claims: AtomicU64::new(checkpoint_trim::LOCAL_TRIM_DAILY_CLAIMS),
@@ -2592,6 +2596,29 @@ impl Store {
     /// Publish this member's mode and endpoints when they differ from its last announcement.
     /// Returns whether a claim was written.
     pub fn publish_fleet_endpoints(
+        &self,
+        mode: &str,
+        endpoints: &[Value],
+        build: &str,
+    ) -> Result<bool> {
+        let _publication = self.fleet_endpoints_publication.lock().unwrap_or_else(PoisonError::into_inner);
+        let endpoints = self.preserve_fabric_rekey(mode, endpoints, mode != "listening")?;
+        self.publish_fleet_endpoints_locked(mode, &endpoints, build)
+    }
+
+    /// Explicitly withdraw rotation metadata when changing transport settings.
+    pub fn publish_fleet_endpoints_clearing_fabric_rekey(
+        &self,
+        mode: &str,
+        endpoints: &[Value],
+        build: &str,
+    ) -> Result<bool> {
+        let _publication = self.fleet_endpoints_publication.lock().unwrap_or_else(PoisonError::into_inner);
+        let endpoints = self.preserve_fabric_rekey(mode, endpoints, true)?;
+        self.publish_fleet_endpoints_locked(mode, &endpoints, build)
+    }
+
+    fn publish_fleet_endpoints_locked(
         &self,
         mode: &str,
         endpoints: &[Value],

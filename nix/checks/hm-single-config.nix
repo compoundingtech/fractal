@@ -1,4 +1,4 @@
-# From the repository root on dev3:
+# From the repository root on a build host:
 # gate-slot --class eval --max-wait 600 --max-hold 600 -- nix eval --impure --json --file nix/checks/hm-single-config.nix
 # Standalone evaluation; CI registration requires a separate flake.nix change.
 let

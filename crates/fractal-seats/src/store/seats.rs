@@ -453,6 +453,17 @@ impl SeatsStore for Store {
                 row.get::<_, Option<String>>(2)?))
         })? {
             let (subject, kind, actor) = row?;
+            // Memberless agent cards reduce their currently declared exec/pty children.
+            // Match the previous root too: a removed child's declaration has no live tag.
+            if subject.starts_with("exec/") || subject.starts_with("pty/") {
+                let suffix = subject.split_once('/').map_or("", |(_, suffix)| suffix);
+                delta.subjects.extend(previous.iter().filter_map(|card| {
+                    let agent = card["id"].as_str()?;
+                    let root = agent.strip_prefix("agent/")?;
+                    suffix.strip_prefix(root)?.starts_with('/').then(|| agent.to_owned())
+                }));
+                continue;
+            }
             // A card reads claims about its agent, the runs, generations and steps that own or
             // queue agents, and messages; work activity is read by actor on step claims. A
             // claim about any other subject, of any kind, changes no card.

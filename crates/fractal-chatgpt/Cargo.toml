@@ -21,5 +21,10 @@ tempfile = "3"
 parking_lot = "0.12"
 
 [[bin]]
+name = "fractal-chatgpt"
+path = "src/main.rs"
+
+# Keep the existing Nix package buildable until its package-name cutover.
+[[bin]]
 name = "st-chatgpt"
 path = "src/main.rs"

@@ -278,4 +278,60 @@ exec "{real}" "$@"
     result = install('--tag', 'v0.3.17', '--bin-dir', str(legacy_bin), '--no-run')
     assert result.returncode != 0 and 'Nix-owned path' in result.stderr, result
     assert (legacy_bin / 'st3').readlink() == Path('/nix/store/missing-fractal/bin/st3')
+    # Retained macOS installers swap the fixed signed app without knowing receipts.
+    # Model that transaction (including signing changing the archive's bytes), not
+    # a CLI receipt shim: the retained executable has no setup receipt support.
+    mac = root / 'fractal-aarch64-apple-darwin'
+    (mac / 'bin').mkdir(parents=True)
+    mac_binary = mac / 'bin/fractal'
+    mac_binary.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo \'{"machine_version":"0.3.16+012345678"}\'; else exit 2; fi\n')
+    mac_binary.chmod(0o755)
+    mac_installer = mac / 'install.sh'
+    mac_installer.write_text('''#!/bin/sh
+set -eu
+bin=$2
+app="$HOME/Applications/SmallTalk.app/Contents/MacOS/fractal"
+cp "$(dirname "$0")/bin/fractal" "$app"
+printf '# signed by retained installer\\n' >> "$app"
+chmod 755 "$app"
+ln -sfn fractal "$bin/st"
+ln -sfn fractal "$bin/st3"
+''')
+    mac_installer.chmod(0o755)
+    mac_archive = root / (mac.name + '.tar.gz')
+    with tarfile.open(mac_archive, 'w:gz') as t: t.add(mac, arcname=mac.name)
+    Path(str(mac_archive) + '.sha256').write_text(hashlib.sha256(mac_archive.read_bytes()).hexdigest() + '  ' + mac_archive.name + '\n')
+    mac_bin = root / 'mac-bin'
+    mac_bin.mkdir()
+    app_binary = root / 'home/Applications/SmallTalk.app/Contents/MacOS/fractal'
+    app_binary.parent.mkdir(parents=True)
+    app_binary.write_text('newer signed application\n')
+    app_binary.chmod(0o755)
+    (mac_bin / 'fractal').symlink_to(app_binary)
+    for name in ('st', 'st3'):
+        (mac_bin / name).symlink_to('fractal')
+    mac_receipt = mac_bin / '.fractal-install.json'
+    mac_receipt.write_text(json.dumps({
+        'schema': 1, 'name': 'fractal', 'installer': 'script',
+        'sha256': hashlib.sha256(app_binary.read_bytes()).hexdigest(),
+        'version': 'newer-version', 'commit': 'abcdef123',
+    }))
+    mac_env = {'PLATFORM': 'Darwin', 'ARCH': 'arm64'}
+    result = install('--tag', 'v0.3.16', '--bin-dir', str(mac_bin), '--no-run', extra=mac_env)
+    assert result.returncode == 0 and result.stderr == '', result
+    # The old receipt mismatch previously made this next install fail preflight.
+    result = install('--tag', 'v0.3.16', '--bin-dir', str(mac_bin), '--no-run', extra=mac_env)
+    assert result.returncode == 0 and result.stderr == '', result
+    refreshed = json.loads(mac_receipt.read_text())
+    assert refreshed['sha256'] == hashlib.sha256(app_binary.read_bytes()).hexdigest(), refreshed
+    assert refreshed['installer'] == 'script' and refreshed['version'] == '0.3.16+012345678' and refreshed['commit'] == '012345678', refreshed
+    assert app_binary.read_bytes() != mac_binary.read_bytes()  # signing changes the digest
+    # Neither intact aliases nor same-installer metadata waive an unknown change.
+    for installer in ('script', 'hm'):
+        refreshed['installer'] = installer
+        mac_receipt.write_text(json.dumps(refreshed))
+        app_binary.write_text('unknown replacement\n')
+        result = install('--tag', 'v0.3.16', '--bin-dir', str(mac_bin), '--no-run', extra=mac_env)
+        assert result.returncode != 0 and 'receipt does not match' in result.stderr, result
+        assert app_binary.read_text() == 'unknown replacement\n'
 print('Download installer integrity, visible install, launch and platform controls passed')
