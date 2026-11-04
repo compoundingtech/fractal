@@ -94,9 +94,10 @@ def validate(pin, label):
     if not isinstance(pin['bundles'], dict) or set(pin['bundles']) != set(TARGETS):
         raise BaselineError(f'{label}: bundles must cover both native release targets')
     for target, bundle in pin['bundles'].items():
-        expected = f'https://github.com/{repository()}/releases/download/{pin["tag"]}/smalltalk-{target}.tar.gz'
+        expected = tuple(f'https://github.com/{repository()}/releases/download/{pin["tag"]}/{name}-{target}.tar.gz'
+                         for name in ('fractal', 'smalltalk'))
         if (not isinstance(bundle, dict) or set(bundle) != {'url', 'sha256'}
-                or bundle['url'] != expected or not isinstance(bundle['sha256'], str)
+                or bundle['url'] not in expected or not isinstance(bundle['sha256'], str)
                 or not DIGEST.fullmatch(bundle['sha256'])):
             raise BaselineError(f'{label}: {target} needs the tagged archive URL and hex SHA256')
 
@@ -126,7 +127,8 @@ def release_pin(tag, releases):
     with tempfile.TemporaryDirectory(prefix='fractal-compat-release-') as temporary:
         dist = Path(temporary)
         run('gh', 'release', 'download', tag, '--repo', repository(), '--dir', str(dist),
-            '--pattern', 'RELEASE.json', '--pattern', 'SHA256SUMS', '--pattern', 'smalltalk-*.tar.gz')
+            '--pattern', 'RELEASE.json', '--pattern', 'SHA256SUMS',
+            '--pattern', 'fractal-*.tar.gz', '--pattern', 'smalltalk-*.tar.gz')
         manifest = json.loads((dist / 'RELEASE.json').read_text())
         source = manifest['source']
         if not isinstance(source, str) or not SHA.fullmatch(source):
@@ -143,7 +145,10 @@ def release_pin(tag, releases):
             sums[filename.lstrip('*')] = digest
         bundles = {}
         for target in TARGETS:
-            package = f'smalltalk-{target}'
+            # Select per target: a release may have only one renamed native asset.
+            package = f'fractal-{target}'
+            if not (dist / f'{package}.tar.gz').is_file():
+                package = f'smalltalk-{target}'
             archive = dist / f'{package}.tar.gz'
             checksum = hashlib.sha256()
             with archive.open('rb') as handle:
