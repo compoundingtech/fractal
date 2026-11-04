@@ -2,6 +2,8 @@
 
 Typed authoring and deterministic KDL v2 encoding for Fractal agents, missions and schedules. This is a declaration package, not the daemon HTTP client (`@fractal/client`). It has no runtime dependencies.
 
+For a runnable example and the offline validation workflow, see [Author a graph in TypeScript](../../../docs/clients/author-a-graph-in-typescript.md). The example shares agent objects across supervision, mission assignment and area metadata.
+
 ```ts
 import { encodeKdl } from '@fractal/declarations'
 import type { Agent, Mission, Schedule } from '@fractal/declarations'
