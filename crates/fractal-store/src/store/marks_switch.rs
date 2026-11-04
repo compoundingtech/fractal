@@ -21,6 +21,11 @@ use super::*;
 /// message view and lists ask a seat's host for the seat's marks.
 pub const FEATURE: &str = "message_view_reads";
 
+/// The `daemon.started` feature of a build whose reads of another host's seats count a staging the
+/// host answers, below every mark. A staging becomes a mark only once every other member
+/// advertises it; this build advertises it and still records stagings as claims.
+pub const STAGED_FEATURE: &str = "message_staged_reads";
+
 const WRITER_TABLES: [(&str, &str); 3] = [
     ("replica_envelopes", "writer"), ("batches", "origin"), ("checkpoint_envelopes", "writer"),
 ];
