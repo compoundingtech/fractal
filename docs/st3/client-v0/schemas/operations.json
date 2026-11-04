@@ -5,6 +5,10 @@
     "sidebar_arrangement_uuid": {
       "value": "00000000-0000-7000-8000-000000000001",
       "about": "Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043)."
+    },
+    "pins_arrangement_uuid": {
+      "value": "00000000-0000-7000-8000-000000000002",
+      "about": "Each person's ordered Pins use version-2 memberships at arrangement/person/NAME/<this UUID>."
     }
   },
   "transport": {
