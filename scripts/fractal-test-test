@@ -3574,8 +3574,11 @@ finally:
         self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'top_up', 'checks',
                                                  'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages', 'tree_wait_s', 'tree_slot_wait_s',
                                                  'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s', 'burst', 'burst_wait_s']))
-        # Its tree: free at once, and nothing that waited in it (no check here runs scripts/ci-local).
-        self.assertEqual((record['tree_wait_s'], record['tree_slot_wait_s'], record['tree_blocked_s']), (0, 0, 0))
+        # This private pool has no contention, but acquisition includes ticket work and /proc orphan scans before taking the tree.
+        # Rounded elapsed time can be nonzero on a loaded host; no build slot or ci-local stage actually waits in this fixture.
+        self.assertIsInstance(record['tree_wait_s'], int)
+        self.assertGreaterEqual(record['tree_wait_s'], 0)
+        self.assertEqual((record['tree_slot_wait_s'], record['tree_blocked_s']), (0, 0))
         self.assertLessEqual(record['tree_held_s'], record['total_s'])
         for field in ('started', 'ended'):
             self.assertRegex(record[field], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
@@ -3997,6 +4000,11 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(got[0][0], 1)                                          # the new tree, while tree-0 is still held
         got[0][1].close()
 
+    def test_non_utf8_ticket_rules_are_unreadable(self):
+        ticket = Path(self.tmp.name) / 'ticket'
+        ticket.write_bytes(b'\xff\xfe')
+        self.assertEqual(st_test.ticket_rules(ticket), 0)
+
     def test_the_queue_orders_by_aged_rank_then_arrival_and_drops_dead_tickets(self):
         queue = Path(self.tmp.name) / 'queue'
         queue.mkdir()
@@ -4164,37 +4172,25 @@ class PoolQueue(unittest.TestCase):
 
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)
-        free, asked, waits, got = [False], [], {}, []
-        # Its third look, not a fixed 0.6 s: a waiter thread scheduled late on a loaded host had looked only twice by then (#4807).
-        third = threading.Event()
+        free, asked, waits = [False], [], {}
 
         def slot_ready():
             asked.append(time.monotonic())
-            if len(asked) >= 3:
-                third.set()
             return free[0], 'test: 1 of 1 heavy slots busy'
 
-        said = io.StringIO()
-        with contextlib.redirect_stderr(said):
-            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)))
-            waiter.start()
-            self.assertTrue(third.wait(30), f'the waiter looked {len(asked)} time(s) in 30 s')
-            self.assertEqual(got, [])                                           # both trees are free, but its build would wait for a slot
-            for n in range(2):                                                  # and it holds neither while it waits (only for its look)
+        def next_pass(seconds):
+            self.assertEqual(seconds, st_test.POOL_WAIT_SECONDS)
+            self.assertLessEqual(len(asked), 3, 'the next pass takes a tree once the slot is free')
+            for n in range(2):
                 with open(self.root / f'tree-{n}.lock', 'w') as probe:
-                    for _ in range(100):
-                        try:
-                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            time.sleep(0.01)
-                    else:
-                        self.fail(f'tree-{n} stayed held while its waiter waited for a slot')
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     fcntl.flock(probe, fcntl.LOCK_UN)
-            self.assertGreater(len(asked), 2, 'it looks again on every pass')
-            free[0] = True
-            waiter.join(5)
-        n, lock = got[0]
+            free[0] = len(asked) == 3
+
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said), mock.patch.object(st_test.time, 'sleep', side_effect=next_pass):
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)
+        self.assertEqual(len(asked), 4, 'three passes leave both trees free; the fourth takes one')
         lock.close()
         self.assertEqual(n, 0)
         self.assertGreaterEqual(waits['slot_wait_s'], 0)

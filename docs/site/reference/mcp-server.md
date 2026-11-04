@@ -8,7 +8,7 @@ order: 6
 
 The Fractal MCP server connects an MCP client to the daemon's paired-client gateway. It exposes a closed set of tools for alerts, missions, agents, conversations, and explicitly scoped writes. It does not expose daemon control or give an assistant person authority.
 
-The Rust package is `fractal-chatgpt`; its executable is `st-chatgpt`. The supported assistant principal is `assistant/chatgpt`, including when a generic MCP client uses the adapter. Pairing requires the configured owning person's explicit consent to disclose assistant reads to OpenAI. Do not use a person credential for this server.
+The Rust package is `fractal-chatgpt`; its binary is `fractal-chatgpt` (`st-chatgpt` kept as an alias binary). The supported assistant principal is `assistant/chatgpt`, including when a generic MCP client uses the adapter. Pairing requires the configured owning person's explicit consent to disclose assistant reads to OpenAI. Do not use a person credential for this server.
 
 The [external-assistant contract](https://github.com/compoundingtech/fractal/blob/main/docs/st3/external-assistants.md) defines the authority and wire behavior. Remote access is a restricted dogfood path, not an authenticated public service.
 
@@ -19,10 +19,10 @@ Install and configure [Fractal](../getting-started/install.md) first. The daemon
 Build the adapter from the repository root with Rust and the repository's build prerequisites:
 
 ```sh
-cargo build --release -p fractal-chatgpt --bin st-chatgpt
+cargo build --release -p fractal-chatgpt --bin fractal-chatgpt
 ```
 
-The binary is `target/release/st-chatgpt`. Alternatively, obtain it from the repository's Nix package:
+The binary is `target/release/fractal-chatgpt` (`st-chatgpt` kept as an alias binary). Alternatively, obtain the current Nix package:
 
 ```sh
 nix build github:compoundingtech/fractal#st-chatgpt
@@ -96,7 +96,7 @@ A generic MCP client configuration looks like this; adapt the outer configuratio
 {
   "mcpServers": {
     "fractal": {
-      "command": "/PATH/TO/st-chatgpt",
+      "command": "/PATH/TO/fractal-chatgpt",
       "args": [
         "--transport", "stdio",
         "--socket", "/PATH/TO/st3-client.sock",
@@ -147,7 +147,7 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_conversation_read` | `read.assistant.conversation` | Read | Read one bounded revision-pinned conversation content range. |
 | `fractal_message_send` | `write.assistant.messages` | Write | Send one exact message to any existing agent; person recipients are refused. |
 
-The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This deprecation concerns MCP tool names, not the `st-chatgpt` executable name.
+The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This tool-name deprecation is separate from the `st-chatgpt` alias binary.
 
 ## Limits and grant lifecycle
 

@@ -4,6 +4,9 @@
 
 export const API_VERSION = 'st3.client.v0' as const;
 
+/** Each person's ordered Pins use version-2 memberships at arrangement/person/NAME/<this UUID>. */
+export const PINS_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000002" as const;
+
 /** Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043). */
 export const SIDEBAR_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000001" as const;
 
@@ -1675,7 +1678,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -2265,6 +2268,14 @@ export type MissionActionOffer = {
   confirm: boolean;
   id: "retry-step" | "restart-agent" | "cancel-run" | "chat";
   target: Id;
+};
+
+export type MissionDeclaration = {
+  legacy: boolean;
+  mission: string;
+  published_at: number;
+  revision: Revision;
+  text: string;
 };
 
 export type MissionId = string;

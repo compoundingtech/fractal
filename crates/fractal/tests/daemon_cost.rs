@@ -834,6 +834,10 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/publication-definition",
         "/v1/client/publication-definition?subject=agent%2Fbench%2Fcost%2Fmover",
     ),
+    get(
+        "GET /v1/client/mission-declaration",
+        "/v1/client/mission-declaration?mission={mission}",
+    ),
     get("GET /v1/client/now", "/v1/client/now"),
     get("GET /v1/client/machines", "/v1/client/machines"),
     get("GET /v1/client/hosts/{*id}", "/v1/client/hosts/local/repositories"),
@@ -1271,6 +1275,45 @@ const PROBES: &[Probe] = &[
             .append_harness_event(&publication)
             .map(|(record, _)| serde_json::to_value(record).unwrap())
             .map_err(|error| error.message)
+    }),
+    // Like harness-events, admission requires a live native wrapper absent from
+    // generated stores. Measure the actual Store path, not its HTTP refusal.
+    // Each sample opens AND closes a fresh native call, covering both ingest kinds
+    // without accidentally timing only an idempotent replay.
+    direct("POST /v1/harness-questions/native", |store, fixture, attempt| {
+        use fractal_schema::harness_questions::{Question, Status, native_id_digest, subject};
+        let agent = &fixture.subjects.seats[0];
+        let session = "cost-native-question-session";
+        let native_id = native_id_digest(&format!("cost-native-question-{attempt}"));
+        let id = subject(agent, session, &native_id);
+        assert!(store.harness_question_held(&id).map_err(|error| error.message)?.is_none());
+        let generation = fractal_daemon::store::harness_questions::QuestionGeneration {
+            question: id.clone(), agent: agent.clone(), session: session.into(),
+            runtime_incarnation: SEAT_RUNTIME.into(), owner_session: "cost-owner".into(),
+            owner_sequence: 1,
+            witness: fractal_daemon::store::harness_questions::QuestionWitness {
+                runtime_name: "cost-runtime".into(), created_at: "cost-generation".into(),
+                daemon: (1, 1), terminal: (2, 2), wrapper: (2, 2), bound: false,
+            },
+        };
+        store.retain_harness_question_generation(&generation).map_err(|error| error.message)?;
+        store.observe_harness_question_digest(
+            &fractal_daemon::store::harness_questions::QuestionObservation {
+                agent: agent.clone(), session: session.into(), native_id,
+                runtime_incarnation: SEAT_RUNTIME.into(),
+                questions: vec![Question { id: "q0".into(), options: 2,
+                    multi: false, required: true }],
+            },
+        ).map_err(|error| error.message)?;
+        let current = store.harness_question_held(&id).map_err(|error| error.message)?
+            .expect("the open observation must be persisted");
+        store.retain_harness_question_generation(&generation).map_err(|error| error.message)?;
+        let (question, written) = store.resolve_harness_question(
+            &id, Status::AnsweredElsewhere, &current.revision, &BTreeMap::new(), None,
+        ).map_err(|error| error.message)?;
+        assert!(written, "measure native close, not a replay");
+        store.forget_harness_question_generation(&generation).map_err(|error| error.to_string())?;
+        Ok(json!({"question":question.id}))
     }),
     // Replication, as the worker calls it: an in-step peer asks for a summary, and each side
     // answers the other's summary with what it lacks, here a few new claims.
