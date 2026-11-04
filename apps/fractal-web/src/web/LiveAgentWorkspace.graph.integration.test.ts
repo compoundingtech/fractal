@@ -90,6 +90,8 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
     expect(graph.dependencies).not.toContain('@pierre/highlights')
+    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
     expect(eagerGraph(resolve(web, 'ConversationPane.tsx'), true).dependencies).toContain('@pierre/highlights')
   })
 
@@ -99,6 +101,8 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Markdown.tsx'))
     expect(graph.dependencies).not.toContain('@pierre/highlights')
+    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
     expect(eagerGraph(resolve(web, 'ChangesInspector.tsx'), true).dependencies).toContain('@pierre/highlights')
     expect(graph.files).not.toContain(resolve(web, 'ConversationPane.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/index.ts'))

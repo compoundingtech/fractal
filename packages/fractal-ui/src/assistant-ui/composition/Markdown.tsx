@@ -162,7 +162,10 @@ const subscribeHighlights = (notify: () => void) => {
   }).then(module => {
     highlightsModule = module
     for (const listener of highlightsListeners) listener()
-  }, error => console.error('Code highlighting failed to load', error))
+  }, () => {
+    // Do not notify on failure: plain text stays mounted, and only a later subscription retries.
+    highlightsRequest = undefined
+  })
   return () => { highlightsListeners.delete(notify) }
 }
 

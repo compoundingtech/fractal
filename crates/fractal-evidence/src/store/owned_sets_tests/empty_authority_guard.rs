@@ -26,7 +26,9 @@ fn empty_effect_authority_cost_is_one_current_statement_per_invocation() {
     let desired = store.desired_subjects().unwrap();
     store.owned_desired_guard(&desired[0]).unwrap();
     for roster in [&desired[..1], &desired[..8], &desired[..64]] {
-        let before = smallclaims::sqlite::work::total();
+        // Count this thread's statements only: the guard runs on it, and the process-wide total
+        // also takes in other tests' SQL when they share the process.
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
         for declaration in roster {
             let (result, reads) =
                 smallclaims::touched::record(|| store.owned_desired_guard(declaration));
@@ -34,7 +36,7 @@ fn empty_effect_authority_cost_is_one_current_statement_per_invocation() {
             assert!(reads.contains("kind:owned-set.revised"));
             assert!(reads.contains(&declaration.subject));
         }
-        let spent = smallclaims::sqlite::work::total() - before;
+        let spent = work.finish();
         assert_eq!(spent.statements, roster.len() as u64, "{spent:?}");
         assert_eq!(spent.fullscan_steps, 0, "{spent:?}");
         assert!(spent.vm_steps <= roster.len() as u64 * 100, "{spent:?}");
@@ -64,9 +66,10 @@ fn first_receipt_after_empty_proof_fences_the_captured_old_member() {
         "stale-set-member"
     );
     let fresh = store.desired_subjects().unwrap().remove(0);
-    let before = smallclaims::sqlite::work::total();
+    // This thread's statements only, as above.
+    let work = smallclaims::sqlite::work::SqliteWorkScope::start();
     store.owned_desired_guard(&fresh).unwrap();
-    let spent = smallclaims::sqlite::work::total() - before;
+    let spent = work.finish();
     assert!(spent.statements > 1 && spent.statements <= 20, "{spent:?}");
     println!("nonempty-authority one-member fallback cost={spent:?}");
     assert_pass_candidates_match_effect_guards(&store, &[captured, fresh]);

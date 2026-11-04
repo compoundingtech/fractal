@@ -22,7 +22,7 @@ const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Diff T
   await expect(receipt.minimumTextContrast).toBeGreaterThanOrEqual(4.5)
   await expect(receipt.minimumGutterContrast).toBeGreaterThanOrEqual(4.5)
   for (const token of ['constant', 'number', 'boolean']) {
-    await expect(canvasElement.querySelector(`[data-diff-kind="added"] [data-syntax-token="${token}"]`)).not.toBeNull()
+    await waitFor(() => expect(canvasElement.querySelector(`[data-diff-kind="added"] [data-syntax-token="${token}"]`)).not.toBeNull())
   }
   const counts = [...canvasElement.querySelectorAll('span')].filter(element => /^[-−+]1$/.test(element.textContent ?? ''))
   await expect(counts.length).toBeGreaterThan(0)

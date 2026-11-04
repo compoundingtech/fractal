@@ -29,7 +29,7 @@ package(=fractal) and binary(=integration) and test(/^boot_canaries::/) and not 
 package(=fractal) and binary(=integration) and test(/^fleet::/) and not test(/^fleet::(action_coverage_|transport_prefer_|fleet_workflows_have_no_path_filter$|fixture_port_reservation_excludes_other_processes_until_released$)/)
 
 # Seeded convergence worlds: three to five nodes and an oracle, 300-599 steps, CPU-bound, 11-30 s
-# each: about 265 s per run for these 14 seeds (hetz2, 2026-10-24). Approved by Nathan
+# each: about 265 s per run for these 14 seeds (a build host, 2026-10-24). Approved by Nathan
 # (2026-10-24). Kept per PR: seeds 1, 2 and 34, seed_1_converges_on_a_real_disk, and the
 # suite's checks (a_seed_runs_the_same_every_time, the_checks_catch_*), so every PR still runs
 # three worlds and the oracle's own sabotage checks. All 17 seeds run daily.

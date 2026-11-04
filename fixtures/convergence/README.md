@@ -195,3 +195,14 @@ With v12 every fixed seed converges. The new kind shifts the draws, so seeds 2, 
 longer reach a checkpoint trim; they are the exact never-trim set, and every other fixed seed
 trims. Characterization used
 `cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.
+
+`claims-v13.json` captures the registry that adds `member.admission-override` (a person's or an
+agent's release of a restarted member from waiting for the named peers, for its current daemon
+start). Versions 1 through 12 stay frozen. Generate v13 from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v13.json`;
+do not hand-edit or overwrite v12. The simulation selects v13 and records its filename in audit
+summaries.
+
+With v13 every fixed seed converges. The new kind shifts the draws: seeds 2, 34 and 106 now trim,
+and seed 1597 is the exact never-trim set. Characterization used
+`cargo nextest run -p fractal --features test-support -E 'test(/convergence::/)'`.
