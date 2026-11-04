@@ -415,7 +415,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
   // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
   const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
-  const pins = useAtomValue(sidebarPins(terminalSource.mode === 'live'))
+  const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
   const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
   const pinnedItems = React.useMemo(() => {
     const names = new Map(agents.map(agent => [agent.ref, agent.name]))

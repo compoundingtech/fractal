@@ -25,8 +25,8 @@ describe('sidebar Pins binding', () => {
   it('keeps disabled fixtures inert without a browser origin or client', () => {
     const registry = AtomRegistry.make()
     try {
-      expect(sidebarPins(false)).toBe(sidebarPins(false))
-      const pins = registry.get(sidebarPins(false))
+      expect(sidebarPins()).toBe(sidebarPins())
+      const pins = registry.get(sidebarPins())
       pins.toggle('agent/example'); pins.retry()
       expect(pins).toMatchObject({ editable: false, state: { phase: 'synced', members: [] } })
     } finally { registry.dispose() }

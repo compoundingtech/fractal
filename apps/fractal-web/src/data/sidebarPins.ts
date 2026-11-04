@@ -1,4 +1,4 @@
-import { FractalClient, type OrderedMembershipOperation } from '@fractal/client'
+import type { FractalClient, OrderedMembershipOperation } from '@fractal/client'
 import * as Atom from 'effect/reactivity/Atom'
 import { generateKeyBetween } from 'fractional-indexing'
 import { followPins, type PinsFollow, type PinsState } from './pins.ts'
@@ -17,14 +17,13 @@ export const planPinToggle = (state: PinsState, ref: string): OrderedMembershipO
   return [{ op: 'place', member: ref, bucket: null, key: generateKeyBetween(last, null) }]
 }
 
-/** One same-origin follow per enabled value; fixtures never construct a client. Creation stays off. */
-export const sidebarPins: (enabled: boolean) => Atom.Atom<SidebarPins> = Atom.family((enabled: boolean) => Atom.make((get) => {
+/** One follow per source-owned client; fixtures stay inert. Creation stays off. */
+export const sidebarPins: (client?: FractalClient) => Atom.Atom<SidebarPins> = Atom.family((client: FractalClient | undefined) => Atom.make((get) => {
   let active = true
   let generation = 0
   let editing = false
   let follow: PinsFollow | undefined
   let current: SidebarPins
-  const client = enabled ? new FractalClient({ baseUrl: globalThis.location.origin, fetchImpl: globalThis.fetch.bind(globalThis) }) : undefined
   const publish = (state: PinsState) => {
     if (!active) return
     current = { state, editable: pinsEditable(state), toggle, retry }
@@ -70,7 +69,7 @@ export const sidebarPins: (enabled: boolean) => Atom.Atom<SidebarPins> = Atom.fa
     })()
   }
   get.addFinalizer(() => { active = false; generation++; follow?.close() })
-  current = { state: { phase: enabled ? 'connecting' : 'synced', members: [] }, editable: false, toggle, retry }
-  if (enabled) void Promise.resolve().then(start)
+  current = { state: { phase: client === undefined ? 'synced' : 'connecting', members: [] }, editable: false, toggle, retry }
+  if (client !== undefined) void Promise.resolve().then(start)
   return current
 }))
