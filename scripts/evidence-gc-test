@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest import mock
 
 # Fixture repositories must not inherit a developer's hooks, identity or signing settings, even outside ci-script-tests.
 os.environ.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
@@ -952,6 +953,19 @@ sys.exit({exit_code})
                                        dict(written['inputs']['live']), {tuple(k) for k in written['inputs']['live_keys']},
                                        written['inputs']['retention'], written['inputs']['as_of'])
         self.assertEqual((replayed['delete'], replayed['migrate']), (written['delete'], [tuple(m) for m in written['migrate']]))
+
+
+class PushClassification(unittest.TestCase):
+    def test_protected_deletion_is_classified_before_long_output_is_truncated(self):
+        ref = f'refs/tags/evidence/{"a" * 40}/{"b" * 40}'
+        output = 'remote: GH013: Repository rule violations found for ' + ref + '\n' + 'long remote path ' * 40
+        self.assertNotIn('GH013:', output[-300:])
+        listed = subprocess.CompletedProcess([], 0, f'{"b" * 40}\t{ref}\n'.encode(), b'')
+        refused = subprocess.CompletedProcess([], 1, b'', output.encode())
+        with mock.patch.object(evidence_gc, 'git', side_effect=[listed, refused]) as git:
+            failed, deleted, protected, created = evidence_gc.apply_remote(Path('.'), 'origin', [], [ref], [[ref]])
+        self.assertEqual((failed, deleted, protected, created), ([], set(), {ref}, True))
+        self.assertIn('--atomic', git.call_args.args)
 
 
 class PurePlan(unittest.TestCase):
