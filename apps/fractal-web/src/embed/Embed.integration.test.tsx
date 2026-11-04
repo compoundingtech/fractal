@@ -2,6 +2,8 @@
 import { act } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
+import { createRoot } from 'react-dom/client'
+import { Embed } from './Embed.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 // The same adapter replacement as vite.embed.config.ts, without changing the live app tests.
@@ -88,4 +90,31 @@ it('uses the narrow container inside a desktop window and keeps agent navigation
     expect(push).not.toHaveBeenCalled()
     expect(network).not.toHaveBeenCalled()
   } finally { await act(async () => dispose()); host.remove() }
+})
+
+it('keeps repeated embed work logs and composers as named groups, not duplicate landmarks', async () => {
+  const host = document.createElement('div')
+  document.body.append(host)
+  const root = createRoot(host)
+  try {
+    await act(async () => root.render(<><Embed fragment="web" scheme="light" /><Embed fragment="web-narrow" scheme="light" /></>))
+    await vi.waitFor(async () => {
+      await act(async () => {})
+      expect(host.querySelectorAll('[role="group"][aria-label^="Message composer"]')).toHaveLength(2)
+    })
+    const logs = host.querySelectorAll('[data-testid="work-log"]')
+    const composers = host.querySelectorAll('[role="group"][aria-label^="Message composer"]')
+    expect(logs.length).toBeGreaterThan(1)
+    expect(composers).toHaveLength(2)
+    for (const composer of composers) {
+      const form = composer.querySelector('form')
+      expect(form).not.toBeNull()
+      expect(form?.getAttribute('role')).toBeNull()
+      expect(form?.getAttribute('aria-label')).toBeNull()
+    }
+    for (const element of [...logs, ...composers]) {
+      expect(element.getAttribute('role')).toBe('group')
+      expect(element.getAttribute('aria-label')).toBeTruthy()
+    }
+  } finally { await act(async () => root.unmount()); host.remove() }
 })
