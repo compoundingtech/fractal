@@ -864,6 +864,7 @@ printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
 export const fractalWebStoreCache = {
   path: pnpmStoreEnv.pnpm_config_store_dir,
   key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
+  'restore-keys': 'fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-',
 } as const
 
 /**
@@ -933,7 +934,8 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
   'fractal-web-changes': {
     name: 'fractal-web-changes',
     'runs-on': 'ubuntu-latest',
-    'timeout-minutes': 1,
+    // The job budget includes runner setup and teardown, not just the detection steps.
+    'timeout-minutes': 3,
     permissions: { contents: 'read' },
     outputs: {
       relevant: '${{ steps.detect.outputs.relevant }}',
@@ -1042,7 +1044,8 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
     // require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
-    'timeout-minutes': 1,
+    // The job budget includes runner setup and teardown, not just the gate steps.
+    'timeout-minutes': 3,
     permissions: { contents: 'read' },
     steps: [
       fractalWebRunnerStep,
