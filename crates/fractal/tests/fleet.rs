@@ -7478,93 +7478,6 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     assert_eq!(this_build["message"]["subject"], last, "this build's CLI on the release reads the graph: {this_build}");
 }
 
-/// When the previous release predates the messages shard, it is never dialed for it.
-/// Upgrading it in place opens the shard; rolling it back leaves the shard file in place
-/// and new members stop dialing it. If the release already opens the shard, only these
-/// transition-specific expectations are skipped. Both baselines must retain history,
-/// receive stream items after upgrade, and keep graph sync working without invalid records.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
-async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place() {
-    if fractal_daemon::test_support::supervise_test() {
-        return;
-    }
-    let old = PathBuf::from(
-        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
-    );
-    let root = tempfile::tempdir().unwrap();
-    let fleet_id = "6a5b4c3d-2e1f-4a0b-9c8d-7e6f5a4b3c2d";
-    let secret = root.path().join("fleet.secret");
-    fs::write(&secret, hex::encode([6_u8; 32])).unwrap();
-    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
-    let mut o = Node::new(root.path(), "o");
-    o.binary = old.clone();
-    let mut n1 = Node::new(root.path(), "n1");
-    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
-    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
-    for node in [&mut o, &mut n1] {
-        node.start().await;
-    }
-    // The release's own history, written before any upgrade.
-    o.note("o-before").await;
-    n1.note("n1-before").await;
-    let mut expected = BTreeSet::from([
-        "custom/fleet-test/o-before".to_owned(),
-        "custom/fleet-test/n1-before".to_owned(),
-    ]);
-    for node in [&o, &n1] {
-        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
-    }
-    let release_opens_shard = o.state_dir().join("shards").exists();
-    if release_opens_shard {
-        eprintln!(
-            "baseline release already opens shards/: the messages-shard transition is behind \
-             this fleet; skipping only the no-shard/no-advertisement and rollback transition assertions"
-        );
-    } else {
-        assert!(stream_peers(&n1).await.is_empty(), "the release does not advertise the shard");
-    }
-    append_stream_item(&n1, "message/0000000000000b01").await;
-    o.note("o-mixed").await;
-    n1.note("n1-mixed").await;
-    expected.extend(["custom/fleet-test/o-mixed".to_owned(), "custom/fleet-test/n1-mixed".to_owned()]);
-    for node in [&o, &n1] {
-        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
-        let status = node.st_json(&["replication", "status"]);
-        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
-    }
-    assert!(o.claims().await.iter().all(|claim| claim["subject"] != "message/0000000000000b01"));
-
-    // Upgrade the release in place: its store opens with the shard beside it.
-    let retained: BTreeSet<String> = o.notes().await;
-    o.stop();
-    o.binary = PathBuf::from(st3());
-    o.start().await;
-    assert!(retained.is_subset(&o.notes().await), "upgrade lost release history");
-    wait_for_stream_peers(&n1, &["o"], 90).await;
-    wait_for_stream_item(&o, "message/0000000000000b01", 90).await;
-
-    // Roll back in place; a release predating the shard leaves it alone and stops advertising it.
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    if !release_opens_shard {
-        assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
-        wait_for_stream_peers(&n1, &[], 90).await;
-    }
-    o.note("o-rolled-back").await;
-    n1.note("n1-after-rollback").await;
-    expected.extend([
-        "custom/fleet-test/o-rolled-back".to_owned(),
-        "custom/fleet-test/n1-after-rollback".to_owned(),
-    ]);
-    for node in [&o, &n1] {
-        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
-        let status = node.st_json(&["replication", "status"]);
-        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
-    }
-}
-
 /// Leave the message `subject` from `from` in stopped `node`'s message outbox, refused
 /// `attempts` times already: what a sender that queues there (4c-3) leaves when its daemon stops
 /// before the drain, or when the member rolls back from it.
@@ -7747,6 +7660,93 @@ async fn a_message_left_in_the_outbox_drains_once_when_the_daemon_starts() {
     assert_eq!(stream_items(&n, refused).await, 0);
     for subject in [held, eligible] {
         assert_eq!(stream_items(&n, subject).await, 1, "{subject}");
+    }
+}
+
+/// When the previous release predates the messages shard, it is never dialed for it.
+/// Upgrading it in place opens the shard; rolling it back leaves the shard file in place
+/// and new members stop dialing it. If the release already opens the shard, only these
+/// transition-specific expectations are skipped. Both baselines must retain history,
+/// receive stream items after upgrade, and keep graph sync working without invalid records.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "6a5b4c3d-2e1f-4a0b-9c8d-7e6f5a4b3c2d";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([6_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n1 = Node::new(root.path(), "n1");
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+    // The release's own history, written before any upgrade.
+    o.note("o-before").await;
+    n1.note("n1-before").await;
+    let mut expected = BTreeSet::from([
+        "custom/fleet-test/o-before".to_owned(),
+        "custom/fleet-test/n1-before".to_owned(),
+    ]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+    }
+    let release_opens_shard = o.state_dir().join("shards").exists();
+    if release_opens_shard {
+        eprintln!(
+            "baseline release already opens shards/: the messages-shard transition is behind \
+             this fleet; skipping only the no-shard/no-advertisement and rollback transition assertions"
+        );
+    } else {
+        assert!(stream_peers(&n1).await.is_empty(), "the release does not advertise the shard");
+    }
+    append_stream_item(&n1, "message/0000000000000b01").await;
+    o.note("o-mixed").await;
+    n1.note("n1-mixed").await;
+    expected.extend(["custom/fleet-test/o-mixed".to_owned(), "custom/fleet-test/n1-mixed".to_owned()]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert!(o.claims().await.iter().all(|claim| claim["subject"] != "message/0000000000000b01"));
+
+    // Upgrade the release in place: its store opens with the shard beside it.
+    let retained: BTreeSet<String> = o.notes().await;
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert!(retained.is_subset(&o.notes().await), "upgrade lost release history");
+    wait_for_stream_peers(&n1, &["o"], 90).await;
+    wait_for_stream_item(&o, "message/0000000000000b01", 90).await;
+
+    // Roll back in place; a release predating the shard leaves it alone and stops advertising it.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    if !release_opens_shard {
+        assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+        wait_for_stream_peers(&n1, &[], 90).await;
+    }
+    o.note("o-rolled-back").await;
+    n1.note("n1-after-rollback").await;
+    expected.extend([
+        "custom/fleet-test/o-rolled-back".to_owned(),
+        "custom/fleet-test/n1-after-rollback".to_owned(),
+    ]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
 }
 
