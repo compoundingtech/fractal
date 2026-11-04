@@ -4728,6 +4728,9 @@ impl MissionsStore for Store {
             &self,
             subjects: &[String],
         ) -> Result<BTreeMap<String, MissionRunStateMoment>> {
+        if subjects.is_empty() {
+            return Ok(BTreeMap::new());
+        }
         self.mission_run_states_among(Some(subjects))
     }
 
