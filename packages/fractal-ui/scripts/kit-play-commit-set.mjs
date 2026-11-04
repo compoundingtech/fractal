@@ -48,6 +48,8 @@ export const MERGE_ONLY = [
 ]
 export const BOTH_WIDTHS = [
   'fractal-app-composer-images--several-images',
+  'fractal-app-sidebar-alerts-tab--bounded-scroll',
+  'fractal-app-sidebar-alerts-tab--served',
   'fractal-app-transcript-images--loaded',
   'fractal-ui-composer--footer-width-budget-narrow',
   'fractal-ui-composer--footer-width-budget-medium',

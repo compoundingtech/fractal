@@ -94,7 +94,7 @@ export const useSidebarShortcut = (toggle?: () => void): void => {
 }
 
 /** Available navigation only: unavailable sidebar destinations never steal a chord. */
-export const useSidebarNavigation = (showAgents: () => void): React.ReactNode => {
+export const useSidebarNavigation = (showTab: (tab: 'agents' | 'alerts') => void): React.ReactNode => {
   const [help, setHelp] = React.useState(false)
   React.useEffect(() => {
     let prefixAt = 0
@@ -107,20 +107,20 @@ export const useSidebarNavigation = (showAgents: () => void): React.ReactNode =>
       }
       if (event.key === '?') { event.preventDefault(); prefixAt = 0; setHelp(true); return }
       const key = event.key.toLowerCase()
-      if (key === 'a' && prefixAt > 0 && performance.now() - prefixAt < 1000) {
+      if ((key === 'a' || key === 'l') && prefixAt > 0 && performance.now() - prefixAt < 1000) {
         event.preventDefault()
         prefixAt = 0
-        showAgents()
+        showTab(key === 'a' ? 'agents' : 'alerts')
       } else prefixAt = key === 'g' ? performance.now() : 0
     }
     document.addEventListener('keydown', keydown)
     return () => document.removeEventListener('keydown', keydown)
-  }, [showAgents])
+  }, [showTab])
   return <Aria.ModalOverlay isOpen={help} onOpenChange={setHelp} isDismissable {...stylex.props(styles.helpOverlay)}>
     <Aria.Modal {...stylex.props(styles.helpModal)}>
       <Aria.Dialog aria-label="Keyboard shortcuts" {...stylex.props(styles.helpDialog)}>
         <Aria.Heading slot="title">Keyboard shortcuts</Aria.Heading>
-        <dl><dt>g a</dt><dd>Show Agents</dd><dt>← / →</dt><dd>Switch focused sidebar tabs</dd><dt>⌘B / Ctrl+B</dt><dd>Toggle sidebar</dd><dt>?</dt><dd>Show shortcuts</dd></dl>
+        <dl><dt>g a</dt><dd>Show Agents</dd><dt>g l</dt><dd>Show Alerts</dd><dt>← / →</dt><dd>Switch focused sidebar tabs</dd><dt>⌘B / Ctrl+B</dt><dd>Toggle sidebar</dd><dt>?</dt><dd>Show shortcuts</dd></dl>
         <Aria.Button onPress={() => setHelp(false)}>Close</Aria.Button>
       </Aria.Dialog>
     </Aria.Modal>

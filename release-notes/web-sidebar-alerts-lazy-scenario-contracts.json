@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep sidebar answers outside the eager workspace graph and declare honest Alerts story feed dependencies",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "Existing eager-graph and synthetic-scenario rules remain enforced without exemptions."},
+  "compatibility": {"status": "none", "detail": "The Alerts tab retains inline answer behavior while loading answer controls at the existing conversation boundary."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}
