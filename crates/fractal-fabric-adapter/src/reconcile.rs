@@ -807,8 +807,14 @@ pub async fn reconcile(
         })
         .collect();
     let (mut expiries, rotations) = rotations(view, own_key, &mut desired, (now_ms() / 1000) as u64)?;
-    let rekey_blocked = !expiries.is_empty() && !supports_expiry(socket).await?;
-    if rekey_blocked {
+    let blocked_reason = if expiries.is_empty() { None } else {
+        match supports_expiry(socket).await {
+            Ok(true) => None,
+            Ok(false) => Some("fabric_without_expiry: upgrade every participating Fabric daemon to v0.9.4 before rekey".to_owned()),
+            Err(error) => Some(format!("fabric_capability_unknown: {error:#}")),
+        }
+    };
+    if blocked_reason.is_some() {
         // Never turn expiring overlap into permanent authorization on an older daemon.
         // Keep the old route; ordinary peer additions and revocations still reconcile.
         for (_, rotation) in rotations { desired.remove(&rotation.next_node); }
@@ -823,9 +829,9 @@ pub async fn reconcile(
         .filter_map(|endpoint| endpoint["node"].as_str().map(str::to_owned))
         .collect();
     let mut status = apply(state_dir, socket, fleet_id, desired, expiries, ended, false).await?;
-    if rekey_blocked && status.state == "applied" {
+    if let Some(reason) = blocked_reason.filter(|_| status.state == "applied") {
         status.state = "rekey_blocked".into();
-        status.message = Some("fabric_without_expiry: upgrade every participating Fabric daemon to v0.9.4 before rekey".into());
+        status.message = Some(reason);
     }
     if status.state == "applied"
         && view.members.iter().any(|member| {

@@ -1257,42 +1257,57 @@ fn renamed_rekey_expiry_recovery_only_retains_or_removes_existing_grants() {
 
 #[tokio::test]
 async fn fabric_without_expiry_blocks_rekey_but_applies_unrelated_changes() {
-    let root = tempfile::tempdir().unwrap();
-    let socket = root.path().join("control.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    let permanent = |node| peer(node, OWNER, &["st3-client-v0", "st3/fleet/test-fleet"]);
-    let replies = vec![
-        json!({"type":"reachability_status","version":"0.9.3+old"}),
-        list(vec![permanent("peer-node"), permanent("gone")], 7),
-        mutation(vec![], "complete"),
-        list(vec![permanent("peer-node"), permanent("new-node")], 8),
-    ];
-    let server = tokio::spawn(async move {
-        let mut requests = Vec::new();
-        for mut reply in replies {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut line = String::new();
-            BufReader::new(&mut stream).read_line(&mut line).await.unwrap();
-            let request: Value = serde_json::from_str(&line).unwrap();
-            if request["request"]["operations"].as_array().is_some_and(|ops|
-                ops.iter().any(|op| op["op"] == "set_expiry")) {
-                reply = refusal("unsupported_operation");
+    for capability in ["old", "timeout", "malformed", "truncated", "closed"] {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("control.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let permanent = |node| peer(node, OWNER, &["st3-client-v0", "st3/fleet/test-fleet"]);
+        let replies = vec![
+            json!({"type":"reachability_status","version":"0.9.3+old"}),
+            list(vec![permanent("peer-node"), permanent("gone")], 7),
+            mutation(vec![], "complete"),
+            list(vec![permanent("peer-node"), permanent("new-node")], 8),
+        ];
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for mut reply in replies {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut line = String::new();
+                BufReader::new(&mut stream).read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                if request["request"]["operations"].as_array().is_some_and(|ops|
+                    ops.iter().any(|op| op["op"] == "set_expiry")) {
+                    reply = refusal("unsupported_operation");
+                }
+                let probing = request["type"] == "reachability_status";
+                requests.push(request);
+                if probing && capability != "old" {
+                    match capability {
+                        "timeout" => tokio::time::sleep(CONTROL_TIMEOUT + Duration::from_millis(20)).await,
+                        "malformed" => stream.write_all(b"not-json\n").await.unwrap(),
+                        "truncated" => stream.write_all(b"{\"type\":\"reachability_status\"").await.unwrap(),
+                        "closed" => (),
+                        _ => unreachable!(),
+                    }
+                    continue;
+                }
+                let mut bytes = serde_json::to_vec(&reply).unwrap();
+                bytes.push(b'\n');
+                stream.write_all(&bytes).await.unwrap();
             }
-            requests.push(request);
-            let mut bytes = serde_json::to_vec(&reply).unwrap();
-            bytes.push(b'\n');
-            stream.write_all(&bytes).await.unwrap();
-        }
-        requests
-    });
-    let mut view = rotation_view("prepared", (now_ms() / 1000) as u64 + 300);
-    view.members.push(member("new", "new-key", "new-node", "current"));
-    let status = reconcile(root.path(), &socket, FLEET, "own-key", &view, &BTreeSet::new()).await.unwrap();
-    assert_eq!(status.state, "rekey_blocked");
-    assert!(status.message.unwrap().contains("fabric_without_expiry"));
-    let requests = server.await.unwrap();
-    let operations = requests[2]["request"]["operations"].as_array().unwrap();
-    assert!(operations.iter().any(|op| op["op"] == "remove_peer" && op["node_id"] == "gone"));
-    assert!(operations.iter().any(|op| op["op"] == "add_peer" && op["node_id"] == "new-node"));
-    assert!(operations.iter().all(|op| op["op"] != "set_expiry" && op["node_id"] != "next-node"));
+            requests
+        });
+        let mut view = rotation_view("prepared", (now_ms() / 1000) as u64 + 300);
+        view.members.push(member("new", "new-key", "new-node", "current"));
+        let status = reconcile(root.path(), &socket, FLEET, "own-key", &view, &BTreeSet::new()).await.unwrap();
+        assert_eq!(status.state, "rekey_blocked");
+        assert!(status.message.unwrap().contains(if capability == "old" {
+            "fabric_without_expiry"
+        } else { "fabric_capability_unknown" }));
+        let requests = server.await.unwrap();
+        let operations = requests[2]["request"]["operations"].as_array().unwrap();
+        assert!(operations.iter().any(|op| op["op"] == "remove_peer" && op["node_id"] == "gone"));
+        assert!(operations.iter().any(|op| op["op"] == "add_peer" && op["node_id"] == "new-node"));
+        assert!(operations.iter().all(|op| op["op"] != "set_expiry" && op["node_id"] != "next-node"));
+    }
 }
