@@ -6,10 +6,16 @@ import { selectionParts } from '../folders/client.ts'
 
 export type PinsGateway = Pick<FractalClient, 'discover' | 'arrangementsGet' | 'arrangementsMemberships' | 'arrangementEdit' | 'arrangementMembershipEdit' | 'collectionStream'>
 type EditIdentity = Pick<ActionOf<'arrangement.membership.edit'>, 'id' | 'idempotency_key' | 'fence'>
+export interface PinsFollow {
+  close(): void
+  refresh(): void
+  edit(identity: EditIdentity, operations: OrderedMembershipOperation[], createIdentity?: EditIdentity): Promise<void>
+}
 export interface PinsState {
   readonly phase: 'connecting' | 'synced' | 'pending' | 'unavailable'
   readonly members: readonly OrderedMembership[]
   readonly detail?: string
+  readonly editable?: boolean
 }
 const isArrangement = Schema.is(Schema.toEncoded(ArrangementSchema))
 const isPage = Schema.is(Schema.toEncoded(OrderedMembershipPage))
@@ -23,13 +29,14 @@ export const pinsSelection = (actor: string): { owner: string; subject: string }
 }
 
 /** Online edits use caller-owned immutable IDs/fences. No offline queue or implicit migration. */
-export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
+export const followPins = async ({ gateway, onState, signal, v2ReadersReady = false }: {
   readonly gateway: PinsGateway
   readonly onState: (state: PinsState) => void
+  readonly signal?: AbortSignal
   /** The owner must coordinate all arrangement readers before enabling v2 creation. */
   readonly v2ReadersReady?: boolean
-}): Promise<{ close(): void; refresh(): void; edit(identity: EditIdentity, operations: OrderedMembershipOperation[], createIdentity?: EditIdentity): Promise<void> }> => {
-  const discovery = (await gateway.discover()).value
+}): Promise<PinsFollow> => {
+  const discovery = (await gateway.discover(signal === undefined ? {} : { signal })).value
   const selection = pinsSelection(discovery.session_actor)
   const { person, uuid } = selectionParts(selection)
   if (!discovery.capabilities.some((item) => item.id === 'arrangements' && item.version === 2 && item.state === 'granted'))
@@ -47,6 +54,9 @@ export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
   let state: PinsState = { phase: 'connecting', members: [] }
   let stream: CollectionStream | undefined
   const abort = new AbortController()
+  const close = () => { closed = true; abort.abort(); stream?.close(); signal?.removeEventListener('abort', close) }
+  signal?.throwIfAborted()
+  signal?.addEventListener('abort', close, { once: true })
   const publish = (next: PinsState) => { state = next; if (!closed) onState(next) }
   const fail = (error: unknown) => { ready = false; publish({ ...state, phase: 'unavailable', detail: error instanceof Error ? error.message : String(error) }) }
   const interrupt = (error: unknown) => { interrupted = true; fail(error) }
@@ -88,7 +98,7 @@ export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
         }
         if (!closed && !dirty && !interrupted) {
           ready = !retired
-          publish({ phase: retired ? 'unavailable' : busy ? 'pending' : 'synced', members, ...(retired ? { detail: 'Restoring removed Pins is not available.' } : {}) })
+          publish({ phase: retired ? 'unavailable' : busy ? 'pending' : 'synced', members, editable: writable && (next !== undefined || v2ReadersReady), ...(retired ? { detail: 'Restoring removed Pins is not available.' } : {}) })
         }
       } while (dirty && !closed)
     } catch (error) { if (!closed) fail(error) } finally { reading = false }
@@ -108,11 +118,14 @@ export const followPins = async ({ gateway, onState, v2ReadersReady = false }: {
       },
       onEnd: (error) => interrupt(error ?? new Error('Pins updates disconnected; reopen the Pins follow.')),
     })
-    stream.subscribeArrangements('pins-layout', selection.owner, 1, selection.subject)
-    await read()
+    if (closed) stream.close()
+    else {
+      stream.subscribeArrangements('pins-layout', selection.owner, 1, selection.subject)
+      await read()
+    }
   } catch (error) { interrupt(error) }
   return {
-    close: () => { closed = true; abort.abort(); stream?.close() },
+    close,
     refresh,
     edit: async (identity, operations, createIdentity) => {
       if (closed || !ready || busy || !writable) throw new TypeError('Pins must be synced, writable and idle before editing')
