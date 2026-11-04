@@ -17,7 +17,32 @@ fn remove_uninstall_path(path: &Path, binary_aliases: &[&Path]) -> std::io::Resu
     }
 }
 
-pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json_output: bool) -> Result<()> {
+fn remove_uninstall_paths(
+    paths: &[PathBuf],
+    binary_aliases: &[&Path],
+    state_dir: &Path,
+    deadline: std::time::Instant,
+) -> Result<()> {
+    // A dead leader may leave no socket or startup receipt, while a child still
+    // owns the directory. Do not erase that directory until its lock is released.
+    fractal_daemon::node_identity::wait_for_release(state_dir, deadline)?;
+    for path in paths {
+        // Recheck ownership only for identified canonical executable entries, never state directories.
+        let result = remove_uninstall_path(path, binary_aliases);
+        if let Err(error) = result
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("could not remove {}: {error}", path.display());
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn run_uninstall(
+    endpoint: &Endpoint,
+    args: UninstallArgs,
+    json_output: bool,
+) -> Result<()> {
     fractal_daemon::service::preflight(!args.no_service)?;
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
@@ -160,6 +185,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
         !local_only || args.erase_local_graph,
         "this machine's graph exists nowhere else; pass --erase-local-graph to erase it"
     );
+    let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
     if !args.no_service && services_installed()? {
         fractal_daemon::service::stop_owned_runtimes(&config)?;
         fractal_daemon::service::uninstall()?;
@@ -171,7 +197,11 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
         // is stopped; the default install's daemon is still left for its owner to stop.
         let stopped = instance.is_some() && {
             fractal_daemon::service::stop_owned_runtimes(&config)?;
-            fractal_daemon::service::stop_daemon_at(&config.socket, std::time::Duration::from_secs(20))?
+            fractal_daemon::service::stop_daemon_at(
+                &config.socket,
+                &config.state_dir,
+                std::time::Duration::from_secs(20),
+            )?
         };
         anyhow::ensure!(
             stopped,
@@ -190,15 +220,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
     {
         eprintln!("could not unregister st's Claude plugin: {error:#}");
     }
-    for path in &paths {
-        // Recheck ownership only for identified canonical executable entries, never state directories.
-        let result = remove_uninstall_path(path, &binary_aliases);
-        if let Err(error) = result
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            eprintln!("could not remove {}: {error}", path.display());
-        }
-    }
+    remove_uninstall_paths(&paths, &binary_aliases, &config.state_dir, stop_deadline)?;
     // The work folder setup created goes only while nothing is in it; `remove_dir` refuses a
     // folder that holds anything.
     if let Some(work) = &work_root {
@@ -236,6 +258,39 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
 #[cfg(test)]
 mod instance_uninstall_tests {
     use super::*;
+
+    #[test]
+    fn uninstall_preserves_state_while_inherited_lock_is_held() -> Result<()> {
+        use fractal_daemon::node_identity::stop_fixture::{self, RetainedLock};
+        if stop_fixture::run_if_requested()? {
+            return Ok(());
+        }
+        let root = tempfile::tempdir()?;
+        let state = root.path().join("state");
+        let mut fixture = RetainedLock::spawn(
+            "uninstall_cli::instance_uninstall_tests::uninstall_preserves_state_while_inherited_lock_is_held",
+            &state,
+            false,
+        )?;
+        // No live leader, socket or service remains to tell uninstall to wait.
+        fixture.leader.kill()?;
+        fixture.leader.wait()?;
+        fs::write(state.join("precious"), "keep")?;
+        let paths = vec![state.clone()];
+        let error = remove_uninstall_paths(
+            &paths,
+            &[],
+            &state,
+            std::time::Instant::now() + std::time::Duration::from_millis(100),
+        )
+        .expect_err("uninstall must preserve state while an inherited lock is held");
+        fixture.assert_held_error(&error)?;
+        assert_eq!(fs::read_to_string(state.join("precious"))?, "keep");
+        fixture.release()?;
+        remove_uninstall_paths(&paths, &[], &state, std::time::Instant::now())?;
+        assert!(!state.exists());
+        Ok(())
+    }
 
     fn names(paths: Vec<PathBuf>) -> Vec<String> {
         let mut names = paths
