@@ -66,6 +66,8 @@ migration-reviewer uninstall sender recipient first-reviewer fleet-tester device
 release-smoke owner eval-attention robin lichen visitor blair demo pat wrong-local-actor probe
 discord- discord-404 discord-606
 """.split())
+# Canonical principal grammar fixture exercises hyphen, underscore and dot together.
+EXAMPLE_PEOPLE.add("operator-2_name.test")
 
 
 def tracked_files():
