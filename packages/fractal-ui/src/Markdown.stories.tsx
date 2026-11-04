@@ -15,7 +15,7 @@ import { MarkdownCanvas, languages, streamChunks, inlineStreamStages, styles } f
 const meta = {
   excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Markdown', component: MarkdownCanvas,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and lazily load explicit refractor grammars whose tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
+  parameters: { layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and load @pierre/highlights after plain-text first paint; tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
   args: { scenario: 'rich-text', scheme: 'dark' },
   argTypes: { scenario: { options: ['rich-text', 'languages', 'streaming', 'inline-streaming', 'all'], control: 'radio' }, scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<typeof MarkdownCanvas>
@@ -108,17 +108,27 @@ export const RichText: Story = { ...contractFixture, tags: ['critical'],
 export const Languages: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'languages' },
   play: async ({ canvasElement }) => {
-    const fences = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')]
-    if (fences.length !== languages.length) throw new Error('Language coverage lost a fence')
-    for (let index = 0; index < languages.length; index++) {
-      const [language, code] = languages[index]!
-      const fence = fences[index]!
-      if (fence.dataset.language !== (language || 'text')) throw new Error(`Fence ${index} lost its language label`)
-      if (index < languages.length - 2) {
-        for (let frame = 0; fence.querySelector('[data-syntax-token]') === null && frame < 600; frame++) await settle()
-        if (fence.querySelector('[data-syntax-token]') === null) throw new Error(`${language} did not produce real syntax tokens`)
-      } else if (fence.querySelector('[data-syntax-token], script') !== null) throw new Error('Unknown language should remain safe literal text')
-      if (fence.querySelector('code')?.textContent !== `${code}\n`) throw new Error(`${language || 'text'} highlighting changed the source text`)
+    const previousWidth = canvasElement.style.width
+    try {
+      for (const width of [440, 1440]) {
+        canvasElement.style.width = `${width}px`
+        await settle()
+        const fences = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')]
+        if (fences.length !== languages.length) throw new Error('Language coverage lost a fence')
+        for (let index = 0; index < languages.length; index++) {
+          const [language, code] = languages[index]!
+          const fence = fences[index]!
+          if (fence.dataset.language !== (language || 'text')) throw new Error(`Fence ${index} lost its language label`)
+          if (index < languages.length - 2) {
+            await waitFor(() => expect(fence.querySelector('[data-syntax-token]')).not.toBeNull())
+          } else if (fence.querySelector('[data-syntax-token], script') !== null) throw new Error('Unknown language should remain safe literal text')
+          if (fence.querySelector('code')?.textContent !== `${code}\n`) throw new Error(`${language || 'text'} highlighting changed the source text`)
+          const pre = requireElement<HTMLElement>(fence, 'pre')
+          if (pre.getAttribute('role') !== 'group' || pre.tabIndex !== 0) throw new Error('Code lost its keyboard-accessible group')
+        }
+      }
+    } finally {
+      canvasElement.style.width = previousWidth
     }
   },
 }

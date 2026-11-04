@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Pin the unauthenticated harness test to daemon startup grace so its presentation is stable when tests share a process.",
+  "replay": {
+    "status": "none",
+    "detail": "Test fixture only; no replay or projection changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Test fixture only; no persisted format, claim or schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or fleet coordination changes; members can upgrade in any order."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client, protocol, API or harness behavior changes. The fixture uses the existing test-support uptime pin; production continues to read real uptime."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional service interruption or startup work beyond the usual binary installation."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or migration is required for any starting version or state."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the test fixture change; it persists no state and requires no recovery action."
+  }
+}

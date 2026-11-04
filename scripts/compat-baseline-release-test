@@ -113,6 +113,25 @@ class Policy(unittest.TestCase):
         with self.assertRaisesRegex(baseline.BaselineError, 'expected commit'):
             baseline.check({'fleet': old}, self.releases)
 
+    def test_bundle_urls_accept_both_names_and_mixed_targets(self):
+        value = pin()
+        baseline.validate(value, 'legacy')
+        for bundle in value['bundles'].values():
+            bundle['url'] = bundle['url'].replace('/smalltalk-', '/fractal-')
+            baseline.validate(value, 'renamed')
+
+    def test_bundle_urls_reject_other_names_tags_targets_and_repositories(self):
+        value = pin()
+        bundle = value['bundles'][baseline.TARGETS[0]]
+        original = bundle['url']
+        for url in (original.replace('smalltalk-', 'other-'), original.replace('v0.3.17', 'v0.3.18'),
+                    original.replace(baseline.TARGETS[0], baseline.TARGETS[1]),
+                    original.replace('compoundingtech/fractal', 'other/repo'), original + '?download=1', []):
+            with self.subTest(url=url):
+                bundle['url'] = url
+                with self.assertRaisesRegex(baseline.BaselineError, 'tagged archive URL'):
+                    baseline.validate(value, 'invalid')
+
     def test_release_requires_latest_and_unpublished_pin_fails_even_with_hold(self):
         with self.assertRaisesRegex(baseline.BaselineError, '1 published stable releases behind'):
             baseline.check({'fleet': pin()}, self.releases, require_latest=True)
@@ -187,6 +206,23 @@ class Archives(unittest.TestCase):
             digest = hashlib.sha256((self.dist / f'smalltalk-{target}.tar.gz').read_bytes()).hexdigest()
             self.assertEqual(value['bundles'][target]['sha256'], digest)
         baseline.validate(value, 'fixture')
+
+    def test_fractal_preferred_per_target_with_smalltalk_fallback(self):
+        target = baseline.TARGETS[0]
+        package = f'fractal-{target}'
+        data = json.dumps({'source': SOURCE, 'target': target}).encode()
+        with tarfile.open(self.dist / f'{package}.tar.gz', 'w:gz') as archive:
+            member = tarfile.TarInfo(f'{package}/BUILD.json')
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+        self.sums()
+        value = self.read_pin()
+        for native, name in zip(baseline.TARGETS, ('fractal', 'smalltalk')):
+            asset = f'{name}-{native}.tar.gz'
+            self.assertTrue(value['bundles'][native]['url'].endswith('/' + asset))
+            self.assertEqual(value['bundles'][native]['sha256'],
+                             hashlib.sha256((self.dist / asset).read_bytes()).hexdigest())
+        baseline.validate(value, 'mixed')
 
     def test_corruption_fails_before_repin(self):
         archive = next(self.dist.glob('*.tar.gz'))

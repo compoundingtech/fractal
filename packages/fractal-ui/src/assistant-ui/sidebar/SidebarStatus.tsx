@@ -6,9 +6,9 @@ import { geometryVars as g, motionVars as m, spaceVars as s, statusVars as tone,
 import { compactTime, statuses, type AgentStatus } from './model'
 import { useClockLabel } from '../../time/clock'
 
-export type GlyphVariant = 'SG-1' | 'SG-2' | 'SG-3'
+export type GlyphVariant = 'SG-1' | 'SG-2' | 'SG-3' | 'Agents'
 export type DiscRefinement = 'G1' | 'G2' | 'G3'
-export const glyphDescriptions: Record<GlyphVariant, string> = { 'SG-1': '8px discs in a fixed16px glyph column; refinements add running ring or canonical shape cues', 'SG-2': 'Quiet colored dot with the full canonical status word', 'SG-3': '16px stroke-only canonical status shapes' }
+export const glyphDescriptions: Record<GlyphVariant, string> = { 'SG-1': '8px discs in a fixed16px glyph column; refinements add running ring or canonical shape cues', 'SG-2': 'Quiet colored dot with the full canonical status word', 'SG-3': '16px stroke-only canonical status shapes', Agents: 'Agent activity vocabulary: ● ○ × ! ~; unknown activity has no glyph' }
 export interface SidebarStatusProps {
   readonly status: AgentStatus
   readonly statusLabel?: string
@@ -33,6 +33,7 @@ const paths: Record<AgentStatus, React.ReactNode> = {
   waiting: <><circle cx="10" cy="10" r="7" /><path d="M7.7 7.5a2.3 2.3 0 1 1 3.9 1.7c-1 .6-1.6 1.1-1.6 2.3M10 14h.01" /></>,
   idle: <path d="M16.5 11.5A7 7 0 0 1 8.5 3.5a7 7 0 1 0 8 8Z" />,
   pending: <path d="M6 3h8M6 17h8M7 3v3l6 8v3M13 3v3l-6 8v3" />,
+  failed: <path d="M10 4v8M10 16h.01" />,
   stale: <><circle cx="10" cy="10" r="7" strokeDasharray="2 2" /><path d="M10 6v4l3 2" /></>,
   offline: <path d="M3 8a11 11 0 0 1 14 0M6 11a6 6 0 0 1 8 0M9 14a2 2 0 0 1 2 0M3 3l14 14" />,
   ended: <><circle cx="10" cy="10" r="7" /><rect x="7" y="7" width="6" height="6" rx=".5" fill="currentColor" stroke="none" /></>,
@@ -40,9 +41,14 @@ const paths: Record<AgentStatus, React.ReactNode> = {
   retired: <><rect x="3" y="4" width="14" height="3" rx="1" /><path d="M4 7v9h12V7M8 10h4" /></>,
   unobserved: <><circle cx="10" cy="10" r="7" strokeDasharray="2 3" /><path d="M10 7v4M10 14h.01" /></>,
 }
+/** No activity is invented for observation-only states with no retained status. */
+const agentGlyphs: Partial<Record<AgentStatus, string>> = {
+  working: '●', idle: '○', waiting: '○', suspended: '○',
+  ended: '×', retired: '×', failed: '!', pending: '~',
+}
 /** Shapes never collapse distinct states into an attention or completion fixture state. */
 export function SidebarStatus({ status, statusLabel = statuses[status].label, variant = 'SG-1', discRefinement = 'G1', statusSince, now, freshness = 'unobserved', iconOnly = false, staleTone = 'muted', frozen: snapshotFrozen = false, decorative = false }: SidebarStatusProps) {
-  const frozen = snapshotFrozen || freshness === 'stale'
+  const frozen = snapshotFrozen || freshness === 'stale' || (variant === 'Agents' && freshness === 'unobserved')
   const boundary = statusSince === undefined ? 'Status boundary unavailable' : `Observed status since ${new Date(statusSince).toISOString()}`
   const elapsed = useClockLabel(now => statusSince === undefined || statusSince > now || iconOnly ? '' : compactTime({ at: statusSince, now }), statusSince === undefined || iconOnly ? 0 : now)
   const runningRing = variant === 'SG-1' && discRefinement === 'G2' && status === 'working' && !frozen
@@ -50,8 +56,8 @@ export function SidebarStatus({ status, statusLabel = statuses[status].label, va
   const snapshot = frozen ? '; last-observed snapshot' : ''
   // The former native title text stays exact as the glyph's description; hosts own the only hover disclosure.
   const descriptionId = React.useId()
-  return <span aria-hidden={decorative || undefined} data-status={status} data-frozen={frozen || undefined} data-status-frozen={frozen || undefined} {...stylex.props(styles.root, status === 'working' && styles.working, status === 'waiting' && styles.waiting, status === 'stale' && (staleTone === 'danger' ? styles.staleDanger : styles.staleMuted), frozen && styles.frozen)}>
-    <svg data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation${snapshot}`} aria-describedby={descriptionId} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon, runningRing && styles.iconRing, (runningRing || (status === 'working' && variant === 'SG-3' && !frozen)) && styles.spin)}>{variant === 'SG-2' ? <circle cx="10" cy="10" r="4" fill="currentColor" stroke="none" /> : variant === 'SG-3' ? paths[status] : <><circle cx="10" cy="10" r="5" fill="currentColor" stroke="none" opacity={shapeCue ? '.25' : undefined} />{runningRing && <><circle cx="10" cy="10" r="7.5" opacity=".3" /><path d="M10 2.5a7.5 7.5 0 0 1 7.5 7.5" /></>}{shapeCue && paths[status]}</>}</svg>
+  return <span aria-hidden={decorative || undefined} data-status={status} data-frozen={frozen || undefined} data-status-frozen={frozen || undefined} {...stylex.props(styles.root, status === 'working' && styles.working, status === 'waiting' && styles.waiting, status === 'failed' && styles.staleDanger, status === 'stale' && (staleTone === 'danger' ? styles.staleDanger : styles.staleMuted), frozen && styles.frozen)}>
+    {variant === 'Agents' ? <span role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation${snapshot}`} aria-describedby={descriptionId} data-agent-glyph {...stylex.props(styles.agentGlyph)}>{agentGlyphs[status]}</span> : <svg data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation${snapshot}`} aria-describedby={descriptionId} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon, runningRing && styles.iconRing, (runningRing || (status === 'working' && variant === 'SG-3' && !frozen)) && styles.spin)}>{variant === 'SG-2' ? <circle cx="10" cy="10" r="4" fill="currentColor" stroke="none" /> : variant === 'SG-3' ? paths[status] : <><circle cx="10" cy="10" r="5" fill="currentColor" stroke="none" opacity={shapeCue ? '.25' : undefined} />{runningRing && <><circle cx="10" cy="10" r="7.5" opacity=".3" /><path d="M10 2.5a7.5 7.5 0 0 1 7.5 7.5" /></>}{shapeCue && paths[status]}</>}</svg>}
     <VisuallyHidden elementType="span"><span id={descriptionId}>{`${statusLabel}. ${boundary}. Observation ${freshness}.${frozen ? ' Last-observed snapshot.' : ''}`}</span></VisuallyHidden>
     {variant === 'SG-2' && !iconOnly && <span>{statusLabel}</span>}
     {/* Icon-only glyphs sit in a fixed icon column; visible text there would overrun the next column. */}
@@ -61,6 +67,7 @@ export function SidebarStatus({ status, statusLabel = statuses[status].label, va
 const styles = stylex.create({
   root: { display: 'inline-flex', alignItems: 'center', gap: s.xs, color: ink.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', flexShrink: 0 },
   icon: { width: g.icon, height: g.icon, flexShrink: 0 }, iconRing: { width: g.glyphRing, height: g.glyphRing },
+  agentGlyph: { width: g.icon, textAlign: 'center', flexShrink: 0 },
   working: { color: tone.runningFg }, waiting: { color: tone.attention }, staleDanger: { color: tone.dangerFg }, staleMuted: { color: ink.fgMuted },
   // Last observed: one muted tone for every state, so nothing reads as live; the SG-1 shape cue carries the state.
   frozen: { color: ink.fgMuted },
