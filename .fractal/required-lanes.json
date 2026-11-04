@@ -115,7 +115,7 @@
         ".buckroot",
         ".cargo/config.toml",
         ".config/nextest.toml",
-        ".st",
+        ".fractal",
         "BUCK",
         "apps/fractal-web/package.json",
         "apps/ios/package.json",
@@ -146,7 +146,7 @@
         "scripts/ci-script-tests"
       ],
       "definition_paths": [
-        ".st",
+        ".fractal",
         "flake.lock",
         "flake.nix",
         "package.json",
@@ -159,7 +159,7 @@
         ".gitattributes",
         ".github",
         ".gitignore",
-        ".st",
+        ".fractal",
         ".fractal",
         "apps/fractal-web/.gitignore",
         "apps/fractal-web/src/changelog/seen.ts",
