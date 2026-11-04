@@ -147,15 +147,14 @@ const syntaxKinds: Readonly<Record<string, string>> = {
 }
 let highlightsModule: typeof Highlights | undefined
 const highlightsChunk = createLazyChunk({
-  load: () => {
-    const { promise, resolve, reject } = Promise.withResolvers<typeof Highlights>()
+  // fractal-ui targets ES2022, before Promise.withResolvers.
+  load: () => new Promise<typeof Highlights>((resolve, reject) => {
     // The published entry compiles embedded WASM at import. Defer that work
     // until after the pane's plain-text first paint, never during render.
     requestAnimationFrame(() => setTimeout(() => {
       import('@pierre/highlights').then(resolve, reject)
     }, 0))
-    return promise
-  },
+  }),
 })
 let highlightsRequest: Promise<void> | undefined
 const highlightsListeners = new Set<() => void>()
