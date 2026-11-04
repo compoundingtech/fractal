@@ -1087,7 +1087,7 @@ fn held_verdict_counts(connection: &Connection) -> Result<BTreeMap<String, u64>>
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
     let held = connection
         .prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-hc03851889cc8 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ "WITH own(claim_id) AS (
+            /* sqlite-large-value: allow-for-now lv-h29bcd67aa5d0 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ "WITH own(claim_id) AS (
                  SELECT claim_id FROM claim_signature_judging WHERE complete=0 OR dirty=1 OR blocked=1
                  UNION
                  SELECT c.claim_id FROM claim_signature_counts c INDEXED BY claim_signature_counts_held_index
