@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Match generated Effect string checks to JSON Schema Unicode length and RFC3986 URI-reference semantics.",
+  "replay": {"status": "none", "detail": "No stored claims or replay changes."},
+  "schema": {"status": "none", "detail": "No database or canonical JSON Schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint or server admission rule changes."},
+  "compatibility": {"status": "changed", "detail": "Generated Effect codecs count minLength/maxLength in Unicode code points, not UTF-16 units. URI-reference formats now validate RFC3986 rather than accepting arbitrary strings. ASCII length behavior and independent server byte bounds are unchanged."},
+  "downtime": {"status": "none", "detail": "No service restart required."},
+  "manual": {"status": "none", "detail": "No migration; consume regenerated client codecs normally."},
+  "recovery": {"status": "none", "detail": "Revert generator and regenerate codecs to restore prior client validation; no stored state changes."}
+}
