@@ -373,7 +373,7 @@ fn record_lifecycle_checked(
     let mut writer = shard.connection.write();
     let transaction = writer
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|error| internal(error.into()))?;
+        .map_err(internal)?;
     let current = lifecycle_records_on(&transaction, subject)
         .map_err(internal)?
         .iter()
@@ -437,7 +437,7 @@ fn record_lifecycle_checked(
             return Err(St3Error::new("invalid-message-transition", "custody read is already recorded"));
         }
     }
-    transaction.commit().map_err(|error| internal(error.into()))?;
+    transaction.commit().map_err(internal)?;
     Ok(inserted > 0)
 }
 
