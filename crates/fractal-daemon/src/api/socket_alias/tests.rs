@@ -167,4 +167,44 @@ async fn explicit_legacy_listener_is_not_reserved_as_its_own_discovery_alias() {
         assert!(server.await.unwrap_err().is_cancelled());
     }
 }
+
+#[tokio::test]
+async fn short_parent_symlinks_keep_alias_probes_addressable() {
+    for (primary, legacy) in [("fractal.sock", "st3.sock"), ("fractal-client.sock", "st3-client.sock")] {
+        for discovery_only in [false, true] {
+            let root = tempfile::tempdir_in("/tmp").unwrap();
+            let mut long_parent = root.path().to_path_buf();
+            while crate::config::validate_unix_socket_path(&long_parent.join(primary), "--socket").is_ok() {
+                long_parent = long_parent.join("long-socket-directory");
+            }
+            fs::create_dir_all(&long_parent).unwrap();
+            let short_parent = root.path().join("run");
+            symlink(&long_parent, &short_parent).unwrap();
+            let published = short_parent.join(primary);
+            let alias = short_parent.join(legacy);
+            crate::config::validate_unix_socket_path(&published, "--socket").unwrap();
+            assert!(crate::config::validate_unix_socket_path(
+                &fs::canonicalize(&short_parent).unwrap().join(legacy), "--socket",
+            ).is_err());
+            let socket = if discovery_only { root.path().join("custom.sock") } else { published.clone() };
+            let state_socket = discovery_only.then_some(published.as_path());
+            let reserved = reserve_unix_socket(&socket, state_socket).await.unwrap();
+            assert_eq!(fs::read_link(&alias).unwrap(), Path::new(primary));
+            let (ready, serving) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(serve_reserved_unix_with_ready(
+                reserved, Router::new().route("/test", axum::routing::get(|| async { response(42) })),
+                None, || { let _ = ready.send(()); },
+            ));
+            serving.await.unwrap();
+            for path in [published, alias.clone()] {
+                let client = crate::client::Client::new(crate::client::Endpoint::Unix(path));
+                assert_eq!(client.get::<usize>("/test").await.unwrap(), 42);
+            }
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+            assert!(fs::symlink_metadata(alias).is_err());
+        }
+    }
+}
+
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal

@@ -57,7 +57,9 @@ async fn reserve_alias(socket: &Path, existing: Option<&SocketAlias>, bound_sock
         .truncate(false).mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(PathBuf::from(lock_path))?;
     reservation.try_lock().with_context(|| format!("reserve legacy Unix socket {}", path.display()))?;
-    match tokio::net::UnixStream::connect(&path).await {
+    // Canonical paths fence identity; only the supplied spelling may fit sun_path.
+    let probe_path = parent.join(legacy);
+    match tokio::net::UnixStream::connect(&probe_path).await {
         Ok(_) => anyhow::bail!("refusing to replace live Unix socket listener at {}", path.display()),
         Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {}
         Err(error) => return Err(error).with_context(|| format!("probe legacy Unix socket {}", path.display())),
