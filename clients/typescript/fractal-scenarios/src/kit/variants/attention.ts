@@ -20,8 +20,27 @@ const cards = (ctx: FactoryContext, count: number): AttentionState => {
   return { attention, messages }
 }
 
+/**
+ * Sidebar tab markers: one open harness question raised by the first agent's session (no requesting agent, no mission),
+ * then one needs-you card requested by each other cast agent; only the first of those holds the first mission.
+ */
+const sidebarTabs = (ctx: FactoryContext): AttentionState => {
+  const [asker, ...others] = ctx.cast.agents
+  const person = ctx.cast.people[0]
+  if (asker === undefined || person === undefined) throw new Error('the sidebar-tabs variant requires an agent and person in the cast')
+  const question = resources.attention(ctx, { key: 'sidebar-question', kind: 'harness-prompt', person, source: asker.session, title: 'Allow edits outside the workspace?', detail: 'The harness asks before writing to packages/worker.', priority: 'high', requestedMs: -45_000, actions: ['prompt.respond'] })
+  const needsYou = others.map((member, index) => resources.attention(ctx, {
+    key: `sidebar-needs-you-${member.key}`, kind: index % 2 === 0 ? 'agent-request' : 'human-gate', person, requester: member, source: member.id,
+    ...(index === 0 && ctx.cast.missions[0] !== undefined ? { mission: ctx.cast.missions[0] } : {}),
+    title: index % 2 === 0 ? `Review ${member.name}'s change` : `Approve ${member.name}'s next step`, detail: 'Waiting on you before it continues.',
+    priority: 'normal', requestedMs: -120_000 - index * 60_000, actions: ['custom.reply'],
+  }))
+  return { attention: [question, ...needsYou], messages: [] }
+}
+
 export const attentionVariants: VariantTable['attention'] = {
   none: (_ctx, base) => cleared(base.attention, { attention: [], messages: [] }),
   'one-of-each-kind': (ctx, base) => cleared(base.attention, cards(ctx, 4)),
   many: (ctx, base) => cleared(base.attention, cards(ctx, 50)),
+  'sidebar-tabs': (ctx, base) => cleared(base.attention, sidebarTabs(ctx)),
 }

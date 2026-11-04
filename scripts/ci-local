@@ -6,7 +6,8 @@
 #   scripts/ci-local tests clippy fleet-compat mail-redelivery-canaries      (what a linux-gate skip covers)
 #   scripts/ci-local isolation-vm                                            (the VM tests: scripts/ci-local-isolation-vm)
 #
-# Each STAGE is a scripts/ci-linux stage, run in order; every stage runs even after one fails, and the exit status is the
+# Each STAGE is a scripts/ci-linux stage; clippy and fleet-compat run beside tests unless CI_LOCAL_SERIAL=1. Every stage runs
+# even after one fails, logs are printed in stage order, and the exit status is the
 # first failure's (0 when all passed). Before the stages it builds and installs the rendered hooks, as the CI job's
 # test-archive setup does.
 #
@@ -288,6 +289,14 @@ if command -v nice >/dev/null 2>&1; then low+=(nice -n 10); fi
 run_stage() {
   local n=$1 stage=$2 shown=$3 started began code seconds queued waited
   started=$(stamp); began=$SECONDS
+  # Fleet compatibility resolves a different feature set and relinks binaries that the workspace tests execute (#4128).
+  # Keep every cargo command in that stage in its own target, even in serial mode or when the caller supplied a target.
+  if [ "$stage" = fleet-compat ]; then
+    local compat_target
+    compat_target=$(python3 -I -c 'import os; target=os.environ.get("CARGO_TARGET_DIR"); print(os.path.abspath(target) + "-fleet-compat" if target else os.path.abspath("target/fleet-compat"))')
+    local CARGO_TARGET_DIR=$compat_target
+    export CARGO_TARGET_DIR
+  fi
   # Both streams into one pipe. PIPESTATUS[0] is the stage's own status.
   set +e
   if [ "$stage" = isolation-vm ]; then
@@ -305,17 +314,14 @@ run_stage() {
     > "$log_dir/.$n.row"
   if [ "$shown" = shown ]; then echo "ci-local: $stage exit $code"; fi
 }
-# clippy runs alongside the tests stage in a lane of its own, as its CI job runs on a runner of its own: the tests stage builds first
-# (cargo's lock on the build directory holds the lane's build until then) and then spends most of its time running tests, which is when
-# the lane compiles and runs. Its output is kept and printed once the foreground stages are done, so the two never interleave.
-# Fleet compatibility stays in the foreground, after the tests stage: its `cargo test -p fractal` resolves features apart from the
-# workspace build, so it relinks the fractal binaries in the shared build directory, and a test exec'ing one mid-link fails with
-# ETXTBSY (#4128). clippy links only the client codegen tool, which no test runs. CI_LOCAL_SERIAL=1 runs every stage one after another, as before.
+# clippy and fleet-compat each run in a buffered lane beside tests, as separate CI jobs do. clippy shares the workspace target;
+# fleet-compat has its own kept sibling target, so its relinks cannot replace a binary the tests execute (#4128).
+# Repeated instances of the same stage stay in one lane, in order. CI_LOCAL_SERIAL=1 restores the given serial order.
 stages=("$@")
 lane=()  # positions
 if [ "${CI_LOCAL_SERIAL:-}" != 1 ] && [[ " $* " == *" tests "* ]]; then
   for n in "${!stages[@]}"; do
-    case "${stages[$n]}" in clippy) lane+=("$n") ;; esac
+    case "${stages[$n]}" in clippy|fleet-compat) lane+=("$n") ;; esac
   done
 fi
 in_lane() { local n; for n in "${lane[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
@@ -344,26 +350,43 @@ stop_tree() {
   for pid in $found; do kill "$pid" 2>/dev/null || true; done
   for pid in $found; do kill -CONT "$pid" 2>/dev/null || true; done
 }
-lane_pid=
+lane_pids=()
+cleanup_lanes() {
+  local pid
+  # Stop every lane before removing the scratch they use; an interrupted wait also takes this path.
+  for pid in "${lane_pids[@]}"; do stop_tree "$pid"; done
+  for pid in "${lane_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+  rm -rf "$scratch" "$tmp"
+}
+trap cleanup_lanes EXIT
+# For prompt cancellation while a foreground pipeline runs, signal this process group: Bash defers a PID-only trap until
+# that pipeline ends. st-test's runner signals the group. The EXIT path then stops all buffered lanes before scratch cleanup.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 if [ "${#lane[@]}" -gt 0 ]; then
   echo "ci-local: $(for n in "${lane[@]}"; do printf '%s ' "${stages[$n]}"; done)run alongside the other stages; their output follows when they are done"
-  ( for n in "${lane[@]}"; do run_stage "$n" "${stages[$n]}" quiet; done ) &
-  lane_pid=$!
-  # Stopped, the run takes its lane with it, the stage the lane is running included, before the scratch they use is removed.
-  # (|| true: under set -e a lane that already ended would make the trap's own exit status the run's.)
-  trap 'stop_tree "$lane_pid"; wait "$lane_pid" 2>/dev/null || true; rm -rf "$scratch" "$tmp"' EXIT
+  for stage in clippy fleet-compat; do
+    positions=()
+    for n in "${lane[@]}"; do [ "${stages[$n]}" != "$stage" ] || positions+=("$n"); done
+    if [ "${#positions[@]}" -gt 0 ]; then
+      ( for n in "${positions[@]}"; do run_stage "$n" "${stages[$n]}" quiet; done ) &
+      lane_pids+=("$!")
+    fi
+  done
 fi
 for n in "${!stages[@]}"; do
   in_lane "$n" || run_stage "$n" "${stages[$n]}" shown
 done
-if [ -n "$lane_pid" ]; then
-  wait "$lane_pid" || true
-  for n in "${lane[@]}"; do
-    echo "----- ci-local: ${stages[$n]} output -----"
-    cat "$log_dir/${stages[$n]}.log" 2>/dev/null || echo "(no output)"
-    echo "ci-local: ${stages[$n]} exit $(cat "$log_dir/.$n.code" 2>/dev/null || echo 1)"
-  done
-fi
+for n in "${!lane_pids[@]}"; do
+  wait "${lane_pids[$n]}" || true
+  unset 'lane_pids[n]'  # reaped: cleanup must not signal a recycled PID
+done
+for n in "${lane[@]}"; do
+  echo "----- ci-local: ${stages[$n]} output -----"
+  cat "$log_dir/${stages[$n]}.log" 2>/dev/null || echo "(no output)"
+  echo "ci-local: ${stages[$n]} exit $(cat "$log_dir/.$n.code" 2>/dev/null || echo 1)"
+done
 # The exit status is the first failure's in the order the stages were given; a stage that left no code failed.
 status=0
 table=()

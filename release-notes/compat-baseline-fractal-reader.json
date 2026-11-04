@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Prefer Fractal release archives for compatibility baselines while retaining older Smalltalk archives",
+  "replay": {"status": "none", "detail": "Compatibility test inputs only; no replay change."},
+  "schema": {"status": "none", "detail": "No storage schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet rule change."},
+  "compatibility": {"status": "none", "detail": "Baseline pins prefer fractal assets per target and accept either tagged asset name. The loader reads either package root, prefers bin/st3 when present, and supports bin/fractal otherwise. Legacy cache paths are unchanged; no runtime or wire contract change."},
+  "downtime": {"status": "none", "detail": "No deployment or downtime required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persistent state change."}
+}

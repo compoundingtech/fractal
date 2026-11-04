@@ -92,6 +92,7 @@ export function sidebarRowDescription(row: Row, reportedStatusOnly = false): str
   if (row.harness !== undefined) parts.push(`Harness: ${row.harness}`)
   if (row.model !== undefined) parts.push(`Model: ${row.model}`)
   if (row.needsMe !== undefined) parts.push(row.needsMe ? 'Needs your attention' : 'No attention requested')
+  if (row.asking) parts.push('Open question')
   if (row.unread !== undefined) parts.push(`Unread: ${row.unread}`)
   if (row.statusSince !== undefined) parts.push(`Status boundary: ${new Date(row.statusSince).toISOString()}`)
   if (row.lastActivityAt !== undefined) parts.push(`Last activity: ${new Date(row.lastActivityAt).toISOString()}`)
@@ -153,7 +154,7 @@ export function AgentHoverCard({ row, reportedStatusOnly = false, ...clock }: { 
   const showStatus = !reportedStatusOnly || row.status !== 'unobserved'
   return <div data-testid="agent-hover-card" {...stylex.props(styles.card)}>
     <strong {...stylex.props(styles.cardTitle)}>{row.title}</strong>
-    <div {...stylex.props(styles.cardSummary)}>{showStatus && <><SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="SG-1" freshness={row.freshness} iconOnly /><span>{row.statusLabel}</span><span>·</span></>}<Icon name="gear" size={12} /><span>{row.host}</span></div>
+    <div {...stylex.props(styles.cardSummary)}>{showStatus && <><SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="Agents" freshness={row.freshness} iconOnly /><span>{row.statusLabel}</span><span>·</span></>}<Icon name="gear" size={12} /><span>{row.host}</span></div>
     {row.description !== undefined && <p {...stylex.props(styles.cardWork)}><Icon name="message" size={12} />{row.description}</p>}
     <dl {...stylex.props(styles.details)}>
       {row.usage._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="dot" size={12} />{row.usage.usd === undefined ? 'Tokens' : 'Spend'}</dt><dd {...stylex.props(styles.detailValue)}>{row.usage.usd === undefined ? '' : `${spendCount.format(row.usage.usd)} · `}{tokenCount.format(row.usage.tokens)} tokens<div {...stylex.props(styles.cardScope)}>{row.usage.scope === '24h-root-and-subagents' ? '24h · includes subagents' : row.usage.scope === 'lifetime-incl-subagents' ? 'Lifetime · includes subagents' : 'Reported by agent'}</div></dd></>}
@@ -249,7 +250,7 @@ export function AgentRowActions({ row, now, reportedStatusOnly = false, actions,
     </Menu></MenuPopover></MenuTrigger>
   </ThemePortal>
 }
-export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', glyph = 'SG-1', extraSignals = defaultExtraSignals, discRefinement = 'G1', reportedStatusOnly = false, active = false, query, now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded }: SidebarAgentRowProps) {
+export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', glyph = 'Agents', extraSignals = defaultExtraSignals, discRefinement = 'G1', reportedStatusOnly = false, active = false, query, now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded }: SidebarAgentRowProps) {
   const title = sidebarRowTitle(item)
   // Touch (coarse pointer or touch host): the actions menu and the subagent disclosure leave the dense row's corners for their own trailing 44px columns; the title truncates earlier instead.
   const touch = useTouchLayout()
@@ -267,7 +268,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const expanded = treeExpanded ?? false
   const canOpen = callbacks?.select !== undefined || onOpen !== undefined
   const rowLayout = variant === 'SR-2' ? layout : 'SR2-A'
-  const rowGlyph = variant === 'SR-2' ? 'SG-1' : glyph
+  const rowGlyph = variant === 'SR-2' ? 'Agents' : glyph
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const menuOpen = React.useRef(false)
   const tooltipAnchor = React.useRef<HTMLDivElement>(null)
@@ -307,7 +308,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   return <div data-observation-freshness={item.freshness} data-wf-agent-ref={inTree ? undefined : item.ref} {...stylex.props(styles.wrapper)} onMouseEnter={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onMouseLeave={() => { setRowHovered(false); hoverIntent(false) } } onFocusCapture={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setRowHovered(false); hoverIntent(false) } }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setHoverOpen(false); menuTrigger.current?.click() }} onKeyDown={event => { if (event.key === 'Escape') setHoverOpen(false); if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); event.stopPropagation(); setHoverOpen(false); menuTrigger.current?.click() } }}>
     <div ref={rowAnchor} data-testid="taste-agent-row" data-density={variant} data-layout={rowLayout} data-glyph={rowGlyph} data-disc-refinement={discRefinement} data-extra-signals={extraSignals.join(' ')} data-needs-me={item.needsMe} data-narrow={touch || undefined} data-unknown-row-fields={[...(item.usage._tag === 'Unknown' ? ['total-usd', 'total-tokens'] : []), ...(item.duration._tag === 'Unknown' ? ['total-duration'] : []), ...(item.lastTurn._tag === 'Unknown' ? ['last-turn'] : []), ...(item.description === undefined ? ['current-work'] : [])].join(' ')} data-required-row-fields={variant === 'SR-2' ? 'true' : undefined} {...stylex.props(styles.rowWrap, variant === 'SR-2' ? item.children.length === 0 ? styles.rowWrapLeaf : styles.rowWrapParent : undefined, styles[variant], touch && (item.children.length === 0 ? styles.rowWrapNarrowLeaf : styles.rowWrapNarrowParent), touch && variant === 'SR-1' && styles.singleNarrow, active && styles.active)}>
       <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}>{showStatus && <SidebarStatus status={item.status} statusLabel={item.statusLabel} statusSince={item.statusSince} now={clock.now} variant={rowGlyph} discRefinement={discRefinement} freshness={item.freshness} iconOnly />}</span>
-      <span data-row-trailing-signals {...stylex.props(styles.trailingSignals)}>{extraSignals.includes('X-unread') && (item.unread ?? 0) > 0 && <span data-row-signal="X-unread" aria-label={`${item.unread} unread`} {...stylex.props(styles.unread)}>{item.unread}</span>}{extraSignals.includes('X-needs') && item.needsMe && <span data-row-signal="X-needs" data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needsYou)}>!</span>}</span>
+      <span data-row-trailing-signals {...stylex.props(styles.trailingSignals)}>{extraSignals.includes('X-unread') && (item.unread ?? 0) > 0 && <span data-row-signal="X-unread" aria-label={`${item.unread} unread`} {...stylex.props(styles.unread)}>{item.unread}</span>}{extraSignals.includes('X-needs') && (item.asking || item.needsMe) && <span data-row-signal="X-needs" data-row-column="attention" aria-label={item.asking ? 'Open question' : 'Needs your attention'} {...stylex.props(styles.needsYou)}>{item.asking ? '?' : '◆'}</span>}</span>
       <span data-row-column="time" data-quick-open={quickOpen ? 'true' : undefined} {...stylex.props(styles.statusTime, quickOpen && styles.timeCovered)}>{rowLayout === 'SR2-A' ? lastTurnField : rowLayout === 'SR2-C' ? spendFields : durationField}{quickOpen && <Button data-row-action="open" aria-label={`Open ${title}`} onPress={open} {...stylex.props(styles.quickOpen)}><Icon name="message" size={12} /></Button>}</span>
       {/* The visible title is the whole name (label-in-name); status and every reported fact live in the hidden description. The custom hover card is the only hover disclosure, so no native title appears in this subtree. */}
       {inTree ? <div aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} {...rowStyle}>{content}</div> : <Button aria-labelledby={showStatus && rowGlyph === 'SG-2' ? `${statusWordId} ${titleId}` : titleId} aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} isDisabled={!canOpen} onPress={open} {...rowStyle}>{content}</Button>}

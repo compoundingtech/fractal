@@ -2975,6 +2975,19 @@ pub struct WorkWakeView {
     pub acknowledged_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// What to ask the assignee's host, when it keeps its seats' receipts (db break-up step 4b).
+    /// Never serialized.
+    #[serde(skip)]
+    pub asks: WakeAsks,
+}
+
+/// The wake's own messages to its incarnation that this member has not seen consumed, and
+/// whether one delivered would acknowledge the wake (its assignee is working in that
+/// incarnation), as this member's own records count them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WakeAsks {
+    pub messages: Vec<String>,
+    pub delivery_acknowledges: bool,
 }
 
 /// One agent seat's current claim and its ordered queue of mission runs.

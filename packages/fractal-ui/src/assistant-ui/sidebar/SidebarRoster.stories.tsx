@@ -79,6 +79,12 @@ export const HundredAgentRender: Story = { tags: ['critical'], render: () => <Ro
     if (baselineTitles[index]! >= floor) await expect(settledTitles[index]!).toBeGreaterThanOrEqual(floor)
   }
   await expect(baselineTitles.filter((width, index) => width >= rows[index]!.clientWidth * 0.6)).toHaveLength(100)
+  const attention = [...cohort.querySelectorAll<HTMLElement>('[data-row-column="attention"]')]
+  await expect(attention).toHaveLength(20)
+  for (const marker of attention) {
+    await expect(marker).toHaveTextContent('◆')
+    await expect(getComputedStyle(marker).display).not.toBe('none')
+  }
   await expect(settledTrack).toBe('32px')
   // Row 91's scope is otherwise restorable, but cannot take title room from the chevron parents.
   const retained = canvasElement.querySelector<HTMLElement>('[data-wf-agent-ref="agent/roster-91"] [data-testid="taste-agent-row"]')!
