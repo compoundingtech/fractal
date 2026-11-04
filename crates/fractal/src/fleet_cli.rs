@@ -1102,6 +1102,7 @@ async fn save_and_publish_fleet_settings(
     config: &Config,
     file: &fractal_daemon::config::FleetFile,
     mut endpoints: Vec<Value>,
+    actor: Option<&str>,
 ) -> Result<()> {
     if file.mode == fractal_daemon::config::FleetMode::DialOut {
         endpoints.clear();
@@ -1126,6 +1127,7 @@ async fn save_and_publish_fleet_settings(
             &fractal_daemon::api::FleetEndpointsRequest {
                 mode: file.mode.as_str().into(),
                 endpoints,
+                actor: actor.map(str::to_owned),
             },
         )
         .await
@@ -1145,10 +1147,15 @@ fn refresh_fleet_services(no_service: bool, json_output: bool) -> Result<()> {
 async fn run_fleet_transports(
     client: &Client,
     config: &Config,
-    command: FleetTransportsCommand,
+    mut command: FleetTransportsCommand,
     json_output: bool,
 ) -> Result<()> {
     use fractal_daemon::fleet::transport::{Fabric, default_fabric_protocol, resolve_tool};
+    let actor = match &mut command {
+        FleetTransportsCommand::Add { actor, .. }
+        | FleetTransportsCommand::Remove { actor, .. }
+        | FleetTransportsCommand::Prefer { actor, .. } => actor.take(),
+    };
     let lock = lock_fleet_settings(&config.state_dir).await?;
     let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
         .context("this machine is not a fleet member")?;
@@ -1184,7 +1191,8 @@ async fn run_fleet_transports(
         if *prefer && file.transports.first() != Some(transport) {
             file.transports.retain(|configured| configured != transport);
             file.transports.insert(0, transport.clone());
-            file.save(&config.state_dir)?;
+            let endpoints = member_endpoints(client, &config.node).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
             drop(lock);
             println!("Fabric is now preferred; its existing protocol is unchanged.");
             return refresh_fleet_services(*no_service, json_output);
@@ -1210,6 +1218,7 @@ async fn run_fleet_transports(
         FleetTransportsCommand::Prefer {
             transport,
             no_service,
+            ..
         } => {
             let index = file
                 .transports
@@ -1217,7 +1226,7 @@ async fn run_fleet_transports(
                 .position(|configured| configured == &transport)
                 .expect("preferred transport was checked as enabled");
             file.transports[..=index].rotate_right(1);
-            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
             println!("{transport} is now preferred; transport exposure is unchanged.");
             no_service
         }
@@ -1265,7 +1274,7 @@ async fn run_fleet_transports(
             endpoints.push(json!({"transport":"fabric", "node":node, "protocol":protocol}));
             // A lost publication response can follow a committed claim. Keep the exposure
             // reachable and report the incomplete operation rather than undoing that route.
-            save_and_publish_fleet_settings(client, config, &file, endpoints)
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref())
                 .await
                 .with_context(|| format!("Fabric remains exposed as {protocol}"))?;
             println!("Fabric enabled with protocol {protocol}.");
@@ -1305,7 +1314,7 @@ async fn run_fleet_transports(
             );
             file.transports.retain(|transport| transport != "fabric");
             // Retain the existing protocol setting so a later add can restore it.
-            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
             let result = match resolve_tool(file.fabric.as_deref(), "fabric") {
                 Some(program) => Fabric::new(program).unexpose(&protocol).await,
                 None => Err(anyhow::anyhow!("fabric is not installed")),

@@ -231,6 +231,7 @@ async fn membership_only_gateway_holds_raw_writers_and_fences_capabilities() {
             "listening",
             &[serde_json::json!({"transport": "loopback", "address": address.to_string()})],
             "test",
+            None,
         )
         .unwrap();
     let peer = PeerState::new(MainBackend::new(owner_socket.to_path_buf()), "raw-owner".into(), FleetAuth::test(fleet, &[7; 32]).with_member_key(Some(owner_key.clone())), member_context(&owner.store, &owner_key, &[], &[], false));
@@ -833,7 +834,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
     assert!(!corrected.reaches("host/fern"));
     states[2]
         .store
-        .publish_fleet_endpoints("listening", &[], "test")
+        .publish_fleet_endpoints("listening", &[], "test", None)
         .unwrap();
     replicate_fern(0).await;
     assert!(!corrected.reaches("host/fern"));

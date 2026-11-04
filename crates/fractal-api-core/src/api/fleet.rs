@@ -4,9 +4,12 @@ pub async fn fleet_publish_endpoints(
     State(state): State<AppState>,
     Json(request): Json<FleetEndpointsRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let actor = request.actor.as_deref()
+        .map(|actor| person_or_agent_actor(actor, "invalid-transport-actor"))
+        .transpose()?;
     let store = state.store.clone();
     let written = blocking_store(move || {
-        store.publish_fleet_endpoints(&request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"))
+        store.publish_fleet_endpoints(&request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"), actor.as_deref())
     })
     .await?;
     if written {

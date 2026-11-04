@@ -1,3 +1,32 @@
+#[test]
+fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
+    for (subcommand, transport) in [("add", "fabric"), ("remove", "fabric"), ("prefer", "tailscale")] {
+        for actor in ["agent/example", "agent/other", "person/example"] {
+            let cli = Cli::try_parse_from([
+                "fractal", "fleet", "transports", subcommand, "--as", actor, transport,
+            ]).unwrap();
+            let Command::Fleet { command: FleetCommand::Transports { command } } = &cli.command else {
+                panic!("expected transports");
+            };
+            let (FleetTransportsCommand::Add { actor: parsed, .. }
+                | FleetTransportsCommand::Remove { actor: parsed, .. }
+                | FleetTransportsCommand::Prefer { actor: parsed, .. }) = command;
+            assert_eq!(parsed.as_deref(), Some(actor));
+            let restart = Cli::try_parse_from([
+                "fractal", "agents", "restart", "--as", actor, "agent/example",
+            ]).unwrap();
+            assert_eq!(
+                guard_mutating_cli_actor(&cli.command, Some("agent/example"), None).is_ok(),
+                guard_mutating_cli_actor(&restart.command, Some("agent/example"), None).is_ok(),
+            );
+        }
+        let cli = Cli::try_parse_from([
+            "fractal", "fleet", "transports", subcommand, transport,
+        ]).unwrap();
+        assert!(guard_mutating_cli_actor(&cli.command, Some("agent/example"), None).is_err());
+    }
+}
+
 use super::*;
 
 #[test]
