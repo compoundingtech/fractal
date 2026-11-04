@@ -1079,24 +1079,25 @@ class Burst:
             pass
 
     def hand_off(self):
-        """An ask still waiting, as HANDOVER_BURST carries it to main's newer copy (hand_over), else None. The holder is this process's child and an
-        exec keeps it and its pipes, so the newer copy reads its answer and keeps its place in the host's order. This run then holds nothing."""
-        if self.holder is None or self.granted is not None:
+        """The burst this run holds or still asks for, as HANDOVER_BURST carries it to main's newer copy (hand_over), else None. The holder is this
+        process's child and an exec keeps it and its pipes, so the newer copy keeps a granted burst, or reads the answer to a waiting ask and keeps
+        its place in the host's order. This run then holds nothing."""
+        if self.holder is None:
             return None
         self.waited += time.monotonic() - self.counted
         fds = [self.holder.stdin.fileno(), self.holder.stdout.fileno(), self.errors.fileno()]
         for fd in fds:
             os.set_inheritable(fd, True)
         HANDED_HOLDERS.append((self.holder, self.errors))  # referenced until the exec: a collected file object closes its pipe, which gives the burst back
-        state = {'pid': self.holder.pid, 'fds': fds, 'size': list(self.size), 'waited': self.waited, 'asked': self.asked, 'told': self.told,
-                 'pending': self.pending}
+        state = {'pid': self.holder.pid, 'fds': fds, 'size': list(self.size), 'granted': self.granted is not None, 'waited': self.waited,
+                 'asked': self.asked, 'told': self.told, 'pending': self.pending}
         self.holder, self.errors = None, None
         return json.dumps(state)
 
     @classmethod
     def handed(cls, raw, size, limit_s, output=None):
-        """The ask the copy before this one handed over (HANDOVER_BURST), when it asks for `size` and its holder is still this process's child,
-        else None. A handed ask this run cannot carry on has its pipes closed, so its holder gives back whatever it got."""
+        """The burst or ask the copy before this one handed over (HANDOVER_BURST), when it is for `size` and its holder is still this process's
+        child, else None. A handed ask this run cannot carry on has its pipes closed, so its holder gives back whatever it got."""
         if not raw:
             return None
         try:
@@ -1117,6 +1118,7 @@ class Burst:
             os.set_inheritable(fd, False)  # no check this run starts may keep the holder's stdin open past the run
         burst = cls(size, limit_s, output)
         burst.holder, burst.errors = HandedHolder(pid, fds[0], fds[1]), os.fdopen(fds[2], 'w+b')
+        burst.granted = tuple(size) if state.get('granted') else None
         burst.waited, burst.asked = float(state.get('waited') or 0), float(state.get('asked') or 0)
         burst.told, burst.pending, burst.counted = state.get('told'), state.get('pending') or '', time.monotonic()
         return burst
@@ -1731,8 +1733,8 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
     a run whose base's st-test changed raises Handover to continue in that copy with the same ticket: every waiter follows main's current rules.
     With `burst` (a Burst), a tree this waiter could take asks for the run's lane burst first, and is taken only once the burst is granted: no tree
     is held while the burst waits, so after TREE_FREE_FALLBACK_SECONDS the run behind may take it, and a burst granted while no tree is free is
-    given back and asked again when one is. No run holds a burst without a tree or a tree without its burst. A handover carries a waiting ask
-    to the newer copy (Burst.hand_off) when that copy takes one over (HANDOVER_BURST), and ends it otherwise."""
+    given back and asked again when one is. No run holds a burst without a tree or a tree without its burst. A handover carries the burst or
+    its waiting ask to the newer copy (Burst.hand_off) when that copy takes one over (HANDOVER_BURST), and ends it otherwise."""
     root.mkdir(parents=True, exist_ok=True)
     queue = root / 'queue'
     queue.mkdir(exist_ok=True)
@@ -3415,7 +3417,7 @@ def run_main(argv, cleanup):
         if not needs_tree(checks):
             pool_trees = None  # a throwaway worktree, as with ST_TEST_TREES=off, and no wait for a tree
         # The seat's lane raised for the run (Bursts, docs/st3/seat-lanes.md): asked at the tree, which is taken only once the burst is granted
-        # (acquire_tree), or before the checks of a run with no tree, and given back when the run ends. A handed-over run carries on its ask.
+        # (acquire_tree), or before the checks of a run with no tree, and given back when the run ends. A handed-over run keeps its burst or ask.
         size = burst_size(checks)
         burst = Burst.handed(HANDOVER.pop('burst', ''), size, args.queue_limit) or Burst(size, args.queue_limit)
         cleanup.callback(burst.release)

@@ -1780,7 +1780,7 @@ starves no run. A host without the shim's slots, or a gate that cannot be read, 
 shell) plus `tree_slot_blocked_s` with every running `ci-local` stage waiting for a build slot (one stage's wait while another builds is not
 counted). A run that builds asks for its seat's lane burst at its tree, and takes the tree only once the burst is granted (docs/st3/seat-lanes.md,
 "Bursts"), so the burst wait is part of `tree_wait_s`; its record has `burst` (the size held, or null with `burst_none` saying why) and
-`burst_wait_s`, the wait for it; a handover keeps a waiting ask, which the newer copy carries on. **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
+`burst_wait_s`, the wait for it; a handover keeps the burst or its waiting ask, which the newer copy carries on. **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
 the slot keeps its path (`tree-N` and `target-N`, so cargo's ids for the workspace crates, which contain the path, still match), and when the tree
 there was last registered by another clone it is re-registered as a worktree of the clone now running (its notes land in that clone) while the inputs
 the cleaning keeps (members, installed dependencies, compat baselines) move across by rename. The run still signs only what it built and tested in

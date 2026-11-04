@@ -327,9 +327,9 @@ left), and takes the tree only once the burst is granted. It holds no tree while
 so the run behind may take that tree after the fallback, and a burst granted while no tree is free
 is given back and asked again when one is: no run holds a burst without a tree or a tree without
 its burst. Once its burst is granted a run takes a free tree at once, even if the build slots
-have filled during the ask: its build then waits for a slot in the tree. A run that hands over to main's newer copy while it waits keeps its ask: the holder is
-the run's child, and the exec keeps it and its pipes, so the newer copy reads its answer and keeps
-its place in the host's order. A run with no pool tree asks before its checks. It waits up to
+have filled during the ask: its build then waits for a slot in the tree. A run that hands over to main's newer copy while it waits keeps its burst, or its ask and
+its place in the host's order: the holder is the run's child, and the exec keeps it and its pipes,
+so the newer copy holds the same burst or reads the answer to the same ask. A run with no pool tree asks before its checks. It waits up to
 `--queue-limit` for each ask (a burst given back and asked again starts a new one), prints
 each reason, and records `burst` (the size held, or none and why) and `burst_wait_s` in the run's
 `runs.jsonl` line, which `scripts/fractal-test-report` shows as its own line beside the tree and

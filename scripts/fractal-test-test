@@ -4438,7 +4438,7 @@ class BurstAtTheTree(unittest.TestCase):
     def test_a_run_whose_burst_waits_leaves_the_free_tree_to_the_run_behind_and_gives_back_a_burst_granted_with_no_tree_free(self):
         # The first ask waits until `go`, the next is granted at once.
         body = (f'if [ "$(wc -l < {self.calls})" -eq 1 ]; then echo "waiting burst lane 8 cores/24.0G does not fit"; '
-                f'while [ ! -e {self.go} ]; do sleep 0.05; done; fi; echo granted')
+                f'while [ ! -e {self.go} ] && [ -d {self.tmp.name} ]; do sleep 0.05; done; fi; echo granted')
         head, behind = [], []
         said = io.StringIO()
         with mock.patch.dict(os.environ, self.fractal(body)), mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), \
@@ -4472,7 +4472,7 @@ class BurstAtTheTree(unittest.TestCase):
         st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')  # best in the order, of this copy's rules, and never taking a tree
         got = []
         with mock.patch.dict(os.environ, self.fractal(f'echo "waiting burst lane 8 cores/24.0G does not fit"; '
-                                                      f'while [ ! -e {self.go} ]; do sleep 0.05; done; echo granted')), \
+                                                      f'while [ ! -e {self.go} ] && [ -d {self.tmp.name} ]; do sleep 0.05; done; echo granted')), \
                 mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
             burst = st_test.Burst((8, '24G'), 60)
             waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, burst=burst)), daemon=True)
@@ -4487,19 +4487,20 @@ class BurstAtTheTree(unittest.TestCase):
         burst.release()
         got[0][1].close()
 
-    def test_a_handover_keeps_a_waiting_ask_and_its_place(self):
-        """The holder is this process's child and keeps running through the exec: the newer copy reads its answer, and nothing asks again."""
-        env = self.fractal(f'echo "waiting burst lane 8 cores/24.0G does not fit"; while [ ! -e {self.go} ]; do sleep 0.05; done; echo granted')
+    def handover(self, body, granted):
+        """Hand this run's burst (granted first, or an ask that waits) over to a newer copy through hand_over, as acquire_tree's Handover does:
+        what the newer copy saw, in the same process."""
         report = Path(self.tmp.name) / 'report.json'
         newer = textwrap.dedent(f"""
             import importlib.machinery, importlib.util, json, os, sys
             loader = importlib.machinery.SourceFileLoader('st_test_newer', {str(ROOT / 'scripts/st-test')!r})
             st = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader)); loader.exec_module(st)
             burst = st.Burst.handed(os.environ[{st_test.HANDOVER_BURST!r}], (8, '24G'), 60)
-            alive = not os.path.exists({str(self.released)!r})
+            alive, held = not os.path.exists({str(self.released)!r}), burst.granted
             open({str(self.go)!r}, 'w').close()
-            granted = burst.poll(timeout=10)
-            json.dump({{'pid': os.getpid(), 'alive': alive, 'granted': granted, 'size': burst.granted, 'waited': burst.waited}}, open({str(report)!r}, 'w'))
+            ready = burst.poll(timeout=10)
+            json.dump({{'pid': os.getpid(), 'alive': alive, 'held': held, 'ready': ready, 'size': burst.granted, 'waited': burst.waited}},
+                      open({str(report)!r}, 'w'))
             burst.release()
         """)
         driver = textwrap.dedent(f"""
@@ -4508,23 +4509,35 @@ class BurstAtTheTree(unittest.TestCase):
             loader = importlib.machinery.SourceFileLoader('st_test', {str(ROOT / 'scripts/st-test')!r})
             st = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader)); loader.exec_module(st)
             burst = st.Burst((8, '24G'), 60)
-            assert not burst.poll(start=True, timeout=1)
+            assert burst.poll(start=True, timeout=1) is {granted!r}
             handed = burst.hand_off()
             burst.release()  # what the run's unwind does: nothing is held here any more
             gc.collect()
             print(os.getpid(), flush=True)
             st.hand_over(st.Handover({newer.encode()!r}, 'c' * 40, Path('/q/050.1.' + str(os.getpid())), True, burst=handed), [])
         """)
-        done = subprocess.run([sys.executable, '-c', driver], capture_output=True, text=True, env=dict(os.environ, TMPDIR=self.tmp.name, **env),
-                              timeout=60)
+        done = subprocess.run([sys.executable, '-c', driver], capture_output=True, text=True,
+                              env=dict(os.environ, TMPDIR=self.tmp.name, **self.fractal(body)), timeout=60)
         self.assertEqual(done.returncode, 0, done.stderr)
         seen = json.loads(report.read_text())
         self.assertEqual(seen['pid'], int(done.stdout.split()[0]))
         self.assertTrue(seen['alive'], 'the holder kept its stdin open through the exec')
-        self.assertEqual((seen['granted'], seen['size']), (True, [8, '24G']))
-        self.assertGreaterEqual(seen['waited'], 1)                          # the wait counts from the first copy's ask
+        self.assertEqual((seen['ready'], seen['size']), (True, [8, '24G']))
         self.assertEqual(len(self.lines(self.calls)), 1)                    # one ask, so one place in the host's order
         self.until(lambda: self.lines(self.released))
+        return seen
+
+    def test_a_handover_keeps_a_waiting_ask_and_its_place(self):
+        """The holder is this process's child and keeps running through the exec: the newer copy reads its answer, and nothing asks again."""
+        seen = self.handover(f'echo "waiting burst lane 8 cores/24.0G does not fit"; while [ ! -e {self.go} ] && [ -d {self.tmp.name} ]; '
+                             'do sleep 0.05; done; echo granted', granted=False)
+        self.assertIsNone(seen['held'])
+        self.assertGreaterEqual(seen['waited'], 1)                          # the wait counts from the first copy's ask
+
+    def test_a_handover_keeps_a_granted_burst(self):
+        """main's st-test changing under a run must not drop the run back to its base lane: the newer copy holds the same burst, unasked."""
+        seen = self.handover('echo granted', granted=True)
+        self.assertEqual(seen['held'], [8, '24G'])
 
     def test_a_newer_copy_that_cannot_take_an_ask_over_is_handed_none_and_the_ask_ends(self):
         self.root.mkdir(parents=True)
