@@ -62,6 +62,8 @@
     {"pointer": "/input/speech", "value": null},
     {"pointer": "/input/links/0/label", "value": "  "},
     {"pointer": "/input/links/0/url", "value": "/relative"},
+    {"pointer": "/input/links/0/url", "value": "https://example.com/a b"},
+    {"pointer": "/input/links/0/url", "value": "https://example.com/%xy"},
     {"pointer": "/delivery/0/state", "value": "delivered"},
     {"pointer": "/integrity/state", "value": "conflicted"},
     {"pointer": "/control_revision", "value": ""}

@@ -5042,8 +5042,8 @@ export type NoticeClaimId = typeof NoticeClaimId.Type
 export type NoticeClaimIdEncoded = typeof NoticeClaimId.Encoded
 
 export const NoticeLink = /*#__PURE__*/ (() => Schema.Struct({
-  "label": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinLength(1)),
-  "url": Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z][A-Za-z0-9+.-]*:", "u")))
+  "label": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinCodePoints(1)),
+  "url": Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z][A-Za-z0-9+.-]*:", "u"))).check(Schema.isPattern(URI_REFERENCE, { expected: "an RFC 3986 URI reference" }))
 }).annotate({ identifier: "NoticeLink" }))()
 export type NoticeLink = typeof NoticeLink.Type
 export type NoticeLinkEncoded = typeof NoticeLink.Encoded
@@ -5074,9 +5074,9 @@ export type NoticeTimestampEncoded = typeof NoticeTimestamp.Encoded
 
 /** Immutable producer input. Lengths count Unicode characters. Admission additionally caps serialized claim fields at 65536 UTF-8 bytes; JSON Schema cannot express an encoded-object byte budget. Logical identity is (authenticated producer, dedupe_key). Informational even at confirm urgency; an answer requires a native ask. */
 export const NoticeCreated = /*#__PURE__*/ (() => Schema.Struct({
-  "body": optionalKey(Schema.String.check(Schema.isMaxLength(20000))),
+  "body": optionalKey(Schema.String.check(Schema.isMaxCodePoints(20000))),
   "created_at": NoticeTimestamp,
-  "dedupe_key": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(200)),
+  "dedupe_key": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(200)),
   "expires_at": optionalKey(NoticeTimestamp),
   "intent": Schema.Literals(["done","failed","blocked","fyi"]),
   "links": Schema.Array(NoticeLink).check(Schema.isMaxLength(10)),
@@ -5085,8 +5085,8 @@ export const NoticeCreated = /*#__PURE__*/ (() => Schema.Struct({
   "resource": subjectRef(new RegExp("^(?:resource)/[^\\s]+$", "u"), "resource"),
   "schema_version": Schema.Literal(1),
   "source": NoticeSource,
-  "speech": optionalKey(Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(300))),
-  "summary": Schema.String.check(Schema.isPattern(new RegExp("^[^\\r\\n\\u0085\\u2028\\u2029]+$", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(200)),
+  "speech": optionalKey(Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(300))),
+  "summary": Schema.String.check(Schema.isPattern(new RegExp("^[^\\r\\n\\u0085\\u2028\\u2029]+$", "u"))).check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(200)),
   "urgency": Schema.Literals(["info","attention","confirm"])
 }).annotate({ identifier: "NoticeCreated", description: "Immutable producer input. Lengths count Unicode characters. Admission additionally caps serialized claim fields at 65536 UTF-8 bytes; JSON Schema cannot express an encoded-object byte budget. Logical identity is (authenticated producer, dedupe_key). Informational even at confirm urgency; an answer requires a native ask." }))()
 export type NoticeCreated = typeof NoticeCreated.Type
@@ -5096,8 +5096,8 @@ export type NoticeCreatedEncoded = typeof NoticeCreated.Encoded
 export const NoticeDelivery = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "state": Schema.Literal("pending"), "surface": Schema.Literals(["tray","speech","push","log"]), "completed_at": Schema.optionalKey(Schema.Never), "evidence": Schema.optionalKey(Schema.Never), "outcome_claim": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "completed_at": NoticeTimestamp, "evidence": Schema.Literals(["spoken","shown","logged"]), "outcome_claim": NoticeClaimId, "state": Schema.Literal("delivered"), "surface": Schema.Literals(["tray","speech","push","log"]), "reason": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "outcome_claim": NoticeClaimId, "reason": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinLength(1)), "state": Schema.Literal("failed"), "surface": Schema.Literals(["tray","speech","push","log"]), "completed_at": Schema.optionalKey(Schema.Never), "evidence": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "reason": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinLength(1)), "state": Schema.Literal("suppressed"), "surface": Schema.Literals(["tray","speech","push","log"]), "completed_at": Schema.optionalKey(Schema.Never), "evidence": Schema.optionalKey(Schema.Never), "outcome_claim": Schema.optionalKey(Schema.Never) })
+  Schema.Struct({ "outcome_claim": NoticeClaimId, "reason": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinCodePoints(1)), "state": Schema.Literal("failed"), "surface": Schema.Literals(["tray","speech","push","log"]), "completed_at": Schema.optionalKey(Schema.Never), "evidence": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "reason": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinCodePoints(1)), "state": Schema.Literal("suppressed"), "surface": Schema.Literals(["tray","speech","push","log"]), "completed_at": Schema.optionalKey(Schema.Never), "evidence": Schema.optionalKey(Schema.Never), "outcome_claim": Schema.optionalKey(Schema.Never) })
 ], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("state")).annotate({ identifier: "NoticeDelivery", description: "Per-adapter evidence, not physical audibility or person acknowledgement. Delivered requires an adapter outcome receipt." }))()
 export type NoticeDelivery = typeof NoticeDelivery.Type
 export type NoticeDeliveryEncoded = typeof NoticeDelivery.Encoded
@@ -5133,7 +5133,7 @@ export type NoticeIntegrityEncoded = typeof NoticeIntegrity.Encoded
 export const NoticePolicy = /*#__PURE__*/ (() => Schema.Struct({
   "availability_basis": NoticeClaimId,
   "disposition": Schema.Literals(["deliver","held","suppressed"]),
-  "reason": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinLength(1)),
+  "reason": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinCodePoints(1)),
   "revision": Revision
 }).annotate({ identifier: "NoticePolicy" }))()
 export type NoticePolicy = typeof NoticePolicy.Type
