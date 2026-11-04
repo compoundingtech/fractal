@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Evidence garbage collection recognizes protected tag deletion refusals even when long push output places the GH013 marker outside the last 300 characters.",
+  "replay": {"status": "none", "detail": "No evidence records are rewritten."},
+  "schema": {"status": "none", "detail": "No record or plan format changes."},
+  "rules": {"status": "none", "detail": "Deletion errors are classified using the full redacted push output. Only displayed failure diagnostics are truncated; protected evidence groups remain intact."},
+  "compatibility": {"status": "none", "detail": "Existing diagnostic length limits and credential redaction are preserved."},
+  "downtime": {"status": "none", "detail": "No restart is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Reverting restores the prior diagnostic classification behavior; no data recovery is needed."}
+}
