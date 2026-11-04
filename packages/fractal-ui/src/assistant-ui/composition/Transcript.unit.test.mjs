@@ -346,3 +346,38 @@ test('the newest prompt and a cut reasoning run combine without mounting the row
   assert.deepEqual(mountedSourceIds(markup), ['combined/prompt', ...run, ...range('after', 0, 4)])
   assert.doesNotMatch(markup, /data-item-id="before\/19"/)
 })
+
+test('highlighted commands preserve exact text and token-edge whitespace as text nodes', async () => {
+  const { JSDOM } = await import('jsdom')
+  const { createRoot } = await import('react-dom/client')
+  const { HighlightedSource } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
+  const dom = new JSDOM('<!doctype html><html><body><code></code></body></html>', { pretendToBeVisual: true })
+  const saved = new Map()
+  for (const name of ['window', 'document', 'navigator', 'requestAnimationFrame', 'cancelAnimationFrame', 'IS_REACT_ACT_ENVIRONMENT']) {
+    saved.set(name, Object.getOwnPropertyDescriptor(globalThis, name))
+    const value = name === 'IS_REACT_ACT_ENVIRONMENT' ? true : dom.window[name]
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: typeof value === 'function' ? value.bind(dom.window) : value })
+  }
+  const container = document.querySelector('code')
+  const root = createRoot(container)
+  try {
+    for (const code of ['run pnpm install', '\t run pnpm install \r\n']) {
+      await React.act(async () => root.render(React.createElement(HighlightedSource, { code, language: 'bash' })))
+      assert.equal(container.textContent, code, 'plain source is exact before highlighting')
+      for (let attempt = 0; !container.querySelector('[data-syntax-token]') && attempt < 100; attempt++) {
+        await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+      }
+      assert.ok(container.querySelector('[data-syntax-token]'), 'real Highlights tokens rendered')
+      assert.equal(container.textContent, code, 'highlighting preserves every source byte')
+      for (const span of container.querySelectorAll('[data-syntax-token]')) assert.equal(span.textContent, span.textContent.trim(), 'token-edge whitespace stays outside inline elements')
+      assert.ok([...container.childNodes].some(node => node.nodeType === 3 && /\s/.test(node.textContent)), 'whitespace is a text node')
+    }
+  } finally {
+    await React.act(async () => root.unmount())
+    dom.window.close()
+    for (const [name, descriptor] of saved) {
+      if (descriptor === undefined) Reflect.deleteProperty(globalThis, name)
+      else Object.defineProperty(globalThis, name, descriptor)
+    }
+  }
+})

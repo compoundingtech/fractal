@@ -245,11 +245,38 @@ failure to let an older pass decide; the signed evidence log reports a record th
 user unit on a host we hold, never a GitHub workflow. Both are installed in `~/.config/systemd/user/`, and
 `scripts/evidence-gc-timer` in `~/.local/bin/`. The wrapper keeps a bare repository under
 `~/.local/state/evidence-gc/`, reads `scripts/evidence-gc` and `scripts/evidence-verify` from `origin/main` (a branch
-cannot change what deletes). It reads the open pull requests' heads from the GitHub API without a login (if that
+cannot change what deletes). For a new plan it reads the open pull requests' heads from the GitHub API without a login (if that
 fails, nothing runs), runs GC with `--fetch --apply --open-heads-from`, keeps 30 days of summaries and plans, and
 stores each summary as a new version of the Fractal document `doc/fleet/factory/evidence-gc/runs`. On a host that also runs the evidence log (`~/.local/bin/evidence-log-timer`
 and `~/.config/evidence-log/signer.json` present), the wrapper passes `--before-delete`, so `evidence-log gc --publish`
 writes GC's lines and publishes the log before anything is deleted; if that fails, nothing is deleted.
+
+The wrapper passes `--resume-state` with `pending-plan.json` in its state directory. The complete original plan is fsynced before
+its hook runs and held under a file lock. A killed or failed deletion leaves that journal in place. The next run finishes it
+before reading another open-head list, fetching the evidence namespace, or recomputing record and input-key protection. Remote
+progress is authoritative: refs already gone need no push, and every remaining deletion is leased to its original object id.
+Migration replay keeps an already-created matching destination; a changed ref, remote, repository or hook is refused. Whole-group
+atomic pushes and remote protection remain in force. For live migrations and redundant-name cleanup, each deletion batch first
+re-reads the replacement from the remote and requires its original object id; these records remain live and need no GC line.
+Local cleanup is idempotent too, including a kill after its transaction
+committed but before the journal was removed. Protection-kept groups are a completed outcome: their remaining names stay
+remote, the journal closes, and the next run reads fresh open heads and plans again. Other failures retain the journal.
+The journal is not part of the 30-day summary cleanup.
+The saved plan has a unique `operation_id`; in journal mode `plan_sha256` includes that id with `delete` and `migrate`. The same
+operation keeps its hash on resume, while a later operation over identical refs gets a distinct GC marker. The pure plan's choices
+and `inputs_sha256` remain deterministic; commands without journal mode keep their existing plan hashes.
+A newly created tree-prefixed alias still incurs the existing per-name verification on its first log pull, even if that object
+was verified under another name. Checkpointed pulls retain that progress across interruptions; GC resume itself does not replan
+or re-verify the records. Reusing verification across aliases is a separate optimization.
+
+Every resumed attempt runs the original hook again before any deletion, so the signed GC lines must still publish through the
+existing fast-forward guard. A resumed plan is marked in its plan file: its hook reuses existing GC lines without duplicating them
+or dropping copies of newer records. If an old target was logged again after this operation's GC line, resume refuses its
+deletion even if a later GC line followed. Pending-name expiration is a separate concern; it is unchanged here. A failed publication leaves the previous pending set and copies intact and deletes no
+remote refs. Its signed local GC commit can remain and be published by an intervening pull while copies are retained; finishing
+the journal converges that state. Commands without a journal require a later successful GC run to converge after this failure.
+The wrapper uses `--no-wait` for the log lock, refusing promptly when a pull is active; a collision can defer deletion until the
+next daily invocation. The hook's 600-second limit and the service's one-hour limit are unchanged. The durable journal allows the next scheduled invocation to continue.
 
 **Before deleting.** `--before-delete JSON_ARGV` (with `--plan-out`) runs a command, without a shell and with the plan
 file's path as its last argument, after the plan is written and before any deletion or migration. If it exits non-zero

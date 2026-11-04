@@ -356,23 +356,70 @@ in
             binDir=${lib.escapeShellArg binDir}
             source=${lib.escapeShellArg "${effectivePackage}/bin/fractal"}
             target=${lib.escapeShellArg executable}
-            # Adopt only the historical forward alias or a physical executable
-            # with both reverse aliases; matching payload bytes are not ownership.
+            installReceipt="$binDir/.fractal-install.json"
+            pendingReceipt="$installReceipt.pending"
+            receiptOwned=false
+            # Boundary for rollback through a pre-receipt HM generation: that
+            # generation replaces the payload but leaves the newer HM receipt.
+            # Trust only the previous active generation's immutable package and
+            # intact reverse aliases, never an arbitrary digest mismatch.
+            previousHmPayload() {
+              local previous name hash
+              [[ -f "$installReceipt" && ! -L "$installReceipt" ]] || return 1
+              [[ ! -e "$pendingReceipt" && ! -L "$pendingReceipt" ]] || return 1
+              [[ -f "$target" && -x "$target" ]] || return 1
+              for name in st st3; do
+                [[ -L "$binDir/$name" ]] || return 1
+                case "$(${pkgs.coreutils}/bin/readlink "$binDir/$name")" in
+                  fractal|"$target") ;;
+                  *) return 1 ;;
+                esac
+              done
+              [[ -n "''${oldGenPath:-}" ]] || return 1
+              previous=$(${pkgs.coreutils}/bin/readlink -e "$oldGenPath/home-path/bin/fractal") || return 1
+              [[ "$previous" =~ ^/nix/store/[0-9a-z]{32}-[^/]+/ ]] || return 1
+              [[ -f "$previous" && -x "$previous" ]] || return 1
+              ${pkgs.diffutils}/bin/cmp -s "$previous" "$target" || return 1
+              hash=$(${pkgs.coreutils}/bin/sha256sum "$target") || return 1
+              hash=''${hash%% *}
+              ${pkgs.jq}/bin/jq -e -s --arg hash "$hash" '
+                length == 1 and (.[0] |
+                  type == "object" and .schema == 1 and .name == "fractal"
+                  and .installer == "hm"
+                  and (.sha256 | type == "string" and test("^[0-9a-fA-F]{64}$"))
+                  and .sha256 != $hash)
+              ' "$installReceipt" >/dev/null 2>&1
+            }
+            if [[ -e "$installReceipt" || -L "$installReceipt" || -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
+              # The incoming executable owns the receipt parser and checks it
+              # against the prior installed payload before any replacement.
+              if receiptError=$("$source" setup --receipt-verify "$binDir" 2>&1); then
+                if [[ -n "$receiptError" ]]; then printf '%s\n' "$receiptError" >&2; fi
+              elif ! previousHmPayload; then
+                if [[ -n "$receiptError" ]]; then printf '%s\n' "$receiptError" >&2; fi
+                printf 'Home Manager: invalid install receipt %s; reinstall Fractal to restore ownership.\n' "$installReceipt" >&2
+                exit 1
+              fi
+              receiptOwned=true
+            fi
+            # Matching payload bytes alone are not ownership: require the receipt
+            # or the historical forward/reverse alias layout.
             if [[ -e "$target" || -L "$target" ]]; then
-              owned=false
+              owned=$receiptOwned
               if [[ -L "$target" ]]; then
                 case "$(${pkgs.coreutils}/bin/readlink "$target")" in
                   st3|"$binDir/st3") owned=true ;;
                 esac
               elif [[ -f "$target" && -x "$target" ]]; then
-                owned=true
+                aliasOwned=true
                 for name in st st3; do
-                  if [[ ! -L "$binDir/$name" ]]; then owned=false; break; fi
+                  if [[ ! -L "$binDir/$name" ]]; then aliasOwned=false; break; fi
                   case "$(${pkgs.coreutils}/bin/readlink "$binDir/$name")" in
                     fractal|"$target") ;;
-                    *) owned=false; break ;;
+                    *) aliasOwned=false; break ;;
                   esac
                 done
+                if "$aliasOwned"; then owned=true; fi
               fi
               if ! "$owned"; then
                 printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
@@ -380,14 +427,70 @@ in
               fi
             fi
             ${pkgs.coreutils}/bin/mkdir -p "$binDir"
+            temporary=
+            backup=$(${pkgs.coreutils}/bin/mktemp -d "$binDir/.fractal-backup.XXXXXX")
+            binaryPublished=false
+            receiptPublished=false
+            pendingPublished=false
+            rollback() {
+              status=$?
+              trap - EXIT
+              if [[ "$status" -ne 0 ]]; then
+                if "$receiptPublished"; then
+                  if [[ -e "$backup/receipt" || -L "$backup/receipt" ]]; then
+                    if [[ ! "$backup/receipt" -ef "$installReceipt" ]]; then
+                      ${pkgs.coreutils}/bin/mv -f "$backup/receipt" "$installReceipt"
+                    fi
+                  else
+                    ${pkgs.coreutils}/bin/rm -f "$installReceipt"
+                  fi
+                fi
+                if "$pendingPublished"; then
+                  if [[ -e "$backup/pending" || -L "$backup/pending" ]]; then
+                    ${pkgs.coreutils}/bin/mv -f "$backup/pending" "$pendingReceipt"
+                  else
+                    ${pkgs.coreutils}/bin/rm -f "$pendingReceipt"
+                  fi
+                fi
+                if "$binaryPublished"; then
+                  if [[ -e "$backup/binary" || -L "$backup/binary" ]]; then
+                    ${pkgs.coreutils}/bin/mv -f "$backup/binary" "$target"
+                  else
+                    ${pkgs.coreutils}/bin/rm -f "$target"
+                  fi
+                fi
+              fi
+              ${pkgs.coreutils}/bin/rm -f -- "$temporary"
+              ${pkgs.coreutils}/bin/rm -rf "$backup"
+              exit "$status"
+            }
+            trap rollback EXIT
+            if [[ -e "$target" || -L "$target" ]]; then
+              ${pkgs.coreutils}/bin/ln -P "$target" "$backup/binary"
+            fi
+            if [[ -e "$installReceipt" || -L "$installReceipt" ]]; then
+              ${pkgs.coreutils}/bin/ln -P "$installReceipt" "$backup/receipt"
+            fi
+            if [[ -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
+              ${pkgs.coreutils}/bin/ln -P "$pendingReceipt" "$backup/pending"
+            fi
+            # Prepare ownership for the incoming bytes before publishing them.
+            # A crash after replacement can then be recognized on the next activation.
+            pendingPublished=true
+            "$source" setup --receipt-prepare "$binDir" --receipt-installer hm
             # Preserve the inode on no-op activation; replace symlinks even if bytes match.
             if [[ -L "$target" ]] || ! ${pkgs.diffutils}/bin/cmp -s "$source" "$target"; then
               temporary=$(${pkgs.coreutils}/bin/mktemp "$binDir/.fractal.XXXXXX")
-              trap '${pkgs.coreutils}/bin/rm -f "$temporary"' EXIT
               ${pkgs.coreutils}/bin/cp "$source" "$temporary"
               ${pkgs.coreutils}/bin/chmod 755 "$temporary"
               ${pkgs.coreutils}/bin/mv -f "$temporary" "$target"
+              binaryPublished=true
             fi
+            ${pkgs.coreutils}/bin/chmod 755 "$target"
+            # Finalization validates pending against the installed executable.
+            # Mark first so a failure after publication still restores the old receipt.
+            receiptPublished=true
+            "$source" setup --receipt-write "$binDir"
             # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
             ${pkgs.coreutils}/bin/ln -sfn fractal "$binDir/st"
             ${pkgs.coreutils}/bin/ln -sfn fractal "$binDir/st3"
