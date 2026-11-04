@@ -70,6 +70,7 @@ import { gatewaySubjectReads, SubjectReadPort, subjectReaderFromAtom } from './s
 import { gatewaySessionTraceLayer } from './stSessionTrace.ts'
 import { sessionTrace, type SessionTraceProvider } from './sessionTrace.ts'
 import { gatewayNativeDetails } from './nativeDetailsSource.ts'
+import { gatewayObjectives } from './objectivesSource.ts'
 
 /** Open/silent subscriptions have no SDK idle deadline. Bound only the first roster snapshot;
  * transport failures trigger the published fallback immediately instead of waiting this long. */
@@ -193,6 +194,7 @@ export const liveSource = ({
     registry,
   })
   const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
     FractalLive({
       ...options,
@@ -1129,6 +1131,7 @@ export const liveSource = ({
       mode: 'live',
       subjectReads,
       nativeDetails,
+      objectives,
       label: 'gateway',
       gateway: new URL(baseUrl).host,
       now: wallClock,

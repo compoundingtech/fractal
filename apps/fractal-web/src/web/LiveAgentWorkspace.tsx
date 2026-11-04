@@ -146,7 +146,7 @@ const LiveSidebarTreeView = React.memo((props: {
 })
 LiveSidebarTreeView.displayName = 'LiveSidebarTreeView'
 
-// A static import would evaluate the kit Transcript/Markdown/refractor before the shell paints.
+// A static import would evaluate the kit Transcript/Markdown before the shell paints.
 // Demand and speculative prefetch share one request; a rejection stays until a user retry.
 const conversationChunk = createLazyChunk({ load: () => import('./ConversationPane.tsx'), assets: () => readLazyChunkAssets('conversation') })
 const ConversationPane = React.lazy(() => {
