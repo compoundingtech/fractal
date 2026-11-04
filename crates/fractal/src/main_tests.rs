@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn fleet_rekey_accepts_only_an_explicit_fabric_transport() {
+    assert!(Cli::try_parse_from(["fractal", "fleet", "transports", "rekey", "fabric"]).is_ok());
+    for transport in ["tcp", "iroh", ""] {
+        let mut args = vec!["fractal", "fleet", "transports", "rekey"];
+        if !transport.is_empty() {
+            args.push(transport);
+        }
+        assert!(Cli::try_parse_from(args).is_err(), "{transport}");
+    }
+}
+
+#[test]
 fn fleet_admit_without_binds_mutating_actor_to_harness() {
     for actor in ["agent/own", "agent/peer", "person/operator"] {
         let cli = Cli::try_parse_from([
