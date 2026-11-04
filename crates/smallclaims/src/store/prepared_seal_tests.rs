@@ -531,12 +531,12 @@ fn a_claim_deleted_after_preparation_is_not_sealed() {
 }
 
 #[test]
-fn an_own_envelope_found_unsigned_under_the_writer_is_prepared_again() {
+fn a_retained_unsigned_envelope_is_not_signed_by_a_fresh_seal() {
     let store = node("ivy");
     let key = keyed(&store);
     let first = note(&store, "note/sealed-before", BTreeMap::new());
     note(&store, "note/sealed-now", BTreeMap::new());
-    // Seal and sign the first batch without moving the frontier, so it lies inside the chunk.
+    // Simulate a historical unsigned seal; no exact local provenance survives it.
     let first_rowid: i64 = store
         .readers
         .get()
@@ -551,26 +551,12 @@ fn an_own_envelope_found_unsigned_under_the_writer_is_prepared_again() {
         let transaction = connection.transaction().unwrap();
         seed_replica_envelopes_range_tx(&transaction, &store.origin, None, Some(first_rowid))
             .unwrap();
-        assert_eq!(store.sign_own_envelopes_tx(&transaction, None).unwrap(), 1);
         transaction.commit().unwrap();
     }
     assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 0);
-    // Preparation sees the first envelope signed and signs only the one it seals. Its signature
-    // is gone by the loan, so the writer finds an unsigned envelope it holds no signature for.
-    let batch_id = first.batch_id.clone();
-    before_the_loan(move |store| {
-        store
-            .connection
-            .write()
-            .execute(
-                /* sqlite-large-value: allow-for-now lv-h6e0a902d619e owner=smallclaims::store::prepared_seal_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures WHERE envelope_hash=(
-                     SELECT envelope_hash FROM replica_envelopes WHERE batch_id=?1)",
-                [&batch_id],
-            )
-            .unwrap();
-    });
+    // Only the second, freshly constructed envelope is eligible for a signature.
     assert_eq!(seal(&store), 1);
-    assert_eq!(envelopes_signed_by(&store.readers.get(), &key, FLEET), 2);
+    assert_eq!(envelopes_signed_by(&store.readers.get(), &key, FLEET), 1);
 }
 
 #[test]

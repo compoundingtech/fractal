@@ -2338,31 +2338,19 @@ pub struct FleetAdmissionResidue {
 }
 
 impl Store {
-    /// Set this node's member key. Every envelope of this node's writer gets its signature,
-    /// including envelopes written before the key existed. Returns the number signed now.
-    pub fn set_member_key(&self, key: Option<Arc<crate::fleet::MemberKey>>) -> Result<usize> {
+    /// Load this node's member key and seal fresh local work. Already sealed unsigned history
+    /// has no trusted-local provenance and is never signed by activation.
+    pub fn set_member_key(&self, key: Option<Arc<crate::fleet::MemberKey>>) -> Result<()> {
         if key.is_none() {
             *self
                 .member_key
                 .write()
                 .unwrap_or_else(PoisonError::into_inner) = None;
-            return Ok(0);
+            return Ok(());
         }
-        if let Some(key) = &key {
-            self.set_node_key(key.clone())?;
-        }
-        // Load the node signer before sealing recent standalone work. Its person and agent keys
-        // must likewise have been restored by the caller before this step.
+        self.load_member_key(key)?;
         self.replication_snapshot()?;
-        *self
-            .member_key
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = key;
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
-        let signed = self.sign_own_envelopes_tx(&transaction, None)?;
-        transaction.commit()?;
-        Ok(signed)
+        Ok(())
     }
 
     /// Restore signing credentials before writes, without scanning retained history. Daemon
@@ -2378,89 +2366,11 @@ impl Store {
         Ok(())
     }
 
-    /// Seal retained work and sign envelopes written before this member key existed. Keys for
-    /// people and agents must have been restored before this operation.
-    pub fn complete_replication_activation(&self) -> Result<usize> {
+    /// Seal fresh local work after signing credentials are restored. Retained envelopes are
+    /// never signed: an own-writer label does not prove this store created their exact hash.
+    pub fn complete_replication_activation(&self) -> Result<()> {
         self.replication_snapshot()?;
-        self.sign_retained_own_envelopes()
-    }
-
-    fn sign_retained_own_envelopes(&self) -> Result<usize> {
-        const SIGN_CHUNK_ENVELOPES: usize = 64;
-        let Some(key) = self
-            .member_key
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-        else {
-            return Ok(0);
-        };
-        let Some(fleet_id) = self.signing_fleet_id(&self.readers.get())? else {
-            return Ok(0);
-        };
-        let shard = self.bound_shard()?;
-        let target: u64 = self.readers.get().query_row(
-            "SELECT COALESCE(MAX(sequence),0) FROM replica_envelopes WHERE writer=?1",
-            [&self.origin],
-            |row| row.get(0),
-        )?;
-        let mut after = (0_u64, String::new());
-        let mut signed = 0;
-        loop {
-            let page = self.readers.get().prepare(
-                "SELECT sequence,envelope_hash FROM replica_envelopes AS envelopes
-                 WHERE writer=?1 AND (sequence,envelope_hash)>(?2,?3) AND sequence<=?4
-                   AND NOT EXISTS(SELECT 1 FROM replica_envelope_signatures AS signatures
-                     WHERE signatures.writer=envelopes.writer AND signatures.sequence=envelopes.sequence
-                       AND signatures.envelope_hash=envelopes.envelope_hash AND signatures.member_key=?5)
-                 ORDER BY sequence,envelope_hash LIMIT ?6",
-            )?.query_map(params![self.origin,after.0,after.1,target,key.public(),SIGN_CHUNK_ENVELOPES],
-                |row| Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?)))?
-              .collect::<Result<Vec<_>,_>>()?;
-            let Some(last) = page.last() else {
-                break;
-            };
-            after = last.clone();
-            // Prepare signatures off the writer. The insert checks that each exact envelope
-            // still exists, because checkpoint trimming can remove it after the reader pass.
-            let prepared: Vec<_> = page
-                .iter()
-                .map(|(sequence, hash)| {
-                    (
-                        *sequence,
-                        hash,
-                        key.sign(&crate::fleet::envelope_signature_message_in(
-                            shard.as_deref(),
-                            &fleet_id,
-                            &self.origin,
-                            *sequence,
-                            hash,
-                        )),
-                    )
-                })
-                .collect();
-            let mut connection = self.connection.write();
-            let transaction = connection.transaction()?;
-            for (sequence, hash, signature) in prepared {
-                signed += transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hf8ca51406a05 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_envelope_signatures(
-                         writer,sequence,envelope_hash,member_key,signature,stored_at_unix_ms)
-                     SELECT ?1,?2,?3,?4,?5,?6 WHERE EXISTS(SELECT 1 FROM replica_envelopes
-                         WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)",
-                    params![
-                        self.origin,
-                        sequence,
-                        hash,
-                        key.public(),
-                        signature,
-                        now_ms().to_string()
-                    ],
-                )?;
-            }
-            transaction.commit()?;
-            // Dropping this loan between pages lets queued API writes commit next.
-        }
-        Ok(signed)
+        Ok(())
     }
 
     /// Pin the fleet's anchor key. A node pins it once, from its own founding or from an
@@ -2693,69 +2603,6 @@ impl Store {
                 member_key.as_deref().map(|key| (self.origin.as_str(), key)),
             )?,
         ))
-    }
-
-    /// Sign every envelope of this node's writer that has no signature by its member key,
-    /// optionally only those whose batches follow the last processed batch. Another process
-    /// can seal a batch before this keyed worker sees it; an envelope-row frontier would skip it.
-    pub fn sign_own_envelopes_tx(
-        &self,
-        transaction: &Transaction<'_>,
-        after_batch_rowid: Option<i64>,
-    ) -> Result<usize> {
-        self.sign_own_envelopes_range_tx(transaction, after_batch_rowid, None)
-    }
-
-    fn sign_own_envelopes_range_tx(
-        &self,
-        transaction: &Transaction<'_>,
-        after_batch_rowid: Option<i64>,
-        through_batch_rowid: Option<i64>,
-    ) -> Result<usize> {
-        let _timing = time_stage(&self.replication_timers.signing);
-        let Some(key) = self
-            .member_key
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-        else {
-            return Ok(0);
-        };
-        let Some(fleet_id) = self.signing_fleet_id(transaction)? else {
-            return Ok(0);
-        };
-        let unsigned = prepared_seal::own_unsigned_envelopes(
-            transaction,
-            &self.origin,
-            key.public(),
-            after_batch_rowid,
-            through_batch_rowid,
-        )?;
-        let shard = fleet_meta(transaction, "shard_id")?;
-        let now = now_ms().to_string();
-        for (sequence, envelope_hash) in &unsigned {
-            let signature = key.sign(&crate::fleet::envelope_signature_message_in(
-                shard.as_deref(),
-                &fleet_id,
-                &self.origin,
-                *sequence,
-                envelope_hash,
-            ));
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h4d723fabed04 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_envelope_signatures(
-                     writer, sequence, envelope_hash, member_key, signature, stored_at_unix_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    self.origin,
-                    sequence,
-                    envelope_hash,
-                    key.public(),
-                    signature,
-                    now
-                ],
-            )?;
-        }
-        Ok(unsigned.len())
     }
 
     /// Signatures this node asks its peers for: first those of envelopes it holds until their

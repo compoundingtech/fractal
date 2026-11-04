@@ -167,6 +167,21 @@ window and removal high water, independently of which member relayed it. Old-key
 writes cannot enter a new incarnation just because their sequence matches. Unknown/unsigned or
 fenced records remain visible as admission state, not silently accepted graph authority.
 
+Replicated assistant authority (`custom.client.assistant.v1.begun`, `granted`, `policy`,
+and `revoked`) requires an eligible keyed writer and a verified signature for the exact
+writer, sequence and envelope hash, including backup restoration. Unsigned or legacy authority
+stays held; ordinary legacy replication and trusted-local issuance remain supported.
+
+Local member signatures are made only for freshly sealed envelopes, in the same transaction
+as their seal, after rechecking the prepared local batches and exact computed envelope hashes.
+Activation and retries never sign retained envelopes: an own-writer label, admitted receipt,
+or shared batch id is not trusted-local provenance. Previously sealed unsigned history stays
+unsigned, even when a key is activated or an already-keyed node restarts.
+Configure the anchor and admitted signing key before creating replicated assistant grants.
+Update receivers first; older receivers still apply the former admission rules.
+Upgrading does not validate or remove grants already admitted by an older build; review these
+separately before use. Do not reset stores or disable verification to bypass held envelopes.
+
 ## Listener capability and absence
 
 Listening members advertise endpoints; dial-out members advertise none. `st fleet mode listening`

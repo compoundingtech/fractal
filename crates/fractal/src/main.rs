@@ -7571,11 +7571,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 match activation_store.connection.write_workers().spawn_blocking({
                     let store = activation_store.clone();
                     move || fractal_daemon::task_cpu::blocking("replication.activate", || {
-                        let signed = store.complete_replication_activation()?;
+                        store.complete_replication_activation()?;
                         if let Some(shard) = fractal_store::store::messages_shard::shard(&store) {
                             shard.complete_replication_activation()?;
                         }
-                        Ok::<_, anyhow::Error>(signed)
+                        Ok::<_, anyhow::Error>(())
                     })
                 })
                 .await

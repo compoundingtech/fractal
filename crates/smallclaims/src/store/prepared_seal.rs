@@ -101,46 +101,6 @@ pub(crate) fn unsealed_batches(
     Ok(batches)
 }
 
-/// The envelopes of `origin` whose batches follow `after_batch_rowid` (or, without it, the
-/// envelope rows after it), through `through_batch_rowid`, that `member_key` has not signed.
-pub(crate) fn own_unsigned_envelopes(
-    connection: &Connection,
-    origin: &str,
-    member_key: &str,
-    after_batch_rowid: Option<i64>,
-    through_batch_rowid: Option<i64>,
-) -> Result<Vec<(u64, String)>> {
-    let from = if after_batch_rowid.is_some() {
-        "FROM batches CROSS JOIN replica_envelopes AS envelopes
-         ON envelopes.batch_id=batches.id WHERE batches.rowid>?2 AND batches.rowid<=?4 AND envelopes.writer=?1"
-    } else {
-        "FROM replica_envelopes AS envelopes WHERE envelopes.writer=?1 AND envelopes.rowid>?2 AND envelopes.rowid<=?4"
-    };
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9a397347cb41 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
-        "SELECT envelopes.sequence, envelopes.envelope_hash {from}
-           AND NOT EXISTS (
-             SELECT 1 FROM replica_envelope_signatures AS signatures
-             WHERE signatures.writer=envelopes.writer
-               AND signatures.sequence=envelopes.sequence
-               AND signatures.envelope_hash=envelopes.envelope_hash
-               AND signatures.member_key=?3
-           )
-         ORDER BY envelopes.sequence"
-    ))?;
-    let unsigned = statement
-        .query_map(
-            params![
-                origin,
-                after_batch_rowid.unwrap_or(i64::MIN),
-                member_key,
-                through_batch_rowid.unwrap_or(i64::MAX),
-            ],
-            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(unsigned)
-}
-
 /// One record of a sealed batch: a claim, encoded as the envelope carries it.
 pub(crate) struct SealedRecord {
     claim_id: String,
@@ -488,20 +448,11 @@ impl Store {
         )) = &signer
         {
             let _timing = time_stage(&self.replication_timers.signing);
-            let mut unsigned = own_unsigned_envelopes(
-                &snapshot,
-                &self.origin,
-                key.public(),
-                Some(seeded_through),
-                Some(through),
-            )?;
-            unsigned.extend(
-                batches
-                    .iter()
-                    .filter(|sealed| sealed.batch.writer == self.origin)
-                    .map(|sealed| (sealed.batch.sequence, sealed.envelope_hash.clone())),
-            );
-            for (sequence, envelope_hash) in unsigned {
+            // Only the exact envelopes freshly constructed by this sealing pass are eligible.
+            // Retained own-labelled rows may have arrived over replication.
+            for sealed in batches.iter().filter(|sealed| sealed.batch.writer == self.origin) {
+                let sequence = sealed.batch.sequence;
+                let envelope_hash = sealed.envelope_hash.clone();
                 let signature = key.sign(&crate::fleet::envelope_signature_message_in(
                     shard.as_deref(),
                     fleet_id,
@@ -590,13 +541,8 @@ impl Store {
         )) = &signer
         {
             let now = now_ms().to_string();
-            for envelope in own_unsigned_envelopes(
-                transaction,
-                &self.origin,
-                key.public(),
-                Some(prepared.seeded_through),
-                Some(prepared.through),
-            )? {
+            for sealed in prepared.batches.iter().filter(|sealed| sealed.batch.writer == self.origin) {
+                let envelope = (sealed.batch.sequence, sealed.envelope_hash.clone());
                 let Some(signature) = prepared.envelope_signatures.get(&envelope) else {
                     return Ok(false);
                 };

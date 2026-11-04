@@ -1025,7 +1025,7 @@ fn upgrading_again_recovers_a_batch_skipped_by_a_downgraded_writer() {
 }
 
 #[test]
-fn signing_an_unsigned_backlog_releases_the_writer_between_pages() {
+fn activating_an_unsigned_backlog_never_signs_retained_envelopes() {
     let store = node("cedar");
     for i in 0..256 {
         recovery_note(&store, &format!("note/unsigned-{i}"));
@@ -1033,65 +1033,16 @@ fn signing_an_unsigned_backlog_releases_the_writer_between_pages() {
     store.seal_local_batches().unwrap();
     let key = Arc::new(MemberKey::generate().unwrap().0);
     store.load_member_key(Some(key.clone())).unwrap();
-    let (entered, waiting) = mpsc::sync_channel(1);
-    let (resume, resumed) = mpsc::sync_channel(1);
-    let gate = Mutex::new(Some((entered, resumed)));
-    {
-        let connection = store.connection.write();
-        connection
-            .create_scalar_function("signature_gate", 0, FunctionFlags::SQLITE_UTF8, move |_| {
-                if let Some((entered, resumed)) = gate.lock().unwrap().take() {
-                    entered.send(()).unwrap();
-                    resumed.recv().unwrap();
-                }
-                Ok(0)
-            })
-            .unwrap();
-        connection
-            .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-hcc7d9c00ac1a owner=smallclaims::store::receive_writer_tests TODO=chunk-or-reference-exact-wire-values */ "CREATE TEMP TRIGGER signature_gate BEFORE INSERT ON replica_envelope_signatures
-            BEGIN SELECT signature_gate(); END;",
-            )
-            .unwrap();
-    }
-    let signing_store = store.clone();
-    let signing =
-        std::thread::spawn(move || signing_store.complete_replication_activation().unwrap());
-    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
-    let (done, ack) = mpsc::sync_channel(1);
-    let (observed, prefix) = mpsc::sync_channel(1);
-    store.connection.send(WriterJob::Batched {
-        enqueued: Instant::now(),
-        profile: None,
-        wait: None,
-        holder: crate::windows::holds::Holder::current(),
-        done,
-        run: Box::new(move |tx| {
-            observed
-                .send(
-                    tx.query_row(
-                        "SELECT COUNT(*) FROM replica_envelope_signatures",
-                        [],
-                        |r| r.get::<_, usize>(0),
-                    )
-                    .unwrap(),
-                )
-                .unwrap();
-            tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h1795cee573e7 owner=smallclaims::store::receive_writer_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('signing-fairness','committed')",
-                [],
-            )
-            .unwrap();
-            true
-        }),
-    });
-    resume.send(()).unwrap();
-    let result = ack.recv_timeout(Duration::from_secs(5));
-    let signed = signing.join().unwrap();
-    result.unwrap().unwrap();
-    assert_eq!(prefix.recv().unwrap(), 64);
-    assert_eq!(signed, 256);
-    assert_eq!(store.sign_retained_own_envelopes().unwrap(), 0);
+    store.complete_replication_activation().unwrap();
+    store.complete_replication_activation().unwrap();
+    assert_eq!(
+        store.readers.get().query_row(
+            "SELECT COUNT(*) FROM replica_envelope_signatures",
+            [],
+            |row| row.get::<_, usize>(0),
+        ).unwrap(),
+        0,
+    );
 }
 
 #[test]

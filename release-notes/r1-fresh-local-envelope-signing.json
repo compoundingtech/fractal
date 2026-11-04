@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Restrict member signatures to exact freshly sealed local envelopes",
+  "replay": {"status":"none","detail":"No historical signing or replay; retained unsigned envelopes remain stored unsigned."},
+  "schema": {"status":"none","detail":"No database schema changes or unsafe provenance backfill."},
+  "rules": {"status":"changed","detail":"Activation and prepared sealing never sign retained own-labelled envelopes. Only exact freshly computed local envelope hashes are signed, atomically with sealing."},
+  "compatibility": {"status":"changed","detail":"Unsigned historical authority stays held, including batches previously sealed by an unkeyed daemon. Ordinary Legacy replication and trusted-local issuance remain supported. Mixed versions were not exercised."},
+  "downtime": {"status":"unknown","detail":"Normal binary restart; restart duration is not measured."},
+  "manual": {"status":"changed","detail":"Load admitted member signing credentials before creating replicated assistant grants. Review previously admitted grants separately; preserve the q32 freeze."},
+  "recovery": {"status":"changed","detail":"Roll forward. Downgrading restores historical signature laundering; do not reset stores or disable signature verification."}
+}
