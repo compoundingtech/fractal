@@ -34,6 +34,15 @@ selected release's CLI protocol, so retained tags remain installable. It never
 executes the destination to verify ownership. Missing, dangling or unreadable
 receipt-bound executables are refused with the receipt path and reinstall guidance.
 
+After successfully invoking a retained pre-receipt macOS installer, the downloader
+refreshes an already-verified script-owned receipt for the signed fixed app.
+This requires the same physical app target, no pending intent, and both aliases
+still resolving to that target. Signing can change the archive's executable bytes;
+the refreshed digest therefore covers the installed image, while release identity
+comes only from the verified archive. This does not waive a mismatch present
+before delegation. Interrupted retained installations still require restoring
+the matching executable and receipt together.
+
 ## Install and restart deliberately
 
 For an archive installation, use the [installer](https://github.com/compoundingtech/fractal/blob/main/install.sh) and its release-selection options. Install without opening the interface so you can inspect the selected build before restarting. For Home Manager, update the selected input and activate through the same configuration that owns the service.
