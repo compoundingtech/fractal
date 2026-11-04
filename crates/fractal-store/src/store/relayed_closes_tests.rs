@@ -171,13 +171,7 @@ async fn a_read_queues_a_close_without_waiting_for_a_held_writer() {
 
     release.send(()).unwrap();
     holder.join().unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while relayed_closes::queued(&store) > 0 || !relayed_closes::closed(&store.readers.get(), "message/r2").unwrap() {
-        if std::time::Instant::now() > deadline {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    idle(&store).await;
     assert!(relayed_closes::closed(&store.readers.get(), "message/r2").unwrap(), "the writer recorded the close");
     assert_eq!(current(&store), ["message/r1"]);
 
@@ -206,18 +200,26 @@ async fn the_queue_keeps_at_most_its_bound_and_drops_the_rest_for_a_later_read()
 
     release.send(()).unwrap();
     holder.join().unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while relayed_closes::queued(&store) > 0 && std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let recorded = subjects.iter().filter(|subject| relayed_closes::closed(&store.readers.get(), subject).unwrap()).count();
-    assert!(recorded <= QUEUED && recorded >= QUEUED - BATCH, "only what the queue kept was recorded: {recorded}");
+    idle(&store).await;
+    let recorded = |store: &Store| {
+        subjects.iter().filter(|subject| relayed_closes::closed(&store.readers.get(), subject).unwrap()).count()
+    };
+    assert_eq!(recorded(&store), QUEUED, "only what the queue kept was recorded");
 
     // A later read queues the dropped ones again.
     relayed_closes::queue(&store, subjects.iter().map(|subject| close(subject)).collect()).unwrap();
+    let queued = relayed_closes::queued(&store);
+    assert!(queued <= subjects.len() - QUEUED, "only the dropped ones are queued again: {queued}");
+    idle(&store).await;
+    assert_eq!(recorded(&store), subjects.len());
+}
+
+/// Wait until the queue is empty and the writer has committed the last batch it took: an empty
+/// queue alone can still have a batch in flight.
+async fn idle(store: &Store) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while relayed_closes::queued(&store) > 0 && std::time::Instant::now() < deadline {
+    while !relayed_closes::idle(store) {
+        assert!(std::time::Instant::now() < deadline, "the writer never went idle");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(subjects.iter().all(|subject| relayed_closes::closed(&store.readers.get(), subject).unwrap()));
 }

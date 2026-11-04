@@ -127,6 +127,14 @@ pub fn queued(store: &Store) -> usize {
     store.extension::<Queue>().pending.lock().len()
 }
 
+/// Whether no close waits and no writer is recording a batch it took.
+#[cfg(any(test, feature = "test-support"))]
+pub fn idle(store: &Store) -> bool {
+    let queue = store.extension::<Queue>();
+    let pending = queue.pending.lock();
+    pending.is_empty() && !queue.draining.load(Ordering::Acquire)
+}
+
 fn start(store: &Arc<Store>, queue: &Queue) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         return;
