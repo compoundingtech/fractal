@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
-import { ResizableSplit } from '@fractal/ui/assistant-ui/shell'
+import { ResizableSplit } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Shell.tsx'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { touchPointerQuery } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/useTouchLayout.ts'

@@ -136,13 +136,23 @@ pub fn systemd_user_available() -> bool {
 }
 
 pub fn scope_unit(product: &str, task_id: &str) -> String {
+    scope_unit_name(product, task_id, std::process::id(), SCOPE_SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+fn scope_unit_name(product: &str, task_id: &str, pid: u32, sequence: u64) -> String {
     let safe_product = sanitize(product);
     let safe_task = sanitize(task_id);
-    let sequence = SCOPE_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "{safe_product}-{safe_task}-{}-{sequence}.scope",
-        std::process::id()
-    )
+    format!("{safe_product}-{safe_task}-{pid}-{sequence}.scope")
+}
+
+/// Inverse of `scope_unit`, splitting numeric suffixes from the right.
+pub(crate) fn scope_identity<'a>(product: &str, unit: &'a str) -> Option<&'a str> {
+    let body = unit.strip_suffix(".scope")?;
+    let (body, sequence) = body.rsplit_once('-')?;
+    let (body, pid) = body.rsplit_once('-')?;
+    let identity = body.strip_prefix(product)?.strip_prefix('-')?;
+    (scope_unit_name(product, identity, pid.parse().ok()?, sequence.parse().ok()?) == unit)
+        .then_some(identity)
 }
 
 pub(crate) fn sanitize(value: &str) -> String {

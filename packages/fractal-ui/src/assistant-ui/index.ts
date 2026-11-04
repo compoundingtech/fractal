@@ -46,7 +46,9 @@ export { Button as CompositionButton, IconButton as CompositionIconButton, Menu,
 export type { MenuProps, MenuItemProps, PopoverProps, CheckboxProps, TooltipProps, TooltipSurfaceProps } from './composition/Controls'
 
 /** Controlled sidebar row; the host owns clock and data. */
-export { SidebarAgentRow, AgentHoverCard, AgentRowActions, type AgentRowActionsProps, SidebarQueryContext, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
+export { SidebarAgentRow, sidebarRowDescription } from './sidebar/SidebarAgentRow.tsx'
+export { AgentHoverCard, AgentRowActions, type AgentRowActionsProps } from './sidebar/DeferredRowActions.tsx'
+export { SidebarQueryContext, sidebarRowAccessibleName } from './sidebar/rowPresentation.tsx'
 export { MilestoneAgentRow, openAgentRowMenu, type MilestoneAgentRowProps } from './sidebar/MilestoneAgentRow.tsx'
 export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
