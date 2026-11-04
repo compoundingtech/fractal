@@ -2335,6 +2335,23 @@ pub struct MessageView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_grant_id: Option<String>,
     pub created_index: u64,
+    /// Who said how far the message got, when its recipient's seat runs on another host that keeps
+    /// the seat's receipts (db break-up step 4b): that host answered, and `status` is the further
+    /// of its answer and this member's own records, or it did not, and `status` is only this
+    /// member's own. Absent when this member's own records are the whole answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_from: Option<StatusFrom>,
+}
+
+/// The host a message's status was asked of, and whether it answered.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StatusFrom {
+    pub host: String,
+    /// `answered`, or `unknown` when the host did not answer.
+    pub state: String,
+    /// Why the host's answer is unknown, with `unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A definitive first-send refusal. Transport loss remains MessageSendUnconfirmed.
