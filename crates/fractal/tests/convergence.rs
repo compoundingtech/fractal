@@ -52,7 +52,7 @@ use serde_json::{Map, Value, json};
 use fractal_daemon::model::{ClaimInput, ClaimRecord};
 use fractal_daemon::store::{
     CheckpointAction, CheckpointContext, CheckpointExcuseRequest, Store, TrimFault, certificates,
-    checkpoint_name, stable_checkpoints, verify_checkpoint_manifest,
+    checkpoint, checkpoint_name, stable_checkpoints, verify_checkpoint_manifest,
 };
 use fractal_schema::{FieldSpec, Retention, ValueType};
 
@@ -147,23 +147,23 @@ fn deployment_fields(kind: &str) -> Option<Map<String, Value>> {
     }
 }
 
-/// Kinds a checkpoint rule may drop. Every other kind is kept on every node.
-const RULE_KINDS: &[&str] = &[
-    "harness-question.observed",
-    "harness.observed",
-    "harness.timeline",
-    "loop.state",
-    "subscription.mission-deferred",
-    "observer.observed",
-    "daemon.diagnostic",
-    "transport.observed",
-    "runtime.action.requested",
-    "runtime.action.succeeded",
-    "runtime.action.failed",
-    "runtime.action.deadline-reached",
-    "render.applied",
-    "runtime.readiness-deadline-reached",
-];
+/// Kinds a checkpoint rule may drop, read from the retention policy so the oracle follows every
+/// rule it adds: each kind a slotted rule names, and a seat's status sources, which the status
+/// history rule trims. Every other kind is kept on every node.
+fn rule_kinds() -> &'static BTreeSet<String> {
+    static KINDS: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
+        let mut kinds = BTreeSet::new();
+        for rule in &fractal_schema::retention::policy().rules {
+            if rule.kind == "seat.status-history" {
+                kinds.extend(checkpoint::STATUS_SOURCE_KINDS.map(str::to_owned));
+            } else if rule.slot.is_some() {
+                kinds.insert(rule.kind.clone());
+            }
+        }
+        kinds
+    });
+    &KINDS
+}
 
 /// A small, fast, seeded generator (SplitMix64).
 struct Rng(u64);
@@ -1479,7 +1479,7 @@ impl World {
                 })
                 .unwrap_or_default();
             for (id, claim) in &oracle_claims {
-                let droppable = RULE_KINDS.contains(&claim.kind.as_str())
+                let droppable = rule_kinds().contains(&claim.kind)
                     && !claim
                         .actor
                         .as_deref()

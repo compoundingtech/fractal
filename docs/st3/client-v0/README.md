@@ -1580,6 +1580,11 @@ hosts then ask it. A message resource whose recipient's seat runs on such a host
 A view waits at most a second for a host, and does not ask a host that missed for half a minute.
 Without `status_from`, this host's own records are the whole answer, as on older daemons.
 
+A fault's `target_states` entry for such a message, and a step's `wake.acknowledged_by` in a
+mission's detail, take the host's answer the same way: the further of the two. The answer never
+feeds a resource's `revision` or `updated_at`, which stay monotonic. A client sees a change in it
+on its next read, and a subscription sends it with the next frame that something else triggers.
+
 ## Event feed and resynchronization
 
 `GET /v1/client/events?after=CURSOR&limit=N&wait_ms=M` returns at most the negotiated event and byte
