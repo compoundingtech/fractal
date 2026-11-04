@@ -2959,6 +2959,7 @@ fn client_work_values(
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
                 "execution_elapsed_ms": work.execution_elapsed_ms,
+                "execution_waited_ms": work.execution_waited_ms,
                 "timeout_ms": work.timeout_ms,
                 "goals": work.goals,
                 "constraints": work.constraints,
