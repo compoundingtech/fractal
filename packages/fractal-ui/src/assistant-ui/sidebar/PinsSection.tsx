@@ -33,9 +33,9 @@ export function PinsSection({ items, editable, onOpen, onUnpin, detail, onRetry,
 }
 
 const styles = stylex.create({
-  section: { display: 'flex', flexDirection: 'column', gap: s.xs2, minWidth: 0, paddingBlockEnd: s.sm, fontFamily: t.fontSans },
-  heading: { margin: s.zero, paddingInline: s.sm, color: ink.fgSoft, fontSize: t.denseSize, fontWeight: t.weightMedium },
-  list: { display: 'flex', flexDirection: 'column', margin: s.zero, padding: s.zero, listStyleType: 'none' },
+  section: { display: 'flex', flexDirection: 'column', gap: s.xs2, minWidth: 0, minHeight: 0, maxHeight: '40%', flexShrink: 0, boxSizing: 'border-box', overflow: 'hidden', paddingBlockEnd: s.sm, fontFamily: t.fontSans },
+  heading: { margin: s.zero, paddingInline: s.sm, flexShrink: 0, color: ink.fgSoft, fontSize: t.denseSize, fontWeight: t.weightMedium },
+  list: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden', overscrollBehaviorY: 'contain', margin: s.zero, padding: s.zero, listStyleType: 'none' },
   item: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) max-content', alignItems: 'center', minWidth: 0 },
   label: { flex: '1 1 0', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'start', color: ink.fg },
 })

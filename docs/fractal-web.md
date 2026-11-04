@@ -639,7 +639,8 @@ The live sidebar renders returned Pins in membership order above the roster and
 hides an empty section. Pin/unpin menus appear only with a synced writable follow.
 Retired or unavailable subjects remain hidden by membership reads; these defaults
 are reversible presentation choices. The UI does not opt into Pins creation.
-Pins use the source-owned client and its fetch/socket transports, including replay.
+Pins occupy at most 40% of the roster, with their own vertical scroll area; keyboard
+focus scrolls later rows into view while the agent tree keeps the remaining space.
 
 ## Focused local checks
 

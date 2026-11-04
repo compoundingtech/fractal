@@ -30,7 +30,7 @@ const meta = {
 } satisfies Meta<typeof AllStatesHarness>
 export default meta
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
-export const scenarioExemptions: readonly string[] = ['AllStates:contract-fixture']
+export const scenarioExemptions: readonly string[] = ['AllStates:contract-fixture', 'ManyPins:contract-fixture']
 
 export const AllStates: StoryObj<typeof meta> = { tags: ['critical', 'both-widths'], name: 'All states · ordered, read-only, failed, empty', play: async ({ canvasElement }) => {
   const editable = state(canvasElement, 'editable')
@@ -55,6 +55,31 @@ export const AllStates: StoryObj<typeof meta> = { tags: ['critical', 'both-width
   await expect(canvasElement.querySelector('[data-state="empty"]')).toBeEmptyDOMElement()
 } }
 
+const many = Array.from({ length: 24 }, (_, index) => ({ id: `agent/pin-${index + 1}`, label: `Pinned item ${index + 1}` }))
+export const ManyPins: StoryObj<typeof meta> = {
+  tags: ['critical', 'both-widths'],
+  render: () => <main data-testid="pins-roster" {...stylex.props(styles.many)}>
+    <PinsSection items={many} editable onOpen={() => undefined} onUnpin={() => undefined} />
+    <div data-testid="agent-tree" {...stylex.props(styles.tree)}>Agent tree keeps its remaining space</div>
+  </main>,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement), roster = canvas.getByTestId('pins-roster')
+    const section = canvas.getByRole('region', { name: 'Pinned' }), list = canvas.getByRole('list')
+    await expect(section.getBoundingClientRect().height).toBeLessThanOrEqual(roster.clientHeight * 0.4 + 1)
+    await expect(canvas.getByTestId('agent-tree').getBoundingClientRect().height).toBeGreaterThanOrEqual(roster.clientHeight * 0.6 - 1)
+    await expect(list.scrollHeight).toBeGreaterThan(list.clientHeight)
+    canvas.getByRole('button', { name: 'Unpin Pinned item 23' }).focus()
+    await userEvent.tab()
+    const last = canvas.getByRole('button', { name: 'Pinned item 24' })
+    await expect(last).toHaveFocus()
+    await expect(list.scrollTop).toBeGreaterThan(0)
+    await expect(last.getBoundingClientRect().top).toBeGreaterThanOrEqual(list.getBoundingClientRect().top)
+    await expect(last.getBoundingClientRect().bottom).toBeLessThanOrEqual(list.getBoundingClientRect().bottom + 1)
+  },
+}
+
 const styles = stylex.create({
   canvas: { display: 'flex', flexDirection: 'column', gap: s.lg, width: g.sidebarDefault, maxWidth: '100%', boxSizing: 'border-box', padding: s.sm, minHeight: '100vh', backgroundColor: surface.canvas, color: ink.fg },
+  many: { display: 'flex', flexDirection: 'column', height: 'min(600px, 80vh)', width: g.sidebarDefault, maxWidth: '100%', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg },
+  tree: { flex: '1 1 0', minHeight: 0, overflowY: 'auto' },
 })

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Show the person's existing ordered Pins and editable row pin actions in the web sidebar",
+  "summary": "Show ordered Pins with editable row pin actions and a bounded keyboard-accessible sidebar scroll area",
   "replay": {"status": "none", "detail": "Existing arrangement membership claims are reused."},
   "schema": {"status": "none", "detail": "No wire or storage change."},
   "rules": {"status": "none", "detail": "Existing membership lifecycle and ordering rules apply."},
