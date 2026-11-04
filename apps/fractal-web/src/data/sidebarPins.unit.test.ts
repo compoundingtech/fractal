@@ -1,10 +1,11 @@
+import { PINS_ARRANGEMENT_UUID } from '@fractal/client'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { describe, expect, it } from 'vitest'
 import { pinsEditable, planPinToggle, sidebarPins } from './sidebarPins.ts'
 import type { PinsState } from './pins.ts'
 
 const state: PinsState = { phase: 'synced', editable: true, members: ['a1', 'a0'].map((key) => ({
-  id: `membership/${key}`, container: 'arrangement/person/example/pins', member: `agent/${key}`,
+  id: `agent/${key}`, container: `arrangement/person/example/${PINS_ARRANGEMENT_UUID}`, member: `agent/${key}`,
   revision: 'claim/place', position: { bucket: null, key },
 })) }
 describe('sidebar Pins binding', () => {
