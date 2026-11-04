@@ -18,6 +18,10 @@ client files conflict in a merge, resolve the schema and template files, take ei
 generated file (`git checkout --theirs -- clients crates/fractal-client/src/contract.rs
 crates/fractal-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.
+Generated Effect string length checks count Unicode code points, matching JSON Schema
+`minLength`/`maxLength`, not UTF-16 code units. Separate admission byte limits still apply.
+URI-reference format checks validate RFC3986 syntax, including relative references,
+without URL-constructor normalization of malformed input.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
@@ -1796,7 +1800,7 @@ The shared `checks.st3` suite includes the adapter's Rust tests.
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
 
 ```sh
-nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal -p fractal-cli --features fractal/test-support --bin st-chatgpt --bin fractal --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
+nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal -p fractal-cli --features fractal/test-support --bin fractal-chatgpt --bin fractal --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
 ```
 
 The script starts the repository API harness with its own persistent store, paired gateway,

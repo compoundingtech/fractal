@@ -57,6 +57,246 @@ class SelectionTest(unittest.TestCase):
         self.module.recovery_select_build('b' * 40)
         return str(self.module.P / 'builds' / ('a' * 40))
 
+    def test_capacity_sandbox_cli_preserves_nix_tempfail(self):
+        sandbox = self.module.candidate_sandbox
+        for code in (75, 1):
+            with self.subTest(code=code), \
+                    patch('sys.argv', ['candidate_sandbox.py', '--worktree', str(self.root), '--', 'true']), \
+                    patch.object(sandbox, 'validate_configuration'), \
+                    patch.object(sandbox, 'run',
+                                 side_effect=subprocess.CalledProcessError(code, ['nix', 'build'])), \
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as raised:
+                sandbox.main()
+            self.assertEqual(raised.exception.code, code)
+
+    @contextlib.contextmanager
+    def capacity_tick(self, codes, preparation_error=None):
+        """Exercise real build/probe/cache handling inside the tick error boundary."""
+        self.activation_builds()
+        previous = (self.module.P / 'current').resolve()
+        info = self.module.C / '.git/info'
+        info.mkdir(parents=True)
+        (info / 'exclude').write_text('')
+        build_root = self.root / 'build-root'
+        build_root.mkdir()
+        codes = iter(codes)
+        commands = []
+
+        def run(args, **kwargs):
+            if args[0] == 'gh':
+                return self.response([])
+            commands.append(args)
+            return subprocess.CompletedProcess(args, next(codes))
+
+        def candidate():
+            row = {'included': [{'pr': 10}], 'skipped': []}
+            self.candidate_row = row
+            if self.module.build_candidate(row, 'overlay',
+                    [{'sha': 'a' * 40, 'pr': None}, {'sha': 'b' * 40, 'pr': 10}]):
+                # End the tick after the real candidate path, without deployment.
+                raise RuntimeError('candidate completed')
+
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root),
+                        FRACTAL_BUILD_SNAPSHOT_ROOT=str(self.root / 'snapshots')), \
+                patch.object(self.module, 'run', side_effect=run), \
+                patch.object(self.module, 'prepare_clone', side_effect=candidate), \
+                patch.object(self.module, 'prepare_dependencies', side_effect=preparation_error), \
+                patch.object(self.module, 'stamp'), \
+                patch.object(self.module, 'text', return_value='b' * 40), \
+                patch.object(self.module, 'candidate_key', return_value='same-tree'), \
+                patch.object(self.module, 'git'), \
+                patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            yield commands
+        self.assertEqual((self.module.P / 'current').resolve(), Path(previous))
+
+    def capacity_row(self):
+        row = json.loads((self.module.L / 'live-r3.jsonl').read_text().splitlines()[-1])
+        self.assertEqual(row['build'], 'error')
+        self.assertEqual(row['reason'], 'capacity-refused')
+        self.assertTrue(row['retryable'])
+        self.assertIn('previous build retained', row['error'])
+        self.assertFalse((self.module.L / 'live-r3-tree-cache.json').exists())
+        self.assertEqual(row['skipped'], [])
+        return row
+
+    def test_capacity_helper_exit_is_retryable_without_cache_or_attribution(self):
+        with self.capacity_tick([75, 1, 75]), patch.object(self.module, 'first_break') as attribution:
+            self.module.tick()
+            self.capacity_row()
+            attribution.assert_not_called()
+            # A later refusal while rebuilding an attributed/reduced tree is also
+            # capacity, and must not persist the tentative failure or PR ejection.
+            attribution.return_value = 1
+            with patch.object(self.module, 'candidate_key', side_effect=['full', 'reduced']):
+                self.module.tick()
+            self.capacity_row()
+            self.assertEqual(self.candidate_row['included'], [{'pr': 10}])
+            self.assertEqual(self.candidate_row['skipped'], [])
+
+    def test_capacity_candidate_nix_exception_is_retryable_without_cache_or_attribution(self):
+        error = subprocess.CalledProcessError(75, ['/policy-bin/nix', 'build', 'bubblewrap'])
+        with self.capacity_tick([], preparation_error=error) as commands, \
+                patch.object(self.module, 'first_break') as attribution:
+            self.module.tick()
+        self.capacity_row()
+        self.assertEqual(commands, [])
+        attribution.assert_not_called()
+
+    def test_capacity_same_tree_retries_on_later_tick(self):
+        with self.capacity_tick([75, 0]) as commands, \
+                patch.object(self.module, 'first_break') as attribution:
+            self.module.tick()
+            self.capacity_row()
+            self.module.tick()
+        self.assertEqual(len(commands), 2)
+        cached = json.loads((self.module.L / 'live-r3-tree-cache.json').read_text())
+        self.assertEqual(cached['same-tree']['outcome'], 'built')
+        attribution.assert_not_called()
+
+    def test_capacity_probe_aborts_attribution_without_caching_or_ejecting(self):
+        with self.capacity_tick([1, 75]) as commands:
+            self.module.tick()
+        self.capacity_row()
+        self.assertEqual(len(commands), 2)
+        self.assertTrue(commands[-1][-1].startswith('live-r3-probe-'))
+
+    def test_existing_main_probe_ejects_breaking_pr_and_keeps_later_pr(self):
+        main, broken, later = ('a' * 40, 'b' * 40, 'c' * 40)
+        build_root = self.root / 'build-root'
+        receipt = build_root / 'live-r3-probe' / 'builds' / main / 'build-receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({'buildIdentity': {'rev': main}}))
+        current = {'sha': later, 'tree': 'full'}
+        builds = []
+
+        def git(*args, **kwargs):
+            if args[0] == 'checkout':
+                current['sha'] = args[-1]
+                if args[-1] == main:
+                    current['tree'] = 'reduced'
+            elif args[0] == 'merge':
+                current['sha'] = later
+            return subprocess.CompletedProcess([], 0)
+
+        def build(name):
+            builds.append((name, current['sha']))
+            # The old shared namespace collides; fresh probes really compile.
+            ok = ((name == 'live-r3' and current['tree'] == 'reduced') or
+                  (name.startswith('live-r3-probe-') and current['sha'] == main))
+            return subprocess.CompletedProcess([], 0 if ok else 1)
+
+        row = {'included': [{'pr': 10}, {'pr': 11}], 'skipped': []}
+        checkpoints = [{'sha': main, 'pr': None},
+                       {'sha': broken, 'pr': 10, 'head': 'broken-head'},
+                       {'sha': later, 'pr': 11, 'head': 'later-head'}]
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root),
+                        FRACTAL_BUILD_SNAPSHOT_ROOT=str(self.root / 'snapshots')), \
+                patch.object(self.module, 'git', side_effect=git) as commands, \
+                patch.object(self.module, 'text', side_effect=lambda *args: current['sha']), \
+                patch.object(self.module, 'candidate_key', side_effect=lambda _: current['tree']), \
+                patch.object(self.module, 'prepare_dependencies'), \
+                patch.object(self.module, 'stamp'), \
+                patch.object(self.module, 'retain_main_registry'), \
+                patch.object(self.module, 'build', side_effect=build):
+            self.assertTrue(self.module.build_candidate(row, 'overlay', checkpoints))
+        self.assertEqual(row['included'], [{'pr': 11}])
+        self.assertEqual(row['skipped'], [{'pr': 10, 'reason': 'build-break', 'files': []}])
+        self.assertEqual([sha for _, sha in builds], [later, main, broken, later])
+        self.assertEqual(builds[0][0], 'live-r3')
+        self.assertEqual(builds[-1][0], 'live-r3')
+        self.assertTrue(all(name.startswith('live-r3-probe-') for name, _ in builds[1:3]))
+        self.assertNotEqual(builds[1][0], builds[2][0])
+        self.assertTrue(all(not (build_root / name).exists() for name, _ in builds[1:3]))
+        self.assertIn(('merge', '--no-ff', '--no-edit', 'later-head'),
+                      [call.args for call in commands.call_args_list])
+        cached = json.loads((self.module.L / 'live-r3-tree-cache.json').read_text())
+        self.assertEqual(cached['full']['ejected'], 10)
+        self.assertEqual(cached['full']['included'], [{'pr': 11}])
+
+    def test_changed_overlay_rebuilds_main_and_does_not_eject_a_pr(self):
+        sha = 'a' * 40
+        build_root = self.root / 'build-root'
+        receipt = build_root / 'live-r3-probe' / 'builds' / sha / 'build-receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({'buildIdentity': {'rev': sha}, 'overlay': 'old'}))
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root),
+                        FRACTAL_BUILD_SNAPSHOT_ROOT=str(self.root / 'snapshots')), \
+                patch.object(self.module, 'git'), \
+                patch.object(self.module, 'prepare_dependencies'), \
+                patch.object(self.module, 'build', return_value=subprocess.CompletedProcess([], 1)) as build:
+            # The same git revision with today's overlay now fails to build.
+            self.assertIsNone(self.module.first_break([sha, 'b' * 40], self.module.probe_revision))
+        build.assert_called_once()
+        self.assertTrue(build.call_args.args[0].startswith('live-r3-probe-'))
+
+    def test_raw_receipt_from_interrupted_validation_is_not_reused(self):
+        sha = 'a' * 40
+        build_root = self.root / 'build-root'
+        receipt = build_root / 'live-r3-probe' / 'builds' / sha / 'build-receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({'buildIdentity': {'rev': sha}}))
+        names = []
+
+        def build(name):
+            names.append(name)
+            output = build_root / name / 'builds' / sha
+            output.mkdir(parents=True)
+            (output / 'build-receipt.json').write_text(receipt.read_text())
+            # Promotion produced a matching raw receipt, but host validation failed.
+            return subprocess.CompletedProcess([], 1)
+
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root),
+                        FRACTAL_BUILD_SNAPSHOT_ROOT=str(self.root / 'snapshots')), \
+                patch.object(self.module, 'git'), \
+                patch.object(self.module, 'prepare_dependencies'), \
+                patch.object(self.module, 'build', side_effect=build):
+            self.assertFalse(self.module.probe_revision(sha))
+            self.assertFalse(self.module.probe_revision(sha))
+        self.assertEqual(len(set(names)), 2)
+        self.assertTrue(all(not (build_root / name).exists() for name in names))
+        self.assertTrue(receipt.exists())
+
+    def test_probe_relative_roots_use_build_helper_cwd(self):
+        script_dir = self.root / 'helper'
+        process_cwd = self.root / 'caller'
+        for directory in (script_dir, process_cwd):
+            (directory / 'build-root').mkdir(parents=True)
+            (directory / 'snapshots').mkdir()
+        names = []
+
+        def build(name):
+            names.append(name)
+            self.assertTrue(name.startswith('live-r3-probe-'))
+            self.assertTrue((script_dir / 'build-root' / name).is_dir())
+            self.assertFalse((process_cwd / 'build-root' / name).exists())
+            (script_dir / 'snapshots' / name).mkdir()
+            (process_cwd / 'snapshots' / name).mkdir()
+            return subprocess.CompletedProcess([], 0)
+
+        with contextlib.chdir(process_cwd), \
+                patch.object(self.module, 'SCRIPT_DIR', script_dir), \
+                patch.dict(os.environ, FRACTAL_BUILD_ROOT='build-root',
+                           FRACTAL_BUILD_SNAPSHOT_ROOT='snapshots'), \
+                patch.object(self.module, 'git') as git, \
+                patch.object(self.module, 'prepare_dependencies') as prepare, \
+                patch.object(self.module, 'build', side_effect=build) as build_probe:
+            self.assertTrue(self.module.probe_revision('a' * 40))
+        git.assert_called_once_with('checkout', '--detach', 'a' * 40)
+        prepare.assert_called_once_with()
+        build_probe.assert_called_once_with(names[0])
+        self.assertFalse((script_dir / 'build-root' / names[0]).exists())
+        self.assertFalse((script_dir / 'snapshots' / names[0]).exists())
+        self.assertTrue((process_cwd / 'snapshots' / names[0]).is_dir())
+
+    def test_tree_cache_identity_changes_with_integrator_version(self):
+        with patch.object(self.module, 'text', return_value='tree'):
+            old = self.module.candidate_key('overlay')
+            with patch.object(self.module, 'INTEGRATOR_VERSION', self.module.INTEGRATOR_VERSION + 1):
+                self.assertNotEqual(self.module.candidate_key('overlay'), old)
+
     def test_activation_replaces_serving_generation_without_down(self):
         previous = self.activation_builds()
         for rollback, observations in (
@@ -67,7 +307,7 @@ class SelectionTest(unittest.TestCase):
                     patch.object(self.module, 'registration_not_ready', return_value=False), \
                     patch.object(self.module.subprocess, 'run') as run, \
                     patch.object(self.module, 'recovery_retain_builds') as retain:
-                self.assertEqual(self.module.activate(rollback), 'https://new.invalid')
+                self.assertEqual(self.module.activate(rollback, {}), 'https://new.invalid')
                 commands = [call.args[0] for call in run.call_args_list]
                 self.assertEqual(commands, [
                     ['devnet', 'up', '--replace', 'test', '--ready-path', '/', '--',
@@ -82,7 +322,7 @@ class SelectionTest(unittest.TestCase):
                 patch.object(self.module, 'registration_not_ready', return_value=True), \
                 patch.object(self.module.subprocess, 'run') as run, \
                 patch.object(self.module, 'recovery_retain_builds'):
-            self.module.activate(previous)
+            self.module.activate(previous, {})
         self.assertEqual([call.args[0][:3] for call in run.call_args_list],
                          [['devnet', 'down', 'test'], ['devnet', 'up', '--replace'],
                           ['devnet', 'url', 'test']])
@@ -99,7 +339,7 @@ class SelectionTest(unittest.TestCase):
                     patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
                     patch.object(self.module, 'recovery_retain_builds') as retain:
                 with self.assertRaises(subprocess.CalledProcessError) as raised:
-                    self.module.activate(previous)
+                    self.module.activate(previous, {})
                 self.assertIs(raised.exception, error)
                 self.assertEqual(run.call_count, 1)
                 self.assertEqual(run.call_args.args[0][:3], ['devnet', 'up', '--replace'])
@@ -114,7 +354,7 @@ class SelectionTest(unittest.TestCase):
                 patch.object(self.module.subprocess, 'run') as run, \
                 patch.object(self.module, 'recovery_retain_builds') as retain:
             with self.assertRaisesRegex(RuntimeError, 'previous build rolled back'):
-                self.module.activate(previous)
+                self.module.activate(previous, {})
         self.assertEqual([call.args[0][:3] for call in run.call_args_list],
                          [['devnet', 'up', '--replace'], ['devnet', 'url', 'test'],
                           ['devnet', 'down', 'test'], ['devnet', 'up', 'test']])
@@ -153,31 +393,41 @@ class SelectionTest(unittest.TestCase):
                     patch.object(self.module.subprocess, 'run',
                                  side_effect=[status, self.response({}), self.response({})]) as run, \
                     patch.object(self.module, 'recovery_retain_builds'):
-                self.module.activate(previous)
+                self.module.activate(previous, {})
                 self.assertEqual([call.args[0][:3] for call in run.call_args_list],
                                  [['devnet', 'status', 'test'], ['devnet', 'up', '--replace'],
                                   ['devnet', 'url', 'test']])
 
-    def test_failed_replace_preserves_candidate_or_unknown_publication_pointer(self):
+    def test_nonzero_replace_classifies_only_by_published_candidate_identity(self):
         previous = self.activation_builds()
-        for message in ('old generation retirement failed', 'ReplacementRecoveryRequired'):
-            for published in ('https://candidate.invalid', None):
-                error = subprocess.CalledProcessError(1, ['devnet', 'up', '--replace'], stderr=message)
-                observations = [None, published] + ([] if published else [None])
-                with self.subTest(error=message, published=published), \
-                        patch.object(self.module, 'registration_not_ready', return_value=False), \
-                        patch.object(self.module, 'current_server_url', side_effect=observations) as probe, \
-                        patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
-                        patch.object(self.module, 'recovery_retain_builds') as retain:
-                    with self.assertRaises(subprocess.CalledProcessError) as raised:
-                        self.module.activate(previous)
-                    self.assertIs(raised.exception, error)
-                    self.assertEqual(run.call_count, 1)
-                    self.assertEqual(probe.call_args_list[1].args[1], 'b' * 40)
-                    if not published:
-                        self.assertEqual(probe.call_args_list[2].args[1], 'a' * 40)
-                    self.assertEqual((self.module.P / 'current').resolve().name, 'b' * 40)
-                    retain.assert_not_called()
+        for code in (1, 3):
+            for message in ('old generation retirement failed', 'ReplacementRecoveryRequired', ''):
+                for published in ('https://candidate.invalid', None):
+                    row = {}
+                    error = subprocess.CalledProcessError(code, ['devnet', 'up', '--replace'],
+                                                          stderr=message + 'x' * 4100 if message else '')
+                    observations = [None, published] + ([] if published else [None])
+                    with self.subTest(code=code, error=message, published=published), \
+                            patch.object(self.module, 'registration_not_ready', return_value=False), \
+                            patch.object(self.module, 'current_server_url', side_effect=observations) as probe, \
+                            patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
+                            patch.object(self.module, 'recovery_retain_builds') as retain:
+                        if published:
+                            self.assertEqual(self.module.activate(previous, row), published)
+                            self.assertEqual(row, {'replaceWarning': (error.stderr or str(error))[-4000:]})
+                            retain.assert_called_once_with(previous)
+                        else:
+                            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                                self.module.activate(previous, row)
+                            self.assertIs(raised.exception, error)
+                            self.assertEqual(row, {})
+                            self.assertEqual(probe.call_args_list[2].args[1], 'a' * 40)
+                            retain.assert_not_called()
+                        self.assertEqual(run.call_count, 1)
+                        self.assertEqual(run.call_args.kwargs['stderr'], subprocess.PIPE)
+                        self.assertTrue(run.call_args.kwargs['text'])
+                        self.assertEqual(probe.call_args_list[1].args[1], 'b' * 40)
+                        self.assertEqual((self.module.P / 'current').resolve().name, 'b' * 40)
 
     def test_miss_fetches_complete_paths_then_hit_does_not_call_api(self):
         with patch.object(self.module, 'run', side_effect=self.responses()) as run:
@@ -307,6 +557,33 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(current.read_text(), 'f' * 40)
         self.assertIsNone(self.module.SELECTION_DEADLINE)
         self.assertFalse(self.module.C.exists())
+
+    def test_failed_replace_stderr_tail_reaches_tick_receipt(self):
+        previous = self.activation_builds()
+        info = self.module.C / '.git/info'
+        info.mkdir(parents=True)
+        (info / 'exclude').write_text('')
+        diagnostic = 'prelude' + 'x' * 4100 + 'strict PTY inventory incomplete'
+        error = subprocess.CalledProcessError(3, ['devnet', 'up', '--replace'],
+                                              stderr=diagnostic)
+        with patch.object(self.module, 'run', return_value=self.response([])), \
+                patch.object(self.module, 'prepare_clone',
+                             side_effect=lambda: self.module.activate(previous, {})), \
+                patch.object(self.module, 'registration_not_ready', return_value=False), \
+                patch.object(self.module, 'current_server_url',
+                             side_effect=[None, None, 'https://old.invalid']), \
+                patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
+                patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.module.tick()
+        row = json.loads((self.module.L / 'live-r3.jsonl').read_text())
+        self.assertEqual(row['build'], 'failed')
+        self.assertEqual(row['detail'], diagnostic[-4000:])
+        self.assertNotIn('replaceWarning', row)
+        self.assertEqual(run.call_args.kwargs['stderr'], subprocess.PIPE)
+        self.assertTrue(run.call_args.kwargs['text'])
+        self.assertEqual((self.module.P / 'current').resolve(), Path(previous))
 
     def test_clone_config_refusal_is_preserved_in_tick_receipt(self):
         subprocess.run(['git', 'init', '-q', str(self.module.C)], check=True)
