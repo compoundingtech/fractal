@@ -61,6 +61,13 @@ pub fn server_unit(runtime_id: &str, pid: u32) -> String {
     )
 }
 
+pub(crate) fn server_identity(unit: &str) -> Option<&str> {
+    let body = unit.strip_suffix(".scope")?;
+    let (body, pid) = body.rsplit_once('-')?;
+    let identity = body.strip_prefix("st3-pty-server-")?;
+    (server_unit(identity, pid.parse().ok()?) == unit).then_some(identity)
+}
+
 /// The environment variable that carries a seat's [`SeatPriority`] into its launch. The daemon sets
 /// it from the install's `seat_priority`; a seat that declares its own value keeps it.
 pub const PRIORITY_ENV: &str = "ST_SEAT_PRIORITY";
