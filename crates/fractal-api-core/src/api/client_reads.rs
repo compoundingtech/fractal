@@ -871,7 +871,7 @@ pub async fn client_attention(
         return attention_history::page(state, snapshot, effective_query, "attention").await;
     }
     let history = query.history;
-    client_snapshot_page(
+    let (snapshot, Json(mut page)) = client_snapshot_page(
         &state,
         snapshot,
         "attention",
@@ -882,7 +882,12 @@ pub async fn client_attention(
             Ok(items)
         },
     )
-    .await
+    .await?;
+    // After the page's cache and digest: a seat's host's answer is never part of either.
+    relay_attention_target_states(&state, &mut page.items)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok((snapshot, Json(page)))
 }
 
 pub async fn client_attention_detail(
@@ -901,7 +906,13 @@ pub async fn client_attention_detail(
         client_attention_resources_with_previews(&state, person.as_deref(), query.history)
             .map_err(ApiError::internal)?;
     client_attention_compatibility(&mut items, session.custom_forms);
-    client_detail(items, "attention", &id).map(IntoResponse::into_response)
+    let Json(item) = client_detail(items, "attention", &id)?;
+    let mut items = [item];
+    relay_attention_target_states(&state, &mut items)
+        .await
+        .map_err(ApiError::internal)?;
+    let [item] = items;
+    Ok(Json(item).into_response())
 }
 
 pub async fn client_messages(
