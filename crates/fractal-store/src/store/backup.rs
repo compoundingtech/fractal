@@ -1614,7 +1614,8 @@ mod tests {
         fn shard_digest(header: &mut Header) -> &mut super::super::backup_format::ShardDigest {
             header.shards.get_mut(super::super::messages_shard::SHARD_ID).unwrap()
         }
-        let cases: [(&str, Box<dyn Fn(&mut Vec<Record>)>); 6] = [
+        type Tamper = Box<dyn Fn(&mut Vec<Record>)>;
+        let cases: [(&str, Tamper); 6] = [
             ("holds 2 envelopes, not the 3", Box::new(|records| {
                 if let Record::Header(header) = &mut records[0] {
                     shard_digest(header).envelope_count += 1;
