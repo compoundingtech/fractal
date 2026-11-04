@@ -20740,10 +20740,12 @@ fn spawn_message_outbox(store: Arc<Store>) {
                         Ok(Err(error)) => stderr_message("st3", format_args!("message outbox drain failed: {error:#}")),
                         Err(error) => stderr_message("st3", format_args!("message outbox drain stopped: {error}")),
                     }
-                    // A new message queued meanwhile has its own commit; what stays waits a while.
+                    // A new message queued meanwhile has its own commit; what stays waits a while,
+                    // counted from its last try, so new mail does not put its retry off.
                     retry_at = match waiting(store.clone()).await {
                         Ok((_, false)) => None,
-                        _ => Some(Instant::now() + RETRY),
+                        _ if retry_due || retry_at.is_none() => Some(Instant::now() + RETRY),
+                        _ => retry_at,
                     };
                 }
                 // Waiting for a retry, or emptied by another drain (a backup's).
