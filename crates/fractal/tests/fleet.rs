@@ -6003,8 +6003,7 @@ async fn newest_start_advertises(node: &Node, member: &str, feature: &str) -> bo
     node.claims()
         .await
         .iter()
-        .filter(|claim| claim["subject"] == format!("daemon/{member}") && claim["kind"] == "daemon.started")
-        .next_back()
+        .rfind(|claim| claim["subject"] == format!("daemon/{member}") && claim["kind"] == "daemon.started")
         .is_some_and(|claim| claim.pointer(&format!("/body/fields/features/{feature}")).and_then(Value::as_i64) == Some(1))
 }
 
@@ -7093,8 +7092,7 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     // Every member says its reads count a staging mark, and a staging is still a claim: nothing
     // in this build records one as a mark. `o` reads it as staged.
     wait_until("the host holds o's start advertising message_staged_reads", 60, || {
-        let advertised = newest_start_advertises(&h, "o", "message_staged_reads");
-        async move { advertised.await }
+        newest_start_advertises(&h, "o", "message_staged_reads")
     })
     .await;
     assert!(!lifecycle(&h, &staged, "staged").await.starts_with("offset-receipt/"), "a staging stays a claim");
