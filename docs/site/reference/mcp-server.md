@@ -19,16 +19,16 @@ Install and configure [Fractal](../getting-started/install.md) first. The daemon
 Build the adapter from the repository root with Rust and the repository's build prerequisites:
 
 ```sh
-cargo build --release -p fractal-chatgpt --bin fractal-chatgpt
+cargo build --release -p fractal-chatgpt --bin st-chatgpt
 ```
 
-The binary is `target/release/fractal-chatgpt` (`st-chatgpt` kept as an alias binary). Alternatively, obtain the current Nix package:
+The binary is `target/release/st-chatgpt`. The source package also provides the canonical `fractal-chatgpt` binary via `--bin fractal-chatgpt`; the examples here use `st-chatgpt`, which both installation methods provide. Alternatively, obtain the current Nix package:
 
 ```sh
 nix build github:compoundingtech/fractal#st-chatgpt
 ```
 
-That binary is `result/bin/st-chatgpt`. Use a matching Fractal revision. The examples below assume the binary is on `PATH`.
+That binary is `result/bin/st-chatgpt`. Use a matching Fractal revision. The shell examples below assume `st-chatgpt` is on `PATH`; in the MCP client configuration, use the absolute path to the binary produced by your chosen installation method.
 
 ## Pair and prepare a grant
 
@@ -96,7 +96,7 @@ A generic MCP client configuration looks like this; adapt the outer configuratio
 {
   "mcpServers": {
     "fractal": {
-      "command": "/PATH/TO/fractal-chatgpt",
+      "command": "/PATH/TO/st-chatgpt",
       "args": [
         "--transport", "stdio",
         "--socket", "/PATH/TO/st3-client.sock",
