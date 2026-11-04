@@ -753,7 +753,7 @@ mod tests {
         assert!(!store.account_limits_ready().unwrap());
         let binding = store.seat_binding(seat).unwrap().unwrap();
         // Every account would read as unused, so a pool start chooses nothing and stores nothing.
-        let error = store.account_for_start(seat, &binding, "alder", now + 2).unwrap_err();
+        let error = store.account_for_start(seat, &binding, "alder", now + 2, true).unwrap_err();
         assert!(error.contains("catching up"), "{error}");
         assert_eq!(store.seat_account_choice(seat).unwrap(), None);
         assert!(store
@@ -763,13 +763,15 @@ mod tests {
         // A single named account does not depend on the readings.
         let single = store.seat_binding("agent/alder.single").unwrap().unwrap();
         assert_eq!(
-            store.account_for_start("agent/alder.single", &single, "alder", now + 2).unwrap().account.name,
+            store.account_for_start("agent/alder.single", &single, "alder", now + 2, true).unwrap().account.name,
             "ada/one"
         );
         // Once the projection has caught up the pool start picks the account with usage left.
         while store.catch_up_account_limits(1).unwrap() {}
+        assert_eq!(store.account_for_start(seat, &binding, "alder", now + 2, false).unwrap().account.name, "ada/two");
+        assert_eq!(store.seat_account_choice(seat).unwrap(), None);
         assert_eq!(
-            store.account_for_start(seat, &binding, "alder", now + 2).unwrap().account.name,
+            store.account_for_start(seat, &binding, "alder", now + 2, true).unwrap().account.name,
             "ada/two"
         );
         assert_eq!(store.seat_account_choice(seat).unwrap().as_deref(), Some("ada/two"));
@@ -1737,7 +1739,7 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         // sixty-hour-old 84 would have kept choosing ada/one.
         let binding = store.seat_binding("agent/alder.other").unwrap().unwrap();
         let chosen = store
-            .account_for_start("agent/alder.other", &binding, "alder", now)
+            .account_for_start("agent/alder.other", &binding, "alder", now, true)
             .unwrap();
         assert_eq!(chosen.account.name, "ada/two");
     }

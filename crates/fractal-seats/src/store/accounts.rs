@@ -189,13 +189,14 @@ pub trait AccountsStore {
         ) -> Vec<AccountDecl>;
     /// The account `seat` starts on at `host`, or why it cannot start. A single binding names its
     /// account. A pool keeps the account the seat already runs on, and otherwise takes the one
-    /// with the most usage left.
+    /// with the most usage left. `retain_choice = false` previews without persisting a pool choice.
     fn account_for_start(
             &self,
             seat: &str,
             binding: &HarnessBinding,
             host: &str,
             now: u128,
+            retain_choice: bool,
         ) -> Result<SeatAccount, String>;
     /// The pool accounts a seat on `host` could move to when `leaving` runs out: the ones other than
     /// `leaving` whose weekly reading is under `limit_percent`, most usage left first.
@@ -290,6 +291,7 @@ impl AccountsStore for Store {
             binding: &HarnessBinding,
             host: &str,
             now: u128,
+            retain_choice: bool,
         ) -> Result<SeatAccount, String> {
         let accounts = self
             .declared_accounts()
@@ -342,8 +344,10 @@ impl AccountsStore for Store {
                                 binding.driver
                             )
                         })?;
-                    self.choose_seat_account(seat, &name, now)
-                        .map_err(|error| error.to_string())?;
+                    if retain_choice {
+                        self.choose_seat_account(seat, &name, now)
+                            .map_err(|error| error.to_string())?;
+                    }
                     bindable
                         .into_iter()
                         .find(|account| account.name == name)
