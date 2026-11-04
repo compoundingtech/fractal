@@ -193,6 +193,7 @@ export const liveSource = ({
     registry,
   })
   const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const followInterests = new Map<string, () => boolean>()
   const runtime = ManagedRuntime.make(
     FractalLive({
       ...options,
@@ -256,7 +257,10 @@ export const liveSource = ({
         options.onDiagnostics?.(event)
       },
     }).pipe(
-      Layer.provide(BrowserFractalPlatform({ adoptEarlyCollections })),
+      Layer.provide(BrowserFractalPlatform({
+        adoptEarlyCollections,
+        hasInterest: (key) => followInterests.get(key)?.(),
+      })),
       Layer.provideMerge(Metric.enableRuntimeMetricsLayer),
       Layer.merge(Layer.succeed(SubjectReadPort, subjectReads)),
       Layer.merge(sessionTraceLayer ?? gatewaySessionTraceLayer(client).pipe(
@@ -354,6 +358,9 @@ export const liveSource = ({
     const syncData = Atom.keepAlive(Atom.make<FeedSync<A>>(syncLatest))
     let unmount: (() => void) | undefined
     const data = Atom.make<Feed<A>>(latest)
+    // Registry disposal is deferred. Admission must use current demand, not wait
+    // for the outgoing interest's finalizer before freeing its warm socket slot.
+    const hasInterest = () => visible && !registry.ensureNode(interest).canBeRemoved
     const following = Atom.make((get): Feed<A> => {
       let active = true
       if (readRejection !== undefined)
@@ -403,12 +410,17 @@ export const liveSource = ({
       const resolving = resolve(get)
       const previous = previousFiber
       spec = undefined
+      let boundKey: string | undefined
       let freshnessFiber: Fiber.Fiber<void, unknown> | undefined
       let initialReadFiber: Fiber.Fiber<void> | undefined
       let initialReadDeadlineFiber: Fiber.Fiber<void> | undefined
       let initialReadConnectionFiber: Fiber.Fiber<void> | undefined
       const fiber = runtime.runFork(
         Effect.gen(function* () {
+          // Finish atom acquisition before transport callbacks can reenter the registry.
+          // In particular, eviction must not unsubscribe while the new interest's mount
+          // is still installing its ownership and has not returned its release handle.
+          yield* Effect.yieldNow
           // Release the old socket slot before binding the replacement owner.
           if (previous !== undefined) yield* Fiber.interrupt(previous)
           if (readRejection !== undefined) {
@@ -427,6 +439,8 @@ export const liveSource = ({
           const boundSpec = yield* resolving
           spec = boundSpec
           const key = followKey(boundSpec)
+          boundKey = key
+          followInterests.set(key, hasInterest)
           const startInitialRead = () => {
             if (initialRead === undefined || initialReadFiber !== undefined || !active
               || readRejection !== undefined || terminalFailure || latest._tag !== 'Waiting') return
@@ -567,13 +581,15 @@ export const liveSource = ({
                     initialReadFiber?.interruptUnsafe()
                     initialReadDeadlineFiber?.interruptUnsafe()
                     initialReadConnectionFiber?.interruptUnsafe()
+                    if (boundKey !== undefined && followInterests.get(boundKey) === hasInterest)
+                      followInterests.delete(boundKey)
                     if (!active) return
                     ended = true
                     // Interest can return between SDK eviction and this finalizer. Its
                     // acquisition saw ended=false, so completion must hand demand back
                     // to a new run too. Wait until this fiber finishes before refreshing.
-                    if (visible && !terminalFailure && readRejection === undefined) queueMicrotask(() => {
-                      if (!active || !visible || !ended || terminalFailure || readRejection !== undefined) return
+                    if (hasInterest() && !terminalFailure && readRejection === undefined) queueMicrotask(() => {
+                      if (!active || !hasInterest() || !ended || terminalFailure || readRejection !== undefined) return
                       ingest.flush()
                       registry.refresh(following)
                     })

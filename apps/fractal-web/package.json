@@ -16,14 +16,14 @@
     "start": "node server/main.mts"
   },
   "dependencies": {
-    "@effect/opentelemetry": "4.0.3",
-    "@effect/platform-node": "4.0.3",
-    "@effect/platform-node-shared": "4.0.3",
+    "@effect/opentelemetry": "4.1.0",
+    "@effect/platform-node": "4.1.0",
+    "@effect/platform-node-shared": "4.1.0",
     "@overeng/devbar": "workspace:^",
     "@overeng/meters": "workspace:^",
     "@overeng/utils": "workspace:^",
     "@fractal/client": "file:../../clients/typescript/fractal-client",
-    "effect": "4.0.3",
+    "effect": "4.1.0",
     "fractional-indexing": "3.2.0",
     "@fractal/ui": "workspace:*",
     "@fractal/sdk": "workspace:*",
@@ -33,10 +33,10 @@
     "react-aria-components": "1.21.1",
     "react-stately": "3.50.0",
     "@stylexjs/stylex": "0.19.0",
-    "@effect/atom-react": "4.0.3"
+    "@effect/atom-react": "4.1.0"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.3",
+    "@effect/vitest": "4.1.0",
     "@fractal/scenarios": "workspace:*",
     "@types/node": "24.10.0",
     "typescript": "6.0.3",

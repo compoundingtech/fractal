@@ -46,11 +46,16 @@ export const subjectReaderFromAtom = <T>({
   const changes = (ref: string) =>
     Stream.callback<Feed<T>>((output) =>
       Effect.acquireRelease(
-        Effect.sync(() =>
-          registry.subscribe(feed(ref), (state) => Queue.offerUnsafe(output, state), {
+        Effect.sync(() => {
+          const atom = feed(ref)
+          // Registry disposal is scheduled, not synchronous with the last unsubscribe.
+          // Reacquisition must revalidate even before that scheduled removal runs;
+          // an already-mounted consumer still shares its current acquisition.
+          if (registry.ensureNode(atom).canBeRemoved) registry.refresh(atom)
+          return registry.subscribe(atom, (state) => Queue.offerUnsafe(output, state), {
             immediate: true,
-          }),
-        ),
+          })
+        }),
         (unsubscribe) => Effect.sync(unsubscribe),
       ),
     )

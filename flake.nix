@@ -15,7 +15,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/d883d18e3ad7609602db0ec8687c14a77625b905";
+      "github:overengineeringstudio/effect-utils/f77b58a42db4b0067f036d1484494f8ae07042c8";
   };
 
   outputs =
@@ -1848,7 +1848,7 @@
           '';
         };
         # The web workspace's toolchain comes from effect-utils' own nixpkgs pin, not the root
-        # Rust nixpkgs: pnpm 12.15.0 (`mkPnpm`), Node 24.20, Bun 1.4.2, Corepack 0.36 and Buck2.
+        # Rust nixpkgs: pnpm 12.17.0 (`mkPnpm`), Node 24.20, Bun 1.4.2, Corepack 0.36 and Buck2.
         # The Buck root mirrors `mkConsumerBuckRoot`; its rules and capabilities cells are linked
         # into `.buck2/` from the store, and `scripts/ci-fractal-web` fails if the checked-in
         # `.buckconfig`, `BUCK` or `buck2/toolchains/BUCK` drift from it.
