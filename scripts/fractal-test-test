@@ -1374,9 +1374,9 @@ class StTest(unittest.TestCase):
 
     def test_a_member_step_waits_for_admission_exactly_while_its_process_is_the_gate_s_start(self):
         proc = Path(self.tmp.name) / 'proc'
-        for pid, argv in ((1, ['python3', '/home/u/.local/bin/build-admission', 'start', 'heavy', 'nix:run', '--', '/nix/bin/nix', 'run']),
+        for pid, argv in ((1, ['python3', '/opt/admission/bin/build-admission', 'start', 'heavy', 'nix:run', '--', '/nix/bin/nix', 'run']),
                           (2, ['/nix/bin/nix', 'run', 'github:x/y#megarepo', '--', 'apply']),             # admitted: the gate exec'd nix
-                          (3, ['python3', '/home/u/.local/bin/build-admission', 'run', 'heavy', 'nix:build', '--', 'nix']),  # run: it stays the parent
+                          (3, ['python3', '/opt/admission/bin/build-admission', 'run', 'heavy', 'nix:build', '--', 'nix']),  # run: it stays the parent
                           (4, ['sh', '-c', 'echo build-admission start'])):
             (proc / str(pid)).mkdir(parents=True)
             (proc / str(pid) / 'cmdline').write_bytes(b'\0'.join(arg.encode() for arg in argv) + b'\0')
