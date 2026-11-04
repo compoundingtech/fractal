@@ -61,7 +61,7 @@ vi.mock('../data/react.tsx', async () => {
   useNowSnapshot: () => source.now,
   useGrants: () => ({ actions: 'ungranted', messageSend: source.sendable ? 'granted' : 'ungranted', attachmentUpload: source.sendable ? 'granted' : 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }),
   usePausedNow: () => undefined,
-  useAttention: () => ({ _tag: 'Waiting' }),
+  useAttention: () => ({ _tag: 'Observed', freshness: 'live', value: [] }),
   })
 })
 
@@ -175,6 +175,16 @@ const mount = async (ux?: UxTelemetry, strictMode = false) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('does not create a question card from a running raw call without open attention', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [{ _tag: 'ToolCall', id: 'raw-question', callId: 'q1', name: 'AskUserQuestion', status: 'running', callSeen: true,
+        input: { questions: [{ question: 'Raw only?', options: [{ label: 'One' }] }] }, at: at(1) }],
+      hasOlder: false, observation: { empty: false },
+    } }
+    await mount()
+    expect(container.querySelector('[data-testid="conversation-alerts"]')).toBeNull()
+  })
+
   it('keeps the parent composer mounted while child tabs remain read-only', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: {
       items: scenario, hasOlder: false, observation: { empty: false },

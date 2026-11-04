@@ -43,7 +43,7 @@ it('times each answered alert until the strip no longer shows it, and drops refu
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
-  const render = () => act(async () => root.render(<LiveAgentAlerts agentRef={seat} items={[]} ux={ux} />))
+  const render = () => act(async () => root.render(<LiveAgentAlerts agentRef={seat} ux={ux} />))
   await render()
   expect(container.textContent).toContain('◆ 2 alerts')
 
@@ -64,5 +64,21 @@ it('times each answered alert until the strip no longer shows it, and drops refu
   expect(container.textContent).not.toContain('attention/one?')
   expect(ux.beginAlertAnswer).toHaveBeenCalledTimes(2)
   act(() => root.unmount())
+  container.remove()
+})
+
+it('removes a served prompt card when its authoritative attention row closes', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  data.attention = [{ ...ask('attention/question'), attention_kind: 'harness-prompt', title: 'Choose a color' }]
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const render = () => act(async () => root.render(<LiveAgentAlerts agentRef={seat} />))
+  await render()
+  expect(container.textContent).toContain('Choose a color')
+  data.attention = [{ ...data.attention[0] as Native.Attention, state: 'resolved' }]
+  await render()
+  expect(container.querySelector('[data-testid="conversation-alerts"]')).toBeNull()
+  await act(async () => root.unmount())
   container.remove()
 })
