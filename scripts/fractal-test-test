@@ -361,6 +361,50 @@ class TreeOrphansTest(unittest.TestCase):
                     st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=0)
                 shutil.rmtree(entry)
 
+    def test_a_live_st_test_or_its_process_in_a_free_tree_is_never_signalled_and_the_tree_is_left(self):
+        # A live run's processes in a tree free by its lock are never signalled (2026-11-04: two seats' runs died of SIGTERM, cause unconfirmed).
+        self.process(300, cwd='/', argv=[sys.executable, '/opt/repo/scripts/st-test', '--all', '--push', 'origin'], ppid=1)
+        self.process(301, cwd=self.tree, argv=['bash', 'scripts/ci-local', 'tests'], ppid=300)  # its child, in the tree
+        self.process(302, cwd=self.tree, argv=['cargo', 'nextest', 'run'], ppid=301)  # and a grandchild
+        for live in ((300, 301, 302), (301, 302)):  # the st-test itself in the tree too, or only its descendants
+            with self.subTest(live=live):
+                if 300 in live:
+                    (self.proc / '300' / 'cwd').unlink()
+                    (self.proc / '300' / 'cwd').symlink_to(self.tree)
+                with mock.patch.object(st_test.os, 'pidfd_open') as opened, \
+                        mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent, \
+                        contextlib.redirect_stderr(io.StringIO()) as said:
+                    self.assertIs(st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc), False)
+                opened.assert_not_called()
+                sent.assert_not_called()
+                self.assertIn('a live st-test is in it (', said.getvalue())
+                self.assertIn('302 of st-test 300', said.getvalue())
+                self.assertIn('cargo nextest run; cwd ', said.getvalue())  # each process named with its command and cwd
+                (self.proc / '300' / 'cwd').unlink()
+                (self.proc / '300' / 'cwd').symlink_to('/')
+        # Logged once per waiter's set, however often it looks.
+        told = set()
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            for _ in range(3):
+                self.assertIs(st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, told=told), False)
+        self.assertEqual(said.getvalue().count('a live st-test is in it'), 1)
+
+    def test_an_orphan_whose_st_test_is_gone_or_this_run_s_own_child_is_still_cleared_and_named(self):
+        self.process(os.getpid(), cwd='/', argv=[sys.executable, '/srv/scripts/st-test'], ppid=0)  # this process, itself an st-test
+        self.process(310, cwd=self.tree, argv=['cargo', 'build'], ppid=1)  # reparented: its st-test was killed
+        self.process(311, cwd=self.tree, argv=['sleep', '60'], ppid=os.getpid())  # this run's own child is not another's
+        signalled = []
+        with mock.patch.object(st_test.os, 'pidfd_open', side_effect=lambda pid: 600 + pid), \
+                mock.patch.object(st_test.os, 'close'), \
+                mock.patch.object(st_test.select, 'select', side_effect=lambda *args: (list(args[0]), [], [])), \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal', side_effect=lambda fd, sig: signalled.append(fd - 600)), \
+                mock.patch.object(st_test, 'tree_users', side_effect=[[310, 311], [310, 311], [310, 311], [310, 311], [], []]), \
+                contextlib.redirect_stderr(io.StringIO()) as said:
+            self.assertIs(st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc), True)
+        self.assertEqual(signalled, [310, 311])
+        self.assertIn('terminating 2 orphan process(es) in pool tree', said.getvalue())
+        self.assertIn('310 (cargo build; cwd ', said.getvalue())
+
     def test_termination_escalates_only_survivors_and_refuses_dirty_tree(self):
         for exits_on in (st_test.signal.SIGTERM, st_test.signal.SIGKILL, 'chdir', None):
             with self.subTest(exits_on=exits_on):
@@ -2212,6 +2256,30 @@ finally:
         self.assertFalse((repo / 'tree-1').exists())
         self.assertFalse(orphan.exists(), 'an orphaned compat target still belongs to its eviction unit')
 
+    @mock.patch.object(st_test, 'du_gb', apparent_gb)
+    def test_the_pool_cap_never_evicts_a_tree_a_live_st_test_is_in_though_its_lock_is_free(self):
+        base = Path(self.tmp.name) / 'pool-live'
+        repo = base / 'pools/o-example'
+        for n in (0, 1, 2):
+            self.fake_unit(base / 'pools', 'o-example', n, 100, 1000 + n)  # tree-0 the oldest
+        runner = Path(self.tmp.name) / 'bin' / 'st-test'  # another seat's live run, in tree-0 without its flock (acquire_tree left the tree)
+        runner.parent.mkdir()
+        runner.write_text('import time\ntime.sleep(60)\n')
+        live = subprocess.Popen([sys.executable, str(runner)], cwd=repo / 'tree-0', start_new_session=True)
+        self.addCleanup(live.wait)
+        self.addCleanup(lambda: os.killpg(live.pid, signal.SIGKILL) if live.poll() is None else None)
+        for _ in range(200):
+            if st_test.tree_users(repo / 'tree-0', execution_only=True):
+                break
+            time.sleep(0.05)
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            st_test.evict_to_cap(base, 0.0003, keep=(repo, 2))  # room for one unit: this run holds tree-2
+        self.assertTrue((repo / 'tree-0/blob').exists(), 'the live run keeps its tree')
+        self.assertTrue((repo / 'target-0/blob').exists(), 'and its target')
+        self.assertFalse((repo / 'tree-1').exists(), 'an idle unit is still evicted')
+        self.assertIn('not evicting o-example/tree-0: free by its lock but a live st-test is in it', said.getvalue())
+        self.assertIsNone(live.poll())
+
     def test_a_tagless_target_the_caller_made_is_never_emptied(self):
         """ST_EVIDENCE_TARGET naming a directory st-test did not make, without cargo's tag, is left alone however big it is."""
         self.commit('b.txt', 'two')
@@ -3086,6 +3154,21 @@ finally:
         code, out, err = self.run_st_test('--check', 'demo')
         self.assertRegex(str(code), r'does not merge cleanly: merge origin/main into the branch first')
         self.assertEqual(self.statements(), [])
+
+    def test_a_branch_that_cannot_be_merged_with_main_fails_before_it_asks_for_a_burst_with_a_pool_tree_or_without(self):
+        self.branch_from_a_base_with_the_gate()
+        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(POLICY, indent=3))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'branch edits the policy too')
+        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))
+        asked = []
+        for trees in ('', 'off'):
+            with self.subTest(trees=trees or 'pool'), mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), \
+                    mock.patch.object(st_test, 'burst_size', return_value=(8, '24G')), \
+                    mock.patch.object(st_test.Burst, 'poll', lambda burst, start=False, timeout=0.0: asked.append(start) or True):
+                code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_TREES': trees} if trees else None)
+                self.assertRegex(str(code), r'does not merge cleanly: merge origin/main into the branch first')
+                self.assertEqual(asked, [])  # not after a wait for a burst the run could never use
 
     def test_a_base_without_the_shared_rule_signs_the_head_as_before(self):
         self.commit('b.txt', 'two')  # the base of this fixture has no gate script at all
@@ -4264,6 +4347,42 @@ class PoolQueue(unittest.TestCase):
         self.assertIsNotNone(left.poll())
         self.assertIn('terminating 1 orphan process', said.getvalue())
 
+    def test_a_live_st_test_in_a_free_locked_tree_survives_a_waiter_s_pass(self):
+        (self.root / 'tree-0').mkdir(parents=True)
+        runner = Path(self.tmp.name) / 'bin' / 'st-test'  # another seat's live run, its cwd in tree-0 though it holds no flock on it
+        runner.parent.mkdir()
+        runner.write_text('import subprocess, time\nsubprocess.Popen(["sleep", "60"])\ntime.sleep(60)\n')
+        live = subprocess.Popen([sys.executable, str(runner)], cwd=self.root / 'tree-0', start_new_session=True)
+        self.addCleanup(live.wait)
+        self.addCleanup(lambda: os.killpg(live.pid, signal.SIGKILL) if live.poll() is None else None)
+        for _ in range(200):  # until its child is up, so both are in the tree
+            if len(st_test.tree_users(self.root / 'tree-0', execution_only=True)) >= 2:
+                break
+            time.sleep(0.05)
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50)
+        self.addCleanup(lock.close)
+        self.assertEqual(n, 1)  # tree-0 was left; the waiter took the other tree
+        self.assertIsNone(live.poll(), 'the live st-test was signalled')
+        self.assertIn('a live st-test is in it', said.getvalue())
+        self.assertNotIn('terminating', said.getvalue())
+
+    def test_a_waiter_that_gives_a_free_tree_back_for_a_build_slot_signals_nothing_in_it(self):
+        self.root.mkdir(parents=True)
+        looks, cleared = [], []
+
+        def slot_ready():
+            looks.append(True)
+            return len(looks) >= 3, 'test: 1 of 1 heavy slots busy'
+
+        with mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.01), \
+                mock.patch.object(st_test, 'clear_tree_orphans', side_effect=lambda directory, **kwargs: cleared.append(directory.name) or True), \
+                contextlib.redirect_stderr(io.StringIO()):
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready)
+        lock.close()
+        self.assertEqual((n, len(looks)), (0, 3))
+        self.assertEqual(cleared, ['tree-0'])  # once, as it took the tree: not on the two passes that gave it back
+
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)
         free, asked, waits = [False], [], {}
@@ -4486,6 +4605,37 @@ class BurstAtTheTree(unittest.TestCase):
         self.assertEqual((len(self.lines(self.calls)), self.lines(self.released)), (1, []))  # one ask, never given back
         burst.release()
         got[0][1].close()
+
+    def test_a_free_tree_given_back_while_the_burst_waits_is_cleared_only_as_it_is_taken(self):
+        for path in ('head', 'fallback'):
+            with self.subTest(path=path):
+                shutil.rmtree(self.root, ignore_errors=True)
+                for name in (self.calls, self.released, self.go):
+                    name.unlink(missing_ok=True)
+                queue = self.root / 'queue'
+                queue.mkdir(parents=True)
+                if path == 'fallback':  # best in the order and never taking a tree: this waiter tries the free one after the fallback
+                    st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')
+                got, cleared, slots = [], [], []
+                with mock.patch.dict(os.environ, self.fractal(f'echo "waiting burst lane 8 cores/24.0G does not fit"; '
+                                                              f'while [ ! -e {self.go} ] && [ -d {self.tmp.name} ]; do sleep 0.05; done; echo granted')), \
+                        mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.3), \
+                        mock.patch.object(st_test, 'clear_tree_orphans', side_effect=lambda directory, **kwargs: cleared.append(directory.name) or True), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    burst = st_test.Burst((8, '24G'), 60)
+                    slot_ready = lambda: slots.append(True) or (True, 'test: a slot is free')
+                    waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, slot_ready=slot_ready, burst=burst)),
+                                              daemon=True)
+                    waiter.start()
+                    self.until(lambda: self.lines(self.calls))              # tree-0 flocked and given back for the ask
+                    time.sleep(0.5)
+                    self.assertEqual((got, cleared), ([], []))              # nothing in a tree given back is signalled
+                    self.go.touch()
+                    waiter.join(10)
+                self.assertEqual([n for n, _ in got], [0])
+                self.assertEqual(cleared, ['tree-0'])                       # once, as the granted run took it
+                burst.release()
+                got[0][1].close()
 
     def handover(self, body, granted):
         """Hand this run's burst (granted first, or an ask that waits) over to a newer copy through hand_over, as acquire_tree's Handover does:
