@@ -5,6 +5,7 @@ struct FakeManager {
     services: Services,
     domain: Option<String>,
     registrations: Option<[Vec<String>; 2]>,
+    journal: Option<PathBuf>,
     events: Vec<String>,
     idle_calls: usize,
     idle_failure: Option<usize>,
@@ -16,6 +17,13 @@ struct FakeManager {
 }
 
 impl FakeManager {
+    fn observe_journal(&mut self) -> Result<()> {
+        if let Some(path) = &self.journal {
+            let journal: Journal = serde_json::from_slice(&fs::read(path)?)?;
+            self.events.push(format!("saved:{}", journal.launchd_domain.context("missing saved domain")?));
+        }
+        Ok(())
+    }
     fn unit_mut(&mut self, name: &str) -> Result<&mut Unit> {
         if let Some(domain) = &self.domain { self.events.push(format!("domain-operation:{domain}")); }
         self.services.legacy.iter_mut().chain(&mut self.services.target)
@@ -51,12 +59,14 @@ impl Manager for FakeManager {
     }
 
     fn stop(&mut self, unit: &Unit) -> Result<()> {
+        self.observe_journal()?;
         self.events.push(format!("stop:{}", unit.name));
         self.unit_mut(&unit.name)?.running = false;
         Ok(())
     }
 
     fn start(&mut self, unit: &Unit) -> Result<()> {
+        self.observe_journal()?;
         self.events.push(format!("start:{}", unit.name));
         if self.fail_legacy_start_once && self.services.legacy.iter().any(|old| old.name == unit.name) {
             self.fail_legacy_start_once = false;
@@ -67,6 +77,7 @@ impl Manager for FakeManager {
     }
 
     fn enable(&mut self, unit: &Unit, enabled: bool) -> Result<()> {
+        self.observe_journal()?;
         self.events.push(format!("enable:{}:{enabled}", unit.name));
         if enabled && self.fail_target_enable_once {
             self.fail_target_enable_once = false;
@@ -170,7 +181,7 @@ impl Fixture {
         let services = Services { legacy, target };
         Ok(Self {
             root, layout,
-            manager: FakeManager { services, domain: None, registrations: None, events: Vec::new(), idle_calls: 0,
+            manager: FakeManager { services, domain: None, registrations: None, journal: None, events: Vec::new(), idle_calls: 0,
                 idle_failure: None, probe_failure: false, target_protection: None,
                 fail_target_enable_once: false, omit_missing: false, fail_legacy_start_once: false },
         })
@@ -1018,9 +1029,20 @@ async fn launchd_cutover_saves_selected_domain() -> Result<()> {
         let mut jobs = [Vec::new(), Vec::new()];
         jobs[index].push("com.compoundingtech.st3".into());
         fixture.manager.registrations = Some(jobs);
+        fixture.manager.journal = Some(fixture.layout.journal.clone());
         assert_eq!(fixture.run(false, false).await?.launchd_domain.as_deref(), Some(domain));
         let journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
         assert_eq!(journal.launchd_domain.as_deref(), Some(domain));
+        let saved = fixture.manager.events.iter().position(|event| event == &format!("saved:{domain}")).unwrap();
+        let mutation = fixture.manager.events.iter().position(|event| event.starts_with("enable:") || event.starts_with("stop:")).unwrap();
+        assert!(saved < mutation);
+        assert!(journal.committed);
+        fixture.manager.registrations = Some([vec!["com.compoundingtech.st3".into()], vec!["com.compoundingtech.st3".into()]]);
+        fixture.manager.domain = None;
+        fixture.manager.events.clear();
+        assert_eq!(fixture.run(false, false).await?.launchd_domain.as_deref(), Some(domain));
+        assert!(fixture.manager.events.iter().any(|event| event == &format!("domain-operation:{domain}")));
+        assert!(!fixture.manager.events.iter().any(|event| event.starts_with("domain-operation:") && event != &format!("domain-operation:{domain}")));
     }
     Ok(())
 }
