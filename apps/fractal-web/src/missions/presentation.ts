@@ -1,6 +1,7 @@
 import type * as Fractal from '@fractal/client/schema'
 import type { DecodedAgent } from '@fractal/sdk/effect'
 import { DateTime, Option } from 'effect'
+import type { MissionEta } from '../../../../packages/fractal-ui/src/assistant-ui/MissionEta.tsx'
 
 import words from '../../../../fixtures/clients/words.json' with { type: 'json' }
 import { leafText } from '../data/projections.ts'
@@ -54,6 +55,13 @@ const missionSteps = (mission: Row): readonly Step[] => {
   const open = runs.filter((run) => !FINISHED.has(run.status))
   const shown = open.length > 0 ? open : runs.slice(-1)
   return shown.flatMap((run) => Option.getOrElse(run.steps, () => [] as readonly Fractal.MissionStep[]))
+}
+
+/** The served ETA of the latest open run, never a finished run's: a terminal status or `completed_at` hides it. */
+export const missionEta = (mission: Fractal.Mission): MissionEta | null => {
+  const open = (mission.run_details ?? []).filter((run) => !FINISHED.has(run.status) && Option.isNone(run.completed_at))
+  const run = open.at(-1)
+  return run === undefined ? null : Option.getOrNull(run.eta)
 }
 
 const queuedFor = (agents: readonly DecodedAgent[], work: string) =>

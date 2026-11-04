@@ -1,3 +1,4 @@
+import type { MissionEta } from '../MissionEta.tsx'
 export { matchPositions } from './fuzzy.ts'
 /** `tokens` is always reported with Known usage; `usd` only when the source reported a USD cost, never a substituted $0. */
 export type SidebarUsage = { readonly _tag: 'Known'; readonly scope: SidebarUsageScope; readonly tokens: number; readonly usd?: number } | { readonly _tag: 'Unknown' }
@@ -14,7 +15,7 @@ export type SidebarMissionProgress = { readonly _tag: 'Known'; readonly done: nu
 export type SidebarMissionStep = { readonly _tag: 'Step'; readonly name: string } | { readonly _tag: 'Waiting'; readonly question: string; readonly handle?: string } | { readonly _tag: 'Unknown' }
 /** The mission the agent currently works on, plus missions queued behind it; None when the agent has no current mission. */
 export type SidebarMissionContext =
-  | { readonly _tag: 'Mission'; readonly id: string; readonly slug: string; readonly progress: SidebarMissionProgress; readonly step: SidebarMissionStep; readonly queued: readonly { readonly id: string; readonly slug: string }[] }
+  | { readonly _tag: 'Mission'; readonly id: string; readonly slug: string; readonly progress: SidebarMissionProgress; readonly eta?: MissionEta | null; readonly step: SidebarMissionStep; readonly queued: readonly { readonly id: string; readonly slug: string }[] }
   | { readonly _tag: 'Unavailable' }
   | { readonly _tag: 'None' }
 /**

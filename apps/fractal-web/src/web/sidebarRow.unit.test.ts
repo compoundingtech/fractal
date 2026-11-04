@@ -246,7 +246,7 @@ describe('retained mission row context', () => {
   const run: MissionRunSummary = {
     id: work.runId, requester: 'agent/example-worker', status: 'running', phase: 'working',
     state_since: mission.updated_at, progress: { done: 2, total: 5 }, current_steps: [],
-    started_at: Option.none(), completed_at: Option.none(),
+    started_at: Option.none(), completed_at: Option.none(), eta: Option.none(),
     after: Option.none(), blocker: Option.none(), deadline: Option.none(),
     last_progress: Option.none(), outcome: Option.none(), steps: Option.none(), must_act: 'agent',
   }
@@ -260,6 +260,19 @@ describe('retained mission row context', () => {
     expect(project([])).toMatchObject({ progress: { _tag: 'Unknown' } })
     expect(project([{ ...hydrated, run_details: [{ ...run, id: 'mission-run/example/other' }] }]))
       .toMatchObject({ progress: { _tag: 'Unknown' } })
+  })
+
+  it('preserves only the open run served ETA and hides missing estimates', () => {
+    const eta = { remaining_low_ms: 720_000, remaining_high_ms: 1_080_000,
+      basis: { method: 'critical-path' as const, samples: 12 }, as_of: 1_794_000_000_000 }
+    const withRun = (summary: MissionRunSummary) => project([{ ...hydrated, run_details: [summary] }])
+    expect(withRun({ ...run, eta: Option.some(eta) })).toMatchObject({ eta })
+    expect(withRun({ ...run, eta: Option.none() })).toMatchObject({ eta: undefined })
+    for (const status of ['completed', 'failed', 'cancelled']) {
+      expect(withRun({ ...run, status, eta: Option.some(eta) })).toMatchObject({ eta: undefined })
+    }
+    expect(withRun({ ...run, completed_at: Option.some(eta.as_of), eta: Option.some(eta) }))
+      .toMatchObject({ eta: undefined })
   })
 
   it('does not borrow progress from a different generation', () => {
