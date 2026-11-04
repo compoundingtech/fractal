@@ -2720,14 +2720,15 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
     };
     // Deliberately old read/closed mail must affect neither count nor oldest age.
     let mut transitions = Vec::new();
+    // Write oldest first: accepted time never moves behind this writer's newest batch.
     for (id, recipient, lifecycle, silent, seconds) in [
+        ("stale-pending", BUSY, "sent", false, 90_000),
         ("read", BUSY, "read", false, 600),
         ("closed", BUSY, "closed", false, 600),
         ("remote", REMOTE, "sent", false, 600),
         ("person", "person/example", "sent", false, 600),
         ("undeclared", "agent/example.undeclared", "sent", false, 600),
         ("pending", BUSY, "sent", false, 120),
-        ("stale-pending", BUSY, "sent", false, 90_000),
         ("staged", BUSY, "staged", false, 100),
         ("delivered", BUSY, "delivered", false, 90),
         ("held", BUSY, "sent", true, 60),
