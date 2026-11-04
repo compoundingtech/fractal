@@ -4469,6 +4469,55 @@ fn insert_attention_target_states(
     Ok(())
 }
 
+/// Raise the `target_states` of messages whose seat's host keeps their receipts by what that
+/// host says, within a second, as a message view does: a fault about mail another host delivered,
+/// read or closed shows it so. Patched at serve time, after any cached or stored row, and never
+/// part of a revision: a client sees the host's answer on its next read.
+pub async fn relay_attention_target_states(state: &AppState, items: &mut [Value]) -> anyhow::Result<()> {
+    let messages = items
+        .iter()
+        .flat_map(|item| item["target_states"].as_array().into_iter().flatten())
+        .filter_map(|target| target["id"].as_str().filter(|id| id.starts_with("message/")).map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    if messages.is_empty() {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let messages = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<crate::model::MessageView>> {
+        let mut views = Vec::new();
+        for message in messages {
+            views.extend(store.message(&message)?);
+        }
+        Ok(views)
+    })
+    .await??;
+    let relayed = message_reads::read_for_views(state, &messages).await?;
+    for target in items
+        .iter_mut()
+        .flat_map(|item| item["target_states"].as_array_mut().into_iter().flatten())
+    {
+        let Some(message_reads::Relayed::Answered { status: Some(status), latest, .. }) =
+            target["id"].as_str().and_then(|id| relayed.get(id))
+        else {
+            continue;
+        };
+        if crate::store::message_marks::rank(status)
+            > crate::store::message_marks::rank(target["state"].as_str().unwrap_or_default())
+        {
+            target["state"] = json!(status);
+            match latest {
+                Some((_, at)) => target["since"] = json!(client_timestamp(u128::from(*at))),
+                None => {
+                    if let Some(target) = target.as_object_mut() {
+                        target.remove("since");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn client_attention_resources(
     store: &Store,
     person: Option<&str>,
@@ -4712,6 +4761,99 @@ fn client_message_resource(
     Ok(resource)
 }
 
+/// Take the answers of the hosts that keep these messages' receipts into their client resources
+/// (db break-up step 4b). `state` is the further of this member's records and the host's
+/// answer, `status_from` names the host and whether it answered, `delivery` reads what it said,
+/// and a message its host closed is history, as a message this member closed is. The answer never
+/// feeds `revision` or `updated_at`: a client takes a revision as monotonic, and a host that falls
+/// silent would move it back. A client sees the host's answer on its next read.
+/// `views` are the messages, each with its sent time. Answers the messages the host closed: a
+/// list of current messages leaves them out, as it leaves out those this member closed.
+pub async fn relay_client_messages<'a>(
+    state: &AppState,
+    items: impl IntoIterator<Item = &'a mut Value>,
+    views: Vec<(crate::model::MessageView, u128)>,
+    now: u128,
+) -> anyhow::Result<BTreeSet<String>> {
+    let messages = views.iter().map(|(message, _)| message.clone()).collect::<Vec<_>>();
+    let relayed = message_reads::read_for_views(state, &messages).await?;
+    let mut closed = BTreeSet::new();
+    if relayed.is_empty() {
+        return Ok(closed);
+    }
+    let store = state.store.clone();
+    let patches = tokio::task::spawn_blocking(move || -> anyhow::Result<BTreeMap<String, Value>> {
+        let mut patches = BTreeMap::new();
+        for (mut message, sent_at) in views {
+            let Some(answer) = relayed.get(&message.subject) else {
+                continue;
+            };
+            message_reads::take_in(&mut message, answer);
+            let delivery = message_delivery_for(&store, &message, sent_at, now, Some(answer))?;
+            let patch = json!({
+                "state": message.status, "status_from": message.status_from, "delivery": delivery,
+            });
+            patches.insert(message.subject.clone(), patch);
+        }
+        Ok(patches)
+    })
+    .await??;
+    for item in items {
+        let Some(patch) = item.get("id").and_then(Value::as_str).and_then(|id| patches.get(id)) else {
+            continue;
+        };
+        for field in ["state", "status_from", "delivery"] {
+            if let Some(value) = patch.get(field) {
+                item[field] = value.clone();
+            }
+        }
+        if patch["state"] == "closed" {
+            item["operational"] = json!({ "layer": "history", "actionable": false, "reasons": ["closed"] });
+            closed.extend(item.get("id").and_then(Value::as_str).map(str::to_owned));
+        }
+    }
+    Ok(closed)
+}
+
+/// [`relay_client_messages`] for resources read without their messages, such as a detail or a
+/// page cut from a materialized collection: each message and its sent time are read again. With
+/// `drop_closed`, the messages the host closed leave `items`.
+pub async fn relay_client_message_items(
+    state: &AppState,
+    items: &mut Vec<Value>,
+    now: u128,
+    drop_closed: bool,
+) -> anyhow::Result<()> {
+    let ids = items
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let views = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<_>> {
+        let mut views = Vec::new();
+        for id in ids {
+            let Some(message) = store.message(&id)? else {
+                continue;
+            };
+            let sent_at = store
+                .latest_claim(&id, Some("message.sent"))?
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or_default();
+            views.push((message, sent_at));
+        }
+        Ok(views)
+    })
+    .await??;
+    let closed = relay_client_messages(state, items.iter_mut(), views, now).await?;
+    if drop_closed {
+        items.retain(|item| !item.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id)));
+    }
+    Ok(())
+}
+
 pub fn client_message_resources(
     store: &Store,
     person: Option<&str>,
@@ -4749,9 +4891,16 @@ fn client_message_resources_at(
         let sent_at = first
             .map(|claim| claim.accepted_at_unix_ms)
             .unwrap_or_default();
-        let updated_at = last
+        let mut updated_at = last
             .map(|claim| claim.accepted_at_unix_ms)
             .unwrap_or(sent_at);
+        let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
+        // A seat this member hosts moves its message by a local mark, which no claim records.
+        if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
+            && at >= updated_at
+        {
+            (revision, updated_at) = (receipt, at);
+        }
         let session_id = first
             .and_then(|claim| {
                 claim
@@ -4772,7 +4921,7 @@ fn client_message_resources_at(
         let mut resource = json!({
             "id": message.subject,
             "kind": "message",
-            "revision": last.map(|claim| claim.id.as_str()).unwrap_or("message/unknown"),
+            "revision": revision,
             "updated_at": client_timestamp(updated_at),
             "from": message.from,
             "to": message.to,
@@ -7873,6 +8022,24 @@ fn relayed_held_mail(
         .collect())
 }
 
+/// Whether this member records its seats' lifecycle as local marks (store/marks_switch.rs), and,
+/// while it does not, which members keep it writing claims. Either is healthy: the check informs.
+fn message_marks_check(state: &AppState) -> DoctorCheck {
+    let switched = state.store.marks_switched();
+    let blockers = crate::store::marks_switch::blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
+    let message = match (switched, blockers) {
+        (Ok(true), _) => "on: this member records its own seats' delivery, read and close as local marks".to_owned(),
+        (Ok(false), Ok(blockers)) if blockers.is_empty() => "off: every member is ready; marks turn on at the next check".to_owned(),
+        (Ok(false), Ok(blockers)) => format!(
+            "off: lifecycle claims until every other member advertises {}=1, whose message view and lists ask a seat's host for its marks ({})",
+            crate::store::marks_switch::FEATURE, blockers.join("; ")),
+        (Err(error), _) | (_, Err(error)) => {
+            return DoctorCheck { name: "message-marks".into(), status: "warn".into(), message: format!("{error:#}") };
+        }
+    };
+    DoctorCheck { name: "message-marks".into(), status: "pass".into(), message }
+}
+
 /// Held silent mail is never lost: unread past a day, it is listed for its seat. A seat whose
 /// host keeps its receipts (`message_reads`) is listed by what that host answers: this member's
 /// held flags for it never clear.
@@ -9235,6 +9402,7 @@ fn doctor_report_within(
     checks.check("publication-evidence", || {
         Ok(vec![publication_evidence_check(&state.store)])
     });
+    checks.check("message-marks", || Ok(vec![message_marks_check(state)]));
     checks.check("held-mail", || {
         Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
     });
@@ -10759,6 +10927,7 @@ pub fn accept_message_receipt_with_upload_owner(
             in_reply_to: request.in_reply_to,
             tags,
             created_index: record.store_index,
+            status_from: None,
             attachments,
             body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
             body_bytes: body.as_ref().map(|body| body.size),

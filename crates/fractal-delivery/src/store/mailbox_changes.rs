@@ -5,6 +5,9 @@ use super::*;
 pub use fractal_store::store::mailbox_changes::*;
 use fractal_store::store::messages_shard::mailbox_reads;
 
+/// The most mark events one change read takes; past them the stream resyncs.
+const MARK_EVENTS_READ: usize = 4_096;
+
 const MESSAGE_CHANGES: &str = "SELECT DISTINCT changed.subject FROM claims changed NOT INDEXED
                  WHERE changed.store_index>?1 AND changed.subject GLOB 'message/*'
                    AND (changed.subject IN (SELECT value FROM json_each(?4))
@@ -116,6 +119,22 @@ impl MailboxChangesStore for Store {
             changed.sort();
             changed.dedup();
         }
+        // A seat's marks are this member's own records too: each names its message and consumer.
+        let mut marks_behind = false;
+        if fence.component == "delivery" && mark.marks != previous.marks {
+            let listed = messages.iter().map(|message| message.subject.as_str()).collect::<std::collections::HashSet<_>>();
+            let events = fractal_store::store::message_marks::events_after(&connection, previous.marks, MARK_EVENTS_READ)?;
+            // Ids are consecutive until the trim removes the oldest: a gap after `previous.marks`
+            // is events this reader never saw.
+            marks_behind = events.len() == MARK_EVENTS_READ
+                || mark.marks < previous.marks
+                || events.first().map_or(mark.marks > previous.marks, |(id, _, _)| *id > previous.marks + 1);
+            changed.extend(events.into_iter().filter_map(|(_, subject, consumer)| {
+                (consumer == recipient || consumer == bare || listed.contains(subject.as_str())).then_some(subject)
+            }));
+            changed.sort();
+            changed.dedup();
+        }
         // Binding replacement and incarnation validity are independent of message content.
         // No history fold on idle rechecks; a changed seat or owner still checks the full fence.
         if seat || mark.owner != previous.owner {
@@ -127,7 +146,8 @@ impl MailboxChangesStore for Store {
                 || mark.index < previous.index
                 || mark.local < previous.local
                 || mark.stream.admitted < previous.stream.admitted
-                || mark.stream.lifecycle < previous.stream.lifecycle,
+                || mark.stream.lifecycle < previous.stream.lifecycle
+                || marks_behind,
             mark,
             messages: changed,
         })
@@ -264,5 +284,51 @@ mod tests {
             .unwrap();
         assert_eq!(changes.messages, ["message/concurrent"]);
         assert!(changes.mark.index > previous.index);
+    }
+
+    /// A seat's mark changes its mailbox as its lifecycle claim would: the next changes list names
+    /// the message, with no resync. A reader whose position the trim has passed resyncs.
+    #[test]
+    fn a_mark_changes_its_seats_mailbox_and_a_trimmed_gap_resyncs() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("graph.db");
+        let store = Store::open(&database, "node").unwrap();
+        crate::store::mailbox_tests::ready(&store, "session-1");
+        let fence = store
+            .bind_mailbox(&Fence::new("agent/eval.worker", "session-1", "delivery"))
+            .unwrap();
+        for subject in ["message/marked", "message/trimmed", "message/later"] {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some("person/fixture".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("person/fixture")),
+                    ("to".into(), json!(fence.subject)),
+                    ("content".into(), json!("Marked on this member.")),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
+        let before = store.mailbox_watermark(&fence).unwrap();
+        fractal_store::store::message_marks::record(&store, "message/marked", "message.delivered", &fence.subject).unwrap();
+        let changes = store.mailbox_changes(&fence, &before, &[]).unwrap();
+        assert_eq!(changes.messages, ["message/marked"]);
+        assert!(!changes.resync);
+        assert_eq!(changes.mark.marks, before.marks + 1);
+
+        let previous = changes.mark;
+        for subject in ["message/trimmed", "message/later"] {
+            fractal_store::store::message_marks::record(&store, subject, "message.read", &fence.subject).unwrap();
+        }
+        rusqlite::Connection::open(&database).unwrap()
+            .execute("DELETE FROM local_message_mark_events WHERE id=?1", [previous.marks + 1])
+            .unwrap();
+        let changes = store.mailbox_changes(&fence, &previous, &[]).unwrap();
+        assert!(changes.resync, "a reader past the trimmed events did not resync");
+        assert_eq!(changes.messages, ["message/later"]);
     }
 }

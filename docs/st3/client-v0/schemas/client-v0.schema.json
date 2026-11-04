@@ -877,10 +877,15 @@
             "tags": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
             "attachments": { "type": "array", "items": { "$ref": "#/$defs/Attachment" } },
             "body_ref": { "type": "string", "pattern": "^blob/[0-9a-f]{64}$", "description": "Present when content is only the start of a longer message; read the whole text with message-body.get." },
-            "body_bytes": { "type": "integer", "minimum": 0, "description": "The length in UTF-8 bytes of the whole text, with body_ref." }
+            "body_bytes": { "type": "integer", "minimum": 0, "description": "The length in UTF-8 bytes of the whole text, with body_ref." },
+            "status_from": { "$ref": "#/$defs/MessageStatusFrom", "description": "Present when the recipient's seat runs on another host that keeps its receipts: whether that host answered. Absent when this host's own records are the whole answer." }
           }
         }
       ]
+    },
+    "MessageStatusFrom": {
+      "type": "object", "required": ["host", "state"],
+      "properties": { "host": { "type": "string" }, "state": { "type": "string", "description": "answered: state is the further of this host's records and that host's answer. unknown: that host did not answer, and state is only this host's own records. A client treats any other word as unknown." }, "reason": { "type": "string", "description": "Why that host's answer is unknown, with unknown." } }
     },
     "MessageBody": {
       "type": "object", "additionalProperties": false,
