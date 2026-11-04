@@ -913,7 +913,7 @@
               set -eu
               if [ "$*" = "--version --json" ]; then
                 printf '%s\n' '{"machine_version":"fixture-version","commit":"fixture-commit"}'
-              elif [ "$1" = setup ]; then
+              elif [ "''${1:-}" = setup ]; then
                 operation=$2
                 directory=$3
                 receipt="$directory/.fractal-install.json"
