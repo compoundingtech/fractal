@@ -206,7 +206,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
       </div>
       {expanded ? (
         <div ref={panel} id={panelId} role="region" tabIndex={-1} aria-label={`Answer ${row.title}`} {...stylex.props(styles.panel)}>
-          <AgentAlerts alerts={[row.item]} calls={[]} served onAct={onAct} onAnswer={onAnswer} />
+          <AgentAlerts alerts={[row.item]} onAct={onAct} onAnswer={onAnswer} />
         </div>
       ) : null}
     </li>
