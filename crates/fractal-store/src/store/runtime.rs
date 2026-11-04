@@ -542,6 +542,7 @@ impl Runtime for FractalRuntime {
         // The native connection signal makes the no-work boundary SQL-free.
         resources::flush_preparation(transaction)?;
         completion_state::flush(transaction)?;
+        run_eta::flush(transaction)?;
         let budget = client_messages::finalize_commit(transaction)?;
         #[cfg(any(test, feature = "test-support"))]
         {

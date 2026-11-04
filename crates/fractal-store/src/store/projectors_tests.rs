@@ -30,6 +30,7 @@ fn open_installs_each_domain_in_order() {
             "agent-messages",
             "arrangements",
             "limits",
+            "run-eta",
         ]
     );
 }
@@ -89,7 +90,7 @@ fn replicated_claims_project_arrangements_and_ordered_memberships_only() {
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements", "ordered-membership"]
+        ["custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements", "run-eta", "ordered-membership"]
     );
 }
 
@@ -97,7 +98,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "ordered-membership"]
+        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "run-eta", "ordered-membership"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -110,6 +111,7 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/directive-notes",
             "full-replay/custom",
             "full-replay/arrangements",
+            "full-replay/run-eta",
             "full-replay/ordered-membership",
             "full-replay/flush",
         ]
