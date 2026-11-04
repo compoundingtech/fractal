@@ -82,7 +82,9 @@ for the separate launcher scripts.
 Failure attribution builds each probe in a fresh temporary
 `live-r3-probe-*` namespace under `FRACTAL_BUILD_ROOT`. Probe outputs are removed
 after the helper returns; empty snapshot namespaces are also removed, without
-deleting leftover snapshots that might still hold leases. Existing outputs are
+deleting leftover snapshots that might still hold leases. Relative build and
+snapshot roots are resolved against the helper's working directory (`SCRIPT_DIR`),
+not the integrator process's starting directory. Existing outputs are
 never reused: ignored private/vendor overlays can change without changing the
 commit, and a raw build receipt can exist before host validation finishes.
 A probe passes only when the full build-and-validation helper exits successfully.
