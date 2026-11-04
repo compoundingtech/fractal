@@ -906,12 +906,13 @@ pub async fn client_attention_detail(
         client_attention_resources_with_previews(&state, person.as_deref(), query.history)
             .map_err(ApiError::internal)?;
     client_attention_compatibility(&mut items, session.custom_forms);
-    let full = client_detail_id("attention", &id);
-    items.retain(|item| item["id"] == id.as_str() || item["id"] == full.as_str());
+    let Json(item) = client_detail(items, "attention", &id)?;
+    let mut items = [item];
     relay_attention_target_states(&state, &mut items)
         .await
         .map_err(ApiError::internal)?;
-    client_detail(items, "attention", &id).map(IntoResponse::into_response)
+    let [item] = items;
+    Ok(Json(item).into_response())
 }
 
 pub async fn client_messages(

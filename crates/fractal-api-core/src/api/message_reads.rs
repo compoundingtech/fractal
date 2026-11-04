@@ -595,29 +595,21 @@ pub async fn read_work_wakes<'a>(
     Ok(())
 }
 
-/// [`read_work_wakes`] for client resources whose steps carry wakes (`steps[].wake`): a step whose
-/// wake is not yet acknowledged by a claim or consumption, and whose assignee is a seat of a host
-/// that keeps its receipts, is read again and its `acknowledged_by` raised by that host's answer.
-/// Asks nobody and reads no step when no host keeps receipts.
+/// [`read_work_wakes`] for client resources whose steps carry wakes: `steps[].wake`, or
+/// `run_details[].steps[].wake` as a mission's detail has them. A step whose wake is not yet
+/// acknowledged by a claim or consumption, and whose assignee is a seat of a host that keeps its
+/// receipts, is read again and its `acknowledged_by` raised by that host's answer. Asks nobody and
+/// reads no step when no host keeps receipts.
 pub async fn relay_client_wakes(state: &AppState, items: &mut [Value]) -> anyhow::Result<()> {
-    let waiting = |step: &Value| {
-        step["wake"].is_object()
-            && !matches!(step["wake"]["acknowledged_by"].as_str(), Some("claim" | "consumed"))
-    };
-    if !items.iter().any(|item| item["steps"].as_array().is_some_and(|steps| steps.iter().any(waiting))) {
+    let waiting = waiting_client_wakes(items);
+    if waiting.is_empty() {
         return Ok(());
     }
     let store = state.store.clone();
-    let assignees = items
-        .iter()
-        .flat_map(|item| item["steps"].as_array().into_iter().flatten())
-        .filter(|step| waiting(step))
-        .filter_map(|step| Some((step["id"].as_str()?.to_owned(), step["wake"]["assignee"].as_str()?.to_owned())))
-        .collect::<Vec<_>>();
     let mut steps = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<crate::model::StepRunView>> {
         let seats = relay_hosts(&store)?.into_values().flatten().collect::<BTreeSet<_>>();
         let mut steps = Vec::new();
-        for (step, assignee) in assignees {
+        for (step, assignee) in waiting {
             if seats.contains(&assignee) {
                 steps.extend(store.step_run(&step)?);
             }
@@ -633,12 +625,93 @@ pub async fn relay_client_wakes(state: &AppState, items: &mut [Value]) -> anyhow
         .into_iter()
         .filter_map(|step| Some((step.subject, step.wake?.acknowledged_by?)))
         .collect::<BTreeMap<_, _>>();
-    for step in items.iter_mut().flat_map(|item| item["steps"].as_array_mut().into_iter().flatten()) {
-        if waiting(step)
+    take_in_client_wakes(items, &acknowledged);
+    Ok(())
+}
+
+/// The steps of client resources, at `steps` and at `run_details[].steps`.
+fn client_steps(items: &mut [Value]) -> impl Iterator<Item = &mut Value> {
+    items.iter_mut().flat_map(|item| {
+        let Value::Object(item) = item else {
+            return Vec::new();
+        };
+        let mut steps = Vec::new();
+        for (key, value) in item.iter_mut() {
+            match (key.as_str(), value) {
+                ("steps", Value::Array(list)) => steps.extend(list.iter_mut()),
+                ("run_details", Value::Array(runs)) => {
+                    for run in runs {
+                        if let Some(Value::Array(list)) = run.get_mut("steps") {
+                            steps.extend(list.iter_mut());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        steps
+    })
+}
+
+/// Whether a client step's wake waits for an acknowledgement a host could give.
+fn waits(step: &Value) -> bool {
+    step["wake"].is_object() && !matches!(step["wake"]["acknowledged_by"].as_str(), Some("claim" | "consumed"))
+}
+
+/// The steps of `items` whose wakes wait, each with its wake's assignee.
+fn waiting_client_wakes(items: &mut [Value]) -> Vec<(String, String)> {
+    client_steps(items)
+        .filter(|step| waits(step))
+        .filter_map(|step| Some((step["id"].as_str()?.to_owned(), step["wake"]["assignee"].as_str()?.to_owned())))
+        .collect()
+}
+
+/// Raise each waiting step's `acknowledged_by` to what `acknowledged` names for it.
+fn take_in_client_wakes(items: &mut [Value], acknowledged: &BTreeMap<String, String>) {
+    for step in client_steps(items) {
+        if waits(step)
             && let Some(by) = step["id"].as_str().and_then(|id| acknowledged.get(id))
         {
             step["wake"]["acknowledged_by"] = json!(by);
         }
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod client_wake_tests {
+    use super::*;
+
+    /// A mission's detail nests its steps under each run; a work list has them at the top. Both
+    /// are found, a wake a claim or consumption acknowledged is left alone, and a step without a
+    /// wake is not asked about.
+    #[test]
+    fn client_wakes_are_found_under_runs_and_steps_and_only_waiting_ones_change() {
+        let wake = |by: Option<&str>| json!({"assignee": "agent/example/cedar", "acknowledged_by": by});
+        let mut items = [
+            json!({"id": "mission/example", "run_details": [{"steps": [
+                {"id": "step-run/a", "wake": wake(None)},
+                {"id": "step-run/b", "wake": wake(Some("claim"))},
+                {"id": "step-run/c"},
+            ]}]}),
+            json!({"id": "mission-run/example", "steps": [{"id": "step-run/d", "wake": wake(Some("turn"))}]}),
+        ];
+        assert_eq!(
+            waiting_client_wakes(&mut items),
+            [
+                ("step-run/a".to_owned(), "agent/example/cedar".to_owned()),
+                ("step-run/d".to_owned(), "agent/example/cedar".to_owned()),
+            ]
+        );
+        let acknowledged = BTreeMap::from([
+            ("step-run/a".to_owned(), "consumed".to_owned()),
+            ("step-run/b".to_owned(), "consumed".to_owned()),
+            ("step-run/d".to_owned(), "delivery".to_owned()),
+        ]);
+        take_in_client_wakes(&mut items, &acknowledged);
+        let steps = &items[0]["run_details"][0]["steps"];
+        assert_eq!(steps[0]["wake"]["acknowledged_by"], "consumed");
+        assert_eq!(steps[1]["wake"]["acknowledged_by"], "claim", "a claim still wins");
+        assert!(steps[2].get("wake").is_none());
+        assert_eq!(items[1]["steps"][0]["wake"]["acknowledged_by"], "delivery");
+    }
 }
