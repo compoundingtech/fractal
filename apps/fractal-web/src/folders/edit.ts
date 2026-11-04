@@ -1,5 +1,5 @@
-import type { ActionOf, ActionResult, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
-import { ArrangementEditParameters, ErrorCode, decodeUnknownSync } from '@fractal/client/schema'
+import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
+import { ArrangementEditParameters, ErrorCode, decodeUnknownSync, type ActionResult } from '@fractal/client/schema'
 import type { ActionFailure } from '@fractal/sdk/mutations'
 import type { SdkChunkFailure } from '../data/lazySdk.ts'
 import { Effect, Schema } from 'effect'
@@ -9,7 +9,7 @@ import { reservedSidebarSubject, sidebarCandidates, sidebarWinner, type Arrangem
 export interface ArrangementActionPort {
   readonly snapshot: Effect.Effect<string, ActionFailure | SdkChunkFailure>
   readonly submitAction: (request: ActionOf<'arrangement.edit'>) =>
-    Effect.Effect<ActionResult, ActionFailure | SdkChunkFailure>
+    Effect.Effect<typeof ActionResult.Type, ActionFailure | SdkChunkFailure>
 }
 
 /** Only folder/placement operations are user-editable: Sidebar name and retirement are not. */
