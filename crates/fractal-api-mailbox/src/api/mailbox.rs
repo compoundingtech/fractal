@@ -13,6 +13,9 @@ use crate::mailbox::{Fence, Frame, Receipt};
 pub use fractal_api_core::api::mailbox::*;
 pub use fractal_api_core::api::mailbox::{hold_pre_boot_mail};
 pub mod authority;
+mod questions;
+mod question_lifecycle;
+pub use question_lifecycle::start as start_question_lifecycle;
 #[cfg(test)]
 #[path = "mailbox_profile.rs"]
 pub mod profile;
@@ -27,6 +30,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/mailbox/bind", post(bind))
         .route("/v1/mailbox/attachment", get(attachment))
         .route("/v1/mailbox/receipts", post(receipt))
+        .route("/v1/harness-questions/native", post(questions::ingest))
 }
 
 #[derive(serde::Deserialize)]

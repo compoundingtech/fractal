@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Home Manager activation writes and verifies .fractal-install.json ownership receipts using the incoming Fractal package, independently of compatibility aliases.",
+  "replay": { "status": "none", "detail": "No claim replay or projection changes." },
+  "schema": { "status": "none", "detail": "No database schema changes; activation uses the schema-1 installer ownership file." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet rules change." },
+  "compatibility": { "status": "changed", "detail": "A valid receipt recognizes an existing executable without aliases. Invalid or symlinked receipts stop activation with their path and reinstall guidance. Existing aliases remain recognized and unchanged." },
+  "downtime": { "status": "none", "detail": "No additional service restart requirement." },
+  "manual": { "status": "changed", "detail": "Keep .fractal-install.json beside the matching executable; restore both together when recovering an installation." },
+  "recovery": { "status": "changed", "detail": "Activation prepares a durable pending intent before replacing executable bytes, so interrupted publication can be retried without aliases. Rollback restores the prior executable, finalized receipt and pending intent together. Repeated activation repairs executable permissions without replacing unchanged bytes." }
+}
