@@ -68,7 +68,7 @@ const eagerGraph = (entry: string, includeLazy = false) => {
 }
 
 describe('conversation eager graph boundary', () => {
-  it('keeps ConversationPane, the kit Transcript/Markdown and refractor outside the production shell graph', () => {
+  it('keeps ConversationPane, the kit Transcript/Markdown and Highlights outside the production shell graph', () => {
     const graph = eagerGraph(resolve(web, 'main.tsx'))
     // Positive witnesses prevent an empty or incorrectly resolved graph from passing.
     expect(graph.files).toContain(resolve(web, 'LiveAgentWorkspace.tsx'))
@@ -77,7 +77,7 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/sidebar/RowOverlays.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/declaration/DeclarationPanel.tsx'))
     expect(graph.files.some(file => /\/(?:ConversationPane|Transcript|Markdown)\.tsx$/.test(file))).toBe(false)
-    expect(graph.dependencies.some(specifier => /^(?:refractor|react-markdown)(?:\/|$)/.test(specifier))).toBe(false)
+    expect(graph.dependencies.some(specifier => /^(?:@pierre\/highlights|react-markdown)(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.dependencies).not.toContain('@assistant-ui/react')
     expect(graph.files).toContain(resolve(web, 'ConversationPaneFallback.tsx'))
     expect(graph.files).not.toContain(resolve(web, 'ChangesInspector.tsx'))
@@ -92,11 +92,10 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/index.ts'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
+    expect(graph.dependencies).not.toContain('@pierre/highlights')
     expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
-    const withGrammars = eagerGraph(resolve(web, 'ConversationPane.tsx'), true)
-    expect(withGrammars.files).toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
-    expect(withGrammars.dependencies).toContain('refractor/core')
+    expect(eagerGraph(resolve(web, 'ConversationPane.tsx'), true).dependencies).toContain('@pierre/highlights')
   })
 
   it('reaches the real diff viewer only through the on-demand Changes inspector', () => {
@@ -104,11 +103,10 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).toContain(resolve(web, 'capturedChanges.ts'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Markdown.tsx'))
+    expect(graph.dependencies).not.toContain('@pierre/highlights')
     expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
-    const withGrammars = eagerGraph(resolve(web, 'ChangesInspector.tsx'), true)
-    expect(withGrammars.files).toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
-    expect(withGrammars.dependencies).toContain('refractor/core')
+    expect(eagerGraph(resolve(web, 'ChangesInspector.tsx'), true).dependencies).toContain('@pierre/highlights')
     expect(graph.files).not.toContain(resolve(web, 'ConversationPane.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/index.ts'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))

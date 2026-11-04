@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A trim's end-of-run rebuild of a resource's preparation state stops at its 20 ms budget even inside one subject and resumes in the next transaction, so a resource with thousands of claims no longer holds the store's writer for its whole history at once",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "changed", "detail": "Additive and local only: a table local_resource_preparation_rebuild holds the partial fold of each deferred subject being rebuilt and the sort key it stopped after. It stays outside shared projections and digests, and the store drops its rows each time it opens. A local index on local_resource_preparation_claims(subject, sort_key) lets each step seek to where the walk stopped; it is built once when a store first opens with this build (a second or two on a store with about 500,000 rows). Storage version is unchanged; an older build ignores the table and rebuilds a deferred subject whole, as before."},
+  "rules": {"status": "none", "detail": "No retention change."},
+  "compatibility": {"status": "none", "detail": "No API, wire or config change. A finished rebuild writes the rows a whole rebuild writes; a walk that finds fewer claims than the subject has rebuilds it whole instead."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build as usual. The table can be dropped; a deferred subject is rebuilt whole by an older build."}
+}
