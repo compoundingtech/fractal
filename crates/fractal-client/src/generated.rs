@@ -1517,6 +1517,8 @@ pub struct MissionRunSummary {
     pub state_since: String,
     pub started_at: Option<u64>,
     pub completed_at: Option<u64>,
+    /// Remaining duration estimate at its publication cut; absent on older daemons.
+    pub eta: Option<Value>,
     /// The outcome a person or an authorized agent set after the run finished.
     #[serde(default)]
     pub outcome: Option<MissionRunOutcome>,

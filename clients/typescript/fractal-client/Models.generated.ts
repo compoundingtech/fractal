@@ -2337,6 +2337,15 @@ export type MissionRunSummary = {
   title: string | null;
 }>;
   deadline?: (Timestamp | null);
+  eta?: (null | {
+  as_of: number;
+  basis: {
+  method: "per-step" | "critical-path";
+  samples: number;
+};
+  remaining_high_ms: number;
+  remaining_low_ms: number;
+});
   generation_id?: RunGenerationId;
   id: MissionRunId;
   last_progress?: string | null;

@@ -3094,6 +3094,7 @@ fn mission_resources_filtered(
     selected_id: Option<&str>,
     page_ids: Option<&[String]>,
 ) -> anyhow::Result<Vec<Value>> {
+    let at_unix_ms = client_now_ms();
     let human_attention_runs = store.human_attention_runs()?;
     let mut missions = BTreeMap::<String, Vec<MissionRunView>>::new();
     // A detail or a page reads only its own missions' runs, definitions, seats and states.
@@ -3402,6 +3403,11 @@ fn mission_resources_filtered(
                         "state_since": client_timestamp(state_since),
                         "started_at": run.created_at_unix_ms,
                         "completed_at": run_state.and_then(|state| state.completed_at_unix_ms),
+                        "eta": if matches!(run.status.as_str(), "completed" | "failed" | "cancelled") {
+                            None
+                        } else {
+                            store.mission_run_eta(&run.subject, at_unix_ms)?
+                        },
                         "outcome": outcome,
                         "last_progress": last_progress,
                         "blocker": blocker,
@@ -16343,6 +16349,54 @@ mission "example/looped" state="ready" {
             .find(|value| value["id"] == "mission/example/looped")
             .unwrap();
         assert_eq!(retired["state"], "retired");
+    }
+
+    #[test]
+    fn mission_eta_uses_card_cut_and_detail_snapshot_and_is_null_without_samples_or_when_finished() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "eta-node");
+        let mission = "mission/example/eta";
+        let source = "version 2\nmission \"example/eta\" state=\"ready\" {\n goal \"Finish.\"\n concurrent-runs max=2\n step \"work\" { agentless; }\n}\n";
+        let intent = crate::graph::parse_intent(source, "eta-node").unwrap();
+        let preview = state.store.mission(&intent, crate::model::IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        state.store.apply_as(&intent, &preview.subject_tokens, "publish-eta", Some("person/operator")).unwrap();
+        let start = |key: &str| state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "example/eta".into(), revision: None, workspace: root.path().display().to_string(),
+            requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        }).unwrap();
+        let first = start("eta-first");
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        assert_eq!(cards[0]["run_details"][0].get("eta"), Some(&Value::Null));
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        assert_eq!(detail[0]["run_details"][0].get("eta"), Some(&Value::Null));
+        state.store.set_step_state(&first.steps[0].subject, "working", None).unwrap();
+        state.store.set_step_state(&first.steps[0].subject, "completed", None).unwrap();
+        state.store.set_mission_run_state(&first.id, "completed", "terminal", Some("done")).unwrap();
+        let second = start("eta-second");
+        let cut = client_now_ms();
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], cut, &BTreeSet::new()).unwrap();
+        let runs = cards[0]["run_details"].as_array().unwrap();
+        let open = runs.iter().find(|run| run["id"] == second.subject).unwrap();
+        let expected = state.store.mission_run_eta(&second.subject, cut).unwrap().unwrap();
+        assert_eq!(open["eta"], expected);
+        assert_eq!(open["eta"]["as_of"], json!(cut));
+        assert_eq!(open["eta"]["basis"], json!({"method":"per-step","samples":1}));
+        assert_eq!(open["eta"].as_object().unwrap().len(), 4);
+        assert!(open["eta"]["remaining_low_ms"].is_u64());
+        assert!(open["eta"]["remaining_high_ms"].is_u64());
+        assert!(runs.iter().find(|run| run["id"] == first.subject).unwrap()["eta"].is_null());
+        let before = client_now_ms();
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        let after = client_now_ms();
+        let runs = detail[0]["run_details"].as_array().unwrap();
+        let open = runs.iter().find(|run| run["id"] == second.subject).unwrap();
+        let detail_cut = u128::from(open["eta"]["as_of"].as_u64().unwrap());
+        assert!((before..=after).contains(&detail_cut));
+        assert_eq!(open["eta"], state.store.mission_run_eta(&second.subject, detail_cut).unwrap().unwrap());
+        assert!(runs.iter().find(|run| run["id"] == first.subject).unwrap()["eta"].is_null());
     }
 
     /// A mission's detail reads only its own runs, seats and states, and says what the whole

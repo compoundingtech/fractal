@@ -1519,6 +1519,29 @@
         "state_since": { "$ref": "#/$defs/Timestamp" },
         "started_at": { "type": ["integer", "null"], "minimum": 0, "description": "Run creation, in Unix milliseconds." },
         "completed_at": { "type": ["integer", "null"], "minimum": 0, "description": "First terminal transition, in Unix milliseconds; unaffected by outcome edits." },
+        "eta": {
+          "description": "Remaining wall duration excluding person-held time, from completed runs under the current definition hash. Null for finished runs or a remaining step without samples; older daemons omit it.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["remaining_low_ms", "remaining_high_ms", "basis", "as_of"],
+              "properties": {
+                "remaining_low_ms": { "type": "integer", "minimum": 0, "description": "p25 remaining duration in milliseconds." },
+                "remaining_high_ms": { "type": "integer", "minimum": 0, "description": "p75 remaining duration in milliseconds." },
+                "basis": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["method", "samples"],
+                  "properties": {
+                    "method": { "enum": ["per-step", "critical-path"] },
+                    "samples": { "type": "integer", "minimum": 1, "description": "Smallest completed sample count among remaining steps." }
+                  }
+                },
+                "as_of": { "type": "integer", "minimum": 0, "description": "Publication cut in Unix milliseconds, not an absolute estimated finish time." }
+              }
+            }
+          ]
+        },
         "outcome": { "oneOf": [{ "$ref": "#/$defs/MissionRunOutcome" }, { "type": "null" }], "description": "The outcome a person or an authorized agent set after the run finished." },
         "last_progress": { "type": ["string", "null"] },
         "blocker": { "type": ["object", "null"] },

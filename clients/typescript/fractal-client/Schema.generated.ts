@@ -3125,6 +3125,12 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "current_steps": Schema.Array(Schema.Struct({ "assignee": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE), "claimant": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE), "id": StepRunId, /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
 "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }), "since": Timestamp, "state": WorkState, "title": Schema.OptionFromNullOr(Schema.String) })),
   "deadline": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  /** Remaining wall duration excluding person-held time, from completed runs under the current definition hash. Null for finished runs or a remaining step without samples; older daemons omit it. */
+  "eta": Schema.OptionFromOptionalNullOr(Schema.Struct({ /** Publication cut in Unix milliseconds, not an absolute estimated finish time. */
+"as_of": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "Publication cut in Unix milliseconds, not an absolute estimated finish time." }), "basis": Schema.Struct({ "method": Schema.Literals(["per-step","critical-path"]), /** Smallest completed sample count among remaining steps. */
+"samples": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({ description: "Smallest completed sample count among remaining steps." }) }), /** p75 remaining duration in milliseconds. */
+"remaining_high_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "p75 remaining duration in milliseconds." }), /** p25 remaining duration in milliseconds. */
+"remaining_low_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "p25 remaining duration in milliseconds." }) }), NULL_NONE).annotate({ description: "Remaining wall duration excluding person-held time, from completed runs under the current definition hash. Null for finished runs or a remaining step without samples; older daemons omit it." }),
   "generation_id": optionalKey(RunGenerationId),
   "id": MissionRunId,
   "last_progress": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),

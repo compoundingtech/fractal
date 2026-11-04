@@ -222,6 +222,17 @@ open runs and the latest finished run. Published cards restrict that batch to th
 20-step previews; detail retains all steps. Older detail steps retain null timing. These are
 lifecycle timestamps, not elapsed execution time or an ETA.
 
+Run summaries also expose optional nullable `eta` on published cards and detail reads.
+Its exact shape is `{remaining_low_ms, remaining_high_ms, basis: {method, samples}, as_of}`.
+Durations are integer milliseconds (p25/p75); `as_of` is the integer Unix-millisecond
+publication cut, not an estimated finish timestamp. Completed samples match the current
+definition hash and step path; person-held time is excluded, but queueing and agent waits
+count. Remaining steps sum along declared dependency critical paths (`critical-path`),
+or sequentially when no dependencies are declared (`per-step`). `samples` is the smallest
+sample count among remaining steps, including one or two prior runs. A missing sample or
+a finished run yields null; older daemons omit the field. ETA remains available while a
+person holds a run, allowing a client to show “waiting on you” instead.
+
 Mission `run_details[].steps[]` and `run_details[].current_steps[]` expose nullable
 `assignee` and `claimant` actor references (`agent/...`, `daemon/...`, or `person/...`),
 not agent-only IDs. A person-ask mission therefore retains its assigned person in both

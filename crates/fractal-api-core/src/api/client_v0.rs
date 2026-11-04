@@ -1038,6 +1038,7 @@ pub fn mission_list_cards_with(
                 "state_since":client_timestamp(run["updated_at_unix_ms"].as_u64().unwrap_or(0) as u128),
                 "started_at":run["created_at_unix_ms"].as_u64(),
                 "completed_at":run_states.get(run_id).and_then(|state| state.completed_at_unix_ms),
+                "eta":if terminal {None} else {store.mission_run_eta(run_id, at_unix_ms)?},
                 "steps":shown
             }))
         }).collect::<anyhow::Result<Vec<_>>>()?;
