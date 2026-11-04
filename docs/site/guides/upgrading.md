@@ -146,11 +146,12 @@ Before proceeding:
   `fractal-replication.service` and `fractal-apply.service`, respectively, where
   those workers are configured. The mover does not rewrite other units'
   `PartOf`, `After` or `WantedBy` relationships.
-- On Linux, configure matching target `memory.low` and `memory.swap.max` values
-  before cutover. After starting the target daemon, the mover requires its running
-  cgroup values to equal the legacy snapshot **exactly**; a mismatch triggers
-  automatic legacy restoration. Dry-run reads the legacy values, not the running
-  target, and cannot prove this comparison will pass.
+- On Linux, configure matching target `memory.low`/`MemoryLow` and
+  `memory.swap.max`/`MemorySwapMax` values before cutover. After starting the target
+  daemon, the mover requires both running cgroup values to equal the legacy unit's
+  snapshot **exactly**; a mismatch triggers automatic legacy restoration. Dry-run
+  reads the legacy values, not the running target, and cannot prove this comparison
+  will pass.
 - Require real legacy directories and absent or empty ordinary destinations on
   the same filesystem. A destination receipt does not authorize merging contents.
 - Resolve mounts at or below either source or destination product root before
@@ -221,9 +222,9 @@ Keep these three objects distinct:
   `local_api`, `effective` memory protection and `gap_ms`. A successful cutover
   reports `completed` and `local API listening`; this is not per-seat readiness.
 - **Root markers:** each migrated config/state root contains
-  `.fractal-migration-completed`, plain text consisting of
-  `arn:lmig:smalltalk:2026-10-16-state-dirs-fractal` followed by one newline,
-  not JSON. Verify both markers and both legacy ancestor symlinks.
+  `.fractal-migration-completed`. Check each marker's exact bytes against the
+  `migration` value in the command receipt followed by exactly one newline, not
+  JSON. Verify both markers and both legacy ancestor symlinks.
 - **Recovery journal:** `${XDG_CONFIG_HOME:-$HOME/.config}/.fractal-host-cutover.json`
   records the service/path plan and undo progress, protection and commit state.
   Preserve it; deleting or editing it is not a recovery procedure.

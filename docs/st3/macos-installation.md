@@ -173,15 +173,31 @@ services stop and are checked again under the store fence before exchanges.
 The product-root bridge is an ancestor symlink, not a database-file symlink,
 and remains compatible with the daemon's store checks.
 
-To put only the database on a dataset mounted at
-`~/.local/state/fractal/store`, first complete cutover without mounts below either
-product root. Then stop only the Fractal daemon, preserve and move
-`claims.sqlite3`, `claims.sqlite3-wal` and `claims.sqlite3-shm` together into the
-dataset without hiding other migrated files, and configure the daemon with
-`store_dir = "/Users/example/.local/state/fractal/store"` (or its equivalent
-`up --store-dir` flag). Keep `state_dir` at `~/.local/state/fractal`; identity,
-sockets, locks, logs and PTY state do not move into the dataset. Restart the daemon.
-This database relocation is operator-managed, not performed by `migrate host`.
+To relocate the store after cutover, first complete cutover without mounts below
+either product root. Record the current store directory (the configured
+`store_dir`, or `state_dir` when unset). Stop **all writers**, including the daemon
+and any other process that can write that store, and prevent automatic restarts
+throughout relocation. Make and verify a recovery copy of the complete store tree
+before changing paths or mounts.
+
+Relocate the **complete store tree**, including `claims.sqlite3`, its WAL/SHM
+companions when present, and all of `shards/messages` with its databases and
+WAL/SHM companions. The messages shard is opened relative to the graph database's
+parent directory; moving only the top-level SQLite trio leaves the local message
+stream and delivery/read state behind and can open a new empty shard at the
+destination. Preserve any other store-tree contents as well. If the store currently
+shares `state_dir`, inventory the graph and shard trees rather than moving or
+hiding unrelated product state.
+
+Use an empty destination such as `/absolute/path/to/new-store`, preserving the
+directory structure and contents without hiding existing files under a mount.
+Configure `store_dir = "/absolute/path/to/new-store"` (or the equivalent
+`up --store-dir` flag). Keep `state_dir = "/absolute/path/to/product-state"`
+unchanged: product-state message bodies, identity, sockets, locks, logs and PTY
+state stay there. Verify the destination against the recovery copy before
+restarting writers; then verify graph, message stream and delivery/read continuity.
+Retain the recovery copy until acceptance. This store relocation is
+operator-managed, not performed by `migrate host`.
 
 Rerunning a committed migration accepts exactly the configured store mount;
 other mounts below either product root still refuse. `--rollback` always refuses
