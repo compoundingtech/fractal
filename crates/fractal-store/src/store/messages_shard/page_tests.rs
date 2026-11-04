@@ -236,3 +236,94 @@ fn a_mailbox_page_lists_a_recipient_s_aliases_in_both_halves_as_the_views_did() 
         assert_eq!(by_view(&graph, &stream_items, Some(recipient), None, true), stream_items[own].to_vec(), "{recipient}");
     }
 }
+
+/// A subject the graph holds as a `message.sent` is the graph's: no stream page, mailbox or
+/// conversation lists the stream item under it, and a page whose remaining items are all the
+/// graph's ends there rather than with a cursor to nothing.
+#[test]
+fn a_stream_item_the_graph_also_holds_is_listed_once_as_the_graphs() {
+    let (_root, graph, subjects) = store(9, 1000);
+    // The last two items, and one in the middle, also reach the graph.
+    let doubled = [&subjects[4], &subjects[7], &subjects[8]];
+    for subject in doubled {
+        let view = message_view(&graph, subject).unwrap().unwrap();
+        graph
+            .append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "message.sent".into(),
+                actor: Some(view.from.clone()),
+                fields: serde_json::from_value(json!({
+                    "from": view.from, "to": view.to, "content": "the graph's copy", "status": "sent"
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        assert!(message_view(&graph, subject).unwrap().is_none(), "the stream item under {subject} is not shown");
+        assert_eq!(graph.message(subject).unwrap().unwrap().content, "the graph's copy");
+    }
+    let all = Filter { recipients: None, senders: None, open_only: false };
+    let single = subjects.iter().filter(|subject| !doubled.contains(subject)).cloned().collect::<Vec<_>>();
+    for limit in [1, 2, 3, 6] {
+        assert_eq!(pages(&graph, all, limit, None), single, "limit {limit}");
+    }
+    let seventh = message_view(&graph, &subjects[6]).unwrap().unwrap().created_index - STREAM_INDEX_BASE;
+    assert!(!any_after(&graph, all, seventh).unwrap(), "only the graph's follow the seventh item");
+    let cedar = mailbox_reads::delivery_items(&graph, "agent/cedar").unwrap();
+    assert!(cedar.iter().all(|message| !doubled.contains(&&message.subject)), "{cedar:?}");
+    let names = RECIPIENTS.iter().chain(SENDERS.iter()).map(|name| name.to_string()).collect::<Vec<_>>();
+    let conversation = stream_reads::conversation_items(&graph, &names, stream_reads::StreamAfter::Position(0), None).unwrap();
+    assert_eq!(conversation.len(), single.len());
+    assert!(conversation.iter().all(|(claim, _)| !doubled.contains(&&claim.subject)));
+}
+
+/// A page whose graph rows all drop out after its query's LIMIT (the open check runs on the
+/// views) is no empty page with a cursor: the stream fills what the dropped rows left, and a page
+/// of graph rows that all drop out is read on from its cursor. The graph's rows
+/// here read closed by their own fields, with no close the query's filter finds.
+#[test]
+fn graph_rows_that_drop_out_after_the_limit_leave_no_empty_page_with_a_cursor() {
+    for (dropped, limit) in [(2, 2), (3, 2), (5, 2), (1, 3)] {
+        let root = tempfile::tempdir().unwrap();
+        let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        let shard = open(&graph, root.path()).unwrap();
+        let sent = |subject: String| ClaimInput {
+            subject,
+            kind: "message.sent".into(),
+            actor: Some("agent/alder".into()),
+            fields: serde_json::from_value(json!({"from": "agent/alder", "to": "agent/cedar", "content": "hello", "status": "sent"})).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        for index in 0..dropped {
+            graph.append_claim(&sent(format!("message/graph-{index}"))).unwrap();
+        }
+        graph
+            .connection
+            .write()
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-h2b266c9b73e1 owner=fractal_store::store::messages_shard::page_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body, '$.fields.status', 'closed') WHERE kind='message.sent'",
+                [],
+            )
+            .unwrap();
+        let stream_items = (0..3)
+            .map(|index| shard.append_claim(&sent(format!("message/{:016x}", 0xc000 + index))).unwrap().subject)
+            .collect::<Vec<_>>();
+        let through = graph.index().unwrap();
+        let mut cursor = None;
+        let mut listed = Vec::new();
+        loop {
+            let (page, next) = graph.messages_page_inner(Some("agent/cedar"), false, cursor, through, limit, false).unwrap();
+            assert!(next.is_none() || !page.is_empty(), "{dropped} dropped, limit {limit}: an empty page with a next cursor");
+            listed.extend(page.into_iter().map(|message| message.subject));
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(listed, stream_items, "{dropped} dropped, limit {limit}");
+    }
+}
